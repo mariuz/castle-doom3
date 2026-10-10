@@ -29,6 +29,15 @@ type
   end;
   TD3TexOps = array of TD3TexOp;
 
+  { A plain stage after the first one: drawn as an overlay. }
+  TD3ExtraStage = record
+    Image: String;
+    Blend: TD3BlendMode;
+    ColorExpr: array [0..3] of TD3Expr; { nil means 1; owned by the material }
+    TexOps: TD3TexOps;                  { owned by the material }
+    AlphaTest: Single;
+  end;
+
   { A parsed material (only what this port renders). Image fields hold image
     programs, e.g. "textures/a_d.tga" or
     "addnormals(textures/a_local.tga,heightmap(textures/a_bmp.tga,4))". }
@@ -65,6 +74,16 @@ type
       cubeMap (_px, _nx...) stage }
     SkyCubeMap: String;
     SkyCameraCubeMap: Boolean;
+    { Plain stages after the first one (glows over lit walls...) }
+    ExtraStages: array of TD3ExtraStage;
+    { "deform sprite", "deform tube"...: the deform kind, lowercase }
+    Deform: String;
+    { Only stages we can't draw (reflections, heat haze, mirrors, videos):
+      drawn as faint glass so windows stay visible }
+    function DrawAsGlass: Boolean;
+    { Plain stages drawn over the base appearance: for lit materials the
+      first plain stage and the extra ones, otherwise the extra ones. }
+    function OverlayCount: Integer;
     destructor Destroy; override;
     { The stage color for an entity's parameters at a time. }
     function EvalStageColor(const Ctx: TD3ExprContext): TVector4;
@@ -127,9 +146,10 @@ type
     FTables: specialize TObjectDictionary<String, TD3Table>;
     FLoaded: Boolean;
     procedure IndexFile(const Path: String; const DefaultType: TD3DeclType);
-    function ParseMaterial(const Name, Body: String): TD3Material;
     procedure ParseEntityDefInto(const Name: String; const Dict: TStringList; const Depth: Integer);
   public
+    { A material from its body (without the outer braces); the caller owns it. }
+    function ParseMaterial(const Name, Body: String): TD3Material;
     constructor Create;
     destructor Destroy; override;
     { Scan materials/, def/, skins/, sound/ in the virtual file system. }
@@ -213,10 +233,28 @@ begin
   Ops := nil;
 end;
 
+function TD3Material.DrawAsGlass: Boolean;
+begin
+  Result := IsInvisible and HasSpecialStage and (SkyCubeMap = '') and (GuiSurf = '');
+end;
+
+function TD3Material.OverlayCount: Integer;
+begin
+  Result := Length(ExtraStages);
+  if (DiffuseImage <> '') and (StageImage <> '') then
+    Inc(Result);
+end;
+
 destructor TD3Material.Destroy;
 var
-  I: Integer;
+  I, J: Integer;
 begin
+  for I := 0 to High(ExtraStages) do
+  begin
+    for J := 0 to 3 do
+      FreeAndNil(ExtraStages[I].ColorExpr[J]);
+    FreeTexOps(ExtraStages[I].TexOps);
+  end;
   for I := 0 to 3 do
     FreeAndNil(StageColorExpr[I]);
   FreeTexOps(DiffuseTexOps);
@@ -607,7 +645,9 @@ var
   Lexer: TDoom3Lexer;
   Tok, L, Special, StageMap, Line: String;
   StageBlendMode: TD3BlendMode;
-  StageSpecial, HasBlend, HasStageColor: Boolean;
+  StageSpecial, HasBlend, HasStageColor, StageSkyTexGen: Boolean;
+  StageCubeMap: String;
+  StageCameraCubeMap: Boolean;
   StageAlphaTest: Single;
   Regs: array [0..3] of TD3Expr;
   Parts: TStringArray;
@@ -663,6 +703,9 @@ begin
         StageBlendMode := bmOpaque;
         Special := '';
         StageSpecial := False;
+        StageCubeMap := '';
+        StageCameraCubeMap := False;
+        StageSkyTexGen := False;
         HasBlend := False;
         StageAlphaTest := -1;
         for I := 0 to 3 do
@@ -688,11 +731,17 @@ begin
           else
           if (L = 'cameracubemap') or (L = 'cubemap') then
           begin
-            if Result.SkyCubeMap = '' then
-            begin
-              Result.SkyCubeMap := Lexer.NextStr;
-              Result.SkyCameraCubeMap := L = 'cameracubemap';
-            end;
+            StageCubeMap := Lexer.NextStr;
+            StageCameraCubeMap := L = 'cameracubemap';
+            StageSpecial := True;
+          end else
+          if L = 'texgen' then
+          begin
+            { skybox / wobblesky: a sky; reflect, screen...: not one }
+            L := LowerCase(Lexer.NextStr);
+            if (L = 'skybox') or (L = 'wobblesky') then
+              StageSkyTexGen := True;
+            Lexer.SkipLine;
             StageSpecial := True;
           end else
           if (L = 'red') or (L = 'green') or (L = 'blue') or (L = 'alpha') then
@@ -741,6 +790,33 @@ begin
           else
           if Tok = '{' then
             Lexer.SkipBracedSection;
+        end;
+        { a cube map is a sky only with "texgen skybox" (glass reflects one) }
+        if (StageCubeMap <> '') and (StageSkyTexGen or StageCameraCubeMap) and
+           (Result.SkyCubeMap = '') then
+        begin
+          Result.SkyCubeMap := StageCubeMap;
+          Result.SkyCameraCubeMap := StageCameraCubeMap;
+        end;
+        if (Special <> 'diffusemap') and (Special <> 'bumpmap') and
+           (Special <> 'specularmap') and (Special <> 'none') and not StageSpecial and
+           HasStageColor and (StageMap <> '') and (Copy(StageMap, 1, 1) <> '_') and
+           (StageMap <> Result.StageImage) then
+        begin
+          SetLength(Result.ExtraStages, Length(Result.ExtraStages) + 1);
+          Result.ExtraStages[High(Result.ExtraStages)].Image := StageMap;
+          if HasBlend then
+            Result.ExtraStages[High(Result.ExtraStages)].Blend := StageBlendMode
+          else
+            Result.ExtraStages[High(Result.ExtraStages)].Blend := bmOpaque;
+          Result.ExtraStages[High(Result.ExtraStages)].AlphaTest := StageAlphaTest;
+          for I := 0 to 3 do
+          begin
+            Result.ExtraStages[High(Result.ExtraStages)].ColorExpr[I] := Regs[I];
+            Regs[I] := nil;
+          end;
+          Result.ExtraStages[High(Result.ExtraStages)].TexOps := StageOps;
+          StageOps := nil;
         end;
         { keep the color registers of the first plain stage }
         if (Special <> 'diffusemap') and (Special <> 'bumpmap') and
@@ -848,8 +924,13 @@ begin
       if L = 'guisurf' then
         Result.GuiSurf := Lexer.NextStr
       else
+      if L = 'deform' then
+      begin
+        Result.Deform := LowerCase(Lexer.NextStr);
+        Lexer.SkipLine;
+      end else
       if (L = 'description') or (L = 'renderbump') or (L = 'decalinfo') or
-         (L = 'deform') or (L = 'sort') or (L = 'spectrum') or (L = 'polygonoffset') then
+         (L = 'sort') or (L = 'spectrum') or (L = 'polygonoffset') then
         Lexer.SkipLine;
     end;
   finally

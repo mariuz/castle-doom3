@@ -713,8 +713,8 @@ end;
 function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings): TX3DRootNode;
 var
   S: TD3StaticSurface;
-  Coords: array of TVector3;
-  I: Integer;
+  Coords, OverlayCoords: array of TVector3;
+  I, J: Integer;
   Coord: TCoordinateNode;
   NormalNode: TNormalNode;
   Normals: TVector3List;
@@ -739,7 +739,7 @@ begin
     GuiUrl := '';
     if M.GuiSurf <> '' then
       GuiUrl := GuiSurfaceUrl(M.GuiSurf, EntityKeys);
-    if (M.IsInvisible and (GuiUrl = '')) or (Length(S.Indexes) < 3) then
+    if (M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass) or (Length(S.Indexes) < 3) then
       Continue;
     SetLength(Coords, Length(S.Positions));
     for I := 0 to High(S.Positions) do
@@ -769,8 +769,34 @@ begin
     if GuiUrl <> '' then
       Shape.Appearance := GuiAppearance(GuiUrl)
     else
+    if M.DrawAsGlass then
+      Shape.Appearance := GlassAppearance
+    else
       Shape.Appearance := MaterialAppearance(MaterialName);
     Result.AddChildren(Shape);
+
+    { more stages: copies a little in front, sharing normals and texture
+      coordinates }
+    if (GuiUrl = '') and not M.DrawAsGlass then
+      for J := 0 to M.OverlayCount - 1 do
+      begin
+        SetLength(OverlayCoords, Length(Coords));
+        for I := 0 to High(Coords) do
+          OverlayCoords[I] := Coords[I] + NormalNode.FdVector.Items[I] * (OverlayOffset * (J + 1));
+        Coord := TCoordinateNode.Create;
+        Coord.SetPoint(OverlayCoords);
+        Geometry := TIndexedTriangleSetNode.Create;
+        Geometry.Coord := Coord;
+        Geometry.TexCoord := TexCoord;
+        Geometry.Normal := NormalNode;
+        Geometry.SetIndex(S.Indexes);
+        Geometry.Ccw := True;
+        Geometry.Solid := not M.TwoSided;
+        Shape := TShapeNode.Create;
+        Shape.Geometry := Geometry;
+        Shape.Appearance := OverlayAppearance(MaterialName, J);
+        Result.AddChildren(Shape);
+      end;
   end;
   AddLightLibrary(Result);
 end;

@@ -121,6 +121,7 @@ jobs:
           run_test stages testmap "W:1,O:notarget,G:640 -150 0,A:90,P:45,W:0.4,S,G:740 -200 96,A:-45,W:0.3,S,W:1,S,Q"
           grep -q 'Sky "textures/test/sky"' test_output/stages.log || { echo "::error::the skybox should be set up"; exit 1; }
           cmp -s test_output/stages_2.png test_output/stages_3.png && { echo "::error::the terminal screen should scroll"; exit 1; } || true
+          grep -q "Material stages: 1 overlays, 1 sprites, 1 glass surfaces" test_output/stages.log || { echo "::error::overlay stages, sprites and glass should be built"; exit 1; }
           run_test guis testmap "W:1,O:notarget,G:-150 -60 0,A:180,P:10,W:0.4,S,G:385 200 0,A:90,P:22,W:0.4,S,Q"
           grep -q 'Rendered "guis/test_panel.gui" (5 windows)' test_output/guis.log || { echo "::error::the panel GUI should be rendered"; exit 1; }
           grep -q 'Rendered "guis/test_status.gui" (6 windows)' test_output/guis.log || { echo "::error::the status GUI should be rendered"; exit 1; }

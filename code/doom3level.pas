@@ -229,6 +229,13 @@ function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 { Orient a transform by a Doom 3 rotation matrix (idMat3). Respects the
   transform's Orientation: CGE's default otUpYDirectionZ points
   Direction along local +Z. }
+var
+  { Billboards built for "deform sprite" materials (scenes holding them
+    process events). }
+  SpriteCount: Integer;
+  { Overlay stage shapes and glass stand-ins built (for the log). }
+  OverlayShapeCount, GlassCount: Integer;
+
 procedure SetD3Rotation(const T: TCastleTransform; const M: TMatrix3);
 
 implementation
@@ -357,22 +364,92 @@ begin
   FreeAndNil(FMapFile);
 end;
 
+{ Shape of an indexed triangle set, Doom 3 winding. }
+function ProcShape(const Coords, Normals: array of TVector3; const UVs: array of TVector2;
+  const Indexes: array of Int32; const Solid: Boolean; const App: TAppearanceNode): TShapeNode;
+var
+  CoordNode: TCoordinateNode;
+  NormalNode: TNormalNode;
+  TexCoordNode: TTextureCoordinateNode;
+  Geometry: TIndexedTriangleSetNode;
+begin
+  CoordNode := TCoordinateNode.Create;
+  CoordNode.SetPoint(Coords);
+  NormalNode := TNormalNode.Create;
+  NormalNode.SetVector(Normals);
+  TexCoordNode := TTextureCoordinateNode.Create;
+  TexCoordNode.SetPoint(UVs);
+  Geometry := TIndexedTriangleSetNode.Create;
+  Geometry.Coord := CoordNode;
+  Geometry.Normal := NormalNode;
+  Geometry.TexCoord := TexCoordNode;
+  Geometry.SetIndex(Indexes);
+  { Doom 3 triangles are clockwise seen from the front (like Quake) }
+  Geometry.Ccw := False;
+  Geometry.Solid := Solid;
+  Result := TShapeNode.Create;
+  Result.Geometry := Geometry;
+  Result.Appearance := App;
+end;
+
+{ "deform sprite": every 4 vertexes are a quad, drawn as a camera facing
+  billboard of the same size at its center. }
+procedure AddSprites(const Surf: TD3ProcSurface; const Group: TAbstractGroupingNode);
+var
+  Q, K: Integer;
+  Center: TVector3;
+  R: Single;
+  Transform: TTransformNode;
+  Billboard: TBillboardNode;
+  Coord: TCoordinateNode;
+  TexCoord: TTextureCoordinateNode;
+  Quad: TIndexedFaceSetNode;
+  Shape: TShapeNode;
+begin
+  for Q := 0 to Length(Surf.Vertexes) div 4 - 1 do
+  begin
+    Center := TVector3.Zero;
+    for K := 0 to 3 do
+      Center := Center + D3ToCge(Surf.Vertexes[Q * 4 + K].Position);
+    Center := Center / 4;
+    R := PointsDistance(D3ToCge(Surf.Vertexes[Q * 4].Position), Center) * 0.7071;
+    Coord := TCoordinateNode.Create;
+    Coord.SetPoint([Vector3(-R, -R, 0), Vector3(R, -R, 0), Vector3(R, R, 0), Vector3(-R, R, 0)]);
+    TexCoord := TTextureCoordinateNode.Create;
+    TexCoord.SetPoint([Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1)]);
+    Quad := TIndexedFaceSetNode.Create;
+    Quad.Coord := Coord;
+    Quad.TexCoord := TexCoord;
+    Quad.SetCoordIndex([0, 1, 2, 3]);
+    Quad.Solid := False;
+    Shape := TShapeNode.Create;
+    Shape.Geometry := Quad;
+    Shape.Appearance := MaterialAppearance(Surf.Material);
+    Shape.Appearance.ShadowCaster := False;
+    { axis (0, 0, 0): local +Z always points at the viewer }
+    Billboard := TBillboardNode.Create;
+    Billboard.AxisOfRotation := TVector3.Zero;
+    Billboard.AddChildren(Shape);
+    Transform := TTransformNode.Create;
+    Transform.Translation := Center;
+    Transform.AddChildren(Billboard);
+    Group.AddChildren(Transform);
+    Inc(SpriteCount);
+  end;
+end;
+
 class procedure TDoom3Map.BuildProcModel(const Model: TD3ProcModel;
   const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
   const Entity: TD3MapEntity);
 var
   Surf: TD3ProcSurface;
   M: TD3Material;
-  Coords, Normals: array of TVector3;
+  Coords, Normals, OverlayCoords: array of TVector3;
   UVs: array of TVector2;
-  I: Integer;
-  CoordNode: TCoordinateNode;
-  NormalNode: TNormalNode;
-  TexCoordNode: TTextureCoordinateNode;
-  Geometry: TIndexedTriangleSetNode;
-  Shape: TShapeNode;
+  I, J: Integer;
   Group: TAbstractGroupingNode;
   GuiUrl: String;
+  App: TAppearanceNode;
 begin
   for Surf in Model.Surfaces do
   begin
@@ -388,14 +465,20 @@ begin
       else
         GuiUrl := GuiSurfaceUrl(M.GuiSurf, nil);
     end;
-    if M.IsInvisible and (GuiUrl = '') then
+    if M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass then
       Continue;
-    if M.NonSolid or M.Translucent or (M.StageImage <> '') and (M.DiffuseImage = '') then
+    if M.NonSolid or M.Translucent or M.DrawAsGlass or (M.Deform = 'sprite') or
+       (M.StageImage <> '') and (M.DiffuseImage = '') then
       Group := NonSolidGroup
     else
       Group := SolidGroup;
     if Group = nil then
       Continue;
+    if M.Deform = 'sprite' then
+    begin
+      AddSprites(Surf, Group);
+      Continue;
+    end;
     SetLength(Coords, Length(Surf.Vertexes));
     SetLength(Normals, Length(Surf.Vertexes));
     SetLength(UVs, Length(Surf.Vertexes));
@@ -406,27 +489,29 @@ begin
       { CGE images are bottom-to-top, Doom 3 t goes down the image }
       UVs[I] := Vector2(Surf.Vertexes[I].ST.X, 1 - Surf.Vertexes[I].ST.Y);
     end;
-    CoordNode := TCoordinateNode.Create;
-    CoordNode.SetPoint(Coords);
-    NormalNode := TNormalNode.Create;
-    NormalNode.SetVector(Normals);
-    TexCoordNode := TTextureCoordinateNode.Create;
-    TexCoordNode.SetPoint(UVs);
-    Geometry := TIndexedTriangleSetNode.Create;
-    Geometry.Coord := CoordNode;
-    Geometry.Normal := NormalNode;
-    Geometry.TexCoord := TexCoordNode;
-    Geometry.SetIndex(Surf.Indexes);
-    { Doom 3 triangles are clockwise seen from the front (like Quake) }
-    Geometry.Ccw := False;
-    Geometry.Solid := not M.TwoSided;
-    Shape := TShapeNode.Create;
-    Shape.Geometry := Geometry;
     if GuiUrl <> '' then
-      Shape.Appearance := GuiAppearance(GuiUrl)
+      App := GuiAppearance(GuiUrl)
     else
-      Shape.Appearance := MaterialAppearance(Surf.Material);
-    Group.AddChildren(Shape);
+    if M.DrawAsGlass then
+    begin
+      App := GlassAppearance;
+      Inc(GlassCount);
+    end
+    else
+      App := MaterialAppearance(Surf.Material);
+    Group.AddChildren(ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App));
+
+    { more stages: copies slightly in front (the depth test is "less") }
+    if (GuiUrl = '') and not M.DrawAsGlass then
+      for J := 0 to M.OverlayCount - 1 do
+      begin
+        SetLength(OverlayCoords, Length(Coords));
+        for I := 0 to High(Coords) do
+          OverlayCoords[I] := Coords[I] + Normals[I] * (OverlayOffset * (J + 1));
+        Group.AddChildren(ProcShape(OverlayCoords, Normals, UVs, Surf.Indexes,
+          not M.TwoSided, OverlayAppearance(Surf.Material, J)));
+        Inc(OverlayShapeCount);
+      end;
   end;
 end;
 
@@ -624,6 +709,7 @@ var
   I, Area: Integer;
   M: TD3ProcModel;
   Surf: TD3ProcSurface;
+  Sprites: Integer;
 begin
   { one solid and one non-solid scene per area, so portal visibility can
     hide areas; shapes stay per material inside them }
@@ -637,6 +723,7 @@ begin
       Continue;
     Root := TX3DRootNode.Create;
     RootNonSolid := TX3DRootNode.Create;
+    Sprites := SpriteCount;
     BuildProcModel(M, Root, RootNonSolid);
     if FSkyMaterial = '' then
       for Surf in M.Surfaces do
@@ -666,6 +753,8 @@ begin
     FAreaNonSolid[Area].Pickable := False;
     FAreaNonSolid[Area].RenderOptions.MaxLightsPerShape := 32;
     FAreaNonSolid[Area].CastShadows := False;
+    { billboards turn to the camera only when the scene processes events }
+    FAreaNonSolid[Area].ProcessEvents := SpriteCount <> Sprites;
     Add(FAreaNonSolid[Area]);
   end;
 
@@ -1017,7 +1106,7 @@ var
   B: TD3BrushEntity;
   Root: TX3DRootNode;
   Surf: TD3ProcSurface;
-  I: Integer;
+  I, Sprites: Integer;
   Rot: TMatrix3;
   ModelName: String;
 begin
@@ -1049,12 +1138,14 @@ begin
           Max(B.LocalMax.Y, Surf.Vertexes[I].Position.Y), Max(B.LocalMax.Z, Surf.Vertexes[I].Position.Z));
       end;
     Root := TX3DRootNode.Create;
+    Sprites := SpriteCount;
     BuildProcModel(Model, Root, Root, E);
     AddLightLibrary(Root);
     B.Scene := TCastleScene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     B.Scene.Load(Root, True);
+    B.Scene.ProcessEvents := SpriteCount <> Sprites;
     B.Scene.PreciseCollisions := E.BoolValue('solid', True);
     B.Scene.Translation := D3ToCge(E.Origin);
     Rot := E.Rotation;
@@ -1218,6 +1309,7 @@ var
   Base: String;
   E: TD3MapEntity;
   B: TD3BrushEntity;
+  Overlays, Sprites, Glass: Integer;
 begin
   ClearMap;
   if FMapName = '' then
@@ -1246,9 +1338,14 @@ begin
       Break;
     end;
 
+  Overlays := OverlayShapeCount;
+  Sprites := SpriteCount;
+  Glass := GlassCount;
   BuildWorld;
   BuildCollision(Base);
   BuildBrushEntities;
+  WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
+    [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
   BuildStaticModelEntities;
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);

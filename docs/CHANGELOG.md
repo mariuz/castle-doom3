@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.0
+
+More material stages.
+
+- **Every plain stage is drawn**: stages after the first one (and the first plain stage of lit materials) are overlays, copies of the surface a little in front of it with their own unlit, blended appearance, texture matrix and animated color. Glowing strips on lit walls and doors now show.
+- **`deform sprite`**: each quad becomes a camera facing billboard of the same size.
+- **Glass**: materials whose only stages are reflections, heat haze, mirrors or videos are drawn as a faint additive tint instead of disappearing.
+- A `cubeMap` is a sky only with `texgen skybox` / `wobblesky` (glass reflects cube maps too).
+- Test level: the door has pulsing glow strips over its lit metal, a glass pane and a flare in room A.
+- 289 checks (extra stages, overlays, glass, sprites); CI checks the stage counts in the log.
+
 ## 0.10.0
 
 More shadows.

@@ -235,6 +235,30 @@ def ceiling_and_glow_textures():
     add('models/test/blob_bmp.tga', tga(64, 64, [[(v,) * 3 for v in r] for r in sn]))
 
 
+def stage_images():
+    """A glow strip for the door's second stage, a round flare."""
+    n = 64
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            # two horizontal light strips, black elsewhere (blend add)
+            d = min(abs(y - 14), abs(y - 49))
+            v = max(0.0, 1.0 - d / 3.0) if 6 <= x < 58 else 0.0
+            row.append((1.0 * v, 0.45 * v, 0.1 * v))
+        rows.append(row)
+    add('textures/test/doorlights.tga', tga(n, n, rows))
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            r = math.hypot(x - 31.5, y - 31.5) / 31.5
+            v = max(0.0, 1.0 - r) ** 2
+            row.append((0.9 * v, 0.95 * v, 1.0 * v))
+        rows.append(row)
+    add('textures/test/flare.tga', tga(n, n, rows))
+
+
 def sky_and_screen_images():
     """A cube map sky (Doom 3 cameraCubeMap names) and a scanline screen."""
     n = 64
@@ -519,6 +543,9 @@ WALL = 'textures/test/wall'
 CEIL = 'textures/test/ceiling'
 METAL = 'textures/test/metal'
 GLOW = 'textures/test/lightpanel'
+DOOR = 'textures/test/door'
+GLASS = 'textures/test/glass'
+FLARE = 'textures/test/flare'
 
 # Room A: x -256..256, y -256..256, z 0..192
 # Doorway tunnel (area 1): x 256..272, y -48..48, z 0..112
@@ -539,6 +566,10 @@ for (cx, cy) in ((-128, -128), (128, 128), (-128, 128), (128, -128)):
     wall_rect(area0, GLOW, 'z', 191, -1, cx - 24, cx + 24, cy - 24, cy + 24)
 # pillars
 box(area0, METAL, (-176, 136, 0), (-136, 176, 192))
+# a free standing glass pane (two sided, not in the .cm)
+wall_rect(area0, GLASS, 'y', -220, 1, -40, 60, 16, 144)
+# a flare (deform sprite) under light_1
+wall_rect(area0, FLARE, 'z', 176, -1, -12, 12, -12, 12)
 
 # doorway tunnel
 wall_rect(area1, FLOOR, 'z', 0, 1, 256, 272, -48, 48)
@@ -578,7 +609,7 @@ for cy in (-256, 256):
 
 # Brush entity models, in entity-local coordinates
 door = Model('door_1')
-box(door, METAL, (-4, -48, -56), (4, 48, 56))
+box(door, {'*': METAL, '+x': DOOR, '-x': DOOR}, (-4, -48, -56), (4, 48, 56))
 crate = Model('crate_1')
 box(crate, METAL, (-32, -32, -32), (32, 32, 32))
 crate2 = Model('crate_2')
@@ -888,6 +919,49 @@ textures/test/metal
 	{
 		blend specularmap
 		map textures/test/metal_s.tga
+	}
+}
+
+/* a lit surface with a glowing second stage (drawn as an overlay) */
+textures/test/door
+{
+	qer_editorimage textures/test/metal_d.tga
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	specularmap	textures/test/metal_s.tga
+	{
+		blend add
+		map textures/test/doorlights.tga
+		rgb 0.6 + 0.4 * sinTable[ time ]
+	}
+}
+
+/* only a stage we can't draw: drawn as faint glass */
+textures/test/glass
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	nonsolid
+	translucent
+	twosided
+	{
+		blend add
+		cubeMap env/testsky
+		texgen reflect
+	}
+}
+
+/* a camera facing glow */
+textures/test/flare
+{
+	qer_editorimage textures/test/flare.tga
+	deform sprite
+	noshadows
+	nonsolid
+	translucent
+	{
+		blend add
+		map textures/test/flare.tga
 	}
 }
 
@@ -1438,6 +1512,7 @@ def main():
     wall_textures()
     metal_textures()
     ceiling_and_glow_textures()
+    stage_images()
     add('maps/testmap.proc', proc_text())
     add('maps/testmap.map', map_text())
     add('maps/testmap.cm', cm_text())

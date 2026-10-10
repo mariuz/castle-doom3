@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes,
-  CastleTransform, CastleUtils, CastleBoxes;
+  CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
   Passed, Failed: Integer;
@@ -80,7 +80,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(46, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(48, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -107,7 +107,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(21, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(24, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -221,7 +221,7 @@ begin
     begin
       CheckEquals(-1, M.AreaIndex, 'door_1 is not an area');
       CheckEquals(12, M.TriangleCount, 'door_1 is a box');
-      CheckEquals('textures/test/metal', M.Surfaces[0].Material, 'door_1 material');
+      CheckEquals('textures/test/door', M.Surfaces[0].Material, 'door_1 material (its big faces)');
     end;
     CheckEquals(0, Proc.PointInArea(Vector3(0, 0, 50)), 'point in room A');
     CheckEquals(1, Proc.PointInArea(Vector3(500, 0, 50)), 'point in room B');
@@ -683,6 +683,10 @@ var
   Ops: TD3TexOps;
   Ctx: TD3ExprContext;
   M: TD3Material;
+  App: TAppearanceNode;
+  Proc: TD3ProcFile;
+  Root: TX3DRootNode;
+  Sprites: Integer;
 begin
   Ctx := DefaultExprContext;
   Ctx.Time := 2;
@@ -726,6 +730,61 @@ begin
   Check(M.SkyCameraCubeMap, 'cameraCubeMap');
   Check(M.IsInvisible, 'sky surfaces are not drawn');
   CheckEquals('env/testsky_forward.tga', FindImageFile('env/testsky_forward'), 'sky image');
+
+  { more stages }
+  M := Decls.Material('textures/test/door');
+  CheckEquals('textures/test/metal_d.tga', M.DiffuseImage, 'door is lit');
+  CheckEquals('textures/test/doorlights.tga', M.StageImage, 'door glow stage');
+  CheckEquals(1, M.OverlayCount, 'door: the glow is an overlay');
+  Check(M.StageColorAnimated, 'door glow pulses');
+  App := OverlayAppearance('textures/test/door', 0);
+  try
+    Check(App.Material is TUnlitMaterialNode, 'overlay is unlit');
+    Check((App.BlendMode <> nil) and (App.BlendMode.DestFactor = bdOne), 'overlay blends additively');
+    Check(not App.ShadowCaster, 'overlay casts no shadow');
+  finally
+    FreeIfUnusedAndNil(App);
+  end;
+
+  M := Decls.ParseMaterial('test/inline_stages',
+    '{ blend add map a.tga }' + LineEnding + '{ blend filter map b.tga' + LineEnding + 'rgb 0.5' + LineEnding +
+      '}' + LineEnding + '{ blend diffusemap map c.tga }');
+  try
+    CheckEquals('a.tga', M.StageImage, 'first plain stage');
+    CheckEquals(1, Length(M.ExtraStages), 'second plain stage kept');
+    if Length(M.ExtraStages) = 1 then
+    begin
+      CheckEquals('b.tga', M.ExtraStages[0].Image, 'extra stage image');
+      Check(M.ExtraStages[0].Blend = bmFilter, 'extra stage blend');
+      Check(M.ExtraStages[0].ColorExpr[0] <> nil, 'extra stage color');
+    end;
+    CheckEquals('c.tga', M.DiffuseImage, 'diffuse stage after the plain ones');
+    CheckEquals(2, M.OverlayCount, 'lit material: both plain stages are overlays');
+  finally
+    M.Free;
+  end;
+
+  M := Decls.Material('textures/test/glass');
+  Check(M.DrawAsGlass, 'glass: only a reflection stage');
+  CheckEquals('', M.SkyCubeMap, 'a reflected cube map is not a sky');
+  M := Decls.Material('textures/test/flare');
+  CheckEquals('sprite', M.Deform, 'deform sprite');
+  Check(not M.DrawAsGlass, 'flare is drawn normally');
+
+  Proc := TD3ProcFile.Create;
+  Root := TX3DRootNode.Create;
+  try
+    Proc.LoadFromVfs('maps/testmap.proc');
+    TDoom3Map.BuildProcModel(Proc.FindModel('door_1'), Root, Root);
+    CheckEquals(3, Root.FdChildren.Count, 'door: metal, door and its overlay shapes');
+    Root.FdChildren.Clear;
+    Sprites := SpriteCount;
+    TDoom3Map.BuildProcModel(Proc.Model(0), Root, Root);
+    CheckEquals(1, SpriteCount - Sprites, 'one flare billboard in room A');
+  finally
+    Root.Free;
+    Proc.Free;
+  end;
 end;
 
 function PixelAt(const Img: TCastleImage; const X, Y: Integer): TVector4;
