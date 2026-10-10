@@ -67,6 +67,12 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Uniform names must be unique per light (several lights' code ends up in one shader), so they are suffixed with the light's index.
 - `r_lightVolumes 0` (`Doom3LightEffects.LightVolumes`) reloads the map with plain spheres / X3D spot lights for comparison.
 
+## Shadows
+
+- CGE renders stencil shadow volumes for one light: the light node with `shadowVolumes` and `shadowVolumesMain`; in the shadowed pass CGE switches off lights with `shadowVolumes` (also global lights of other scenes). Doom 3 shadows every light, so `TDoom3Map.UpdateShadowLight` (called from `UpdateVisibility`) picks the most useful one every frame: the strongest light at the player (`LightStrengthAt`: color times `LightVolumeStrength`, the same volume / shape / falloff as the shader), lights whose origin is in the player's area first (area walls don't cast shadows, so a light behind a wall must not be chosen), ambient lights never, switching only when another light is 20% stronger.
+- Casters: brush entities, static models and md5 models of at most `MaxShadowCastingTriangles` (1500) triangles. CGE finds silhouette edges by comparing edges by position (so per-face vertexes are fine) with a quadratic search, again whenever an animated mesh changes, and skips shapes with open (border) edges. Area scenes, the light scene and the collision scene have `CastShadows := False`: area geometry is open and big; it receives shadows.
+- The viewport's `ShadowVolumes` is on in the play design; `r_shadows 0` turns both it and `TDoom3Map.Shadows` off.
+
 ## Light shaders
 
 - A material's first plain stage (not `blend diffusemap` / `bumpmap` / `specularmap`) keeps its color registers (`TD3Material.StageColorExpr`): `red` / `green` / `blue` / `alpha`, `rgb`, `rgba`, `color a, b, c, d` (split at top level commas) and `colored` (= `parm0..parm3`). Expressions are read to the end of the line (`TDoom3Lexer.RestOfLine`, `//` comments removed) and parsed character by character, so `time*4` needs no spaces. A missing register is 1.

@@ -111,6 +111,7 @@ type
       it doesn't exist. }
     function PlayAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
     function HasAnim(const AnimName: String): Boolean;
+    function TriangleCount: Integer;
     function AnimFinished: Boolean;
     procedure Update(const SecondsPassed: Single);
     property Scene: TCastleScene read FScene;
@@ -119,6 +120,8 @@ type
 
 var
   Md5Cache: TD3Md5Cache;
+  { md5 models with more triangles don't cast shadow volumes }
+  MaxShadowCastingTriangles: Integer = 1500;
 
 implementation
 
@@ -624,6 +627,9 @@ begin
   AddLightLibrary(Root);
   FScene := TCastleScene.Create(nil);
   FScene.Load(Root, True);
+  { CGE finds shadow volume silhouettes by comparing every edge with every
+    other edge, again whenever the mesh animates: only small meshes cast }
+  FScene.CastShadows := TriangleCount <= MaxShadowCastingTriangles;
   ApplyPose;
   { prefer an idle animation, as the game does }
   if not PlayAnim('idle') then
@@ -649,6 +655,15 @@ begin
       FModel.SkinMesh(I, FPose, FPositions[I]);
       FCoords[I].SetPoint(FPositions[I]);
     end;
+end;
+
+function TD3Md5Instance.TriangleCount: Integer;
+var
+  M: TD3Md5Mesh;
+begin
+  Result := 0;
+  for M in FModel.Meshes do
+    Inc(Result, Length(M.Tris) div 3);
 end;
 
 function TD3Md5Instance.HasAnim(const AnimName: String): Boolean;

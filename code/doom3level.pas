@@ -25,7 +25,8 @@ uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
   CastleCameras,
-  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions;
+  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions,
+  Doom3LightEffects;
 
 type
   { A brush entity (its .proc model) or a static model entity (.lwo / .ase)
@@ -67,6 +68,12 @@ type
     Animated: Boolean;
     { Current color (after the shader) }
     Color: TVector3;
+    { The light volume (Doom3LightEffects), also when LightVolumes is off }
+    Matrix: TMatrix4;
+    Projected: Boolean;
+    Shape: TD3LightShape;
+    { Area of the light's origin (-1 outside) }
+    OriginArea: Integer;
   end;
 
   TDoom3Map = class(TCastleTransform)
@@ -81,6 +88,8 @@ type
     FPortals: TD3PortalVisibility;
     FPortalCulling: Boolean;
     FTime: Single;
+    FShadows: Boolean;
+    FShadowLight: Integer;
     FCollision: TD3CollisionFile;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
@@ -89,6 +98,7 @@ type
     FSpawnOrigin: TVector3;
     FSpawnAngle: Single;
     FStaticModelCount: Integer;
+    procedure SetShadowLight(const I: Integer);
     procedure ApplyLightColor(const I: Integer; const C: TVector3);
     function LightShaderColor(const I: Integer): TVector3;
     procedure SetMapName(const Value: String);
@@ -143,6 +153,13 @@ type
       through the portals (call every frame). Everything is shown when
       PortalCulling is off or the camera is outside the map. }
     procedure UpdateVisibility(const Camera: TCastleCamera);
+    { Pick the light casting shadow volumes: the strongest light at a point
+      (the player), with some hysteresis. Called by UpdateVisibility. }
+    procedure UpdateShadowLight(const P: TVector3);
+    { Index of the light casting shadows, -1 when none. }
+    property ShadowLight: Integer read FShadowLight;
+    { The light's strength (0..1, times its color) at a CGE point. }
+    function LightStrengthAt(const I: Integer; const P: TVector3): Single;
     function VisibleAreaCount: Integer;
     { The .cm collision model, nil when the map has none (or
       UseCollisionModel is off): then the render geometry collides. }
@@ -167,6 +184,10 @@ type
     { Collide with the map's .cm collision model (with Doom 3's invisible
       clip brushes) instead of the render geometry, when the map has one. }
     property UseCollisionModel: Boolean read FUseCollisionModel write FUseCollisionModel default True;
+    { Shadow volumes from the strongest light at the player (CGE renders
+      stencil shadow volumes for one light; the viewport's ShadowVolumes
+      must be on too). }
+    property Shadows: Boolean read FShadows write FShadows default True;
     { Draw only what is visible through the portals (UpdateVisibility). }
     property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
@@ -196,7 +217,7 @@ uses
   Math,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
-  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels, Doom3LightEffects;
+  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -250,6 +271,8 @@ begin
   FSpawnModels := True;
   FUseCollisionModel := True;
   FPortalCulling := True;
+  FShadows := True;
+  FShadowLight := -1;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
@@ -267,7 +290,7 @@ function TDoom3Map.PropertySections(const PropertyName: String): TPropertySectio
 begin
   if ArrayContainsString(PropertyName, ['MapName', 'SpawnModels', 'LightScale',
     'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount', 'StaticModelCount', 'UseCollisionModel',
-    'PortalCulling']) then
+    'PortalCulling', 'Shadows']) then
     Result := [psBasic]
   else
     Result := inherited PropertySections(PropertyName);
@@ -288,6 +311,7 @@ var
   I: Integer;
 begin
   FTime := 0;
+  FShadowLight := -1;
   FStaticModelCount := 0;
   FModels.Clear;
   FBrushes.Clear;
@@ -417,6 +441,16 @@ begin
       R := Max(LightRadius.X, Max(LightRadius.Y, LightRadius.Z));
     end;
 
+    if Projected then
+      LightMatrix := ProjectedLightMatrix(E.Origin, Rot, TargetVec, UpVec, RightVec,
+        E.VectorValue('light_start', TVector3.Zero), E.VectorValue('light_end', TargetVec),
+        E.HasKey('light_start') or E.HasKey('light_end'))
+    else
+      LightMatrix := PointLightMatrix(E.Origin, Rot, LightRadius);
+    ProjectionImage := '';
+    if Shader <> nil then
+      ProjectionImage := Shader.StageImage;
+
     if LightVolumes then
     begin
       { Doom 3's light volume as a shader effect (Doom3LightEffects): a
@@ -428,18 +462,11 @@ begin
       begin
         Point.Location := D3ToCge(E.Origin);
         Point.Radius := R * 1.2;
-        LightMatrix := ProjectedLightMatrix(E.Origin, Rot, TargetVec, UpVec, RightVec,
-          E.VectorValue('light_start', TVector3.Zero), E.VectorValue('light_end', TargetVec),
-          E.HasKey('light_start') or E.HasKey('light_end'));
       end else
       begin
         Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
         Point.Radius := LightRadius.Length + LightCenter.Length + 1;
-        LightMatrix := PointLightMatrix(E.Origin, Rot, LightRadius);
       end;
-      ProjectionImage := '';
-      if Shader <> nil then
-        ProjectionImage := Shader.StageImage;
       Point.SetEffects([CreateLightEffect(N, LightMatrix, ProjectionImage, Projected)]);
       Node := Point;
     end else
@@ -504,6 +531,9 @@ begin
     if (Shader <> nil) and not Shader.Defined then
       Shader := nil;
     FLights[N].Shader := Shader;
+    FLights[N].Matrix := LightMatrix;
+    FLights[N].Projected := Projected;
+    FLights[N].Shape := ProjectionShape(ProjectionImage);
     FLights[N].Animated := (Shader <> nil) and Shader.StageColorAnimated;
     ApplyLightColor(N, LightShaderColor(N));
     Inc(N);
@@ -574,6 +604,8 @@ begin
     FAreaScenes[Area].Load(Root, True);
     FAreaScenes[Area].PreciseCollisions := True;
     FAreaScenes[Area].RenderOptions.MaxLightsPerShape := 32;
+    { area geometry isn't closed (and is big): it receives shadows only }
+    FAreaScenes[Area].CastShadows := False;
     Add(FAreaScenes[Area]);
 
     FAreaNonSolid[Area] := TCastleScene.Create(nil);
@@ -583,6 +615,7 @@ begin
     FAreaNonSolid[Area].Collides := False;
     FAreaNonSolid[Area].Pickable := False;
     FAreaNonSolid[Area].RenderOptions.MaxLightsPerShape := 32;
+    FAreaNonSolid[Area].CastShadows := False;
     Add(FAreaNonSolid[Area]);
   end;
 
@@ -595,12 +628,16 @@ begin
   FLightScene.CastGlobalLights := True;
   FLightScene.Collides := False;
   FLightScene.Pickable := False;
+  FLightScene.CastShadows := False;
   Add(FLightScene);
 
   FPortals := TD3PortalVisibility.Create(FProc);
   for I := 0 to High(FLights) do
+  begin
+    FLights[I].OriginArea := AreaAt(FLights[I].Location);
     FLights[I].Areas := FPortals.AreasWithinRadius(FLights[I].Location, FLights[I].Radius,
-      AreaAt(FLights[I].Location));
+      FLights[I].OriginArea);
+  end;
 end;
 
 function TDoom3Map.AreaScene(const I: Integer): TCastleScene;
@@ -727,6 +764,80 @@ begin
     if FLights[I].Node.IsOn <> On then
       FLights[I].Node.IsOn := On;
   end;
+  if Camera <> nil then
+    UpdateShadowLight(Camera.WorldTranslation);
+end;
+
+function TDoom3Map.LightStrengthAt(const I: Integer; const P: TVector3): Single;
+var
+  C: TVector3;
+begin
+  C := FLights[I].Color;
+  Result := Max(C.X, Max(C.Y, C.Z)) *
+    LightVolumeStrength(FLights[I].Matrix, FLights[I].Shape, FLights[I].Projected, P);
+end;
+
+procedure TDoom3Map.SetShadowLight(const I: Integer);
+begin
+  if I = FShadowLight then
+    Exit;
+  if (FShadowLight >= 0) and (FShadowLight <= High(FLights)) then
+  begin
+    FLights[FShadowLight].Node.ShadowVolumes := False;
+    FLights[FShadowLight].Node.ShadowVolumesMain := False;
+  end;
+  FShadowLight := I;
+  if I >= 0 then
+  begin
+    FLights[I].Node.ShadowVolumes := True;
+    FLights[I].Node.ShadowVolumesMain := True;
+  end;
+end;
+
+procedure TDoom3Map.UpdateShadowLight(const P: TVector3);
+var
+  I, Best, Pass, PlayerArea: Integer;
+  S, BestScore, CurrentScore: Single;
+begin
+  if not FShadows then
+  begin
+    SetShadowLight(-1);
+    Exit;
+  end;
+  PlayerArea := AreaAt(P);
+  Best := -1;
+  BestScore := 0.05;
+  { lights in the player's area first: area walls don't cast shadows, so a
+    light behind a wall must not be the one casting them }
+  for Pass := 0 to 1 do
+  begin
+    for I := 0 to High(FLights) do
+    begin
+      if not FLights[I].Node.IsOn then
+        Continue;
+      if (FLights[I].Shader <> nil) and FLights[I].Shader.IsAmbientLight then
+        Continue;
+      if (Pass = 0) and (FLights[I].OriginArea <> PlayerArea) then
+        Continue;
+      S := LightStrengthAt(I, P);
+      if S > BestScore then
+      begin
+        BestScore := S;
+        Best := I;
+      end;
+    end;
+    if Best >= 0 then
+      Break;
+  end;
+  { hysteresis: keep the current light unless another is clearly stronger }
+  if (FShadowLight >= 0) and (Best <> FShadowLight) and FLights[FShadowLight].Node.IsOn and
+     ((FLights[FShadowLight].OriginArea = PlayerArea) or (FLights[Best].OriginArea <> PlayerArea)) then
+  begin
+    CurrentScore := LightStrengthAt(FShadowLight, P);
+    if (CurrentScore > 0.05) and (BestScore < CurrentScore * 1.2) then
+      Exit;
+  end;
+  SetShadowLight(Best);
 end;
 
 procedure TDoom3Map.BuildCollision(const Base: String);
@@ -752,6 +863,7 @@ begin
     floor ray casts hit the visible world }
   FWorldCollision.Visible := False;
   FWorldCollision.Pickable := False;
+  FWorldCollision.CastShadows := False;
   Add(FWorldCollision);
   for I := 0 to High(FAreaScenes) do
     if FAreaScenes[I] <> nil then

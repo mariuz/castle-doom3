@@ -179,7 +179,7 @@ begin
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
-    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], portals, lights, quit');
+    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], portals, lights, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -241,6 +241,15 @@ begin
       Map.PortalCulling := not Map.PortalCulling;
     Console.Print('r_usePortals ' + BoolToStr(Map.PortalCulling, '1', '0'));
   end else
+  if Cmd = 'r_shadows' then
+  begin
+    if Args <> '' then
+      Map.Shadows := StrToIntDef(Args, 1) <> 0
+    else
+      Map.Shadows := not Map.Shadows;
+    MainViewport.ShadowVolumes := Map.Shadows;
+    Console.Print('r_shadows ' + BoolToStr(Map.Shadows, '1', '0'));
+  end else
   if Cmd = 'r_lightvolumes' then
   begin
     if Args <> '' then
@@ -255,9 +264,9 @@ begin
     for I := 0 to Map.LightCount - 1 do
     begin
       L := Map.Light(I);
-      S := Format('%s %s color %.2f %.2f %.2f%s%s', [L.Entity.Name, L.Entity.Value('texture', '(default)'),
+      S := Format('%s %s color %.2f %.2f %.2f%s%s%s', [L.Entity.Name, L.Entity.Value('texture', '(default)'),
         L.Color.X, L.Color.Y, L.Color.Z, BoolToStr(L.Animated, ' animated', ''),
-        BoolToStr(L.Node.IsOn, '', ' off')]);
+        BoolToStr(L.Node.IsOn, '', ' off'), BoolToStr(I = Map.ShadowLight, ' shadows', '')]);
       Console.Print(S);
       WritelnLog('Lights', S);
     end;
@@ -291,7 +300,7 @@ end;
 
 procedure TViewPlay.CaptureScreenshot;
 var
-  Path: String;
+  Path, ShadowName: String;
   Img: TCastleImage;
 begin
   Inc(FShots);
@@ -305,9 +314,13 @@ begin
   finally
     Img.Free;
   end;
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d)',
+  if Map.ShadowLight >= 0 then
+    ShadowName := Map.Light(Map.ShadowLight).Entity.Name
+  else
+    ShadowName := 'none';
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, shadows %s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
-     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount]);
+     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, ShadowName]);
 end;
 
 procedure TViewPlay.ReleaseDemoKeys;

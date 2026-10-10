@@ -15,6 +15,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | ![The door opens into room B](docs/screenshot-door.png) | ![Flashlight](docs/screenshot-flashlight.png) |
 | ![MD5 creatures](docs/screenshot-creatures.png) | ![Title screen](docs/screenshot-menu.png) |
 | ![LWO barrels](docs/screenshot-barrels.png) | ![ASE terminal](docs/screenshot-terminal.png) |
+| ![Stencil shadows](docs/screenshot-shadows.png) | |
 
 ---
 
@@ -32,6 +33,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | `.md5mesh` / `.md5anim` skeletal models, model decls (`mesh`, `anim`, `offset`, `inherit`), skins | `Doom3Md5`: CPU skinning into a `TCoordinateNode` each frame, interpolated frames, one `TCastleScene` per instance |
 | `.lwo` (LightWave LWO2: `PNTS`, `POLS`, `PTAG`, `TAGS`, `VMAP` / `VMAD` UVs) and `.ase` (3ds Max ASCII: sub-materials, `*BITMAP` → material) static models for `func_static`, props, light fixtures, items, LWO doors | `Doom3StaticModels`: Doom 3's coordinate swaps and face flips, Doom-style smooth normals (shared position and UV), one `TCastleScene` per entity; map geometry (`func_*`) collides unless `noclipmodel` |
 | `.cm` collision models (vertices, signed edges, nodes, polygons with materials, brushes) with Doom 3's invisible `playerclip` brushes; contents from material surface parameters (`playerclip`, `monsterclip`, `nonsolid`, `water`, `trigger`...) | `Doom3Collision`: the world model's player-blocking polygons as an invisible scene (`Visible := False`, `PreciseCollisions`) that the player and monster sight collide with; the render scene stays pickable for shots |
+| Stencil shadows (Doom 3 shadows every light; CGE renders shadow volumes for one) from brush entities, static models and md5 models | CGE shadow volumes (`TCastleViewport.ShadowVolumes`): each frame the strongest light at the player (in the player's area first) becomes the `shadowVolumes` / `shadowVolumesMain` light; area geometry receives only (`CastShadows := False`) |
 | Light shaders: stage color registers (`red`, `green`, `blue`, `alpha`, `rgb`, `rgba`, `color`, `colored`) with material expressions (`time`, `parm0-11`, `global0-7`, `table[...]`, arithmetic, comparisons, `&&` / `\|\|`) and `table` decls (`snap`, `clamp`): strobes, flickers, pulses; `shaderParm0-11` | `Doom3Expressions` (expression trees, idDeclTable lookups); `TDoom3Map` re-evaluates animated lights every frame and sets the X3D lights' `Color` / `Intensity` |
 | Portal visibility: the area BSP, `interAreaPortals`, doors closing portals, lights limited to the areas they reach | `Doom3Portals`: portal flow from the camera's area through portal polygons clipped by the camera `Frustum` and narrowed per portal; one `TCastleScene` per area and the entities, md5 models and lights of hidden areas get `Visible := False` / `IsOn := False` (console `r_usePortals`, `portals`) |
 | `entityDef` with `inherit` | merged key / value dictionaries (`Doom3Decls`) |
@@ -64,7 +66,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `portals`, `lights`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `portals`, `lights`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 
@@ -101,14 +103,14 @@ Doom 3 BFG Edition's binary formats (`.bimage`, `.bproc`, `.bcm`) are not suppor
 .\castle-doom3.exe --autotest MENU test_output\shot      # title screen screenshot
 ```
 
-Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds` hold movement keys, `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command, `L:map` load map, `Q` quit. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area and number of visible areas, and every shot (`Shot:`).
+Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds` hold movement keys, `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command, `L:map` load map, `Q` quit. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area, number of visible areas and the shadow casting light, and every shot (`Shot:`).
 
 ### Tests
 
 ```powershell
 cd tests
 castle-engine compile
-.\castle-doom3-tests.exe   # 210 checks of the lexer, PK4, decls, expressions, images, .proc, .map, .cm, md5, lwo, ase parsers, light volumes and portal visibility
+.\castle-doom3-tests.exe   # 213 checks of the lexer, PK4, decls, expressions, images, .proc, .map, .cm, md5, lwo, ase parsers, light volumes and portal visibility
 ```
 
 ### Regenerating the test level

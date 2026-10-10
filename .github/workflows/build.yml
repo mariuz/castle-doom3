@@ -115,11 +115,14 @@ jobs:
           grep "Screenshot" test_output/portals.log | sed -n 1p | grep -q "visible areas 1" || { echo "::error::closed door should hide room B"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 2p | grep -q "visible areas 2" || { echo "::error::room B should be visible through the open door"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 3p | grep -q "visible areas 1" || { echo "::error::room B should be hidden behind the camera"; exit 1; }
+          run_test shadows testmap "W:1,O:notarget,G:250 -40 0,A:-125,W:0.4,S,O:r_shadows 0,W:0.2,S,Q"
+          grep "Screenshot" test_output/shadows.log | sed -n 1p | grep -q "shadows light_1" || { echo "::error::light_1 should cast the shadows"; exit 1; }
+          grep "Screenshot" test_output/shadows.log | sed -n 2p | grep -q "shadows none" || { echo "::error::r_shadows 0 should turn shadows off"; exit 1; }
           run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,Q"
           test "$(grep 'Lights: light_4 ' test_output/lights.log | sort -u | wc -l)" -ge 2 || { echo "::error::the pulsing light should change color"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 12
+          test "$(ls test_output/*.png | wc -l)" -ge 14
 
       - name: Upload screenshots and logs
         if: always()

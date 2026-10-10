@@ -61,6 +61,11 @@ function ProjectionShape(const ImageName: String): TD3LightShape;
 function CreateLightEffect(const Index: Integer; const M: TMatrix4;
   const ProjectionImage: String; const Projected: Boolean): TEffectNode;
 
+{ The light's strength (0..1) at a CGE world point: the same volume, shape
+  and falloff as the shader (for picking the shadow casting light). }
+function LightVolumeStrength(const M: TMatrix4; const Shape: TD3LightShape;
+  const Projected: Boolean; const WorldCge: TVector3): Single;
+
 { An Effect enabling CGE's EyeWorldSpace shader library for a group. }
 function LightLibraryEffect: TEffectNode;
 
@@ -226,6 +231,35 @@ begin
   Part.ShaderType := stFragment;
   Part.Contents := LightEffectCode(N, ProjectionShape(ProjectionImage), Projected);
   Result.SetParts([Part]);
+end;
+
+function SmoothStep(const E0, E1, X: Single): Single;
+var
+  T: Single;
+begin
+  T := Min(1, Max(0, (X - E0) / (E1 - E0)));
+  Result := T * T * (3 - 2 * T);
+end;
+
+function LightVolumeStrength(const M: TMatrix4; const Shape: TD3LightShape;
+  const Projected: Boolean; const WorldCge: TVector3): Single;
+var
+  TC: TVector3;
+  Projection, Falloff: Single;
+begin
+  TC := LightTexCoord(M, WorldCge);
+  if (TC.X < 0) or (TC.X > 1) or (TC.Y < 0) or (TC.Y > 1) or (TC.Z < 0) or (TC.Z > 1) then
+    Exit(0);
+  case Shape of
+    lsSquare: Projection := 1 - SmoothStep(0, 1, Max(Abs(TC.X * 2 - 1), Abs(TC.Y * 2 - 1)));
+    lsFull: Projection := 1;
+    else Projection := 1 - SmoothStep(0, 1, Sqrt(Sqr(TC.X * 2 - 1) + Sqr(TC.Y * 2 - 1)));
+  end;
+  if Projected then
+    Falloff := (1 - SmoothStep(0.85, 1, TC.Z)) * SmoothStep(0, 0.05, TC.Z)
+  else
+    Falloff := 1 - SmoothStep(0.3, 1, Abs(TC.Z * 2 - 1));
+  Result := Projection * Falloff;
 end;
 
 function LightLibraryEffect: TEffectNode;

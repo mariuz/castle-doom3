@@ -1,6 +1,6 @@
 # Doom 3 comparison and roadmap
 
-Status of version 0.6.0. "Done" items are tested against the bundled test level; real Doom 3 data has not been tested yet (it can't be bundled), so expect fixes when the first retail maps are loaded.
+Status of version 0.7.0. "Done" items are tested against the bundled test level; real Doom 3 data has not been tested yet (it can't be bundled), so expect fixes when the first retail maps are loaded.
 
 ## Done
 
@@ -12,6 +12,7 @@ Status of version 0.6.0. "Done" items are tested against the bundled test level;
 - md5mesh / md5anim with interpolated playback and skins.
 - Static models: LWO2 and ASE (props, `func_static`, light fixtures, items, LWO doors), with skins, collision for `func_*` unless `noclipmodel`.
 - Collision models (`.cm`): the world's player-blocking polygons (solid and `playerclip`) collide instead of the render geometry.
+- Stencil shadows (CGE shadow volumes) for the strongest light at the player, from brush entities, static models and small md5 models.
 - Light volumes: Doom 3's box / frustum lights without distance attenuation, `light_start` / `light_end`, projection and falloff shapes (analytic stand-ins for the images), `shaderParm4` time offsets.
 - Light shaders: animated stage color registers with expressions and tables (strobes, flickers, pulses), `colored`, `shaderParm`s.
 - Portal visibility: areas, entities, models and lights hidden when not visible through the portals; doors close portals.
@@ -23,7 +24,7 @@ Status of version 0.6.0. "Done" items are tested against the bundled test level;
 ## Next steps
 
 1. **Load the retail maps** (`game/mars_city1`, `game/admin` ...) and fix what breaks; record load times; add a CI-independent smoke test script for people who own the game.
-2. **Shadows**: CGE shadow volumes for the main light or shadow maps for a few nearby lights (Doom 3's stencil shadows are its signature look).
+2. **More shadows**: shadows from more than one light (CGE shadow maps for a few nearby spot lights, or several stencil passes), area geometry casting (closed `shadowModel`s from the `.proc`), `noshadows` materials / lights.
 3. **Material stages**: texture `scroll` / `rotate` / `scale` / `translate`, animated `rgb` / `alpha` on surfaces (the expressions exist now), `vertexColor`, `cubeMap` / `cameraCubeMap` skies, `mirrorRenderMap`, glass (`fragmentProgram heatHaze`).
 4. **GUIs**: `.gui` files on `guisurf` surfaces (wall screens, doors' keypads) rendered to textures, with the cursor.
 5. **Gameplay**: lights switched by triggers, monsters blocked by `monsterclip` instead of `playerclip`, brush entity `.cm` models for movers, weapons with view models (`models/md5/weapons/`), ammo and items (`item_*`, `ammo_*`), triggers (`trigger_once` / `multiple`, `target` chains, `func_elevator`, `func_plat`, `func_mover` with scripts), PDAs, the real AI (`ai/*.script`, animation events, `af` ragdolls as a later step), monster `def_head` and attachments.

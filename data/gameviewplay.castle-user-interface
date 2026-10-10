@@ -15,6 +15,7 @@
       "Camera" : "Camera",
       "FullSize" : true,
       "Name" : "MainViewport",
+      "ShadowVolumes" : true,
       "Items" : {
         "$$ClassName" : "TCastleRootTransform",
         "UseHeadlight" : "hlOff",

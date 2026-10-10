@@ -620,6 +620,11 @@ begin
   M := ProjectedLightMatrix(Origin, TMatrix3.Identity, Vector3(0, 0, -190), Vector3(0, 90, 0),
     Vector3(90, 0, 0), Vector3(0, 0, -10), Vector3(0, 0, -210), True);
   CheckNear(0.9, LightTexCoord(M, D3ToCge(Vector3(0, -150, 0))).Z, 'projected falloff from start to end');
+  { light strength at a point (picks the shadow casting light) }
+  M := PointLightMatrix(Vector3(0, 0, 0), TMatrix3.Identity, Vector3(100, 100, 100));
+  CheckNear(1, LightVolumeStrength(M, lsRound, False, D3ToCge(Vector3(0, 0, 0))), 'strength at the light center');
+  Check(LightVolumeStrength(M, lsRound, False, D3ToCge(Vector3(50, 0, 0))) < 1, 'strength fades');
+  CheckNear(0, LightVolumeStrength(M, lsRound, False, D3ToCge(Vector3(150, 0, 0))), 'no strength outside the box');
   { analytic projection shapes from image names }
   Check(ProjectionShape('lights/squarelight1.tga') = lsSquare, 'squarelight1 is a square');
   Check(ProjectionShape('makeintensity(lights/round.tga)') = lsRound, 'round is a disc');

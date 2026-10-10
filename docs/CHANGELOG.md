@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0
+
+Shadows.
+
+- **Stencil shadows** with CGE's shadow volumes: every frame the strongest light at the player (lights in the player's area first, ambient lights never) casts shadows of brush entities (doors, crates, movers), static models and md5 models (up to 1500 triangles). Area geometry receives shadows.
+- Console `r_shadows [0|1]`; screenshot log lines name the shadow casting light.
+- 213 checks; CI checks the shadow light is chosen.
+
+Known limitation: one shadow casting light at a time (CGE's shadow volumes), and walls don't cast shadows.
+
 ## 0.6.0
 
 Light volumes.
