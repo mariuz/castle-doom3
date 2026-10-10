@@ -118,11 +118,14 @@ jobs:
           run_test shadows testmap "W:1,O:notarget,G:250 -40 0,A:-125,W:0.4,S,O:r_shadows 0,W:0.2,S,Q"
           grep "Screenshot" test_output/shadows.log | sed -n 1p | grep -q "shadows light_1" || { echo "::error::light_1 should cast the shadows"; exit 1; }
           grep "Screenshot" test_output/shadows.log | sed -n 2p | grep -q "shadows none" || { echo "::error::r_shadows 0 should turn shadows off"; exit 1; }
+          run_test stages testmap "W:1,O:notarget,G:640 -150 0,A:90,P:45,W:0.4,S,G:740 -200 96,A:-45,W:0.3,S,W:1,S,Q"
+          grep -q 'Sky "textures/test/sky"' test_output/stages.log || { echo "::error::the skybox should be set up"; exit 1; }
+          cmp -s test_output/stages_2.png test_output/stages_3.png && { echo "::error::the terminal screen should scroll"; exit 1; } || true
           run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,Q"
           test "$(grep 'Lights: light_4 ' test_output/lights.log | sort -u | wc -l)" -ge 2 || { echo "::error::the pulsing light should change color"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 14
+          test "$(ls test_output/*.png | wc -l)" -ge 17
 
       - name: Upload screenshots and logs
         if: always()

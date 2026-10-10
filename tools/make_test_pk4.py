@@ -235,6 +235,42 @@ def ceiling_and_glow_textures():
     add('models/test/blob_bmp.tga', tga(64, 64, [[(v,) * 3 for v in r] for r in sn]))
 
 
+def sky_and_screen_images():
+    """A cube map sky (Doom 3 cameraCubeMap names) and a scanline screen."""
+    n = 64
+    rnd = random.Random(99)
+    stars = [(rnd.randrange(n), rnd.randrange(n)) for _ in range(40)]
+    faces = {'forward': 0.0, 'back': 0.0, 'left': 0.0, 'right': 0.0, 'up': 1.0, 'down': -1.0}
+    for name, up in faces.items():
+        rows = []
+        for y in range(n):
+            row = []
+            for x in range(n):
+                # a reddish Mars-like horizon glow, darker upwards
+                h = 1 - y / (n - 1)          # 1 at the top row of the image
+                if up > 0:
+                    k = 0.0
+                elif up < 0:
+                    k = 1.0
+                else:
+                    k = max(0.0, 1 - h * 1.6)
+                r, g, b = 0.05 + 0.55 * k, 0.03 + 0.18 * k, 0.06 + 0.05 * k
+                if (x, y) in stars and k < 0.4:
+                    r = g = b = 0.9
+                row.append((r, g, b))
+            rows.append(row)
+        add('env/testsky_%s.tga' % name, tga(n, n, rows))
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            line = 0.55 if (y // 2) % 2 else 1.0
+            bar = 1.0 if 20 < (x + y // 3) % 40 < 34 else 0.35
+            row.append((0.2 * line * bar, 0.9 * line * bar, 0.5 * line * bar))
+        rows.append(row)
+    add('textures/test/screen.tga', tga(n, n, rows))
+
+
 def light_images():
     """Light projection and falloff images, like Doom 3's lights/ folder."""
     def smooth(e0, e1, x):
@@ -407,11 +443,21 @@ wall_rect(area1, WALL, 'y', 48, -1, 256, 272, 0, 112)
 
 # Room B
 room_b = {'*': WALL, '+z': CEIL, '-z': FLOOR}
-box(area1, room_b, (272, -384, 0), (912, 384, 288), inward=True, skip=('-x',))
+box(area1, room_b, (272, -384, 0), (912, 384, 288), inward=True, skip=('-x', '+z'))
+# the ceiling around the skylight hole (facing down)
+for (x0, x1, y0, y1) in ((272, 560, -384, 384), (720, 912, -384, 384),
+                         (560, 720, -384, -96), (560, 720, 96, 384)):
+    wall_rect(area1, CEIL, 'z', 288, -1, x0, x1, y0, y1)
+# the skylight shaft and its sky
+wall_rect(area1, WALL, 'x', 560, 1, -96, 96, 288, 352)
+wall_rect(area1, WALL, 'x', 720, -1, -96, 96, 288, 352)
+wall_rect(area1, WALL, 'y', -96, 1, 560, 720, 288, 352)
+wall_rect(area1, WALL, 'y', 96, -1, 560, 720, 288, 352)
+wall_rect(area1, 'textures/test/sky', 'z', 352, -1, 560, 720, -96, 96)
 wall_rect(area1, WALL, 'x', 272, 1, -384, -48, 0, 288)
 wall_rect(area1, WALL, 'x', 272, 1, 48, 384, 0, 288)
 wall_rect(area1, WALL, 'x', 272, 1, -48, 48, 112, 288)
-for (cx, cy) in ((448, -192), (448, 192), (640, 0)):
+for (cx, cy) in ((448, -192), (448, 192), (640, 250)):
     wall_rect(area1, GLOW, 'z', 287, -1, cx - 32, cx + 32, cy - 32, cy + 32)
 # stairs: 6 steps of 16 up to a balcony 96 high at x 720..912
 for i in range(6):
@@ -718,7 +764,31 @@ textures/test/lightpanel
 	{
 		blend add
 		map textures/test/lightpanel.tga
-		rgb 1.0
+		rgb 0.75 + 0.25 * sinTable[ time * 0.5 ]	// a slow pulse
+	}
+}
+
+textures/test/screen
+{
+	qer_editorimage textures/test/screen.tga
+	noshadows
+	{
+		blend add
+		map textures/test/screen.tga
+		scroll 0, time * -0.25
+		scale 2, 2
+	}
+}
+
+textures/test/sky
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	nonsolid
+	{
+		cameraCubeMap env/testsky
+		texgen skybox
+		texgen wobblesky .0 .0 .0
 	}
 }
 
@@ -1119,7 +1189,7 @@ def terminal_ase():
            '\t\t*MATERIAL_NAME "terminal"', '\t\t*MATERIAL_CLASS "Multi/Sub-Object"',
            '\t\t*NUMSUBMTLS 2']
     for i, bitmap in enumerate(('\\\\purgatory\\purgatory\\doom\\base\\textures\\test\\metal.tga',
-                                'C:\\Doom3\\base\\textures\\test\\lightpanel.tga')):
+                                'C:\\Doom3\\base\\textures\\test\\screen.tga')):
         out += ['\t\t*SUBMATERIAL %d {' % i, '\t\t\t*MATERIAL_NAME "sub%d"' % i,
                 '\t\t\t*MAP_DIFFUSE {', '\t\t\t\t*MAP_NAME "Map #%d"' % i,
                 '\t\t\t\t*BITMAP "%s"' % bitmap,
@@ -1221,6 +1291,7 @@ def main():
     add('models/md5/test/blob.md5mesh', md5mesh_text())
     barrel_texture()
     light_images()
+    sky_and_screen_images()
     add('models/mapobjects/test/barrel.lwo', barrel_lwo())
     add('models/mapobjects/test/terminal.ase', terminal_ase())
     add('models/md5/test/blob_idle.md5anim', md5anim_text('idle'))

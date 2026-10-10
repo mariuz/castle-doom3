@@ -67,6 +67,12 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Uniform names must be unique per light (several lights' code ends up in one shader), so they are suffixed with the light's index.
 - `r_lightVolumes 0` (`Doom3LightEffects.LightVolumes`) reloads the map with plain spheres / X3D spot lights for comparison.
 
+## Material stages
+
+- `TD3Material` keeps the texture matrix keywords of its diffuse stage (`DiffuseTexOps`) and of its first plain stage (`StageTexOps`): `scroll` / `translate`, `scale`, `centerScale`, `shear`, `rotate` (in cycles, around the texture center), each with expressions. `TexMatrix` composes them like idMaterial's `MultiplyTextureMatrix` (a new keyword applies after the previous ones) and converts to CGE's texture coordinates (`v = 1 - t`: `F M F` with `F (s, v) = (s, 1 - v)`), as a 4x4 matrix for a `TextureTransformMatrix3D` node.
+- `MaterialAppearance` adds that node to the appearance (the diffuse stage's matrix applies to the normal and specular maps too) and sets the plain stage's color registers on the unlit material (`EmissiveColor`, and `Transparency` for `blend blend` stages). Appearances that change with time (`UsesTime`) are registered; `TDoom3Map.Update` calls `UpdateAnimatedSurfaces(Time)` every frame and `ClearMap` forgets them. World surfaces use shader parameters 1.
+- Skies: a `cameraCubeMap name` stage (images `name_forward`, `_back`, `_left`, `_right`, `_up`, `_down`) or `cubeMap name` (`_px`, `_nx`, `_py`, `_ny`, `_pz`, `_nz`) marks a sky material. Its surfaces aren't drawn (no diffuse map / plain stage), and `TViewPlay.SetupSky` puts the first sky of the map's areas on a `TCastleBackground`: Doom 3 +X / +Z (up) / +Y (left) are CGE +X / +Y / -Z, and CGE draws `TexturePositiveZ` at -Z. The images' orientation within each face is not verified against real Doom 3 skies yet.
+
 ## Shadows
 
 - CGE renders stencil shadow volumes for one light: the light node with `shadowVolumes` and `shadowVolumesMain`; in the shadowed pass CGE switches off lights with `shadowVolumes` (also global lights of other scenes). Doom 3 shadows every light, so `TDoom3Map.UpdateShadowLight` (called from `UpdateVisibility`) picks the most useful one every frame: the strongest light at the player (`LightStrengthAt`: color times `LightVolumeStrength`, the same volume / shape / falloff as the shader), lights whose origin is in the player's area first (area walls don't cast shadows, so a light behind a wall must not be chosen), ambient lights never, switching only when another light is 20% stronger.

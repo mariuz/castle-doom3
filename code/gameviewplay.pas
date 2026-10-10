@@ -28,6 +28,7 @@ type
     Console: TDoom3Console;
   private
     FGame: TD3Game;
+    FSky: TCastleBackground;
     FNoclip: Boolean;
     { autotest / demo scripts }
     FDemoCommands: TStringList;
@@ -37,6 +38,7 @@ type
     FShots: Integer;
     FQuitting: Boolean;
     procedure LoadLevel(const AMapName: String);
+    procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
     procedure HandleConsoleCommand(const Cmd, Args: String);
@@ -146,7 +148,29 @@ begin
   FGame.Armor := 0;
   FGame.Spawn;
   PlaceCamera(Map.SpawnOrigin, Map.SpawnAngle);
+  SetupSky;
   Hud.ShowMessage(AMapName, 4);
+end;
+
+procedure TViewPlay.SetupSky;
+var
+  Urls: TCastleStringArray6;
+begin
+  if not Map.SkyboxUrls(Urls) then
+  begin
+    MainViewport.Background := nil;
+    Exit;
+  end;
+  if FSky = nil then
+    FSky := TCastleBackground.Create(Self);
+  FSky.TexturePositiveX := Urls[0];
+  FSky.TextureNegativeX := Urls[1];
+  FSky.TexturePositiveY := Urls[2];
+  FSky.TextureNegativeY := Urls[3];
+  FSky.TexturePositiveZ := Urls[4];
+  FSky.TextureNegativeZ := Urls[5];
+  MainViewport.Background := FSky;
+  WritelnLog('GameViewPlay', 'Sky "%s"', [Map.SkyMaterial]);
 end;
 
 procedure TViewPlay.HandleMessage(const Msg: String);

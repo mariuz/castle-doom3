@@ -31,6 +31,8 @@ uses
 type
   { A brush entity (its .proc model) or a static model entity (.lwo / .ase)
     as a scene. Both can be movers (func_door, func_rotating...). }
+  TCastleStringArray6 = array [0..5] of String;
+
   TD3BrushEntity = class
     Entity: TD3MapEntity;
     Scene: TCastleScene;
@@ -90,6 +92,7 @@ type
     FTime: Single;
     FShadows: Boolean;
     FShadowLight: Integer;
+    FSkyMaterial: String;
     FCollision: TD3CollisionFile;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
@@ -156,6 +159,13 @@ type
     { Pick the light casting shadow volumes: the strongest light at a point
       (the player), with some hysteresis. Called by UpdateVisibility. }
     procedure UpdateShadowLight(const P: TVector3);
+    { The first sky material (cameraCubeMap / cubeMap stage) of the map's
+      areas, '' when none. }
+    property SkyMaterial: String read FSkyMaterial;
+    { The six skybox image URLs of SkyMaterial, CGE background order:
+      +X, -X, +Y (up), -Y, +Z, -Z. False when there's no sky or an image is
+      missing. }
+    function SkyboxUrls(out Urls: TCastleStringArray6): Boolean;
     { Index of the light casting shadows, -1 when none. }
     property ShadowLight: Integer read FShadowLight;
     { The light's strength (0..1, times its color) at a CGE point. }
@@ -311,6 +321,8 @@ var
   I: Integer;
 begin
   FTime := 0;
+  FSkyMaterial := '';
+  ClearAnimatedSurfaces;
   FShadowLight := -1;
   FStaticModelCount := 0;
   FModels.Clear;
@@ -581,6 +593,7 @@ var
   Root, RootNonSolid, LightRoot: TX3DRootNode;
   I, Area: Integer;
   M: TD3ProcModel;
+  Surf: TD3ProcSurface;
 begin
   { one solid and one non-solid scene per area, so portal visibility can
     hide areas; shapes stay per material inside them }
@@ -595,6 +608,13 @@ begin
     Root := TX3DRootNode.Create;
     RootNonSolid := TX3DRootNode.Create;
     BuildProcModel(M, Root, RootNonSolid);
+    if FSkyMaterial = '' then
+      for Surf in M.Surfaces do
+        if Decls.Material(Surf.Material).SkyCubeMap <> '' then
+        begin
+          FSkyMaterial := Surf.Material;
+          Break;
+        end;
     AddLightLibrary(Root);
     AddLightLibrary(RootNonSolid);
 
@@ -638,6 +658,35 @@ begin
     FLights[I].Areas := FPortals.AreasWithinRadius(FLights[I].Location, FLights[I].Radius,
       FLights[I].OriginArea);
   end;
+end;
+
+function TDoom3Map.SkyboxUrls(out Urls: TCastleStringArray6): Boolean;
+const
+  { Doom 3 cameraCubeMap suffixes for CGE's +X, -X, +Y, -Y, +Z, -Z:
+    Doom 3 +X is CGE +X, Doom 3 +Z (up) is CGE +Y, Doom 3 +Y (left) is
+    CGE -Z. CGE's background draws TexturePositiveZ ("front") at -Z. }
+  CameraSuffixes: array [0..5] of String = ('_forward', '_back', '_up', '_down', '_left', '_right');
+  CubeSuffixes: array [0..5] of String = ('_px', '_nx', '_pz', '_nz', '_py', '_ny');
+var
+  M: TD3Material;
+  I: Integer;
+  F: String;
+begin
+  Result := False;
+  if FSkyMaterial = '' then
+    Exit;
+  M := Decls.Material(FSkyMaterial);
+  for I := 0 to 5 do
+  begin
+    if M.SkyCameraCubeMap then
+      F := FindImageFile(M.SkyCubeMap + CameraSuffixes[I])
+    else
+      F := FindImageFile(M.SkyCubeMap + CubeSuffixes[I]);
+    if F = '' then
+      Exit;
+    Urls[I] := D3FsUrl(F);
+  end;
+  Result := True;
 end;
 
 function TDoom3Map.AreaScene(const I: Integer): TCastleScene;
@@ -1204,6 +1253,9 @@ var
 begin
   inherited Update(SecondsPassed, RemoveMe);
   FTime := FTime + SecondsPassed;
+  { scrolling / rotating textures, pulsing glows }
+  if FProc <> nil then
+    UpdateAnimatedSurfaces(FTime);
   { light shaders: strobes, flickers, pulses }
   for I := 0 to High(FLights) do
     if FLights[I].Animated and FLights[I].Node.IsOn then

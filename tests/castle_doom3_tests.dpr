@@ -79,7 +79,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(36, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(43, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -106,7 +106,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(17, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(19, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -369,7 +369,8 @@ begin
         Inc(ClipPolys);
       if P.Material = 'textures/common/monster_clip' then
         Inc(MonsterClipPolys);
-      Inc(Fan, Length(P.Verts) - 2);
+      if Decls.Material(P.Material).BlocksPlayer then
+        Inc(Fan, Length(P.Verts) - 2);
     end;
     CheckEquals(6, ClipPolys, 'playerclip box polygons');
     CheckEquals(6, MonsterClipPolys, 'monsterclip box polygons');
@@ -388,8 +389,8 @@ begin
 
     W.PlayerTriangles(Coords, Indexes);
     try
-      CheckEquals(3 * (Fan - 2 * MonsterClipPolys), Indexes.Count,
-        'player collision triangles: all but monsterclip');
+      CheckEquals(3 * Fan, Indexes.Count,
+        'player collision triangles: the polygons whose material blocks the player');
     finally
       Coords.Free;
       Indexes.Free;
@@ -634,6 +635,98 @@ begin
   CheckEquals('lights/projfalloff.tga', Decls.Material('lights/test_window').LightFalloffImage, 'light shader falloff image');
 end;
 
+function TexApply(const M: TMatrix4; const S, V: Single): TVector2;
+var
+  R: TVector4;
+begin
+  R := M * Vector4(S, V, 0, 1);
+  Result := Vector2(R.X, R.Y);
+end;
+
+function MakeOps(const Kinds: array of TD3TexOpKind; const Args: array of String): TD3TexOps;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(Kinds));
+  for I := 0 to High(Kinds) do
+  begin
+    Result[I].Kind := Kinds[I];
+    Result[I].A := ParseD3ExpressionString(Args[I * 2], @Decls.Table);
+    if Args[I * 2 + 1] <> '' then
+      Result[I].B := ParseD3ExpressionString(Args[I * 2 + 1], @Decls.Table)
+    else
+      Result[I].B := nil;
+  end;
+end;
+
+procedure FreeOps(var Ops: TD3TexOps);
+var
+  I: Integer;
+begin
+  for I := 0 to High(Ops) do
+  begin
+    Ops[I].A.Free;
+    Ops[I].B.Free;
+  end;
+  Ops := nil;
+end;
+
+procedure CheckVec2(const Expected, Actual: TVector2; const What: String);
+begin
+  Check(TVector2.Equals(Expected, Actual, 0.001),
+    Format('%s: expected %s, got %s', [What, Expected.ToString, Actual.ToString]));
+end;
+
+procedure TestMaterialStages;
+var
+  Ops: TD3TexOps;
+  Ctx: TD3ExprContext;
+  M: TD3Material;
+begin
+  Ctx := DefaultExprContext;
+  Ctx.Time := 2;
+  { scroll s: plain shift }
+  Ops := MakeOps([toScroll], ['time * 0.125', '0']);
+  CheckVec2(Vector2(0.35, 0.4), TexApply(TD3Material.TexMatrix(Ops, Ctx), 0.1, 0.4), 'scroll s');
+  Check(TD3Material.TexOpsAnimated(Ops), 'scroll by time is animated');
+  FreeOps(Ops);
+  { scroll t: Doom 3's t goes down the image, CGE's v up }
+  Ops := MakeOps([toScroll], ['0', '0.25']);
+  CheckVec2(Vector2(0.1, 0.15), TexApply(TD3Material.TexMatrix(Ops, Ctx), 0.1, 0.4), 'scroll t moves v down');
+  Check(not TD3Material.TexOpsAnimated(Ops), 'constant scroll');
+  FreeOps(Ops);
+  { scale 2: Doom (s, t) -> (2s, 2t); in CGE v = 1 - t }
+  Ops := MakeOps([toScale], ['2', '2']);
+  CheckVec2(Vector2(0.2, 0.6), TexApply(TD3Material.TexMatrix(Ops, Ctx), 0.1, 0.8), 'scale');
+  FreeOps(Ops);
+  { centerScale keeps the center }
+  Ops := MakeOps([toCenterScale], ['3', '3']);
+  CheckVec2(Vector2(0.5, 0.5), TexApply(TD3Material.TexMatrix(Ops, Ctx), 0.5, 0.5), 'centerScale center');
+  FreeOps(Ops);
+  { rotate a quarter cycle around the center }
+  Ops := MakeOps([toRotate], ['0.25', '']);
+  CheckVec2(Vector2(0.5, 0.5), TexApply(TD3Material.TexMatrix(Ops, Ctx), 0.5, 0.5), 'rotate center');
+  CheckVec2(Vector2(0.5, 0), TexApply(TD3Material.TexMatrix(Ops, Ctx), 1, 0.5), 'rotate quarter');
+  FreeOps(Ops);
+  { order: scale then scroll (scroll is applied after the scale) }
+  Ops := MakeOps([toScale, toScroll], ['2', '1', '0.5', '0']);
+  CheckVec2(Vector2(0.7, 0.4), TexApply(TD3Material.TexMatrix(Ops, Ctx), 0.1, 0.4), 'keywords compose in order');
+  FreeOps(Ops);
+
+  M := Decls.Material('textures/test/screen');
+  CheckEquals(2, Length(M.StageTexOps), 'screen: scroll and scale');
+  Check(TD3Material.TexOpsAnimated(M.StageTexOps), 'screen scrolls with time');
+  Check(M.StageTexOps[0].Kind = toScroll, 'screen first keyword');
+  M := Decls.Material('textures/test/lightpanel');
+  Check(M.StageColorAnimated, 'light panels pulse');
+  Check(Length(M.StageTexOps) = 0, 'light panels have no texture matrix');
+  M := Decls.Material('textures/test/sky');
+  CheckEquals('env/testsky', M.SkyCubeMap, 'sky cube map');
+  Check(M.SkyCameraCubeMap, 'cameraCubeMap');
+  Check(M.IsInvisible, 'sky surfaces are not drawn');
+  CheckEquals('env/testsky_forward.tga', FindImageFile('env/testsky_forward'), 'sky image');
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -700,7 +793,7 @@ begin
   if M <> nil then
   begin
     CheckEquals(2, M.Surfaces.Count, 'terminal surfaces from sub-materials');
-    S := FindSurface(M, 'textures/test/lightpanel');
+    S := FindSurface(M, 'textures/test/screen');
     if S <> nil then
     begin
       CheckEquals(2, S.TriangleCount, 'terminal screen triangles');
@@ -741,6 +834,7 @@ begin
   TestPortals;
   TestExpressions;
   TestLightVolumes;
+  TestMaterialStages;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

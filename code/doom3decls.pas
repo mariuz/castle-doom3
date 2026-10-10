@@ -21,6 +21,14 @@ type
 
   TD3BlendMode = (bmOpaque, bmBlend, bmAdd, bmFilter);
 
+  { A texture matrix keyword of a stage (idMaterial's MultiplyTextureMatrix). }
+  TD3TexOpKind = (toScroll, toScale, toCenterScale, toShear, toRotate);
+  TD3TexOp = record
+    Kind: TD3TexOpKind;
+    A, B: TD3Expr; { B is nil for rotate }
+  end;
+  TD3TexOps = array of TD3TexOp;
+
   { A parsed material (only what this port renders). Image fields hold image
     programs, e.g. "textures/a_d.tga" or
     "addnormals(textures/a_local.tga,heightmap(textures/a_bmp.tga,4))". }
@@ -50,11 +58,23 @@ type
     { Color registers (red, green, blue, alpha) of the first plain stage
       (for lights: the light's color); nil means 1. Owned. }
     StageColorExpr: array [0..3] of TD3Expr;
+    { Texture matrix keywords of the diffuse stage and of the first plain
+      stage (scroll, translate, scale, centerScale, shear, rotate). Owned. }
+    DiffuseTexOps, StageTexOps: TD3TexOps;
+    { A sky: the image name of a cameraCubeMap (_forward, _back...) or
+      cubeMap (_px, _nx...) stage }
+    SkyCubeMap: String;
+    SkyCameraCubeMap: Boolean;
     destructor Destroy; override;
     { The stage color for an entity's parameters at a time. }
     function EvalStageColor(const Ctx: TD3ExprContext): TVector4;
     { Does the stage color change with time? }
     function StageColorAnimated: Boolean;
+    { Do the texture matrix keywords change with time? }
+    class function TexOpsAnimated(const Ops: TD3TexOps): Boolean; static;
+    { The texture matrix of some keywords, for CGE's texture coordinates
+      (v = 1 - Doom 3's t), as a 4x4 matrix for TextureTransformMatrix3D. }
+    class function TexMatrix(const Ops: TD3TexOps; const Ctx: TD3ExprContext): TMatrix4; static;
     { True when the surface has nothing we can draw. }
     function IsInvisible: Boolean;
     { Collides with the player? }
@@ -181,13 +201,113 @@ begin
   Result := (DiffuseImage = '') and (StageImage = '');
 end;
 
+procedure FreeTexOps(var Ops: TD3TexOps);
+var
+  I: Integer;
+begin
+  for I := 0 to High(Ops) do
+  begin
+    FreeAndNil(Ops[I].A);
+    FreeAndNil(Ops[I].B);
+  end;
+  Ops := nil;
+end;
+
 destructor TD3Material.Destroy;
 var
   I: Integer;
 begin
   for I := 0 to 3 do
     FreeAndNil(StageColorExpr[I]);
+  FreeTexOps(DiffuseTexOps);
+  FreeTexOps(StageTexOps);
   inherited Destroy;
+end;
+
+class function TD3Material.TexOpsAnimated(const Ops: TD3TexOps): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(Ops) do
+    if ((Ops[I].A <> nil) and Ops[I].A.UsesTime) or ((Ops[I].B <> nil) and Ops[I].B.UsesTime) then
+      Exit(True);
+  Result := False;
+end;
+
+type
+  { 2x3 affine texture matrix, rows (s, t) }
+  TTexAffine = array [0..1, 0..2] of Single;
+
+function AffineMultiply(const A, B: TTexAffine): TTexAffine;
+var
+  R, C: Integer;
+begin
+  { A * B, both as 3x3 with a (0, 0, 1) last row }
+  for R := 0 to 1 do
+  begin
+    for C := 0 to 1 do
+      Result[R, C] := A[R, 0] * B[0, C] + A[R, 1] * B[1, C];
+    Result[R, 2] := A[R, 0] * B[0, 2] + A[R, 1] * B[1, 2] + A[R, 2];
+  end;
+end;
+
+class function TD3Material.TexMatrix(const Ops: TD3TexOps; const Ctx: TD3ExprContext): TMatrix4;
+var
+  M, K, F: TTexAffine;
+  I: Integer;
+  A, B, C, S: Single;
+begin
+  { identity }
+  M[0, 0] := 1; M[0, 1] := 0; M[0, 2] := 0;
+  M[1, 0] := 0; M[1, 1] := 1; M[1, 2] := 0;
+  for I := 0 to High(Ops) do
+  begin
+    A := 0;
+    B := 0;
+    if Ops[I].A <> nil then
+      A := Ops[I].A.Eval(Ctx);
+    if Ops[I].B <> nil then
+      B := Ops[I].B.Eval(Ctx);
+    case Ops[I].Kind of
+      toScroll:
+        begin
+          K[0, 0] := 1; K[0, 1] := 0; K[0, 2] := A;
+          K[1, 0] := 0; K[1, 1] := 1; K[1, 2] := B;
+        end;
+      toScale:
+        begin
+          K[0, 0] := A; K[0, 1] := 0; K[0, 2] := 0;
+          K[1, 0] := 0; K[1, 1] := B; K[1, 2] := 0;
+        end;
+      toCenterScale:
+        begin
+          K[0, 0] := A; K[0, 1] := 0; K[0, 2] := 0.5 - 0.5 * A;
+          K[1, 0] := 0; K[1, 1] := B; K[1, 2] := 0.5 - 0.5 * B;
+        end;
+      toShear:
+        begin
+          K[0, 0] := 1; K[0, 1] := A; K[0, 2] := -0.5 * A;
+          K[1, 0] := B; K[1, 1] := 1; K[1, 2] := -0.5 * B;
+        end;
+      toRotate:
+        begin
+          { in cycles, around the texture center (sinTable / cosTable) }
+          C := Cos(2 * Pi * A);
+          S := Sin(2 * Pi * A);
+          K[0, 0] := C; K[0, 1] := -S; K[0, 2] := 0.5 - 0.5 * C + 0.5 * S;
+          K[1, 0] := S; K[1, 1] := C;  K[1, 2] := 0.5 - 0.5 * S - 0.5 * C;
+        end;
+    end;
+    { like MultiplyTextureMatrix: the new keyword applies after the old ones }
+    M := AffineMultiply(K, M);
+  end;
+  { CGE's v is 1 - t: F M F with F (s, v) = (s, 1 - v) }
+  F[0, 0] := 1; F[0, 1] := 0;  F[0, 2] := 0;
+  F[1, 0] := 0; F[1, 1] := -1; F[1, 2] := 1;
+  M := AffineMultiply(F, AffineMultiply(M, F));
+  Result := TMatrix4.Identity;
+  Result.Data[0, 0] := M[0, 0]; Result.Data[1, 0] := M[0, 1]; Result.Data[3, 0] := M[0, 2];
+  Result.Data[0, 1] := M[1, 0]; Result.Data[1, 1] := M[1, 1]; Result.Data[3, 1] := M[1, 2];
 end;
 
 function TD3Material.EvalStageColor(const Ctx: TD3ExprContext): TVector4;
@@ -492,6 +612,29 @@ var
   Regs: array [0..3] of TD3Expr;
   Parts: TStringArray;
   I: Integer;
+  StageOps: TD3TexOps;
+
+  procedure AddOp(const Kind: TD3TexOpKind; const Text: String; const TwoArgs: Boolean);
+  var
+    Args: TStringArray;
+    Op: TD3TexOp;
+  begin
+    Args := SplitTopLevel(Text);
+    Op.Kind := Kind;
+    Op.A := nil;
+    Op.B := nil;
+    if Length(Args) > 0 then
+      Op.A := ParseD3ExpressionString(Args[0], @Table);
+    if TwoArgs and (Length(Args) > 1) then
+      Op.B := ParseD3ExpressionString(Args[1], @Table);
+    if (Op.A = nil) or (TwoArgs and (Op.B = nil)) then
+    begin
+      FreeAndNil(Op.A);
+      FreeAndNil(Op.B);
+      Exit;
+    end;
+    StageOps := Concat(StageOps, [Op]);
+  end;
 
   procedure SetReg(const Index: Integer; const Text: String);
   begin
@@ -524,9 +667,34 @@ begin
         StageAlphaTest := -1;
         for I := 0 to 3 do
           FreeAndNil(Regs[I]);
+        FreeTexOps(StageOps);
         while Lexer.Next(Tok) and (Tok <> '}') do
         begin
           L := LowerCase(Tok);
+          if (L = 'scroll') or (L = 'translate') then
+            AddOp(toScroll, Lexer.RestOfLine, True)
+          else
+          if L = 'scale' then
+            AddOp(toScale, Lexer.RestOfLine, True)
+          else
+          if L = 'centerscale' then
+            AddOp(toCenterScale, Lexer.RestOfLine, True)
+          else
+          if L = 'shear' then
+            AddOp(toShear, Lexer.RestOfLine, True)
+          else
+          if L = 'rotate' then
+            AddOp(toRotate, Lexer.RestOfLine, False)
+          else
+          if (L = 'cameracubemap') or (L = 'cubemap') then
+          begin
+            if Result.SkyCubeMap = '' then
+            begin
+              Result.SkyCubeMap := Lexer.NextStr;
+              Result.SkyCameraCubeMap := L = 'cameracubemap';
+            end;
+            StageSpecial := True;
+          end else
           if (L = 'red') or (L = 'green') or (L = 'blue') or (L = 'alpha') then
           begin
             Line := Lexer.RestOfLine;
@@ -584,7 +752,15 @@ begin
             Result.StageColorExpr[I] := Regs[I];
             Regs[I] := nil;
           end;
+          Result.StageTexOps := StageOps;
+          StageOps := nil;
         end;
+        if (Special = 'diffusemap') and (Result.DiffuseTexOps = nil) then
+        begin
+          Result.DiffuseTexOps := StageOps;
+          StageOps := nil;
+        end;
+        FreeTexOps(StageOps);
         if StageSpecial then
         begin
           Result.HasSpecialStage := True;
@@ -680,6 +856,7 @@ begin
     Lexer.Free;
     for I := 0 to 3 do
       FreeAndNil(Regs[I]);
+    FreeTexOps(StageOps);
   end;
 end;
 

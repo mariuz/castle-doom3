@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+Material stages.
+
+- **Texture matrices**: `scroll` / `translate`, `scale`, `centerScale`, `shear` and `rotate` with expressions, composed like Doom 3's `MultiplyTextureMatrix`, as CGE `TextureTransformMatrix3D` nodes: scrolling screens, moving fluids, rotating fans.
+- **Animated surface colors**: `rgb` / `red` / ... / `alpha` registers on glow and blend stages (pulsing panels, fading decals), updated every frame.
+- **Skies**: `cameraCubeMap` / `cubeMap` sky materials become a CGE skybox (`TCastleBackground`); the sky surfaces themselves aren't drawn.
+- Test level: scrolling terminal screens, pulsing ceiling panels, a skylight in room B.
+- 231 checks (texture matrices, stage parsing, skies); CI checks the sky is set up.
+
 ## 0.7.0
 
 Shadows.
