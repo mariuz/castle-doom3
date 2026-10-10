@@ -11,7 +11,8 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
                                             ├─► Doom3MapFile (.map entities)
                                             ├─► Doom3Md5    (.md5mesh / .md5anim, CPU skinning)
                                             ├─► Doom3StaticModels (.lwo / .ase)
-                                            └─► Doom3Collision (.cm)
+                                            ├─► Doom3Collision (.cm)
+                                            └─► Doom3Portals (portal visibility)
                                                          │
                                        Doom3Level (TDoom3Map component) ─► Doom3World (TD3Game: doors, AI, sounds, player)
                                                          │
@@ -32,6 +33,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 | `Doom3Md5` | md5mesh joints / meshes / weights, md5anim hierarchy / baseframe / frames, absolute poses, frame interpolation (lerp + normalized quaternion lerp), skinning. `TD3Md5Instance` owns a `TCastleScene`, `PlayAnim`, `Update`. `Md5Cache` shares parsed files. |
 | `Doom3StaticModels` | LWO2 (`TAGS`, `LAYR`, `PNTS`, `VMAP` / `VMAD` `TXUV`, `POLS` `FACE` as triangle fans, `PTAG` `SURF`) and ASE (`*MATERIAL` / `*SUBMATERIAL` `*BITMAP` and UV tiling / offset, `*GEOMOBJECT` meshes, `*MESH_MTLID`, `*MATERIAL_REF`). Surfaces per material with Doom-style smooth normals (vertexes sharing position and UV). `StaticModels` caches them. |
 | `Doom3Collision` | `.cm` files: per `collisionModel` the vertices, edges (edge 0 is a dummy; a negative edge in a polygon is used backwards and starts at its second vertex), BSP nodes (counted), polygons (`numEdges ( edges ) ( normal ) dist ( min ) ( max ) "material"`) and brushes (`n { ( normal ) dist ... } ( min ) ( max ) "contents"`). `PlayerTriangles` / `BuildCollisionNode` turn the polygons whose material `BlocksPlayer` into triangle fans. |
+| `Doom3Portals` | `TD3PortalVisibility`: the portals in CGE coordinates, per area portal lists, `Compute` (portal flow with polygon clipping and per-portal narrowing, closed portals), `AreasWithinRadius` (areas a light reaches), `PortalsInBox` (portals a door closes), `ClipPolygon`. |
 | `Doom3Level` | `TDoom3Map` (`TCastleTransform`, registered for the editor): builds the area scenes, lights, brush entities and md5 entities of a map. |
 | `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, player health / armor, pistol, use. |
 | `Doom3Hud`, `Doom3Console` | UI components drawn with `DrawRectangle` and `UIFont`. |
@@ -50,14 +52,22 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 
 ## Collision
 
-- With a `maps/<name>.cm` (and `UseCollisionModel`), `TDoom3Map` loads the `worldMap` model into `WorldCollision`: invisible (`Visible := False`), `PreciseCollisions`, not pickable. `World` then has `Collides := False`. So the player and `WorldSegmentCollision` (monster sight, monster movement) use Doom 3's collision geometry with its `playerclip` brushes and without render-only detail, while `WorldRayCast` (shots, monster floor following) hits what you see.
+- With a `maps/<name>.cm` (and `UseCollisionModel`), `TDoom3Map` loads the `worldMap` model into `WorldCollision`: invisible (`Visible := False`), `PreciseCollisions`, not pickable. The area scenes then have `Collides := False`. So the player and `WorldSegmentCollision` (monster sight, monster movement) use Doom 3's collision geometry with its `playerclip` brushes and without render-only detail, while `WorldRayCast` (shots, monster floor following) hits what you see.
 - Contents come from the polygon's material, like Doom 3's surface parameters: `playerclip` blocks the player only; `monsterclip`, `nonsolid`, `water`, `trigger`, `ikclip`, `aassolid`... clear solid (`TD3Material.BlocksPlayer`).
 - Brush entities (doors, movers) keep colliding with their render geometry, which moves with them; their `.cm` models are parsed but not used yet. Without a `.cm`, the render geometry collides as before.
 
+## Portal visibility
+
+- Like Doom 3's renderer: `UpdateVisibility(Camera)` (every frame, from `TViewPlay.Update`) finds the camera's area with the area BSP and flows through the portals. A portal is followed when its polygon, clipped by the current view volume (the camera frustum's side planes at first), is not empty; the view volume is then narrowed to the planes through the eye and the clipped polygon's edges. An eye within 1 unit of a portal's plane passes through with the same planes. Depth and call count are capped.
+- Each area has its own solid and non-solid `TCastleScene` (`AreaScene`, `AreaNonSolidScene`); hidden areas get `Visible := False`, which keeps them colliding. Brush / static model entities know the areas their bounding box touches (`TD3BrushEntity.Areas`), md5 models are tested every frame at their position.
+- Lights are all in the `Lights` scene (global lights). Each knows the areas it reaches (flood from its area through portals within its Doom 3 radius); a light is switched off while none of them is visible, so fewer lights reach the shaders.
+- A `func_door` closes the portals inside its bounding box (grown by 16) while it is shut (`TD3Mover.Portals`), like idDoor's area portal.
+- Outside the map (noclip), with `PortalCulling` off, or in the editor everything is drawn.
+
 ## Rendering notes
 
-- One `TCastleScene` (`World`) holds every area's solid surfaces and all lights; `WorldNonSolid` holds `nonsolid`, translucent and blended surfaces with `Collides := False`. Each area and material is its own shape, so frustum culling and per-shape light lists stay effective (`MaxLightsPerShape` 32).
-- Lights are `Global` and the world scene has `CastGlobalLights`, so they also light brush entities and md5 models.
+- Each area's solid surfaces are one `TCastleScene` and its `nonsolid`, translucent and blended surfaces another with `Collides := False`; each material is its own shape, so frustum culling and per-shape light lists stay effective (`MaxLightsPerShape` 32).
+- Lights are `Global` in the `Lights` scene with `CastGlobalLights`, so they light every area, brush entity and md5 model.
 - Brush entity, static model and md5 scenes are children of `TDoom3Map`. Static model entities are `TD3BrushEntity` items too, so `func_door` / `func_rotating` with LWO models move like brush ones; md5 scenes don't collide and aren't pickable (shots test monsters as cylinders).
 - Textures are referenced by URL (`d3fs:/...`, `d3img:/...`), so CGE's texture cache shares them between shapes and scenes. X3D nodes are never shared between scenes.
 

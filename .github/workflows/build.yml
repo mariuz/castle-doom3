@@ -111,9 +111,13 @@ jobs:
           grep -q "4 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -q "testmap.cm.: 5 models" test_output/clip.log || { echo "::error::collision model not loaded"; exit 1; }
+          run_test portals testmap "W:1,S,G:200 0 0,A:0,W:2.2,S,A:180,W:0.2,S,Q"
+          grep "Screenshot" test_output/portals.log | sed -n 1p | grep -q "visible areas 1" || { echo "::error::closed door should hide room B"; exit 1; }
+          grep "Screenshot" test_output/portals.log | sed -n 2p | grep -q "visible areas 2" || { echo "::error::room B should be visible through the open door"; exit 1; }
+          grep "Screenshot" test_output/portals.log | sed -n 3p | grep -q "visible areas 1" || { echo "::error::room B should be hidden behind the camera"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 9
+          test "$(ls test_output/*.png | wc -l)" -ge 12
 
       - name: Upload screenshots and logs
         if: always()

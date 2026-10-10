@@ -32,6 +32,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | `.md5mesh` / `.md5anim` skeletal models, model decls (`mesh`, `anim`, `offset`, `inherit`), skins | `Doom3Md5`: CPU skinning into a `TCoordinateNode` each frame, interpolated frames, one `TCastleScene` per instance |
 | `.lwo` (LightWave LWO2: `PNTS`, `POLS`, `PTAG`, `TAGS`, `VMAP` / `VMAD` UVs) and `.ase` (3ds Max ASCII: sub-materials, `*BITMAP` → material) static models for `func_static`, props, light fixtures, items, LWO doors | `Doom3StaticModels`: Doom 3's coordinate swaps and face flips, Doom-style smooth normals (shared position and UV), one `TCastleScene` per entity; map geometry (`func_*`) collides unless `noclipmodel` |
 | `.cm` collision models (vertices, signed edges, nodes, polygons with materials, brushes) with Doom 3's invisible `playerclip` brushes; contents from material surface parameters (`playerclip`, `monsterclip`, `nonsolid`, `water`, `trigger`...) | `Doom3Collision`: the world model's player-blocking polygons as an invisible scene (`Visible := False`, `PreciseCollisions`) that the player and monster sight collide with; the render scene stays pickable for shots |
+| Portal visibility: the area BSP, `interAreaPortals`, doors closing portals, lights limited to the areas they reach | `Doom3Portals`: portal flow from the camera's area through portal polygons clipped by the camera `Frustum` and narrowed per portal; one `TCastleScene` per area and the entities, md5 models and lights of hidden areas get `Visible := False` / `IsOn := False` (console `r_usePortals`, `portals`) |
 | `entityDef` with `inherit` | merged key / value dictionaries (`Doom3Decls`) |
 | `func_door` (opens when you come near, `movedir` incl. up / down, `lip`, `speed`, `time`, `wait`, `locked`, `snd_open` / `snd_close`), `func_static`, `func_rotating` | brush entity scenes moved by `TD3Mover`; `TCastleSoundSource` behaviors for door sounds |
 | `speaker` entities and sound shaders (`.sndshd`: files, `minDistance` / `maxDistance` in meters, `volume` in dB, `looping`) | `TCastleSound` (`ReferenceDistance`, `MaxDistance`, linear distance model) on a `TCastleSoundSource` |
@@ -47,7 +48,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 
 - **Views are designed, not hard-coded.** `TViewPlay` and `TViewMenu` load `data/gameviewplay.castle-user-interface` and `data/gameviewmenu.castle-user-interface`; the viewport, camera (90° horizontal FOV), `TCastleWalkNavigation`, the flashlight and muzzle flash lights, HUD and console are published fields you can tweak in the editor.
 - **Custom components** (`editor_units` in `CastleEngineManifest.xml`): **Doom 3 Map** (`TDoom3Map`), **Doom 3 HUD**, **Doom 3 Console**. Open the project in the editor and use *Project → Restart Editor (With Custom Components)*.
-- **`TDoom3Map`** is a `TCastleTransform`: set `MapName` (`testmap`, or e.g. `game/mars_city1` with a Doom 3 install) and the level, its lights, brush entities and animated md5 models are built right in the editor viewport. `SpawnModels` toggles the md5 models, `LightScale` scales all lights, read-only `AreaCount`, `EntityCount`, `TriangleCount`, `LightCount` and `StaticModelCount` show map info. `UseCollisionModel` (default on) collides with the map's `.cm` instead of the render geometry.
+- **`TDoom3Map`** is a `TCastleTransform`: set `MapName` (`testmap`, or e.g. `game/mars_city1` with a Doom 3 install) and the level, its lights, brush entities and animated md5 models are built right in the editor viewport. `SpawnModels` toggles the md5 models, `LightScale` scales all lights, read-only `AreaCount`, `EntityCount`, `TriangleCount`, `LightCount` and `StaticModelCount` show map info. `UseCollisionModel` (default on) collides with the map's `.cm` instead of the render geometry. `PortalCulling` (default on) draws only what is visible through the portals in the game.
 
 ---
 
@@ -62,7 +63,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `portals`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 
@@ -99,14 +100,14 @@ Doom 3 BFG Edition's binary formats (`.bimage`, `.bproc`, `.bcm`) are not suppor
 .\castle-doom3.exe --autotest MENU test_output\shot      # title screen screenshot
 ```
 
-Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds` hold movement keys, `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command, `L:map` load map, `Q` quit. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw and area, and every shot (`Shot:`).
+Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds` hold movement keys, `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command, `L:map` load map, `Q` quit. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area and number of visible areas, and every shot (`Shot:`).
 
 ### Tests
 
 ```powershell
 cd tests
 castle-engine compile
-.\castle-doom3-tests.exe   # 147 checks of the lexer, PK4, decls, images, .proc, .map, .cm, md5, lwo, ase parsers
+.\castle-doom3-tests.exe   # 162 checks of the lexer, PK4, decls, images, .proc, .map, .cm, md5, lwo, ase parsers and portal visibility
 ```
 
 ### Regenerating the test level

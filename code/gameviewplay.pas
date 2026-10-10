@@ -175,7 +175,8 @@ begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
-    Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls, quit');
+    Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
+    Console.Print('r_useportals [0|1], portals, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -229,6 +230,22 @@ begin
     P := ParseVector3(Args, CgeToD3(Camera.Translation));
     PlaceCamera(D3ToCge(P), StrToFloatDef(Copy(Args, LastDelimiter(' ', Args) + 1, MaxInt), CameraYaw));
   end else
+  if Cmd = 'r_useportals' then
+  begin
+    if Args <> '' then
+      Map.PortalCulling := StrToIntDef(Args, 1) <> 0
+    else
+      Map.PortalCulling := not Map.PortalCulling;
+    Console.Print('r_usePortals ' + BoolToStr(Map.PortalCulling, '1', '0'));
+  end else
+  if Cmd = 'portals' then
+  begin
+    Console.Print(Format('area %d, %d of %d areas visible, %d portals',
+      [Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, Map.AreaCount,
+       Map.Portals.PortalCount]));
+    WritelnLog('Portals', 'area %d, %d of %d areas visible',
+      [Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, Map.AreaCount]);
+  end else
   if Cmd = 'fps' then
     LabelFps.Exists := not LabelFps.Exists
   else
@@ -264,9 +281,9 @@ begin
   finally
     Img.Free;
   end;
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d)',
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
-     Map.AreaAt(Camera.Translation)]);
+     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount]);
 end;
 
 procedure TViewPlay.ReleaseDemoKeys;
@@ -440,6 +457,7 @@ begin
   end;
 
   FGame.Update(SecondsPassed, Camera.Translation);
+  Map.UpdateVisibility(Camera);
   MuzzleFlash.Exists := FGame.SinceFire < 0.07;
 
   Hud.Health := FGame.Health;

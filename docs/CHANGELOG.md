@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0
+
+Portal visibility.
+
+- **Portal visibility** like Doom 3's renderer: from the camera's area through the inter-area portals, each portal clipped by the view volume and narrowing it. Areas (now one scene each), brush entities, static and md5 models of hidden areas aren't drawn.
+- **Doors close portals** while they are shut, so nothing behind a closed door is drawn.
+- **Lights** are switched off while none of the areas they reach is visible (a flood through the portals within the light's radius).
+- Console: `r_usePortals [0|1]`, `portals`; screenshot log lines show the visible areas. `TDoom3Map.PortalCulling`.
+- Fixed: `notarget` didn't stop a monster that was already attacking.
+- 162 parser and visibility checks; CI checks the visible areas through the door.
+
 ## 0.3.0
 
 Static models and collision models.

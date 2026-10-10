@@ -33,6 +33,8 @@ type
     Locked, NoTouch: Boolean;
     SoundOpen, SoundClose: TCastleSound;
     Sounds: TCastleSoundSource;
+    { portals this door closes when it is shut }
+    Portals: array of Integer;
     { rotating }
     RotAxis: TVector3;
     RotSpeed, Angle: Single;
@@ -329,6 +331,8 @@ begin
       M.Sounds.Spatial := True;
       B.Scene.AddBehavior(M.Sounds);
     end;
+    if FMap.Portals <> nil then
+      M.Portals := FMap.Portals.PortalsInBox(B.Scene.BoundingBox.Grow(16));
     FMovers.Add(M);
   end else
   if (Cls = 'func_rotating') or (Cls = 'func_fx_rotating') then
@@ -422,7 +426,7 @@ end;
 
 function TD3Game.CanSee(const A, B: TVector3): Boolean;
 begin
-  Result := not FMap.World.World.WorldSegmentCollision(A, B);
+  Result := not FMap.World.WorldSegmentCollision(A, B);
 end;
 
 procedure TD3Game.UpdateMonster(const M: TD3Monster; const SecondsPassed: Single;
@@ -479,28 +483,34 @@ begin
         Step := ToPlayer.Normalize * (MonsterWalkSpeed * SecondsPassed);
         NewPos := M.Position + Step;
         { blocked by a wall or a closed door? try sliding along one axis }
-        if FMap.World.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
+        if FMap.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
           Step.Normalize * M.Radius) then
         begin
           NewPos := M.Position + Vector3(Step.X, 0, 0);
-          if FMap.World.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
+          if FMap.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
             Vector3(Sign(Step.X) * M.Radius, 0, 0)) then
           begin
             NewPos := M.Position + Vector3(0, 0, Step.Z);
-            if FMap.World.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
+            if FMap.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
               Vector3(0, 0, Sign(Step.Z) * M.Radius)) then
               NewPos := M.Position;
           end;
         end;
         { follow the floor (steps up to 18, falls) }
         FloorStart := NewPos + Vector3(0, 24, 0);
-        Hit := FMap.World.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist);
+        Hit := FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist);
         if (Hit <> nil) and (FloorDist < 24 + 400) then
           NewPos.Y := FloorStart.Y - FloorDist;
         M.Model.Holder.Translation := NewPos;
       end;
     msAttack:
       begin
+        if NoTarget or PlayerDead then
+        begin
+          M.State := msIdle;
+          M.Model.Instance.PlayAnim('idle');
+          Exit;
+        end;
         if Dist > MonsterMeleeRange * 1.3 then
         begin
           M.State := msChase;
@@ -522,6 +532,7 @@ end;
 
 procedure TD3Game.Update(const SecondsPassed: Single; const PlayerEye: TVector3);
 var
+  P: Integer;
   Mover: TD3Mover;
   Mon: TD3Monster;
   Feet: TVector3;
@@ -537,6 +548,10 @@ begin
        Mover.TriggerBox.Contains(PlayerEye) then
       Mover.Open;
     Mover.Update(SecondsPassed);
+    { a shut door closes its area portal (like idDoor) }
+    if FMap.Portals <> nil then
+      for P in Mover.Portals do
+        FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
@@ -556,7 +571,7 @@ begin
   SinceFire := 0;
   Result := True;
   D := Dir.Normalize;
-  Hit := FMap.World.World.WorldRayCast(Origin, D, WallDist);
+  Hit := FMap.World.WorldRayCast(Origin, D, WallDist);
   if Hit = nil then
     WallDist := MaxSingle;
   { monsters as vertical cylinders }

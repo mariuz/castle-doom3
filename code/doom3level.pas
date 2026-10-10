@@ -24,7 +24,8 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
-  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision;
+  CastleCameras,
+  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals;
 
 type
   { A brush entity (its .proc model) or a static model entity (.lwo / .ase)
@@ -34,6 +35,8 @@ type
     Scene: TCastleScene;
     { Model bounds in the entity's local Doom 3 coordinates. }
     LocalMin, LocalMax: TVector3;
+    { Areas the entity's bounding box touches (empty: always drawn). }
+    Areas: TD3IntArray;
     destructor Destroy; override;
   end;
 
@@ -50,6 +53,12 @@ type
     Entity: TD3MapEntity;
     Node: TAbstractPunctualLightNode;
     BaseColor: TVector3;
+    { Doom 3 light radius (the light box), CGE location }
+    Radius: Single;
+    Location: TVector3;
+    StartOn: Boolean;
+    { Areas the light reaches (empty: always on) }
+    Areas: TD3IntArray;
   end;
 
   TDoom3Map = class(TCastleTransform)
@@ -59,7 +68,10 @@ type
     FLightScale: Single;
     FProc: TD3ProcFile;
     FMapFile: TD3MapFile;
-    FWorld, FWorldNonSolid, FWorldCollision: TCastleScene;
+    FLightScene, FWorldCollision: TCastleScene;
+    FAreaScenes, FAreaNonSolid: array of TCastleScene;
+    FPortals: TD3PortalVisibility;
+    FPortalCulling: Boolean;
     FCollision: TD3CollisionFile;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
@@ -109,7 +121,18 @@ type
 
     property Proc: TD3ProcFile read FProc;
     property MapFile: TD3MapFile read FMapFile;
-    property World: TCastleScene read FWorld;
+    { The scene holding all map lights (global lights). }
+    property LightScene: TCastleScene read FLightScene;
+    { The solid / non-solid render scene of an area (may be nil). }
+    function AreaScene(const I: Integer): TCastleScene;
+    function AreaNonSolidScene(const I: Integer): TCastleScene;
+    { Portal visibility of the loaded map, nil when no map is loaded. }
+    property Portals: TD3PortalVisibility read FPortals;
+    { Show only the areas, entities and lights visible from the camera
+      through the portals (call every frame). Everything is shown when
+      PortalCulling is off or the camera is outside the map. }
+    procedure UpdateVisibility(const Camera: TCastleCamera);
+    function VisibleAreaCount: Integer;
     { The .cm collision model, nil when the map has none (or
       UseCollisionModel is off): then the render geometry collides. }
     property Collision: TD3CollisionFile read FCollision;
@@ -130,6 +153,8 @@ type
     { Collide with the map's .cm collision model (with Doom 3's invisible
       clip brushes) instead of the render geometry, when the map has one. }
     property UseCollisionModel: Boolean read FUseCollisionModel write FUseCollisionModel default True;
+    { Draw only what is visible through the portals (UpdateVisibility). }
+    property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
     property LightScale: Single read FLightScale write FLightScale {$ifdef FPC}default 1{$endif};
     { Read-only information, visible in the editor's inspector. }
@@ -156,7 +181,7 @@ implementation
 uses
   Math,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
-  CastleRenderOptions,
+  CastleRenderOptions, CastleFrustum,
   Doom3Files, Doom3Decls, Doom3Images, Doom3Materials, Doom3StaticModels;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
@@ -210,6 +235,7 @@ begin
   inherited Create(AOwner);
   FSpawnModels := True;
   FUseCollisionModel := True;
+  FPortalCulling := True;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
@@ -226,7 +252,8 @@ end;
 function TDoom3Map.PropertySections(const PropertyName: String): TPropertySections;
 begin
   if ArrayContainsString(PropertyName, ['MapName', 'SpawnModels', 'LightScale',
-    'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount', 'StaticModelCount', 'UseCollisionModel']) then
+    'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount', 'StaticModelCount', 'UseCollisionModel',
+    'PortalCulling']) then
     Result := [psBasic]
   else
     Result := inherited PropertySections(PropertyName);
@@ -243,13 +270,22 @@ begin
 end;
 
 procedure TDoom3Map.ClearMap;
+var
+  I: Integer;
 begin
   FStaticModelCount := 0;
   FModels.Clear;
   FBrushes.Clear;
   FLights := nil;
-  FreeAndNil(FWorld);
-  FreeAndNil(FWorldNonSolid);
+  for I := 0 to High(FAreaScenes) do
+  begin
+    FreeAndNil(FAreaScenes[I]);
+    FreeAndNil(FAreaNonSolid[I]);
+  end;
+  FAreaScenes := nil;
+  FAreaNonSolid := nil;
+  FreeAndNil(FLightScene);
+  FreeAndNil(FPortals);
   FreeAndNil(FWorldCollision);
   FreeAndNil(FCollision);
   FreeAndNil(FProc);
@@ -355,6 +391,7 @@ begin
       Spot.CutOffAngle := Min(Pi / 2 - 0.01, ArcTan2(R, Max(1, TargetVec.Length)) * 1.2);
       Spot.BeamWidth := Spot.CutOffAngle * 0.7;
       Spot.Radius := TargetVec.Length * 1.5;
+      R := Spot.Radius;
       Spot.Attenuation := Vector3(1, 0, 4 / Sqr(Max(1, Spot.Radius)));
       Node := Spot;
     end else
@@ -395,47 +432,187 @@ begin
     FLights[N].Entity := E;
     FLights[N].Node := Node;
     FLights[N].BaseColor := LightColor;
+    FLights[N].Radius := R;
+    FLights[N].StartOn := Node.IsOn;
+    if Node is TPointLightNode then
+      FLights[N].Location := TPointLightNode(Node).Location
+    else
+      FLights[N].Location := TSpotLightNode(Node).Location;
+    FLights[N].Areas := nil;
     Inc(N);
   end;
 end;
 
 procedure TDoom3Map.BuildWorld;
 var
-  Root, RootNonSolid: TX3DRootNode;
-  I: Integer;
+  Root, RootNonSolid, LightRoot: TX3DRootNode;
+  I, Area: Integer;
   M: TD3ProcModel;
 begin
-  Root := TX3DRootNode.Create;
-  RootNonSolid := TX3DRootNode.Create;
+  { one solid and one non-solid scene per area, so portal visibility can
+    hide areas; shapes stay per material inside them }
+  SetLength(FAreaScenes, FProc.NumAreas);
+  SetLength(FAreaNonSolid, FProc.NumAreas);
   for I := 0 to FProc.ModelCount - 1 do
   begin
     M := FProc.Model(I);
-    if M.AreaIndex >= 0 then
-      BuildProcModel(M, Root, RootNonSolid);
+    Area := M.AreaIndex;
+    if (Area < 0) or (Area >= FProc.NumAreas) then
+      Continue;
+    Root := TX3DRootNode.Create;
+    RootNonSolid := TX3DRootNode.Create;
+    BuildProcModel(M, Root, RootNonSolid);
+
+    FAreaScenes[Area] := TCastleScene.Create(nil);
+    FAreaScenes[Area].SetTransient;
+    FAreaScenes[Area].Name := 'Area' + IntToStr(Area);
+    FAreaScenes[Area].Load(Root, True);
+    FAreaScenes[Area].PreciseCollisions := True;
+    FAreaScenes[Area].RenderOptions.MaxLightsPerShape := 32;
+    Add(FAreaScenes[Area]);
+
+    FAreaNonSolid[Area] := TCastleScene.Create(nil);
+    FAreaNonSolid[Area].SetTransient;
+    FAreaNonSolid[Area].Name := 'AreaNonSolid' + IntToStr(Area);
+    FAreaNonSolid[Area].Load(RootNonSolid, True);
+    FAreaNonSolid[Area].Collides := False;
+    FAreaNonSolid[Area].Pickable := False;
+    FAreaNonSolid[Area].RenderOptions.MaxLightsPerShape := 32;
+    Add(FAreaNonSolid[Area]);
   end;
-  BuildLights(Root);
 
-  FWorld := TCastleScene.Create(nil);
-  FWorld.SetTransient;
-  FWorld.Name := 'World';
-  FWorld.Load(Root, True);
-  FWorld.PreciseCollisions := True;
-  FWorld.CastGlobalLights := True;
-  FWorld.RenderOptions.MaxLightsPerShape := 32;
-  Add(FWorld);
+  LightRoot := TX3DRootNode.Create;
+  BuildLights(LightRoot);
+  FLightScene := TCastleScene.Create(nil);
+  FLightScene.SetTransient;
+  FLightScene.Name := 'Lights';
+  FLightScene.Load(LightRoot, True);
+  FLightScene.CastGlobalLights := True;
+  FLightScene.Collides := False;
+  FLightScene.Pickable := False;
+  Add(FLightScene);
 
-  FWorldNonSolid := TCastleScene.Create(nil);
-  FWorldNonSolid.SetTransient;
-  FWorldNonSolid.Name := 'WorldNonSolid';
-  FWorldNonSolid.Load(RootNonSolid, True);
-  FWorldNonSolid.Collides := False;
-  FWorldNonSolid.Pickable := False;
-  Add(FWorldNonSolid);
+  FPortals := TD3PortalVisibility.Create(FProc);
+  for I := 0 to High(FLights) do
+    FLights[I].Areas := FPortals.AreasWithinRadius(FLights[I].Location, FLights[I].Radius,
+      AreaAt(FLights[I].Location));
+end;
+
+function TDoom3Map.AreaScene(const I: Integer): TCastleScene;
+begin
+  if (I >= 0) and (I <= High(FAreaScenes)) then
+    Result := FAreaScenes[I]
+  else
+    Result := nil;
+end;
+
+function TDoom3Map.AreaNonSolidScene(const I: Integer): TCastleScene;
+begin
+  if (I >= 0) and (I <= High(FAreaNonSolid)) then
+    Result := FAreaNonSolid[I]
+  else
+    Result := nil;
+end;
+
+function TDoom3Map.VisibleAreaCount: Integer;
+begin
+  if FPortals <> nil then
+    Result := FPortals.VisibleCount
+  else
+    Result := 0;
+end;
+
+{ Areas a world-space box touches: its corners and center. }
+function BoxAreas(const Map: TDoom3Map; const Box: TBox3D): TD3IntArray;
+var
+  I, A, K: Integer;
+  P: TVector3;
+  Known: Boolean;
+begin
+  Result := nil;
+  if Box.IsEmpty then
+    Exit;
+  for I := 0 to 8 do
+  begin
+    if I = 8 then
+      P := Box.Center
+    else
+      P := Vector3(
+        Box.Data[I and 1].X,
+        Box.Data[(I shr 1) and 1].Y,
+        Box.Data[(I shr 2) and 1].Z);
+    { corners can sit exactly on walls: pull them in a little }
+    P := P + (Box.Center - P) * 0.05;
+    A := Map.AreaAt(P);
+    if A < 0 then
+      Continue;
+    Known := False;
+    for K := 0 to High(Result) do
+      if Result[K] = A then
+        Known := True;
+    if not Known then
+      Result := Concat(Result, [A]);
+  end;
+end;
+
+function AnyAreaVisible(const Portals: TD3PortalVisibility; const Areas: TD3IntArray): Boolean;
+var
+  A: Integer;
+begin
+  if Length(Areas) = 0 then
+    Exit(True);
+  for A in Areas do
+    if (A >= 0) and (A <= High(Portals.AreaVisible)) and Portals.AreaVisible[A] then
+      Exit(True);
+  Result := False;
+end;
+
+procedure TDoom3Map.UpdateVisibility(const Camera: TCastleCamera);
+var
+  Planes: array [0..3] of TVector4;
+  P: TFrustumPlane;
+  I: Integer;
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+  Area: Integer;
+  On: Boolean;
+begin
+  if FPortals = nil then
+    Exit;
+  if FPortalCulling and (Camera <> nil) then
+  begin
+    for P := fpLeft to fpTop do
+      Planes[Ord(P)] := Camera.Frustum.Planes[P];
+    FPortals.Compute(Camera.WorldTranslation, AreaAt(Camera.WorldTranslation), Planes);
+  end else
+    FPortals.AllVisible;
+
+  for I := 0 to High(FAreaScenes) do
+  begin
+    if FAreaScenes[I] <> nil then
+      FAreaScenes[I].Visible := FPortals.AreaVisible[I];
+    if FAreaNonSolid[I] <> nil then
+      FAreaNonSolid[I].Visible := FPortals.AreaVisible[I];
+  end;
+  for B in FBrushes do
+    B.Scene.Visible := AnyAreaVisible(FPortals, B.Areas);
+  for ME in FModels do
+  begin
+    Area := AreaAt(ME.Holder.Translation + Vector3(0, 32, 0));
+    ME.Holder.Visible := (Area < 0) or (Area > High(FPortals.AreaVisible)) or FPortals.AreaVisible[Area];
+  end;
+  for I := 0 to High(FLights) do
+  begin
+    On := FLights[I].StartOn and AnyAreaVisible(FPortals, FLights[I].Areas);
+    if FLights[I].Node.IsOn <> On then
+      FLights[I].Node.IsOn := On;
+  end;
 end;
 
 procedure TDoom3Map.BuildCollision(const Base: String);
 var
   WorldModel: TD3CollisionModel;
+  I: Integer;
 begin
   if not (FUseCollisionModel and D3Fs.FileExists(Base + '.cm')) then
     Exit;
@@ -456,7 +633,9 @@ begin
   FWorldCollision.Visible := False;
   FWorldCollision.Pickable := False;
   Add(FWorldCollision);
-  FWorld.Collides := False;
+  for I := 0 to High(FAreaScenes) do
+    if FAreaScenes[I] <> nil then
+      FAreaScenes[I].Collides := False;
 end;
 
 procedure TDoom3Map.BuildBrushEntities;
@@ -665,6 +844,7 @@ procedure TDoom3Map.Rebuild;
 var
   Base: String;
   E: TD3MapEntity;
+  B: TD3BrushEntity;
 begin
   ClearMap;
   if FMapName = '' then
@@ -697,6 +877,8 @@ begin
   BuildCollision(Base);
   BuildBrushEntities;
   BuildStaticModelEntities;
+  for B in FBrushes do
+    B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
   if FSpawnModels then
     BuildModelEntities;
   WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models',

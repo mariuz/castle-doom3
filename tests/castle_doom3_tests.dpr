@@ -12,7 +12,7 @@ uses
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
-  Doom3StaticModels, Doom3Level, Doom3Collision, CastleTransform, CastleUtils;
+  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, CastleTransform, CastleUtils, CastleBoxes;
 
 var
   Passed, Failed: Integer;
@@ -398,6 +398,93 @@ begin
   end;
 end;
 
+{ The 4 side planes of a 90 degree view from Eye along a horizontal CGE
+  direction (X or Z axis), inside = dot(n, p) + w >= 0. }
+function ViewPlanes(const Eye, Dir: TVector3): TD3PlaneArray;
+var
+  Side, Up: TVector3;
+  N: array [0..3] of TVector3;
+  I: Integer;
+begin
+  Up := Vector3(0, 1, 0);
+  Side := TVector3.CrossProduct(Dir, Up);
+  N[0] := (Dir + Side).Normalize;
+  N[1] := (Dir - Side).Normalize;
+  N[2] := (Dir + Up).Normalize;
+  N[3] := (Dir - Up).Normalize;
+  SetLength(Result, 4);
+  for I := 0 to 3 do
+    Result[I] := Vector4(N[I], -TVector3.DotProduct(N[I], Eye));
+end;
+
+procedure TestPortals;
+var
+  Proc: TD3ProcFile;
+  V: TD3PortalVisibility;
+  EyeA, EyeB: TVector3;
+  Poly: TD3PointArray;
+  Areas: TD3IntArray;
+  Door: TD3IntArray;
+  DoorBox: TBox3D;
+begin
+  { clipping a square by a plane keeps the inside half }
+  Poly := ClipPolygon([Vector3(-1, 0, -1), Vector3(1, 0, -1), Vector3(1, 0, 1), Vector3(-1, 0, 1)],
+    Vector4(1, 0, 0, 0));
+  CheckEquals(4, Length(Poly), 'clipped square has 4 corners');
+  CheckNear(0, Poly[0].X, 'clipped square starts at the plane');
+
+  Proc := TD3ProcFile.Create;
+  try
+    Proc.LoadFromVfs('maps/testmap.proc');
+    V := TD3PortalVisibility.Create(Proc);
+    try
+      CheckEquals(2, V.AreaCount, 'portal areas');
+      CheckEquals(1, V.PortalCount, 'portals');
+      { room A, eye height, looking at the doorway (+X) }
+      EyeA := D3ToCge(Vector3(150, 0, 60));
+      V.Compute(EyeA, 0, ViewPlanes(EyeA, Vector3(1, 0, 0)));
+      CheckEquals(2, V.VisibleCount, 'room B is seen through the doorway');
+      V.Compute(EyeA, 0, ViewPlanes(EyeA, Vector3(-1, 0, 0)));
+      CheckEquals(1, V.VisibleCount, 'looking away: only room A');
+      Check(V.AreaVisible[0] and not V.AreaVisible[1], 'looking away: area 0 only');
+      { looking along +Z (Doom 3 -Y): the doorway is outside the view }
+      V.Compute(EyeA, 0, ViewPlanes(EyeA, Vector3(0, 0, 1)));
+      CheckEquals(1, V.VisibleCount, 'doorway outside the frustum');
+      { a closed door closes the portal }
+      V.PortalClosed[0] := True;
+      V.Compute(EyeA, 0, ViewPlanes(EyeA, Vector3(1, 0, 0)));
+      CheckEquals(1, V.VisibleCount, 'closed portal hides room B');
+      V.PortalClosed[0] := False;
+      { from room B looking back }
+      EyeB := D3ToCge(Vector3(500, 0, 60));
+      V.Compute(EyeB, 1, ViewPlanes(EyeB, Vector3(-1, 0, 0)));
+      CheckEquals(2, V.VisibleCount, 'room A is seen from room B');
+      { far to the side in room B the doorway is outside a narrow view }
+      EyeB := D3ToCge(Vector3(500, -350, 60));
+      V.Compute(EyeB, 1, ViewPlanes(EyeB, Vector3(0, 0, 1)));
+      CheckEquals(1, V.VisibleCount, 'doorway not in view from the side');
+      { no planes, outside the map }
+      V.Compute(EyeA, -1, []);
+      CheckEquals(2, V.VisibleCount, 'outside the map: everything');
+      { lights reach areas through nearby portals only }
+      Areas := V.AreasWithinRadius(D3ToCge(Vector3(0, 0, 160)), 320, 0);
+      CheckEquals(2, Length(Areas), 'a light near the doorway reaches room B');
+      Areas := V.AreasWithinRadius(D3ToCge(Vector3(-200, 200, 64)), 200, 0);
+      CheckEquals(1, Length(Areas), 'a light far from the doorway stays in room A');
+      { the door's box contains the portal }
+      DoorBox := TBox3D.Empty;
+      DoorBox.Include(D3ToCge(Vector3(244, -64, -16)));
+      DoorBox.Include(D3ToCge(Vector3(284, 64, 128)));
+      Door := V.PortalsInBox(DoorBox);
+      CheckEquals(1, Length(Door), 'door box contains the portal');
+    finally
+      V.Free;
+    end;
+  finally
+    Proc.Free;
+  end;
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -502,6 +589,7 @@ begin
   TestStaticModels;
   TestEntityRotation;
   TestCollisionModel;
+  TestPortals;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
