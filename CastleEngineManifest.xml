@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  Castle Doom 3: Doom 3 (idTech 4) levels, materials, md5 models and sounds
+  rendered and played with Castle Game Engine.
+  See https://castle-engine.io/project_manifest for documentation of this file.
+
+  editor_units: units with components registered for the CGE editor
+  (TDoom3Map, TDoom3Hud, TDoom3Console). Use
+  "Project -> Restart Editor (With Custom Components)" to see them.
+-->
+<project name="castle-doom3"
+  game_units="GameInitialize"
+  editor_units="Doom3Level, Doom3Hud, Doom3Console"
+  qualified_name="io.castleengine.castledoom3"
+  caption="Castle Doom 3"
+  author="castle-doom3"
+  screen_orientation="landscape"
+>
+  <version value="0.1.0" code="1" />
+  <compiler_options>
+    <search_paths>
+      <path value="code/" />
+    </search_paths>
+  </compiler_options>
+</project>

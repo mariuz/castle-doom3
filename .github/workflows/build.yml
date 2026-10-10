@@ -1,0 +1,143 @@
+# Native builds (Windows x86_64, Linux x86_64) using the Castle Game Engine
+# Docker image, which bundles FPC with cross-compilers and the CGE build tool.
+#
+# - On every push / pull request: parser unit tests, autotest screenshots of
+#   the bundled test level, and packages kept as workflow artifacts.
+# - On a tag like v0.1.0: also attach the packages to a GitHub Release.
+#
+# See https://castle-engine.io/github_actions and https://castle-engine.io/docker
+
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-native:
+    name: Package Windows and Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: kambi/castle-engine-cloud-builds-tools:cge-unstable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show versions
+        run: |
+          castle-engine --version
+          fpc -iV
+
+      - name: Package Windows (x86_64)
+        run: castle-engine package --os=win64 --cpu=x86_64 --mode=release --verbose
+
+      - name: Package Linux (x86_64)
+        run: castle-engine package --os=linux --cpu=x86_64 --mode=release --verbose
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: castle-doom3-windows
+          path: "*-win64-x86_64.zip"
+          if-no-files-found: error
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: castle-doom3-linux
+          path: "*-linux-x86_64.tar.gz"
+          if-no-files-found: error
+
+  autotest:
+    name: Tests and autotest (Linux, Mesa software OpenGL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: kambi/castle-engine-cloud-builds-tools:cge-unstable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the test PK4 is up to date with its generator
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3
+          cp data/base/castle_doom3_test.pk4 /tmp/committed.pk4
+          python3 tools/make_test_pk4.py
+          cmp data/base/castle_doom3_test.pk4 /tmp/committed.pk4 || echo "::warning::test PK4 differs from tools/make_test_pk4.py output (zlib versions can differ); regenerate and commit it"
+
+      - name: Install virtual display and Mesa
+        run: |
+          apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri libglx-mesa0 libegl1
+
+      - name: Parser unit tests
+        working-directory: tests
+        run: |
+          castle-engine compile --os=linux --cpu=x86_64 --mode=debug
+          ./castle-doom3-tests
+
+      - name: Compile (Linux)
+        run: castle-engine compile --os=linux --cpu=x86_64 --mode=release
+
+      - name: Run autotest scripts
+        run: |
+          set -eu
+          mkdir -p test_output
+          run_test() {
+            name="$1"; map="$2"; demo="$3"
+            echo "::group::autotest $name"
+            status=0
+            timeout 600 xvfb-run -a -s "-screen 0 1600x900x24" ./castle-doom3 --autotest "$map" "test_output/$name" --demo "$demo" > "test_output/$name.log" 2>&1 || status=$?
+            tail -n 40 "test_output/$name.log"
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ]; then
+              echo "::error::autotest $name exited with $status"; exit 1
+            fi
+            if grep -q "shader not compiled" "test_output/$name.log"; then
+              echo "::error::GLSL shader compile error in autotest $name"; exit 1
+            fi
+            if grep -q "Exception" "test_output/$name.log"; then
+              echo "::error::Exception in autotest $name"; exit 1
+            fi
+          }
+          run_test start testmap "W:2,S,T:-45,S,Q"
+          run_test door testmap "W:1,G:200 0 0,A:0,W:2.2,S,G:420 -250 0,A:20,F,W:0.4,S,Q"
+          run_test fight testmap "W:1,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,Q"
+          run_test menu MENU "Q"
+          grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
+          ls -l test_output
+          test "$(ls test_output/*.png | wc -l)" -ge 6
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autotest-screenshots
+          path: test_output/
+          if-no-files-found: warn
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-native
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: packages
+      - name: List packages
+        run: ls -l packages
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packages/*.zip
+            packages/*.tar.gz
+          generate_release_notes: true

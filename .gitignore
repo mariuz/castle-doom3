@@ -1,0 +1,29 @@
+# Castle Game Engine build output
+castle-engine-output/
+castle-auto-generated-resources.res
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.ppu
+*.rsj
+*.or
+*.res
+*.lps
+*.zip
+*.tar.gz
+
+# Logs, test outputs, screenshots and temporary files
+*.log
+test_output/
+castle-doom3-*.png
+
+# A Doom 3 install linked next to the executable (never commit id's data)
+/base/
+/d3xp/
+
+# Linux / macOS executable
+/castle-doom3
+/tests/castle-doom3-tests
