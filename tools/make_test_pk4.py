@@ -737,6 +737,34 @@ def cm_text():
     # a monster clip strip the player walks through (x = -40, y -256..-80)
     world += box_quads((-44, -256, 0), (-36, -80, 192), MONSTER_CLIP)
     brushes = [(clip_box[0], clip_box[1], 'playerclip')]
+    # the solid brushes of the level (like dmap writes them): 16 unit walls
+    # around both rooms, floors, ceilings, pillars and the balcony
+    solids = [
+        # room A
+        ((-272, -272, -16), (-256, 272, 208)),        # west wall
+        ((-256, -272, -16), (256, -256, 208)),        # south wall
+        ((-256, 256, -16), (256, 272, 208)),          # north wall
+        ((-256, -256, -16), (256, 256, 0)),           # floor
+        ((-256, -256, 192), (256, 256, 208)),         # ceiling
+        ((-176, 136, 0), (-136, 176, 192)),           # pillar
+        # the wall between the rooms, with the doorway
+        ((256, -400, -16), (272, -48, 304)),
+        ((256, 48, -16), (272, 400, 304)),
+        ((256, -48, 112), (272, 48, 304)),
+        # room B
+        ((912, -400, -16), (928, 400, 304)),          # east wall
+        ((272, -400, -16), (912, -384, 304)),         # south wall
+        ((272, 384, -16), (912, 400, 304)),           # north wall
+        ((272, -384, -16), (912, 384, 0)),            # floor
+        ((272, -384, 288), (560, 384, 304)),          # ceiling around the skylight
+        ((720, -384, 288), (912, 384, 304)),
+        ((560, -384, 288), (720, -96, 304)),
+        ((560, 96, 288), (720, 384, 304)),
+        ((480, -280, 0), (528, -232, 288)),           # pillars
+        ((480, 232, 0), (528, 280, 288)),
+        ((720, -384, 0), (912, 384, 96)),             # balcony
+    ]
+    brushes += [(mins, maxs, 'solid,opaque') for mins, maxs in solids]
     out = ['CM "1.00"', '', '1234567890', '']
     out.append(cm_model('worldMap', world, brushes))
     for m in (door, crate, crate2, spinner, panel):

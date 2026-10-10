@@ -158,6 +158,7 @@ begin
   Unlit.EmissiveTexture := Texture;
   Result.Material := Unlit;
   Result.AlphaMode := amOpaque;
+  Result.ShadowCaster := False;
 end;
 
 function MaterialAppearance(const MaterialName: String): TAppearanceNode;
@@ -170,6 +171,8 @@ var
 begin
   M := Decls.Material(MaterialName);
   Result := TAppearanceNode.Create;
+  { noshadows: the surface doesn't cast shadow volumes }
+  Result.ShadowCaster := not M.NoShadows;
 
   if M.DiffuseImage <> '' then
   begin

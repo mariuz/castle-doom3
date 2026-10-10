@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+More shadows.
+
+- **Walls and pillars cast shadows**: the level's `.cm` brushes (solid / opaque contents) are rebuilt as closed convex shadow casters 1 unit inside the walls (the render geometry of areas is open and can't cast). They also stop the shadow light from shining through walls. Grouped per area, enabled for visible areas and the areas the shadow light reaches.
+- **`noshadows`**: materials with it don't cast (X3D `shadowCaster`), lights or light shaders with it are never the shadow casting light.
+- Test level: solid brushes for walls, floors, ceilings, pillars and the balcony in its `.cm`.
+- 269 checks (brush polyhedra are closed, insets, casters of the test level, `noshadows`); CI checks the casters are built.
+
+Still one shadow casting light at a time (CGE's shadow volumes).
+
 ## 0.9.0
 
 GUIs.

@@ -32,6 +32,9 @@ type
     Contents: String;
   end;
 
+  TD3Polygon = array of TVector3;
+  TD3Polyhedron = array of TD3Polygon;
+
   TD3CollisionModel = class
     Name: String;
     Vertices: array of TVector3;
@@ -44,8 +47,21 @@ type
     procedure PlayerTriangles(out Coords: TVector3List; out Indexes: TInt32List);
     { An invisible collision-only X3D node of PlayerTriangles. }
     function BuildCollisionNode: TX3DRootNode;
+    { Brushes that block light (contents with "solid" or "opaque"). }
+    function BrushCastsShadows(const I: Integer): Boolean;
   end;
 
+{ The closed convex polyhedron of a brush (Doom 3 coordinates), shrunk by
+  Inset: every face polygon counter-clockwise seen from outside, vertexes
+  shared between faces welded to exactly equal coordinates (CGE matches
+  shadow volume edges by position). Empty when degenerate. }
+function BrushPolyhedron(const Brush: TD3CmBrush; const Inset: Single): TD3Polyhedron;
+
+{ X3D shapes of brushes as invisible-in-practice shadow casters: one closed,
+  black, unlit shape per brush (CGE skips open shapes as casters). }
+function BuildShadowCasterNode(const Brushes: array of TD3CmBrush; const Inset: Single): TX3DRootNode;
+
+type
   TD3CollisionFile = class
   strict private
     FModels: specialize TObjectList<TD3CollisionModel>;
@@ -66,8 +82,133 @@ type
 implementation
 
 uses
+  Math, CastleRenderOptions,
   CastleLog,
-  Doom3Files, Doom3Decls, Doom3MapFile;
+  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Portals;
+
+function BrushPolyhedron(const Brush: TD3CmBrush; const Inset: Single): TD3Polyhedron;
+var
+  I, J, K, F: Integer;
+  N, U, V, C: TVector3;
+  R: Single;
+  Poly: TD3PointArray;
+  Welded: array of TVector3;
+  Face: TD3Polygon;
+  Found: Boolean;
+begin
+  Result := nil;
+  if Length(Brush.Planes) < 4 then
+    Exit;
+  R := Max(64, (Brush.Maxs - Brush.Mins).Length * 2);
+  Welded := nil;
+  for I := 0 to High(Brush.Planes) do
+  begin
+    N := Vector3(Brush.Planes[I].X, Brush.Planes[I].Y, Brush.Planes[I].Z);
+    if N.Length < 1e-6 then
+      Continue;
+    N := N.Normalize;
+    { a big quad on the plane (n . p = dist - inset) around the brush
+      center's projection, counter-clockwise around the outward normal:
+      u x v = n }
+    C := (Brush.Mins + Brush.Maxs) * 0.5;
+    C := C - N * (TVector3.DotProduct(N, C) - (Brush.Planes[I].W - Inset));
+    if Abs(N.Z) < 0.9 then
+      U := TVector3.CrossProduct(Vector3(0, 0, 1), N).Normalize
+    else
+      U := TVector3.CrossProduct(Vector3(1, 0, 0), N).Normalize;
+    V := TVector3.CrossProduct(N, U);
+    Poly := [C + (-U - V) * R, C + (U - V) * R, C + (U + V) * R, C + (-U + V) * R];
+    { keep the part inside every other plane: n_j . p <= dist_j - inset }
+    for J := 0 to High(Brush.Planes) do
+    begin
+      if (J = I) or (Length(Poly) < 3) then
+        Continue;
+      Poly := ClipPolygon(Poly, Vector4(-Brush.Planes[J].X, -Brush.Planes[J].Y, -Brush.Planes[J].Z,
+        Brush.Planes[J].W - Inset));
+    end;
+    if Length(Poly) < 3 then
+      Continue;
+    { weld to shared vertexes, drop repeated points }
+    Face := nil;
+    for K := 0 to High(Poly) do
+    begin
+      Found := False;
+      for F := 0 to High(Welded) do
+        if PointsDistanceSqr(Welded[F], Poly[K]) < Sqr(0.05) then
+        begin
+          Poly[K] := Welded[F];
+          Found := True;
+          Break;
+        end;
+      if not Found then
+        Welded := Concat(Welded, [Poly[K]]);
+      if (Length(Face) = 0) or not TVector3.PerfectlyEquals(Face[High(Face)], Poly[K]) then
+        Face := Concat(Face, [Poly[K]]);
+    end;
+    if (Length(Face) > 1) and TVector3.PerfectlyEquals(Face[0], Face[High(Face)]) then
+      SetLength(Face, Length(Face) - 1);
+    if Length(Face) >= 3 then
+      Result := Concat(Result, [Face]);
+  end;
+  if Length(Result) < 4 then
+    Result := nil;
+end;
+
+function BuildShadowCasterNode(const Brushes: array of TD3CmBrush; const Inset: Single): TX3DRootNode;
+var
+  B, F, K, Base: Integer;
+  Poly: TD3Polyhedron;
+  Coords: TVector3List;
+  Indexes: TInt32List;
+  CoordNode: TCoordinateNode;
+  Geometry: TIndexedTriangleSetNode;
+  Shape: TShapeNode;
+  Appearance: TAppearanceNode;
+  Unlit: TUnlitMaterialNode;
+begin
+  Result := TX3DRootNode.Create;
+  for B := 0 to High(Brushes) do
+  begin
+    Poly := BrushPolyhedron(Brushes[B], Inset);
+    if Poly = nil then
+      Continue;
+    Coords := TVector3List.Create;
+    Indexes := TInt32List.Create;
+    try
+      for F := 0 to High(Poly) do
+      begin
+        Base := Coords.Count;
+        for K := 0 to High(Poly[F]) do
+          Coords.Add(D3ToCge(Poly[F][K]));
+        for K := 1 to High(Poly[F]) - 1 do
+        begin
+          Indexes.Add(Base);
+          Indexes.Add(Base + K);
+          Indexes.Add(Base + K + 1);
+        end;
+      end;
+      CoordNode := TCoordinateNode.Create;
+      CoordNode.SetPoint(Coords);
+      Geometry := TIndexedTriangleSetNode.Create;
+      Geometry.Coord := CoordNode;
+      Geometry.SetIndex(Indexes);
+      { counter-clockwise from outside (D3ToCge is a rotation) }
+      Geometry.Ccw := True;
+      Geometry.Solid := True;
+      Unlit := TUnlitMaterialNode.Create;
+      Unlit.EmissiveColor := Vector3(0, 0, 0);
+      Appearance := TAppearanceNode.Create;
+      Appearance.Material := Unlit;
+      Shape := TShapeNode.Create;
+      Shape.Geometry := Geometry;
+      Shape.Appearance := Appearance;
+      Result.AddChildren(Shape);
+    finally
+      Coords.Free;
+      Indexes.Free;
+    end;
+  end;
+end;
 
 { TD3CollisionModel }
 
@@ -99,6 +240,16 @@ begin
       Indexes.Add(Base + J + 1);
     end;
   end;
+end;
+
+function TD3CollisionModel.BrushCastsShadows(const I: Integer): Boolean;
+var
+  C: String;
+begin
+  C := LowerCase(Brushes[I].Contents);
+  { old .cm files write contents as a number: treat them as solid }
+  Result := (Pos('solid', C) > 0) or (Pos('opaque', C) > 0) or
+    ((C <> '') and (C[1] in ['0'..'9']));
 end;
 
 function TD3CollisionModel.BuildCollisionNode: TX3DRootNode;

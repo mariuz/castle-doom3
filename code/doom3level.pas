@@ -76,6 +76,8 @@ type
     Shape: TD3LightShape;
     { Area of the light's origin (-1 outside) }
     OriginArea: Integer;
+    { "noshadows": never the shadow casting light }
+    NoShadows: Boolean;
   end;
 
   TDoom3Map = class(TCastleTransform)
@@ -87,6 +89,10 @@ type
     FMapFile: TD3MapFile;
     FLightScene, FWorldCollision: TCastleScene;
     FAreaScenes, FAreaNonSolid: array of TCastleScene;
+    { shadow casting brushes (.cm) per area; the last one has brushes
+      outside all areas }
+    FCasterScenes: array of TCastleScene;
+    FCasterBrushCount: Integer;
     FPortals: TD3PortalVisibility;
     FPortalCulling: Boolean;
     FTime: Single;
@@ -114,6 +120,7 @@ type
     procedure Rebuild;
     procedure BuildWorld;
     procedure BuildCollision(const Base: String);
+    procedure BuildShadowCasters(const WorldModel: TD3CollisionModel);
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
     procedure BuildModelEntities;
@@ -148,6 +155,8 @@ type
     property MapFile: TD3MapFile read FMapFile;
     { The scene holding all map lights (global lights). }
     property LightScene: TCastleScene read FLightScene;
+    { Number of .cm brushes casting shadows (walls, pillars...). }
+    property CasterBrushCount: Integer read FCasterBrushCount;
     { The solid / non-solid render scene of an area (may be nil). }
     function AreaScene(const I: Integer): TCastleScene;
     function AreaNonSolidScene(const I: Integer): TCastleScene;
@@ -336,6 +345,10 @@ begin
   end;
   FAreaScenes := nil;
   FAreaNonSolid := nil;
+  for I := 0 to High(FCasterScenes) do
+    FreeAndNil(FCasterScenes[I]);
+  FCasterScenes := nil;
+  FCasterBrushCount := 0;
   FreeAndNil(FLightScene);
   FreeAndNil(FPortals);
   FreeAndNil(FWorldCollision);
@@ -561,6 +574,8 @@ begin
     FLights[N].Matrix := LightMatrix;
     FLights[N].Projected := Projected;
     FLights[N].Shape := ProjectionShape(ProjectionImage);
+    FLights[N].NoShadows := E.BoolValue('noshadows') or
+      ((Shader <> nil) and Shader.NoShadows);
     FLights[N].Animated := (Shader <> nil) and Shader.StageColorAnimated;
     ApplyLightColor(N, LightShaderColor(N));
     Inc(N);
@@ -830,6 +845,18 @@ begin
   end;
   if Camera <> nil then
     UpdateShadowLight(Camera.WorldTranslation);
+  { shadow casting brushes of visible areas and of areas the shadow light
+    reaches }
+  for I := 0 to High(FCasterScenes) do
+    if FCasterScenes[I] <> nil then
+    begin
+      On := (I > High(FPortals.AreaVisible)) or FPortals.AreaVisible[I];
+      if (not On) and (FShadowLight >= 0) then
+        for Area in FLights[FShadowLight].Areas do
+          if Area = I then
+            On := True;
+      FCasterScenes[I].Exists := On and FShadows;
+    end;
 end;
 
 function TDoom3Map.LightStrengthAt(const I: Integer; const P: TVector3): Single;
@@ -880,6 +907,8 @@ begin
       if not FLights[I].Node.IsOn then
         Continue;
       if (FLights[I].Shader <> nil) and FLights[I].Shader.IsAmbientLight then
+        Continue;
+      if FLights[I].NoShadows then
         Continue;
       if (Pass = 0) and (FLights[I].OriginArea <> PlayerArea) then
         Continue;
@@ -932,6 +961,53 @@ begin
   for I := 0 to High(FAreaScenes) do
     if FAreaScenes[I] <> nil then
       FAreaScenes[I].Collides := False;
+  BuildShadowCasters(WorldModel);
+end;
+
+procedure TDoom3Map.BuildShadowCasters(const WorldModel: TD3CollisionModel);
+var
+  Groups: array of array of TD3CmBrush;
+  I, G: Integer;
+  Box: TBox3D;
+  Areas: TD3IntArray;
+  Scene: TCastleScene;
+begin
+  { The render geometry of areas is open, it can't cast shadow volumes.
+    The .cm brushes are closed convex solids: rebuild them as shadow
+    casters, 1 unit inside the walls so they are never seen, grouped by
+    the first area they touch (the last group: no area). }
+  SetLength(Groups, Length(FAreaScenes) + 1);
+  for I := 0 to High(WorldModel.Brushes) do
+  begin
+    if not WorldModel.BrushCastsShadows(I) then
+      Continue;
+    Box := TBox3D.Empty;
+    Box.Include(D3ToCge(WorldModel.Brushes[I].Mins));
+    Box.Include(D3ToCge(WorldModel.Brushes[I].Maxs));
+    Areas := BoxAreas(Self, Box.Grow(24));
+    if Length(Areas) > 0 then
+      G := Areas[0]
+    else
+      G := High(Groups);
+    Groups[G] := Concat(Groups[G], [WorldModel.Brushes[I]]);
+    Inc(FCasterBrushCount);
+  end;
+  SetLength(FCasterScenes, Length(Groups));
+  for G := 0 to High(Groups) do
+  begin
+    if Length(Groups[G]) = 0 then
+      Continue;
+    Scene := TCastleScene.Create(nil);
+    Scene.SetTransient;
+    Scene.Name := 'ShadowCasters' + IntToStr(G);
+    Scene.Load(BuildShadowCasterNode(Groups[G], 1), True);
+    Scene.Collides := False;
+    Scene.Pickable := False;
+    Scene.CastShadows := True;
+    Add(Scene);
+    FCasterScenes[G] := Scene;
+  end;
+  WritelnLog('Doom3Level', 'Shadow casters: %d brushes', [FCasterBrushCount]);
 end;
 
 procedure TDoom3Map.BuildBrushEntities;

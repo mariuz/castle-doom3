@@ -13,6 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
+  Doom3Materials, X3DNodes,
   CastleTransform, CastleUtils, CastleBoxes;
 
 var
@@ -351,7 +352,7 @@ begin
     if W = nil then
       Exit;
     CheckEquals(1, W.NodeCount, 'one leaf node');
-    CheckEquals(1, Length(W.Brushes), 'one brush');
+    CheckEquals(21, Length(W.Brushes), 'brushes (playerclip + 20 solid)');
     if Length(W.Brushes) > 0 then
     begin
       CheckEquals(6, Length(W.Brushes[0].Planes), 'brush sides');
@@ -834,6 +835,104 @@ begin
   end;
 end;
 
+{ Is the polyhedron closed: every directed edge has its reverse in
+  another face (what CGE's shadow volumes need)? }
+function PolyhedronClosed(const P: TD3Polyhedron): Boolean;
+var
+  F, K, F2, K2: Integer;
+  A, B: TVector3;
+  Found: Boolean;
+begin
+  for F := 0 to High(P) do
+    for K := 0 to High(P[F]) do
+    begin
+      A := P[F][K];
+      B := P[F][(K + 1) mod Length(P[F])];
+      Found := False;
+      for F2 := 0 to High(P) do
+        if F2 <> F then
+          for K2 := 0 to High(P[F2]) do
+            if TVector3.PerfectlyEquals(P[F2][K2], B) and
+               TVector3.PerfectlyEquals(P[F2][(K2 + 1) mod Length(P[F2])], A) then
+              Found := True;
+      if not Found then
+        Exit(False);
+    end;
+  Result := True;
+end;
+
+procedure TestShadowCasters;
+var
+  Brush: TD3CmBrush;
+  Poly: TD3Polyhedron;
+  Cm: TD3CollisionFile;
+  W: TD3CollisionModel;
+  I, Solid: Integer;
+  AllClosed: Boolean;
+  N: TVector3;
+  App: TAppearanceNode;
+begin
+  { a 100 x 50 x 20 box brush: outward planes n . p = dist }
+  Brush.Planes := [Vector4(1, 0, 0, 100), Vector4(-1, 0, 0, 0), Vector4(0, 1, 0, 50),
+    Vector4(0, -1, 0, 0), Vector4(0, 0, 1, 20), Vector4(0, 0, -1, 0)];
+  Brush.Mins := Vector3(0, 0, 0);
+  Brush.Maxs := Vector3(100, 50, 20);
+  Brush.Contents := 'solid';
+  Poly := BrushPolyhedron(Brush, 0);
+  CheckEquals(6, Length(Poly), 'box brush faces');
+  Check((Length(Poly) > 0) and (Length(Poly[0]) = 4), 'box faces are quads');
+  Check(PolyhedronClosed(Poly), 'box brush polyhedron is closed (2-manifold)');
+  if Length(Poly) > 0 then
+  begin
+    { the first face (+X) is counter-clockwise seen from outside }
+    N := TVector3.CrossProduct(Poly[0][1] - Poly[0][0], Poly[0][2] - Poly[0][0]);
+    Check(N.X > 0, 'faces are counter-clockwise from outside');
+    CheckNear(100, Poly[0][0].X, '+X face position');
+  end;
+  Poly := BrushPolyhedron(Brush, 1);
+  if Length(Poly) > 0 then
+    CheckNear(99, Poly[0][0].X, 'inset moves faces inside');
+  { a wedge (5 planes) }
+  Brush.Planes := [Vector4(0, 0, -1, 0), Vector4(0, -1, 0, 0), Vector4(0, 1, 0, 64),
+    Vector4(-1, 0, 0, 0), Vector4(0.7071, 0, 0.7071, 45.25)];
+  Brush.Maxs := Vector3(64, 64, 64);
+  Poly := BrushPolyhedron(Brush, 0);
+  CheckEquals(5, Length(Poly), 'wedge faces');
+  Check(PolyhedronClosed(Poly), 'wedge polyhedron is closed');
+
+  Cm := TD3CollisionFile.Create;
+  try
+    Cm.LoadFromVfs('maps/testmap.cm');
+    W := Cm.World;
+    Solid := 0;
+    AllClosed := True;
+    for I := 0 to High(W.Brushes) do
+      if W.BrushCastsShadows(I) then
+      begin
+        Inc(Solid);
+        if not PolyhedronClosed(BrushPolyhedron(W.Brushes[I], 1)) then
+          AllClosed := False;
+      end;
+    CheckEquals(20, Solid, 'solid brushes cast shadows, the playerclip brush not');
+    Check(AllClosed, 'every test level brush makes a closed caster');
+  finally
+    Cm.Free;
+  end;
+
+  App := MaterialAppearance('textures/test/lightpanel');
+  try
+    Check(not App.ShadowCaster, 'noshadows material does not cast');
+  finally
+    App.Free;
+  end;
+  App := MaterialAppearance('textures/test/floor');
+  try
+    Check(App.ShadowCaster, 'other materials cast');
+  finally
+    App.Free;
+  end;
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -943,6 +1042,7 @@ begin
   TestLightVolumes;
   TestMaterialStages;
   TestGuis;
+  TestShadowCasters;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
