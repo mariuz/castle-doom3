@@ -60,6 +60,8 @@ function CgeToD3(const V: TVector3): TVector3; inline;
 function ParseVector3(const S: String; const Default: TVector3): TVector3;
 { Direction of a Doom 3 yaw (degrees, 0 = +X, 90 = +Y) in CGE coordinates. }
 function YawToCgeDir(const YawDeg: Single): TVector3;
+{ Doom 3 rotation matrix (idMat3, rows = axes) of a yaw in degrees. }
+function YawMatrix(const YawDeg: Single): TMatrix3;
 
 implementation
 
@@ -101,6 +103,17 @@ var
 begin
   A := DegToRad(YawDeg);
   Result := D3ToCge(Vector3(Cos(A), Sin(A), 0));
+end;
+
+function YawMatrix(const YawDeg: Single): TMatrix3;
+var
+  C, S: Single;
+begin
+  C := Cos(DegToRad(YawDeg));
+  S := Sin(DegToRad(YawDeg));
+  Result := TMatrix3.Identity;
+  Result.Data[0, 0] := C; Result.Data[0, 1] := S;
+  Result.Data[1, 0] := -S; Result.Data[1, 1] := C;
 end;
 
 { TD3MapEntity }
@@ -181,7 +194,6 @@ function TD3MapEntity.Rotation: TMatrix3;
 var
   Parts: TStringArray;
   I: Integer;
-  A, C, S: Single;
 begin
   Result := TMatrix3.Identity;
   Parts := Trim(Value('rotation')).Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
@@ -192,13 +204,7 @@ begin
       Result.Data[I div 3, I mod 3] := D3StrToFloat(Parts[I]);
   end else
   if HasKey('angle') then
-  begin
-    A := DegToRad(FloatValue('angle'));
-    C := Cos(A);
-    S := Sin(A);
-    Result.Data[0, 0] := C; Result.Data[0, 1] := S;
-    Result.Data[1, 0] := -S; Result.Data[1, 1] := C;
-  end;
+    Result := YawMatrix(FloatValue('angle'));
 end;
 
 function TD3MapEntity.Angle: Single;

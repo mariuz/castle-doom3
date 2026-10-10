@@ -4,9 +4,9 @@ Working notes for developers and AI agents on Castle Doom 3: a Doom 3 (id Tech 4
 
 ## What this is
 
-- Doom 3 data (`.proc`, `.map`, `.mtr`, `.def`, `.skin`, `.sndshd`, `.md5mesh`, `.md5anim`, TGA / DDS images, WAV / OGG sounds) is read at runtime from PK4 archives and served to CGE through the `d3fs:` and `d3img:` URL protocols.
+- Doom 3 data (`.proc`, `.map`, `.mtr`, `.def`, `.skin`, `.sndshd`, `.md5mesh`, `.md5anim`, `.lwo`, `.ase`, TGA / DDS images, WAV / OGG sounds) is read at runtime from PK4 archives and served to CGE through the `d3fs:` and `d3img:` URL protocols.
 - Bundled data is only the generated test level `data/base/castle_doom3_test.pk4` (map `testmap`), written by `tools/make_test_pk4.py`. **Never commit id Software data**; a Doom 3 install is loaded with `-basepath` or a `base/` directory next to the exe (gitignored).
-- Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
+- Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3StaticModels`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
 
 ## Build and run (Windows)
 
@@ -27,9 +27,9 @@ Keep the project at a short path (`E:\Work\castle-doom3`): long paths break FPC 
 .\castle-doom3.exe --autotest MENU C:\TMP\cd3\s
 ```
 
-Pass the whole `--demo` value as one argument (from PowerShell `Start-Process`, quote it inside `-ArgumentList`, or the spaces in `G:x y z` split it). Script commands are listed in the README; grep the log for `Warning|Exception|Screenshot|Message|Shot:`. Screenshot log lines show the FPS, eye position (Doom 3 coordinates), yaw and area. Useful test map spots: start (-160, -160) yaw 45; in front of the door (200, 0) yaw 0 (it opens within ~1 s); room B (420, -250); creatures are monsters 0 and 1 (`N:0`). `blob_1` has 80 health, the pistol does 14 per shot every 0.35 s (6 hits kill it).
+Pass the whole `--demo` value as one argument (from PowerShell `Start-Process`, quote it inside `-ArgumentList`, or the spaces in `G:x y z` split it). Script commands are listed in the README; grep the log for `Warning|Exception|Screenshot|Message|Shot:`. Screenshot log lines show the FPS, eye position (Doom 3 coordinates), yaw and area. Useful test map spots: start (-160, -160) yaw 45; LWO barrels at (-60, 190) and (-12, 206); ASE terminals at (200, 200) (`noclipmodel`, faces yaw -135) and on the balcony (820, -280, 96) (see its screen from (740, -200, 96) yaw -45); in front of the door (200, 0) yaw 0 (it opens within ~1 s); room B (420, -250); creatures are monsters 0 and 1 (`N:0`). `blob_1` has 80 health, the pistol does 14 per shot every 0.35 s (6 hits kill it).
 
-Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (102 checks; run from `tests/`). When the generator changes, update the expected counts there.
+Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (127 checks; run from `tests/`). When the generator changes, update the expected counts there.
 
 ## CGE editor integration
 
@@ -42,6 +42,8 @@ Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (102 che
 - 2-space indent, `begin` / `end` on their own lines, PascalCase, no `with`.
 - Coordinates: `D3ToCge(v) = (v.x, v.z, -v.y)`; Doom 3 front faces are clockwise → `Ccw := False`; `v = 1 - t`; normal maps get their green flipped (see ARCHITECTURE.md).
 - Pascal `{ }` comments end at the first `}`: don't write braces inside them (use words or `//`).
+- Orient transforms with `SetD3Rotation`, never `SetView(..., -Z ...)` by hand: CGE's default `TCastleTransform.Orientation` is `otUpYDirectionZ` (direction = local +Z). Symmetric test models hide a 180° error; the terminal's screen and `TestEntityRotation` catch it.
+- The bash tool mangles backslashes in heredocs (a backslash before `t` becomes a tab): write Windows paths into Pascal sources with the file editor or a script file.
 - Locals named like `TCastleTransform` properties (`Center`, `Up`, `Direction`...) clash inside `TDoom3Map` methods.
 - `TCastleSoundSource` lives in `CastleBehaviors`; `Container.Pressed.KeyUp` has an `out` key string.
 - CGE cuts a light off hard at its `Radius`; keep attenuation low there (see `BuildLights`).

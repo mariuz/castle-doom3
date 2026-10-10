@@ -471,6 +471,15 @@ def map_text():
          'origin': '136 -150 88', 'angle': '-15'},
         {'classname': 'func_rotating', 'name': 'spinner_1', 'model': 'spinner_1',
          'origin': '590 0 220', 'speed': '45'},
+        # static models
+        {'classname': 'func_static', 'name': 'barrel_1',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '-60 190 0'},
+        {'classname': 'func_static', 'name': 'barrel_2',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '-12 206 0', 'angle': '40'},
+        {'classname': 'func_static', 'name': 'terminal_1',
+         'model': 'models/mapobjects/test/terminal.ase', 'origin': '820 -280 96', 'angle': '135'},
+        {'classname': 'func_static', 'name': 'terminal_2', 'noclipmodel': '1',
+         'model': 'models/mapobjects/test/terminal.ase', 'origin': '200 200 0', 'angle': '-135'},
         # a creature
         {'classname': 'monster_test_blob', 'name': 'blob_1', 'origin': '600 -40 0',
          'angle': '180'},
@@ -545,6 +554,13 @@ textures/test/lightpanel
 		map textures/test/lightpanel.tga
 		rgb 1.0
 	}
+}
+
+models/mapobjects/test/barrel
+{
+	diffusemap	models/mapobjects/test/barrel_d.tga
+	bumpmap		heightmap(models/mapobjects/test/barrel_d.tga, 3)
+	specularmap	models/mapobjects/test/barrel_s.tga
 }
 
 models/test/blob
@@ -758,6 +774,164 @@ def md5anim_text(kind):
 
 
 # --------------------------------------------------------------------------
+# Static models: LWO2 (LightWave) and ASE (3ds Max ASCII)
+
+def lwo_chunk(cid, data):
+    out = cid.encode('ascii') + struct.pack('>I', len(data)) + data
+    if len(data) % 2:
+        out += b'\0'
+    return out
+
+
+def lwo_str(s):
+    b = s.encode('ascii') + b'\0'
+    if len(b) % 2:
+        b += b'\0'
+    return b
+
+
+def lwo_vx(i):
+    return struct.pack('>H', i) if i < 0xFF00 else struct.pack('>I', 0xFF000000 | i)
+
+
+def make_lwo(points, polys, uvs, vmad, surfaces):
+    """points: Doom 3 coordinates; polys: (surface index, [point indexes]) with
+    the corners counter-clockwise seen from the front in Doom 3 space (which
+    is LightWave's clockwise after the y/z swap); uvs: per point (u, v);
+    vmad: (point, poly, (u, v)) overrides."""
+    tags = b''.join(lwo_str(n) for n in surfaces)
+    layr = struct.pack('>HH', 0, 0) + struct.pack('>fff', 0, 0, 0) + lwo_str('test')
+    # Doom 3 reads LightWave points as (x, z, y)
+    pnts = b''.join(struct.pack('>fff', p[0], p[2], p[1]) for p in points)
+    vmap = b'TXUV' + struct.pack('>H', 2) + lwo_str('txuv') + b''.join(
+        lwo_vx(i) + struct.pack('>ff', u, v) for i, (u, v) in enumerate(uvs))
+    pols = b'FACE' + b''.join(struct.pack('>H', len(vs)) + b''.join(lwo_vx(v) for v in vs)
+                              for _, vs in polys)
+    ptag = b'SURF' + b''.join(lwo_vx(i) + struct.pack('>H', srf) for i, (srf, _) in enumerate(polys))
+    vmad_data = b'TXUV' + struct.pack('>H', 2) + lwo_str('txuv') + b''.join(
+        lwo_vx(pt) + lwo_vx(pl) + struct.pack('>ff', u, v) for pt, pl, (u, v) in vmad)
+    body = b'LWO2' + lwo_chunk('TAGS', tags) + lwo_chunk('LAYR', layr) + lwo_chunk('PNTS', pnts)
+    body += lwo_chunk('VMAP', vmap) + lwo_chunk('POLS', pols) + lwo_chunk('PTAG', ptag)
+    body += lwo_chunk('VMAD', vmad_data)
+    for name in surfaces:
+        body += lwo_chunk('SURF', lwo_str(name) + lwo_str(''))
+    return b'FORM' + struct.pack('>I', len(body)) + body
+
+
+def barrel_lwo():
+    """A 16-sided barrel, radius 18, height 44: sides with a texture seam
+    (VMAD), n-gon caps with the metal material."""
+    n, r, h = 16, 18.0, 44.0
+    points, uvs = [], []
+    for ring, z in ((0, 0.0), (1, h)):
+        for i in range(n):
+            a = 2 * math.pi * i / n
+            points.append((r * math.cos(a), r * math.sin(a), z))
+            uvs.append((i / n, z / h))
+    polys, vmad = [], []
+    for i in range(n):
+        j = (i + 1) % n
+        # outward side quad, counter-clockwise from outside (Doom 3 space)
+        polys.append((0, [i, j, n + j, n + i]))
+        if j == 0:
+            # the seam: this quad's second column uses u = 1, not 0
+            vmad.append((j, len(polys) - 1, (1.0, 0.0)))
+            vmad.append((n + j, len(polys) - 1, (1.0, 1.0)))
+    polys.append((1, [n + i for i in range(n)]))             # top, facing +Z
+    polys.append((1, [i for i in reversed(range(n))]))       # bottom, facing -Z
+    return make_lwo(points, polys, uvs, vmad,
+                    ['models/mapobjects/test/barrel', 'textures/test/metal', 'unused_surface'])
+
+
+def terminal_ase():
+    """A computer terminal: a base box (metal) and a tilted glowing screen,
+    one GEOMOBJECT with a multi/sub-object material."""
+    verts, faces = [], []
+
+    def quad(corners, mtl):
+        # corners counter-clockwise from the front, Doom 3 space
+        b = len(verts)
+        verts.extend(corners)
+        faces.append(((b, b + 1, b + 2), mtl, ((0, 0), (1, 0), (1, 1))))
+        faces.append(((b, b + 2, b + 3), mtl, ((0, 0), (1, 1), (0, 1))))
+
+    x0, x1, y0, y1, z0, z1 = -16, 16, -24, 24, 0, 40
+    quad([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)], 0)   # front +X
+    quad([(x0, y1, z0), (x0, y0, z0), (x0, y0, z1), (x0, y1, z1)], 0)   # back -X
+    quad([(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)], 0)   # -Y
+    quad([(x1, y1, z0), (x0, y1, z0), (x0, y1, z1), (x1, y1, z1)], 0)   # +Y
+    quad([(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)], 0)   # top
+    # tilted screen above the base, facing +X and a little up
+    quad([(6, -20, 44), (6, 20, 44), (-4, 20, 74), (-4, -20, 74)], 1)
+    quad([(-4, -20, 74), (-4, 20, 74), (6, 20, 44), (6, -20, 44)], 0)   # its back
+
+    tverts, tfaces = [], []
+    for (_, _, uv) in faces:
+        idx = []
+        for u, v in uv:
+            idx.append(len(tverts))
+            tverts.append((u, v))
+        tfaces.append(idx)
+
+    out = ['*3DSMAX_ASCIIEXPORT\t200', '*COMMENT "generated by tools/make_test_pk4.py"',
+           '*SCENE {', '\t*SCENE_FILENAME "terminal.max"', '}',
+           '*MATERIAL_LIST {', '\t*MATERIAL_COUNT 1', '\t*MATERIAL 0 {',
+           '\t\t*MATERIAL_NAME "terminal"', '\t\t*MATERIAL_CLASS "Multi/Sub-Object"',
+           '\t\t*NUMSUBMTLS 2']
+    for i, bitmap in enumerate(('\\\\purgatory\\purgatory\\doom\\base\\textures\\test\\metal.tga',
+                                'C:\\Doom3\\base\\textures\\test\\lightpanel.tga')):
+        out += ['\t\t*SUBMATERIAL %d {' % i, '\t\t\t*MATERIAL_NAME "sub%d"' % i,
+                '\t\t\t*MAP_DIFFUSE {', '\t\t\t\t*MAP_NAME "Map #%d"' % i,
+                '\t\t\t\t*BITMAP "%s"' % bitmap,
+                '\t\t\t\t*UVW_U_OFFSET 0.0000', '\t\t\t\t*UVW_V_OFFSET 0.0000',
+                '\t\t\t\t*UVW_U_TILING 1.0000', '\t\t\t\t*UVW_V_TILING 1.0000',
+                '\t\t\t}', '\t\t}']
+    out += ['\t}', '}', '*GEOMOBJECT {', '\t*NODE_NAME "terminal"', '\t*NODE_TM {',
+            '\t\t*NODE_NAME "terminal"', '\t\t*TM_ROW0 1.0000 0.0000 0.0000', '\t}',
+            '\t*MESH {', '\t\t*TIMEVALUE 0',
+            '\t\t*MESH_NUMVERTEX %d' % len(verts), '\t\t*MESH_NUMFACES %d' % len(faces),
+            '\t\t*MESH_VERTEX_LIST {']
+    for i, v in enumerate(verts):
+        out.append('\t\t\t*MESH_VERTEX %5d\t%.4f\t%.4f\t%.4f' % (i, v[0], v[1], v[2]))
+    out += ['\t\t}', '\t\t*MESH_FACE_LIST {']
+    for i, ((a, b, c), mtl, _) in enumerate(faces):
+        out.append('\t\t\t*MESH_FACE %5d:    A: %5d B: %5d C: %5d AB:    1 BC:    1 CA:    0'
+                   '\t *MESH_SMOOTHING 1 \t*MESH_MTLID %d' % (i, a, b, c, mtl))
+    out += ['\t\t}', '\t\t*MESH_NUMTVERTEX %d' % len(tverts), '\t\t*MESH_TVERTLIST {']
+    for i, (u, v) in enumerate(tverts):
+        out.append('\t\t\t*MESH_TVERT %d\t%.4f\t%.4f\t0.0000' % (i, u, v))
+    out += ['\t\t}', '\t\t*MESH_NUMTVFACES %d' % len(tfaces), '\t\t*MESH_TFACELIST {']
+    for i, t in enumerate(tfaces):
+        out.append('\t\t\t*MESH_TFACE %d\t%d\t%d\t%d' % (i, t[0], t[1], t[2]))
+    out += ['\t\t}', '\t}', '\t*PROP_MOTIONBLUR 0', '\t*MATERIAL_REF 0', '}', '']
+    return '\r\n'.join(out)
+
+
+def barrel_texture():
+    noise = fbm(N, 60)
+    diff, spec = [], []
+    for y in range(N):
+        dr, sr = [], []
+        for x in range(N):
+            g = noise[y][x]
+            band = (y % 64) < 6
+            rust = g > 0.62
+            if band:
+                c = (0.25, 0.25, 0.25)
+            elif rust:
+                c = (0.45 + 0.2 * g, 0.25, 0.1)
+            else:
+                c = (0.15 + 0.1 * g, 0.32 + 0.12 * g, 0.18)
+            dr.append(c)
+            sp = 0.1 if rust else 0.5
+            sr.append((sp, sp, sp))
+        diff.append(dr)
+        spec.append(sr)
+    add('models/mapobjects/test/barrel_d.tga', tga(N, N, diff))
+    add('models/mapobjects/test/barrel_s.tga', tga(N, N, spec))
+
+
+# --------------------------------------------------------------------------
 # Sounds
 
 def wav(samples, rate=22050):
@@ -804,6 +978,9 @@ def main():
     add('def/test.def', DEFS)
     add('sound/test.sndshd', SOUNDS)
     add('models/md5/test/blob.md5mesh', md5mesh_text())
+    barrel_texture()
+    add('models/mapobjects/test/barrel.lwo', barrel_lwo())
+    add('models/mapobjects/test/terminal.ase', terminal_ase())
     add('models/md5/test/blob_idle.md5anim', md5anim_text('idle'))
     add('models/md5/test/blob_walk.md5anim', md5anim_text('walk'))
     sounds()

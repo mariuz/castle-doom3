@@ -11,7 +11,8 @@ uses
   {$ifdef UNIX} CThreads, {$endif}
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5;
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
+  Doom3StaticModels, Doom3Level, CastleTransform;
 
 var
   Passed, Failed: Integer;
@@ -77,7 +78,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(26, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(30, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -104,7 +105,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(8, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(9, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -236,7 +237,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(17, MapFile.Entities.Count, 'entity count');
+    CheckEquals(21, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -307,6 +308,107 @@ begin
   CheckNear(41.41, Pose[Body].Position.Z, 'PoseAt 0.25 s (frame 6)', 0.05);
 end;
 
+function FindSurface(const M: TD3StaticModel; const Material: String): TD3StaticSurface;
+var
+  S: TD3StaticSurface;
+begin
+  for S in M.Surfaces do
+    if S.Material = Material then
+      Exit(S);
+  Result := nil;
+end;
+
+{ Normal of a surface's first triangle (counter-clockwise = front). }
+function FirstNormal(const S: TD3StaticSurface): TVector3;
+begin
+  Result := TVector3.CrossProduct(S.Positions[S.Indexes[1]] - S.Positions[S.Indexes[0]],
+    S.Positions[S.Indexes[2]] - S.Positions[S.Indexes[0]]).Normalize;
+end;
+
+procedure TestEntityRotation;
+var
+  T: TCastleTransform;
+  P, Expected: TVector3;
+begin
+  T := TCastleTransform.Create(nil);
+  try
+    SetD3Rotation(T, YawMatrix(135));
+    { a model's +X (its front) must point along the yaw }
+    P := T.Transform.MultPoint(D3ToCge(Vector3(1, 0, 0)));
+    Expected := D3ToCge(Vector3(Cos(DegToRad(135)), Sin(DegToRad(135)), 0));
+    Check(TVector3.Equals(P, Expected, 0.001),
+      Format('yaw 135 turns +X to %s, got %s', [Expected.ToString, P.ToString]));
+    P := T.Transform.MultPoint(D3ToCge(Vector3(0, 0, 1)));
+    Check(TVector3.Equals(P, D3ToCge(Vector3(0, 0, 1)), 0.001), 'yaw keeps up');
+  finally
+    T.Free;
+  end;
+end;
+
+procedure TestStaticModels;
+var
+  M: TD3StaticModel;
+  S: TD3StaticSurface;
+begin
+  CheckEquals('textures/test/metal', AseBitmapToMaterial('\\purgatory\doom\base\textures\test\metal.tga'),
+    'ASE bitmap with a UNC path');
+  CheckEquals('textures/test/lightpanel', AseBitmapToMaterial('C:\Doom3\BASE\Textures\test\lightpanel.tga'),
+    'ASE bitmap with a drive path');
+  CheckEquals('textures/a/b', AseBitmapToMaterial('D:\art\textures\a\b.tga'), 'ASE bitmap without base/');
+  Check(IsStaticModelPath('models/x/y.LWO') and IsStaticModelPath('a.ase') and
+    not IsStaticModelPath('a.md5mesh'), 'IsStaticModelPath');
+
+  M := StaticModels.Model('models/mapobjects/test/barrel.lwo');
+  Check(M <> nil, 'load barrel.lwo');
+  if M <> nil then
+  begin
+    CheckEquals(2, M.Surfaces.Count, 'barrel surfaces (unused tag skipped)');
+    S := FindSurface(M, 'models/mapobjects/test/barrel');
+    Check(S <> nil, 'barrel side surface');
+    if S <> nil then
+    begin
+      CheckEquals(32, S.TriangleCount, 'barrel sides: 16 quads');
+      { the first quad faces +X (angle 0..22.5 degrees) }
+      Check(FirstNormal(S).X > 0.9, 'barrel side faces out (counter-clockwise)');
+      { the seam quad (the 16th) uses u = 1 from VMAD at its second column }
+      CheckNear(1, S.TexCoords[15 * 4 + 1].X, 'VMAD overrides the seam UV');
+      CheckNear(0, S.TexCoords[15 * 4].X - 15 / 16, 'VMAP UV of the seam quad first column');
+      CheckNear(1, S.TexCoords[2].Y, 'top ring v = 1 (CGE v = LightWave v)');
+    end;
+    S := FindSurface(M, 'textures/test/metal');
+    if S <> nil then
+    begin
+      CheckEquals(28, S.TriangleCount, 'barrel caps: two 16-gons as fans');
+      Check(FirstNormal(S).Z > 0.9, 'barrel top cap faces up');
+    end else
+      Check(False, 'barrel cap surface');
+    CheckNear(44, M.BoundsMax.Z, 'barrel height (LightWave y -> Doom 3 z)');
+    CheckNear(18, M.BoundsMax.X, 'barrel radius', 0.05);
+  end;
+
+  M := StaticModels.Model('models/mapobjects/test/terminal.ase');
+  Check(M <> nil, 'load terminal.ase');
+  if M <> nil then
+  begin
+    CheckEquals(2, M.Surfaces.Count, 'terminal surfaces from sub-materials');
+    S := FindSurface(M, 'textures/test/lightpanel');
+    if S <> nil then
+    begin
+      CheckEquals(2, S.TriangleCount, 'terminal screen triangles');
+      Check(FirstNormal(S).X > 0.5, 'terminal screen faces +X');
+      CheckNear(0, S.TexCoords[0].Y, 'ASE v kept (CGE convention)');
+    end else
+      Check(False, 'terminal screen surface (MESH_MTLID 1)');
+    S := FindSurface(M, 'textures/test/metal');
+    if S <> nil then
+    begin
+      CheckEquals(12, S.TriangleCount, 'terminal metal triangles');
+      Check(FirstNormal(S).X > 0.9, 'terminal front faces +X');
+    end else
+      Check(False, 'terminal metal surface');
+  end;
+end;
+
 begin
   InitializeLog;
   D3Fs.RegisterProtocol;
@@ -324,6 +426,8 @@ begin
   TestProc;
   TestMapFile;
   TestMd5;
+  TestStaticModels;
+  TestEntityRotation;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

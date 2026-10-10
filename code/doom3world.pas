@@ -377,13 +377,9 @@ begin
 end;
 
 procedure TD3Game.SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
-var
-  A: Single;
 begin
   M.Yaw := YawDeg;
-  A := DegToRad(YawDeg);
-  { a holder's local -Z is Doom 3's +Y; rotated by the yaw around Z }
-  M.Model.Holder.SetView(D3ToCge(Vector3(-Sin(A), Cos(A), 0)), Vector3(0, 1, 0));
+  SetD3Rotation(M.Model.Holder, YawMatrix(YawDeg));
 end;
 
 procedure TD3Game.Spawn;

@@ -27,7 +27,8 @@ uses
   Doom3Proc, Doom3MapFile, Doom3Md5;
 
 type
-  { A brush entity: its .proc model as a scene. }
+  { A brush entity (its .proc model) or a static model entity (.lwo / .ase)
+    as a scene. Both can be movers (func_door, func_rotating...). }
   TD3BrushEntity = class
     Entity: TD3MapEntity;
     Scene: TCastleScene;
@@ -64,6 +65,7 @@ type
     FLights: array of TD3LightInfo;
     FSpawnOrigin: TVector3;
     FSpawnAngle: Single;
+    FStaticModelCount: Integer;
     procedure SetMapName(const Value: String);
     procedure SetSpawnModels(const Value: Boolean);
     function GetAreaCount: Integer;
@@ -76,6 +78,7 @@ type
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
     procedure BuildModelEntities;
+    procedure BuildStaticModelEntities;
   protected
     procedure Loaded; override;
   public
@@ -124,6 +127,7 @@ type
     property EntityCount: Integer read GetEntityCount;
     property TriangleCount: Integer read GetTriangleCount;
     property LightCount: Integer read GetLightCount;
+    property StaticModelCount: Integer read FStaticModelCount;
   end;
 
 const
@@ -132,13 +136,18 @@ const
 { Rotate a CGE-space vector by a Doom 3 entity rotation matrix. }
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 
+{ Orient a transform by a Doom 3 rotation matrix (idMat3). Respects the
+  transform's Orientation: CGE's default otUpYDirectionZ points
+  Direction along local +Z. }
+procedure SetD3Rotation(const T: TCastleTransform; const M: TMatrix3);
+
 implementation
 
 uses
   Math,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions,
-  Doom3Files, Doom3Decls, Doom3Images, Doom3Materials;
+  Doom3Files, Doom3Decls, Doom3Images, Doom3Materials, Doom3StaticModels;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -151,6 +160,17 @@ begin
     U.X * M.Data[0, 1] + U.Y * M.Data[1, 1] + U.Z * M.Data[2, 1],
     U.X * M.Data[0, 2] + U.Y * M.Data[1, 2] + U.Z * M.Data[2, 2]);
   Result := D3ToCge(W);
+end;
+
+procedure SetD3Rotation(const T: TCastleTransform; const M: TMatrix3);
+var
+  LocalDirection: TVector3;
+begin
+  if T.Orientation = otUpYDirectionMinusZ then
+    LocalDirection := Vector3(0, 0, -1)
+  else
+    LocalDirection := Vector3(0, 0, 1);
+  T.SetView(D3RotateCge(M, LocalDirection), D3RotateCge(M, Vector3(0, 1, 0)));
 end;
 
 { TD3BrushEntity }
@@ -195,7 +215,7 @@ end;
 function TDoom3Map.PropertySections(const PropertyName: String): TPropertySections;
 begin
   if ArrayContainsString(PropertyName, ['MapName', 'SpawnModels', 'LightScale',
-    'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount']) then
+    'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount', 'StaticModelCount']) then
     Result := [psBasic]
   else
     Result := inherited PropertySections(PropertyName);
@@ -213,6 +233,7 @@ end;
 
 procedure TDoom3Map.ClearMap;
 begin
+  FStaticModelCount := 0;
   FModels.Clear;
   FBrushes.Clear;
   FLights := nil;
@@ -446,9 +467,77 @@ begin
     B.Scene.PreciseCollisions := E.BoolValue('solid', True);
     B.Scene.Translation := D3ToCge(E.Origin);
     Rot := E.Rotation;
-    B.Scene.SetView(D3RotateCge(Rot, Vector3(0, 0, -1)), D3RotateCge(Rot, Vector3(0, 1, 0)));
+    SetD3Rotation(B.Scene, Rot);
     Add(B.Scene);
     FBrushes.Add(B);
+  end;
+end;
+
+{ Model of an entity (its "model" key or its entityDef's), resolved through
+  a model decl; '' when there is none. }
+function EntityModelPath(const E: TD3MapEntity; const Def: TStringList;
+  out Decl: TD3ModelDecl): String;
+begin
+  Decl := nil;
+  Result := E.Value('model');
+  if (Result = '') and (Def <> nil) then
+    Result := Def.Values['model'];
+  if (Result <> '') and (ExtractFileExt(Result) = '') then
+  begin
+    Decl := Decls.ModelDecl(Result);
+    if Decl <> nil then
+      Result := Decl.Mesh;
+  end;
+end;
+
+procedure TDoom3Map.BuildStaticModelEntities;
+var
+  E: TD3MapEntity;
+  Def: TStringList;
+  Decl: TD3ModelDecl;
+  Path, SkinName, Cls: String;
+  Model: TD3StaticModel;
+  B: TD3BrushEntity;
+  Rot: TMatrix3;
+begin
+  for E in FMapFile.Entities do
+  begin
+    if SameText(E.ClassName_, 'worldspawn') then
+      Continue;
+    Def := Decls.EntityDef(E.ClassName_);
+    Path := EntityModelPath(E, Def, Decl);
+    if not IsStaticModelPath(Path) then
+      Continue;
+    Model := StaticModels.Model(Path);
+    if Model = nil then
+      Continue;
+    SkinName := E.Value('skin');
+    if (SkinName = '') and (Def <> nil) then
+      SkinName := Def.Values['skin'];
+    if (SkinName = '') and (Decl <> nil) then
+      SkinName := Decl.Skin;
+
+    B := TD3BrushEntity.Create;
+    B.Entity := E;
+    B.LocalMin := Model.BoundsMin;
+    B.LocalMax := Model.BoundsMax;
+    B.Scene := TCastleScene.Create(nil);
+    B.Scene.SetTransient;
+    B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
+    B.Scene.Load(Model.BuildNode(SkinName), True);
+    { map geometry (func_static, doors...) collides, unless "noclipmodel";
+      lights' fixtures, items and other props don't }
+    Cls := LowerCase(E.ClassName_);
+    B.Scene.PreciseCollisions := (Copy(Cls, 1, 5) = 'func_') and
+      not E.BoolValue('noclipmodel') and E.BoolValue('solid', True);
+    B.Scene.Collides := B.Scene.PreciseCollisions;
+    B.Scene.Pickable := B.Scene.PreciseCollisions;
+    B.Scene.Translation := D3ToCge(E.Origin);
+    Rot := E.Rotation;
+    SetD3Rotation(B.Scene, Rot);
+    Add(B.Scene);
+    FBrushes.Add(B);
+    Inc(FStaticModelCount);
   end;
 end;
 
@@ -483,7 +572,7 @@ begin
         MeshPath := Decl.Mesh;
     end;
     if not SameText(ExtractFileExt(MeshPath), '.md5mesh') then
-      Continue; { .lwo / .ase static models are not supported yet }
+      Continue; { .lwo / .ase: BuildStaticModelEntities }
     Md5 := Md5Cache.Model(MeshPath);
     if Md5 = nil then
       Continue;
@@ -511,7 +600,7 @@ begin
     ME.Holder.Name := 'Model_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     ME.Holder.Translation := D3ToCge(E.Origin);
     Rot := E.Rotation;
-    ME.Holder.SetView(D3RotateCge(Rot, Vector3(0, 0, -1)), D3RotateCge(Rot, Vector3(0, 1, 0)));
+    SetD3Rotation(ME.Holder, Rot);
     ME.Holder.Add(ME.Instance.Scene);
     Add(ME.Holder);
     FModels.Add(ME);
@@ -567,10 +656,12 @@ begin
 
   BuildWorld;
   BuildBrushEntities;
+  BuildStaticModelEntities;
   if FSpawnModels then
     BuildModelEntities;
-  WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d md5 models',
-    [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count, FModels.Count]);
+  WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models',
+    [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count - FStaticModelCount,
+     FStaticModelCount, FModels.Count]);
 end;
 
 function TDoom3Map.LoadMap(const AMapName: String): Boolean;
