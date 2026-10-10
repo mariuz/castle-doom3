@@ -139,7 +139,8 @@ type
     { Shapes of a .proc model as an X3D group, Doom 3 coordinates converted.
       Solid / non-solid surfaces go to separate groups (either may be nil). }
     class procedure BuildProcModel(const Model: TD3ProcModel;
-      const SolidGroup, NonSolidGroup: TAbstractGroupingNode);
+      const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
+      const Entity: TD3MapEntity = nil);
 
     procedure Update(const SecondsPassed: Single; var RemoveMe: TRemoveType); override;
 
@@ -227,7 +228,7 @@ uses
   Math,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
-  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels;
+  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels, Doom3Gui;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -344,7 +345,8 @@ begin
 end;
 
 class procedure TDoom3Map.BuildProcModel(const Model: TD3ProcModel;
-  const SolidGroup, NonSolidGroup: TAbstractGroupingNode);
+  const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
+  const Entity: TD3MapEntity);
 var
   Surf: TD3ProcSurface;
   M: TD3Material;
@@ -357,13 +359,23 @@ var
   Geometry: TIndexedTriangleSetNode;
   Shape: TShapeNode;
   Group: TAbstractGroupingNode;
+  GuiUrl: String;
 begin
   for Surf in Model.Surfaces do
   begin
     if (Length(Surf.Indexes) < 3) or (Length(Surf.Vertexes) = 0) then
       Continue;
     M := Decls.Material(Surf.Material);
-    if M.IsInvisible then
+    GuiUrl := '';
+    if M.GuiSurf <> '' then
+    begin
+      { a GUI screen: the entity's gui key (guisurf entity) or a path }
+      if Entity <> nil then
+        GuiUrl := GuiSurfaceUrl(M.GuiSurf, Entity.Pairs)
+      else
+        GuiUrl := GuiSurfaceUrl(M.GuiSurf, nil);
+    end;
+    if M.IsInvisible and (GuiUrl = '') then
       Continue;
     if M.NonSolid or M.Translucent or (M.StageImage <> '') and (M.DiffuseImage = '') then
       Group := NonSolidGroup
@@ -397,7 +409,10 @@ begin
     Geometry.Solid := not M.TwoSided;
     Shape := TShapeNode.Create;
     Shape.Geometry := Geometry;
-    Shape.Appearance := MaterialAppearance(Surf.Material);
+    if GuiUrl <> '' then
+      Shape.Appearance := GuiAppearance(GuiUrl)
+    else
+      Shape.Appearance := MaterialAppearance(Surf.Material);
     Group.AddChildren(Shape);
   end;
 end;
@@ -958,7 +973,7 @@ begin
           Max(B.LocalMax.Y, Surf.Vertexes[I].Position.Y), Max(B.LocalMax.Z, Surf.Vertexes[I].Position.Z));
       end;
     Root := TX3DRootNode.Create;
-    BuildProcModel(Model, Root, Root);
+    BuildProcModel(Model, Root, Root, E);
     AddLightLibrary(Root);
     B.Scene := TCastleScene.Create(nil);
     B.Scene.SetTransient;
@@ -1024,7 +1039,7 @@ begin
     B.Scene := TCastleScene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
-    B.Scene.Load(Model.BuildNode(SkinName), True);
+    B.Scene.Load(Model.BuildNode(SkinName, E.Pairs), True);
     { map geometry (func_static, doors...) collides, unless "noclipmodel";
       lights' fixtures, items and other props don't }
     Cls := LowerCase(E.ClassName_);

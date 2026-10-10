@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+GUIs.
+
+- **Doom 3 GUIs** (`.gui`) on `guisurf` surfaces: windowDef trees with `rect`, `backcolor`, `matcolor`, `background`, borders, `text` (also `gui::` state from the entity's `gui_*` keys, `\n` line breaks), `textscale`, `textalign`, `forecolor`, `visible`, drawn in software into a 640 x 480 image with CGE's built-in font and shown on the surface. `guisurf entity` / `entity2` / `entity3` use the entity's `gui` / `gui2` / `gui3` keys, `guisurf <path>` names the GUI.
+- Brush entities and static models (LWO / ASE screens) pass their entity to their GUI surfaces.
+- Test level: a door panel GUI with the entity's text and a status screen.
+- 257 checks (parsing, rendered pixels, state, caching); CI checks both GUIs are rendered.
+
+Not yet: GUI events and scripts, the cursor, Doom 3's own fonts.
+
 ## 0.8.0
 
 Material stages.

@@ -13,7 +13,7 @@ uses
   SysUtils, Classes,
   CastleWindow, CastleLog, CastleUIControls, CastleApplicationProperties, CastleParameters,
   CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine,
-  Doom3Files, Doom3Images, Doom3Decls, Doom3Level
+  Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level
   {$region 'Castle Initialization Uses'}
   // The content here may be automatically updated by CGE editor.
   , GameViewMenu
@@ -81,6 +81,7 @@ begin
     Window.Container.LoadSettings('castle-data:/CastleSettings.xml');
     D3Fs.RegisterProtocol;
     RegisterImageProtocol;
+    RegisterGuiProtocol;
     if SoundEngine <> nil then
       SoundEngine.DistanceModel := dmLinear;
 
@@ -142,7 +143,7 @@ end;
 
 initialization
   ApplicationProperties.ApplicationName := 'castle-doom3';
-  ApplicationProperties.Version := '0.8.0';
+  ApplicationProperties.Version := '0.9.0';
   LogFileName := 'castle-doom3.log';
   InitializeLog;
   Application.OnInitialize := @ApplicationInitialize;

@@ -6,7 +6,7 @@ Working notes for developers and AI agents on Castle Doom 3: a Doom 3 (id Tech 4
 
 - Doom 3 data (`.proc`, `.map`, `.mtr`, `.def`, `.skin`, `.sndshd`, `.md5mesh`, `.md5anim`, `.lwo`, `.ase`, `.cm`, TGA / DDS images, WAV / OGG sounds) is read at runtime from PK4 archives and served to CGE through the `d3fs:` and `d3img:` URL protocols.
 - Bundled data is only the generated test level `data/base/castle_doom3_test.pk4` (map `testmap`), written by `tools/make_test_pk4.py`. **Never commit id Software data**; a Doom 3 install is loaded with `-basepath` or a `base/` directory next to the exe (gitignored).
-- Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3StaticModels`, `Doom3Collision`, `Doom3Portals`, `Doom3Expressions`, `Doom3LightEffects`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
+- Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3StaticModels`, `Doom3Collision`, `Doom3Portals`, `Doom3Expressions`, `Doom3LightEffects`, `Doom3Gui`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
 
 ## Build and run (Windows)
 
@@ -29,13 +29,14 @@ Keep the project at a short path (`E:\Work\castle-doom3`): long paths break FPC 
 
 Pass the whole `--demo` value as one argument (from PowerShell `Start-Process`, quote it inside `-ArgumentList`, or the spaces in `G:x y z` split it). Script commands are listed in the README; grep the log for `Warning|Exception|Screenshot|Message|Shot:`. Screenshot log lines show the FPS, eye position (Doom 3 coordinates), yaw, area and visible areas (portal visibility: 1 in room A with the door shut, 2 at (200, 0) yaw 0 once the door opened, 1 from there at yaw 180). Useful test map spots: start (-160, -160) yaw 45; LWO barrels at (-60, 190) and (-12, 206); ASE terminals at (200, 200) (`noclipmodel`, faces yaw -135) and on the balcony (820, -280, 96) (see its screen from (740, -200, 96) yaw -45); in front of the door (200, 0) yaw 0 (it opens within ~1 s); the invisible playerclip wall is y = 0 for x < -120 (from (-200, -100) yaw 90, `GO:1 0 1.5` stops at y = -20.7); the monster clip strip at x = -40 lets the player through; climbing to the balcony: `G:560 0 0,A:0,GO:1 0 2.5` ends with eye z 163.5; room B (420, -250); creatures are monsters 0 and 1 (`N:0`). `blob_1` has 80 health, the pistol does 14 per shot every 0.35 s (6 hits kill it).
 
-Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (231 checks; run from `tests/`). When the generator changes, update the expected counts there.
+Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (257 checks; run from `tests/`). When the generator changes, update the expected counts there.
 
 ## CGE editor integration
 
 - `editor_units="Doom3Level, Doom3Hud, Doom3Console"`; these call `RegisterSerializableComponent`. Children created by a component must call `SetTransient`.
 - `TDoom3Map` builds the map in the editor (`Loaded` + `CastleDesignMode`); in the game `TViewPlay` calls `LoadMap`. Keep it at identity transform: gameplay uses its local space as world space. `TDoom3Map.EnsureData` adds the test PK4 and loads decls when the editor runs without `GameInitialize`.
 - Light shaders: console `lights` logs every light's current color (`Lights:` lines); in the test map `light_2` flickers (room A), `light_4` pulses and `light_5` strobes (room B). Lights in hidden areas are off and don't animate.
+- GUIs: the panel is on room A's west wall (look from (-150, -60) yaw 180 `P:10`), the status screen on room B's north wall (from (385, 200) yaw 90 `P:22`). The log says `Doom3Gui: Rendered "guis/..." (N windows)`. GUI rendering is software (no GL), so `tests/` checks pixels.
 - Material stages: the terminal screens scroll and the ceiling panels pulse (two screenshots a second apart from (740, -200, 96) yaw -45 differ); room B's skylight is at (640, 0), look up from (640, -150) with `P:45`. The log says `Sky "textures/test/sky"` when the skybox is set up.
 - Shadows: screenshot log lines end with `shadows <light name>`; `r_shadows 0` compares. A good view of the crate shadow: `G:250 -40 0,A:-125,P:-30` (light_1). Only one light casts (CGE's shadow volumes); areas don't cast.
 - Light volumes (`Doom3LightEffects`): every scene built for the map must call `AddLightLibrary` on its root, or map lights add nothing to it (black). Samplers in light effects don't work in CGE (unbound textures): light images are analytic. `r_lightVolumes 0` compares with plain spheres. A brush entity that looks black or missing is more likely hidden by portal visibility (check its `Areas`) than unlit.

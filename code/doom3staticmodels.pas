@@ -51,7 +51,7 @@ type
     function TriangleCount: Integer;
     { X3D shapes for the model (fresh nodes on every call). A skin remaps
       materials. }
-    function BuildNode(const SkinName: String = ''): TX3DRootNode;
+    function BuildNode(const SkinName: String = ''; const EntityKeys: TStrings = nil): TX3DRootNode;
   end;
 
   TD3StaticModelCache = class
@@ -79,7 +79,7 @@ implementation
 uses
   Math,
   CastleLog,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects;
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects, Doom3Gui;
 
 function IsStaticModelPath(const Path: String): Boolean;
 var
@@ -710,7 +710,7 @@ begin
   end;
 end;
 
-function TD3StaticModel.BuildNode(const SkinName: String): TX3DRootNode;
+function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings): TX3DRootNode;
 var
   S: TD3StaticSurface;
   Coords: array of TVector3;
@@ -724,6 +724,7 @@ var
   SkinDecl: TD3Skin;
   MaterialName: String;
   M: TD3Material;
+  GuiUrl: String;
 begin
   Result := TX3DRootNode.Create;
   SkinDecl := nil;
@@ -735,7 +736,10 @@ begin
     if SkinDecl <> nil then
       MaterialName := SkinDecl.Remap(MaterialName);
     M := Decls.Material(MaterialName);
-    if M.IsInvisible or (Length(S.Indexes) < 3) then
+    GuiUrl := '';
+    if M.GuiSurf <> '' then
+      GuiUrl := GuiSurfaceUrl(M.GuiSurf, EntityKeys);
+    if (M.IsInvisible and (GuiUrl = '')) or (Length(S.Indexes) < 3) then
       Continue;
     SetLength(Coords, Length(S.Positions));
     for I := 0 to High(S.Positions) do
@@ -762,7 +766,10 @@ begin
     Geometry.Solid := not M.TwoSided;
     Shape := TShapeNode.Create;
     Shape.Geometry := Geometry;
-    Shape.Appearance := MaterialAppearance(MaterialName);
+    if GuiUrl <> '' then
+      Shape.Appearance := GuiAppearance(GuiUrl)
+    else
+      Shape.Appearance := MaterialAppearance(MaterialName);
     Result.AddChildren(Shape);
   end;
   AddLightLibrary(Result);

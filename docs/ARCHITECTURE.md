@@ -36,6 +36,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 | `Doom3Expressions` | Material expressions as trees (`TD3Expr.Eval`, `IsConstant`, `UsesTime`) parsed with Doom 3's operator priorities, and `TD3Table` (`snap`, `clamp`, the first value copied to the end, lookups like `idDeclTable::TableLookup`). |
 | `Doom3LightEffects` | Doom 3 light volumes: `PointLightMatrix` / `ProjectedLightMatrix` (CGE world -> the light's texture space `(s w, t w, q, w)`), `LightTexCoord`, `CreateLightEffect` (per-light GLSL with a uniquely named matrix uniform), `LightLibraryEffect` / `AddLightLibrary`, `ProjectionShape`. |
 | `Doom3Portals` | `TD3PortalVisibility`: the portals in CGE coordinates, per area portal lists, `Compute` (portal flow with polygon clipping and per-portal narrowing, closed portals), `AreasWithinRadius` (areas a light reaches), `PortalsInBox` (portals a door closes), `ClipPolygon`. |
+| `Doom3Gui` | `.gui` files: `TD3Gui` / `TD3GuiWindow` (windowDef, editDef, choiceDef... trees; properties as comma-separated tokens; events and variable declarations skipped), `RenderGui` (software rendering), `GuiImageUrl` (cache per path and state, `d3gui:` protocol), `GuiSurfaceUrl` / `GuiSurfPath` (guisurf keywords). |
 | `Doom3Level` | `TDoom3Map` (`TCastleTransform`, registered for the editor): builds the area scenes, lights, brush entities and md5 entities of a map. |
 | `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, player health / armor, pistol, use. |
 | `Doom3Hud`, `Doom3Console` | UI components drawn with `DrawRectangle` and `UIFont`. |
@@ -66,6 +67,13 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Projection and falloff **images** are approximated analytically: textures referenced only by light effects are not bound by CGE's renderer (they read as black / garbage). `ProjectionShape` picks a center-bright soft square for `square*` images, a full volume for `bright` / `white`, otherwise a soft disc; the depth falloff follows Doom 3's default point / projected falloff images.
 - Uniform names must be unique per light (several lights' code ends up in one shader), so they are suffixed with the light's index.
 - `r_lightVolumes 0` (`Doom3LightEffects.LightVolumes`) reloads the map with plain spheres / X3D spot lights for comparison.
+
+## GUIs
+
+- A material with `guisurf entity` (`entity2`, `entity3`) shows the GUI named by its entity's `gui` (`gui2`, `gui3`) key; `guisurf guis/x.gui` names it directly. `TDoom3Map.BuildProcModel` (brush entities pass their entity) and `TD3StaticModel.BuildNode` (static models pass the entity's keys) give such surfaces `GuiAppearance`: unlit, opaque, the GUI image as emissive texture, using the surface's own texture coordinates (Doom 3 maps the 640 x 480 GUI onto them).
+- `RenderGui` draws the window tree in software, so it needs no OpenGL and unit tests can check pixels: background colors, a background material's image (scaled, tinted by `matcolor`), borders, and word-wrapped text with CGE's built-in UI font (`CastleTextureFont_DefaultUi`): every glyph is scaled from the font atlas (Doom 3 fonts are 48 pixels at `textscale 1`) and placed like CGE does, at `pen x - G.X`, `baseline - G.Y`. `gui::name` texts read the GUI state: the entity's keys.
+- Properties are read as tokens separated by commas (`rect 0, 0, 640, 480`), so one-line `windowDef x { rect ... backcolor ... }` blocks work; `definevec4` / `float`... declarations have a name before the value.
+- Images are cached per GUI path and `gui_*` state and served as `d3gui:/guiN.tga` (TGA), so CGE's texture cache shares them. Not yet: events and scripts (`onTime` transitions, `onAction`), the cursor and interaction, Doom 3's fonts, `rotate` / `shear`.
 
 ## Material stages
 

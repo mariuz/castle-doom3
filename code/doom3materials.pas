@@ -28,6 +28,9 @@ function MaterialAppearance(const MaterialName: String): TAppearanceNode;
 { A texture node for a texture URL. }
 function MakeTexture(const Url: String): TImageTextureNode;
 
+{ An unlit, opaque appearance showing a rendered GUI (Doom3Gui). }
+function GuiAppearance(const Url: String): TAppearanceNode;
+
 { Re-evaluate the registered animated appearances at a time (seconds). }
 procedure UpdateAnimatedSurfaces(const Time: Single);
 { Forget the registered appearances (when their scenes are freed). }
@@ -139,6 +142,22 @@ begin
   Result.SetUrl([Url]);
   Result.RepeatS := True;
   Result.RepeatT := True;
+end;
+
+function GuiAppearance(const Url: String): TAppearanceNode;
+var
+  Unlit: TUnlitMaterialNode;
+  Texture: TImageTextureNode;
+begin
+  Result := TAppearanceNode.Create;
+  Unlit := TUnlitMaterialNode.Create;
+  Unlit.EmissiveColor := Vector3(1, 1, 1);
+  Texture := MakeTexture(Url);
+  Texture.RepeatS := False;
+  Texture.RepeatT := False;
+  Unlit.EmissiveTexture := Texture;
+  Result.Material := Unlit;
+  Result.AlphaMode := amOpaque;
 end;
 
 function MaterialAppearance(const MaterialName: String): TAppearanceNode;

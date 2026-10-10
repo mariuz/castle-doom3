@@ -12,7 +12,7 @@ uses
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
-  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects,
+  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   CastleTransform, CastleUtils, CastleBoxes;
 
 var
@@ -79,7 +79,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(43, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(46, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -106,7 +106,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(19, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(21, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -209,7 +209,7 @@ begin
   Proc := TD3ProcFile.Create;
   try
     Check(Proc.LoadFromVfs('maps/testmap.proc'), 'load testmap.proc');
-    CheckEquals(6, Proc.ModelCount, 'proc model count');
+    CheckEquals(7, Proc.ModelCount, 'proc model count');
     CheckEquals(2, Proc.NumAreas, 'proc areas');
     CheckEquals(1, Length(Proc.Portals), 'proc portals');
     CheckEquals(1, Length(Proc.Nodes), 'proc nodes');
@@ -238,7 +238,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(22, MapFile.Entities.Count, 'entity count');
+    CheckEquals(23, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -344,7 +344,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(5, Cm.ModelCount, 'cm models (world + 4 brush entities)');
+    CheckEquals(6, Cm.ModelCount, 'cm models (world + 5 brush entities)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -727,6 +727,113 @@ begin
   CheckEquals('env/testsky_forward.tga', FindImageFile('env/testsky_forward'), 'sky image');
 end;
 
+function PixelAt(const Img: TCastleImage; const X, Y: Integer): TVector4;
+begin
+  { GUI coordinates: y goes down }
+  Result := Img.Colors[X, Img.Height - 1 - Y, 0];
+end;
+
+function BrightPixels(const Img: TCastleImage; const X0, Y0, X1, Y1: Integer): Integer;
+var
+  X, Y: Integer;
+  C: TVector4;
+begin
+  Result := 0;
+  for Y := Y0 to Y1 do
+    for X := X0 to X1 do
+    begin
+      C := PixelAt(Img, X, Y);
+      if C.X + C.Y + C.Z > 2.4 then
+        Inc(Result);
+    end;
+end;
+
+procedure TestGuis;
+var
+  Gui: TD3Gui;
+  W: TD3GuiWindow;
+  State: TStringList;
+  Img: TRGBAlphaImage;
+  C: TVector4;
+  Url1, Url2: String;
+begin
+  CheckEquals('guis/a.gui', GuiSurfPath('entity', 'guis/a.gui', 'guis/b.gui', ''), 'guisurf entity');
+  CheckEquals('guis/b.gui', GuiSurfPath('entity2', 'guis/a.gui', 'guis/b.gui', ''), 'guisurf entity2');
+  CheckEquals('guis/x.gui', GuiSurfPath('guis/x.gui', 'guis/a.gui', '', ''), 'guisurf path');
+  Check(Decls.Material('textures/test/guiscreen').GuiSurf = 'entity', 'guisurf material');
+
+  Gui := TD3Gui.Create;
+  State := TStringList.Create;
+  try
+    Check(Gui.LoadFromVfs('guis/test_panel.gui'), 'load test_panel.gui');
+    CheckEquals(5, Gui.WindowCount, 'panel windows (definevec4 and events skipped)');
+    W := Gui.FindWindow('header');
+    Check(W <> nil, 'find header window');
+    if W <> nil then
+    begin
+      CheckNear(110, W.Rect.Height, 'header rect height');
+      CheckNear(0.55, W.BackColor.X, 'header backcolor');
+      CheckEquals('gui::gui_parm1', W.Text, 'header text');
+      CheckEquals(1, W.TextAlign, 'header textalign');
+    end;
+    W := Gui.FindWindow('hidden');
+    Check((W <> nil) and not W.Visible, 'visible 0');
+    W := Gui.FindWindow('body');
+    Check((W <> nil) and (W.BorderSize = 3), 'bordersize');
+
+    State.Values['gui_parm1'] := 'AREA A';
+    State.Values['gui_parm2'] := 'Hello';
+    Img := RenderGui(Gui, State);
+    try
+      CheckEquals(GuiWidth, Img.Width, 'GUI image width');
+      C := PixelAt(Img, 5, 5);
+      Check((C.X > 0.4) and (C.Y < 0.2), Format('header is red, got %s', [C.ToString]));
+      Check(BrightPixels(Img, 200, 10, 440, 100) > 50, 'header text drawn (gui::gui_parm1)');
+      C := PixelAt(Img, 320, 400);
+      Check(C.X < 0.5, 'the hidden red window is not drawn');
+      C := PixelAt(Img, 31, 300);
+      Check(C.Z > 0.4, 'body border drawn');
+    finally
+      Img.Free;
+    end;
+    { no state: the header has no text }
+    Img := RenderGui(Gui, nil);
+    try
+      Check(BrightPixels(Img, 200, 10, 440, 100) < 5, 'empty gui:: text');
+    finally
+      Img.Free;
+    end;
+
+    Check(Gui.LoadFromVfs('guis/test_status.gui'), 'load test_status.gui');
+    CheckEquals(6, Gui.WindowCount, 'status windows (one-line windowDefs)');
+    Img := RenderGui(Gui, nil);
+    try
+      C := PixelAt(Img, 100, 170);
+      Check((C.Y > 0.6) and (C.X < 0.4), Format('green bar, got %s', [C.ToString]));
+      C := PixelAt(Img, 100, 310);
+      Check((C.X > 0.7) and (C.Y < 0.4), 'red bar');
+    finally
+      Img.Free;
+    end;
+  finally
+    State.Free;
+    Gui.Free;
+  end;
+
+  State := TStringList.Create;
+  try
+    State.Values['gui_parm1'] := 'X';
+    Url1 := GuiImageUrl('guis/test_panel.gui', State);
+    Url2 := GuiImageUrl('GUIS/test_panel.gui', State);
+    Check((Url1 <> '') and (Url1 = Url2), 'GUI images are cached per path and state');
+    State.Values['gui_parm1'] := 'Y';
+    Check(GuiImageUrl('guis/test_panel.gui', State) <> Url1, 'another state, another image');
+    CheckEquals('', GuiImageUrl('guis/missing.gui', nil), 'missing GUI');
+  finally
+    State.Free;
+  end;
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -835,6 +942,7 @@ begin
   TestExpressions;
   TestLightVolumes;
   TestMaterialStages;
+  TestGuis;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
