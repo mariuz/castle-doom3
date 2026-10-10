@@ -563,6 +563,7 @@ var
   Mon, Best: TD3Monster;
   Hit: TCastleTransform;
   D, ToCenter, Closest: TVector3;
+  HitName: String;
 begin
   Result := False;
   if (FFireCooldown > 0) or PlayerDead then
@@ -593,11 +594,14 @@ begin
       BestDist := T;
     end;
   end;
-  if Hit <> nil then
-    WritelnLog('Doom3World', 'Shot: wall %.0f (%s), monster %s', [WallDist, Hit.Name,
-      BoolToStr(Best <> nil, 'hit', 'missed')])
+  if Best <> nil then
+    HitName := 'hit ' + Best.Model.Entity.Name
   else
-    WritelnLog('Doom3World', 'Shot: no wall, monster %s', [BoolToStr(Best <> nil, 'hit', 'missed')]);
+    HitName := 'missed';
+  if Hit <> nil then
+    WritelnLog('Doom3World', 'Shot: wall %.0f (%s), monster %s', [WallDist, Hit.Name, HitName])
+  else
+    WritelnLog('Doom3World', 'Shot: no wall, monster %s', [HitName]);
   if Best <> nil then
   begin
     Dec(Best.Health, PistolDamage);
