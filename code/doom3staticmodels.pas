@@ -79,7 +79,7 @@ implementation
 uses
   Math,
   CastleLog,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials;
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects;
 
 function IsStaticModelPath(const Path: String): Boolean;
 var
@@ -765,6 +765,7 @@ begin
     Shape.Appearance := MaterialAppearance(MaterialName);
     Result.AddChildren(Shape);
   end;
+  AddLightLibrary(Result);
 end;
 
 { TD3StaticModelCache }

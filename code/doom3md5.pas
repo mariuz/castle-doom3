@@ -125,7 +125,7 @@ implementation
 uses
   Math,
   CastleLog,
-  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Materials;
+  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects;
 
 { Doom 3 stores unit quaternions as x y z, w = -sqrt(1 - x2 - y2 - z2). }
 function QuatFromXYZ(const V: TVector3): TQuaternion;
@@ -621,6 +621,7 @@ begin
     Root.AddChildren(Shape);
   end;
 
+  AddLightLibrary(Root);
   FScene := TCastleScene.Create(nil);
   FScene.Load(Root, True);
   ApplyPose;

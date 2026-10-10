@@ -12,7 +12,7 @@ uses
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
-  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions,
+  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects,
   CastleTransform, CastleUtils, CastleBoxes;
 
 var
@@ -79,7 +79,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(31, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(36, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -106,7 +106,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(14, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(17, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -238,7 +238,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(21, MapFile.Entities.Count, 'entity count');
+    CheckEquals(22, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -584,6 +584,51 @@ begin
   Check(M.StageColorExpr[0] = nil, 'diffuse stages have no light color');
 end;
 
+procedure CheckVec(const Expected, Actual: TVector3; const What: String);
+begin
+  Check(TVector3.Equals(Expected, Actual, 0.01),
+    Format('%s: expected %s, got %s', [What, Expected.ToString, Actual.ToString]));
+end;
+
+procedure TestLightVolumes;
+var
+  M: TMatrix4;
+  Origin: TVector3;
+begin
+  { a point light box 100 x 200 x 50 around (10, 20, 30) }
+  Origin := Vector3(10, 20, 30);
+  M := PointLightMatrix(Origin, TMatrix3.Identity, Vector3(100, 200, 50));
+  CheckVec(Vector3(0.5, 0.5, 0.5), LightTexCoord(M, D3ToCge(Origin)), 'point light center');
+  CheckVec(Vector3(1, 0.5, 0.5), LightTexCoord(M, D3ToCge(Origin + Vector3(100, 0, 0))), 'point light +X edge');
+  CheckVec(Vector3(0.5, 0, 0.5), LightTexCoord(M, D3ToCge(Origin + Vector3(0, -200, 0))), 'point light -Y edge');
+  CheckVec(Vector3(0.5, 0.5, 1), LightTexCoord(M, D3ToCge(Origin + Vector3(0, 0, 50))), 'point light top (falloff 1)');
+  { rotated 90 degrees: the box's X axis is the world's Y }
+  M := PointLightMatrix(Origin, YawMatrix(90), Vector3(100, 200, 50));
+  CheckVec(Vector3(1, 0.5, 0.5), LightTexCoord(M, D3ToCge(Origin + Vector3(0, 100, 0))), 'rotated point light');
+
+  { a projected light pointing down 190 units, 90 half width / height }
+  Origin := Vector3(0, -150, 190);
+  M := ProjectedLightMatrix(Origin, TMatrix3.Identity, Vector3(0, 0, -190), Vector3(0, 90, 0),
+    Vector3(90, 0, 0), TVector3.Zero, TVector3.Zero, False);
+  CheckVec(Vector3(0.5, 0.5, 1), LightTexCoord(M, D3ToCge(Vector3(0, -150, 0))), 'projected light target');
+  CheckVec(Vector3(1, 0.5, 1), LightTexCoord(M, D3ToCge(Vector3(90, -150, 0))), 'projected light right edge');
+  CheckVec(Vector3(0.5, 1, 1), LightTexCoord(M, D3ToCge(Vector3(0, -60, 0))), 'projected light up edge');
+  { half way down the frustum is half as wide }
+  CheckVec(Vector3(1, 0.5, 0.5), LightTexCoord(M, D3ToCge(Vector3(45, -150, 95))), 'projected light perspective');
+  Check(LightTexCoord(M, D3ToCge(Vector3(0, -150, 300))).X < 0, 'behind a projected light: w <= 0');
+  { light_start / light_end set the falloff range }
+  M := ProjectedLightMatrix(Origin, TMatrix3.Identity, Vector3(0, 0, -190), Vector3(0, 90, 0),
+    Vector3(90, 0, 0), Vector3(0, 0, -10), Vector3(0, 0, -210), True);
+  CheckNear(0.9, LightTexCoord(M, D3ToCge(Vector3(0, -150, 0))).Z, 'projected falloff from start to end');
+  { analytic projection shapes from image names }
+  Check(ProjectionShape('lights/squarelight1.tga') = lsSquare, 'squarelight1 is a square');
+  Check(ProjectionShape('makeintensity(lights/round.tga)') = lsRound, 'round is a disc');
+  Check(ProjectionShape('') = lsRound, 'default projection is a disc');
+  Check(ProjectionShape('lights/bright.tga') = lsFull, 'bright fills the volume');
+  CheckEquals('lights/window.tga', Decls.Material('lights/test_window').StageImage, 'light shader projection image');
+  CheckEquals('lights/projfalloff.tga', Decls.Material('lights/test_window').LightFalloffImage, 'light shader falloff image');
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -690,6 +735,7 @@ begin
   TestCollisionModel;
   TestPortals;
   TestExpressions;
+  TestLightVolumes;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

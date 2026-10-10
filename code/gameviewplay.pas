@@ -66,7 +66,7 @@ implementation
 uses
   Math,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
-  Doom3MapFile, Doom3Files, Doom3Decls, GameViewMenu;
+  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
 begin
@@ -179,7 +179,7 @@ begin
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
-    Console.Print('r_useportals [0|1], portals, lights, quit');
+    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], portals, lights, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -240,6 +240,15 @@ begin
     else
       Map.PortalCulling := not Map.PortalCulling;
     Console.Print('r_usePortals ' + BoolToStr(Map.PortalCulling, '1', '0'));
+  end else
+  if Cmd = 'r_lightvolumes' then
+  begin
+    if Args <> '' then
+      LightVolumes := StrToIntDef(Args, 1) <> 0
+    else
+      LightVolumes := not LightVolumes;
+    Console.Print('r_lightVolumes ' + BoolToStr(LightVolumes, '1', '0') + ', reloading the map');
+    LoadLevel(MapName);
   end else
   if Cmd = 'lights' then
   begin

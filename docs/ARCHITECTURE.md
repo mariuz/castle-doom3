@@ -34,6 +34,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 | `Doom3StaticModels` | LWO2 (`TAGS`, `LAYR`, `PNTS`, `VMAP` / `VMAD` `TXUV`, `POLS` `FACE` as triangle fans, `PTAG` `SURF`) and ASE (`*MATERIAL` / `*SUBMATERIAL` `*BITMAP` and UV tiling / offset, `*GEOMOBJECT` meshes, `*MESH_MTLID`, `*MATERIAL_REF`). Surfaces per material with Doom-style smooth normals (vertexes sharing position and UV). `StaticModels` caches them. |
 | `Doom3Collision` | `.cm` files: per `collisionModel` the vertices, edges (edge 0 is a dummy; a negative edge in a polygon is used backwards and starts at its second vertex), BSP nodes (counted), polygons (`numEdges ( edges ) ( normal ) dist ( min ) ( max ) "material"`) and brushes (`n { ( normal ) dist ... } ( min ) ( max ) "contents"`). `PlayerTriangles` / `BuildCollisionNode` turn the polygons whose material `BlocksPlayer` into triangle fans. |
 | `Doom3Expressions` | Material expressions as trees (`TD3Expr.Eval`, `IsConstant`, `UsesTime`) parsed with Doom 3's operator priorities, and `TD3Table` (`snap`, `clamp`, the first value copied to the end, lookups like `idDeclTable::TableLookup`). |
+| `Doom3LightEffects` | Doom 3 light volumes: `PointLightMatrix` / `ProjectedLightMatrix` (CGE world -> the light's texture space `(s w, t w, q, w)`), `LightTexCoord`, `CreateLightEffect` (per-light GLSL with a uniquely named matrix uniform), `LightLibraryEffect` / `AddLightLibrary`, `ProjectionShape`. |
 | `Doom3Portals` | `TD3PortalVisibility`: the portals in CGE coordinates, per area portal lists, `Compute` (portal flow with polygon clipping and per-portal narrowing, closed portals), `AreasWithinRadius` (areas a light reaches), `PortalsInBox` (portals a door closes), `ClipPolygon`. |
 | `Doom3Level` | `TDoom3Map` (`TCastleTransform`, registered for the editor): builds the area scenes, lights, brush entities and md5 entities of a map. |
 | `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, player health / armor, pistol, use. |
@@ -57,16 +58,27 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Contents come from the polygon's material, like Doom 3's surface parameters: `playerclip` blocks the player only; `monsterclip`, `nonsolid`, `water`, `trigger`, `ikclip`, `aassolid`... clear solid (`TD3Material.BlocksPlayer`).
 - Brush entities (doors, movers) keep colliding with their render geometry, which moves with them; their `.cm` models are parsed but not used yet. Without a `.cm`, the render geometry collides as before.
 
+## Light volumes
+
+- Doom 3 lights don't fade with distance: a lit point is mapped into the light's texture space (`R_DeriveLightData`'s `lightProject`) and lit only inside 0..1. Point lights are boxes (`light_radius` around the origin, rotated by `rotation`; `light_center` only moves where the light comes from); projected lights are pyramids from the origin along `light_target`, `light_right` / `light_up` being half the width / height at the target, the falloff running from `light_start` to `light_end` (or the target).
+- `TDoom3Map.BuildLights` makes every light a `TPointLightNode` without attenuation whose `Radius` only bounds CGE's per-shape light lists (the box's corner, the frustum), with an `Effect` from `CreateLightEffect`. The GLSL plugs `PLUG_light_scale`: `p = d3_light_matrix_N * (castle_CameraInverseMatrix * castle_vertex_eye)` gives the fragment's light coordinates; outside the volume the light adds nothing, inside it is scaled by the projection and falloff shapes.
+- `castle_vertex_eye` is the Phong shader's varying (CGE's default shading is Phong, so light code runs per fragment) and `castle_CameraInverseMatrix` comes from CGE's `castle-shader:/EyeWorldSpace.glsl` library. Light effects can't enable libraries, appearance / group effects can: every scene the map builds (areas, brush entities, static and md5 models) gets `AddLightLibrary` on its root, otherwise the matrix is zero and map lights add nothing to it.
+- Projection and falloff **images** are approximated analytically: textures referenced only by light effects are not bound by CGE's renderer (they read as black / garbage). `ProjectionShape` picks a center-bright soft square for `square*` images, a full volume for `bright` / `white`, otherwise a soft disc; the depth falloff follows Doom 3's default point / projected falloff images.
+- Uniform names must be unique per light (several lights' code ends up in one shader), so they are suffixed with the light's index.
+- `r_lightVolumes 0` (`Doom3LightEffects.LightVolumes`) reloads the map with plain spheres / X3D spot lights for comparison.
+
 ## Light shaders
 
 - A material's first plain stage (not `blend diffusemap` / `bumpmap` / `specularmap`) keeps its color registers (`TD3Material.StageColorExpr`): `red` / `green` / `blue` / `alpha`, `rgb`, `rgba`, `color a, b, c, d` (split at top level commas) and `colored` (= `parm0..parm3`). Expressions are read to the end of the line (`TDoom3Lexer.RestOfLine`, `//` comments removed) and parsed character by character, so `time*4` needs no spaces. A missing register is 1.
 - A light's parameters: `parm0..2` = `_color`, `parm3` = 1, `shaderParm0..11` override. No `texture`, or an undeclared one, behaves like Doom 3's default `colored` light. A declared shader without color registers is white, as in Doom 3.
 - `TDoom3Map.Update` advances `Time` and re-evaluates lights whose registers use time (`UsesTime`) while they are on. Colors above 1 become intensity (X3D colors are 0..1); ambient lights scale `AmbientIntensity`.
-- Not yet: light projection and falloff images, Doom 3's box-shaped light volumes (lights are spheres of the largest `light_radius`), `nodiffuse` / `nospecular`, `shaderParm4` time offsets.
+- `shaderParm4` is the time offset (`SHADERPARM_TIMEOFFSET`): the light's `time` is the map time minus it.
+- Not yet: `nodiffuse` / `nospecular`, the exact projection / falloff images (see Light volumes).
 
 ## Portal visibility
 
 - Like Doom 3's renderer: `UpdateVisibility(Camera)` (every frame, from `TViewPlay.Update`) finds the camera's area with the area BSP and flows through the portals. A portal is followed when its polygon, clipped by the current view volume (the camera frustum's side planes at first), is not empty; the view volume is then narrowed to the planes through the eye and the clipped polygon's edges. An eye within 1 unit of a portal's plane passes through with the same planes. Depth and call count are capped.
+- An entity whose bounding box contains a portal (a door) belongs to the areas on both of its sides, so a shut door stays visible from either room.
 - Each area has its own solid and non-solid `TCastleScene` (`AreaScene`, `AreaNonSolidScene`); hidden areas get `Visible := False`, which keeps them colliding. Brush / static model entities know the areas their bounding box touches (`TD3BrushEntity.Areas`), md5 models are tested every frame at their position.
 - Lights are all in the `Lights` scene (global lights). Each knows the areas it reaches (flood from its area through portals within its Doom 3 radius); a light is switched off while none of them is visible, so fewer lights reach the shaders.
 - A `func_door` closes the portals inside its bounding box (grown by 16) while it is shut (`TD3Mover.Portals`), like idDoor's area portal.

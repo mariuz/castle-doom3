@@ -235,6 +235,59 @@ def ceiling_and_glow_textures():
     add('models/test/blob_bmp.tga', tga(64, 64, [[(v,) * 3 for v in r] for r in sn]))
 
 
+def light_images():
+    """Light projection and falloff images, like Doom 3's lights/ folder."""
+    def smooth(e0, e1, x):
+        t = max(0.0, min(1.0, (x - e0) / (e1 - e0)))
+        return t * t * (3 - 2 * t)
+
+    n = 64
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            r = math.hypot((x + 0.5) / n * 2 - 1, (y + 0.5) / n * 2 - 1)
+            v = 1 - smooth(0.75, 1.0, r)
+            row.append((v, v, v))
+        rows.append(row)
+    add('lights/round.tga', tga(n, n, rows))
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            ex = min((x + 0.5) / n, 1 - (x + 0.5) / n) * 2
+            ey = min((y + 0.5) / n, 1 - (y + 0.5) / n) * 2
+            v = smooth(0.0, 0.25, ex) * smooth(0.0, 0.25, ey)
+            row.append((v, v, v))
+        rows.append(row)
+    add('lights/squarelight1.tga', tga(n, n, rows))
+    # falloff along the light box's z: 1 in the middle, 0 at the ends
+    row = []
+    for x in range(n):
+        d = abs((x + 0.5) / n * 2 - 1)
+        v = 1 - smooth(0.3, 1.0, d)
+        row.append((v, v, v))
+    add('lights/squarelight1a.tga', tga(n, 4, [row] * 4))
+    # projected lights: bright near the light, fading to the end
+    row = []
+    for x in range(n):
+        q = (x + 0.5) / n
+        v = (1 - smooth(0.85, 1.0, q)) * smooth(0.0, 0.05, q)
+        row.append((v, v, v))
+    add('lights/projfalloff.tga', tga(n, 4, [row] * 4))
+    # a projected pattern: a soft disc with a cross (stained glass style)
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            u, v = (x + 0.5) / n * 2 - 1, (y + 0.5) / n * 2 - 1
+            disc = 1 - smooth(0.8, 1.0, math.hypot(u, v))
+            cross = 0.35 if (abs(u) < 0.06 or abs(v) < 0.06) else 1.0
+            row.append((disc * cross, disc * cross * 0.95, disc * cross * 0.8))
+        rows.append(row)
+    add('lights/window.tga', tga(n, n, rows))
+
+
 # --------------------------------------------------------------------------
 # Geometry (.proc)
 
@@ -564,6 +617,11 @@ def map_text():
         {'classname': 'light', 'name': 'light_spot', 'origin': '880 -300 260',
          'light_target': '-200 220 -260', 'light_up': '0 0 120', 'light_right': '120 0 0',
          '_color': '1 1 0.8'},
+        # a projected pattern on the floor of room A
+        {'classname': 'light', 'name': 'light_window', 'origin': '0 -150 190',
+         'light_target': '0 0 -190', 'light_up': '0 90 0', 'light_right': '90 0 0',
+         'light_end': '0 0 -240', 'light_start': '0 0 -10',
+         '_color': '0.9 0.85 0.6', 'texture': 'lights/test_window'},
         {'classname': 'light', 'name': 'light_ambient_b', 'origin': '590 0 140',
          'light_radius': '900 900 500', '_color': '0.1 0.1 0.12',
          'texture': 'lights/test_ambient'},
@@ -690,6 +748,37 @@ textures/common/monster_clip
 	qer_editorimage textures/test/metal_d.tga
 	noshadows
 	monsterclip
+}
+
+// like Doom 3's lights.mtr defaults, used by lights without a "texture"
+lights/defaultPointLight
+{
+	lightFalloffImage	makeintensity( lights/squarelight1a.tga )
+	{
+		map lights/squarelight1.tga
+		colored
+		zeroClamp
+	}
+}
+
+lights/defaultProjectedLight
+{
+	lightFalloffImage	lights/projfalloff.tga
+	{
+		map lights/round.tga
+		colored
+		zeroClamp
+	}
+}
+
+lights/test_window
+{
+	lightFalloffImage	lights/projfalloff.tga
+	{
+		map lights/window.tga
+		colored
+		zeroClamp
+	}
 }
 
 lights/test_ambient
@@ -1131,6 +1220,7 @@ def main():
     add('sound/test.sndshd', SOUNDS)
     add('models/md5/test/blob.md5mesh', md5mesh_text())
     barrel_texture()
+    light_images()
     add('models/mapobjects/test/barrel.lwo', barrel_lwo())
     add('models/mapobjects/test/terminal.ase', terminal_ase())
     add('models/md5/test/blob_idle.md5anim', md5anim_text('idle'))

@@ -196,7 +196,7 @@ uses
   Math,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
-  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels;
+  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels, Doom3LightEffects;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -377,6 +377,9 @@ var
   Node: TAbstractPunctualLightNode;
   Shader: TD3Material;
   N, I: Integer;
+  Projected: Boolean;
+  LightMatrix: TMatrix4;
+  ProjectionImage: String;
 begin
   N := 0;
   for E in FMapFile.Entities do
@@ -390,25 +393,19 @@ begin
       Continue;
     LightColor := E.VectorValue('_color', Vector3(1, 1, 1));
     Rot := E.Rotation;
-    if E.HasKey('light_target') then
+    Projected := E.HasKey('light_target');
+    { Doom 3's default light shaders, when the game data has them }
+    if (Shader = nil) and Projected and Decls.HasDecl(dtMaterial, 'lights/defaultprojectedlight') then
+      Shader := Decls.Material('lights/defaultprojectedlight');
+    if (Shader = nil) and not Projected and Decls.HasDecl(dtMaterial, 'lights/defaultpointlight') then
+      Shader := Decls.Material('lights/defaultpointlight');
+    LightCenter := E.VectorValue('light_center', TVector3.Zero);
+    if Projected then
     begin
-      { a projected light: a spot light along light_target }
       TargetVec := E.VectorValue('light_target', Vector3(0, 0, -256));
       UpVec := E.VectorValue('light_up', Vector3(0, 0, 0));
       RightVec := E.VectorValue('light_right', Vector3(0, 0, 0));
-      Spot := TSpotLightNode.Create;
-      Spot.Location := D3ToCge(E.Origin);
-      LightDir := D3RotateCge(Rot, D3ToCge(TargetVec));
-      if LightDir.IsZero then
-        LightDir := Vector3(0, -1, 0);
-      Spot.Direction := LightDir.Normalize;
-      R := Max(UpVec.Length, RightVec.Length);
-      Spot.CutOffAngle := Min(Pi / 2 - 0.01, ArcTan2(R, Max(1, TargetVec.Length)) * 1.2);
-      Spot.BeamWidth := Spot.CutOffAngle * 0.7;
-      Spot.Radius := TargetVec.Length * 1.5;
-      R := Spot.Radius;
-      Spot.Attenuation := Vector3(1, 0, 4 / Sqr(Max(1, Spot.Radius)));
-      Node := Spot;
+      R := TargetVec.Length + Max(UpVec.Length, RightVec.Length);
     end else
     begin
       LightRadius := E.VectorValue('light_radius', Vector3(0, 0, 0));
@@ -417,14 +414,56 @@ begin
         R := E.FloatValue('light', 300);
         LightRadius := Vector3(R, R, R);
       end;
-      LightCenter := E.VectorValue('light_center', TVector3.Zero);
+      R := Max(LightRadius.X, Max(LightRadius.Y, LightRadius.Z));
+    end;
+
+    if LightVolumes then
+    begin
+      { Doom 3's light volume as a shader effect (Doom3LightEffects): a
+        point light without attenuation; its radius only bounds which
+        shapes CGE gives the light to (the box's corner / the frustum) }
+      Point := TPointLightNode.Create;
+      Point.Attenuation := Vector3(1, 0, 0);
+      if Projected then
+      begin
+        Point.Location := D3ToCge(E.Origin);
+        Point.Radius := R * 1.2;
+        LightMatrix := ProjectedLightMatrix(E.Origin, Rot, TargetVec, UpVec, RightVec,
+          E.VectorValue('light_start', TVector3.Zero), E.VectorValue('light_end', TargetVec),
+          E.HasKey('light_start') or E.HasKey('light_end'));
+      end else
+      begin
+        Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
+        Point.Radius := LightRadius.Length + LightCenter.Length + 1;
+        LightMatrix := PointLightMatrix(E.Origin, Rot, LightRadius);
+      end;
+      ProjectionImage := '';
+      if Shader <> nil then
+        ProjectionImage := Shader.StageImage;
+      Point.SetEffects([CreateLightEffect(N, LightMatrix, ProjectionImage, Projected)]);
+      Node := Point;
+    end else
+    if Projected then
+    begin
+      { a spot light along light_target }
+      Spot := TSpotLightNode.Create;
+      Spot.Location := D3ToCge(E.Origin);
+      LightDir := D3RotateCge(Rot, D3ToCge(TargetVec));
+      if LightDir.IsZero then
+        LightDir := Vector3(0, -1, 0);
+      Spot.Direction := LightDir.Normalize;
+      Spot.CutOffAngle := Min(Pi / 2 - 0.01,
+        ArcTan2(Max(UpVec.Length, RightVec.Length), Max(1, TargetVec.Length)) * 1.2);
+      Spot.BeamWidth := Spot.CutOffAngle * 0.7;
+      Spot.Radius := TargetVec.Length * 1.5;
+      Spot.Attenuation := Vector3(1, 0, 4 / Sqr(Max(1, Spot.Radius)));
+      Node := Spot;
+    end else
+    begin
       Point := TPointLightNode.Create;
       Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
-      R := Max(LightRadius.X, Max(LightRadius.Y, LightRadius.Z));
-      { Doom 3's falloff images fade the light to zero at the light box.
-        X3D attenuation can't reach zero and CGE cuts a light off hard at
-        its radius, so the radius is twice the box and the quadratic
-        attenuation is 1/3 at the box and 1/33 at the cut. }
+      { spheres: the radius is twice the box and the quadratic attenuation
+        is 1/3 at the box and 1/33 where CGE cuts the light off }
       Point.Radius := 2 * R;
       Point.Attenuation := Vector3(1, 0, 8 / Sqr(Max(1, R)));
       Node := Point;
@@ -479,7 +518,8 @@ begin
   if FLights[I].Shader = nil then
     Exit(Vector3(FLights[I].Parms.Parms[0], FLights[I].Parms.Parms[1], FLights[I].Parms.Parms[2]));
   Ctx := FLights[I].Parms;
-  Ctx.Time := FTime;
+  { shaderParm4 is Doom 3's time offset (SHADERPARM_TIMEOFFSET) }
+  Ctx.Time := FTime - FLights[I].Parms.Parms[4];
   C := FLights[I].Shader.EvalStageColor(Ctx);
   Result := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z));
 end;
@@ -525,6 +565,8 @@ begin
     Root := TX3DRootNode.Create;
     RootNonSolid := TX3DRootNode.Create;
     BuildProcModel(M, Root, RootNonSolid);
+    AddLightLibrary(Root);
+    AddLightLibrary(RootNonSolid);
 
     FAreaScenes[Area] := TCastleScene.Create(nil);
     FAreaScenes[Area].SetTransient;
@@ -588,7 +630,7 @@ end;
 { Areas a world-space box touches: its corners and center. }
 function BoxAreas(const Map: TDoom3Map; const Box: TBox3D): TD3IntArray;
 var
-  I, A, K: Integer;
+  I, A, K, P2, Side: Integer;
   P: TVector3;
   Known: Boolean;
 begin
@@ -616,6 +658,21 @@ begin
     if not Known then
       Result := Concat(Result, [A]);
   end;
+  { an entity in a portal (a door) belongs to the areas on both sides }
+  if Map.Portals <> nil then
+    for P2 in Map.Portals.PortalsInBox(Box.Grow(16)) do
+      for Side := 0 to 1 do
+      begin
+        A := Map.Portals.PortalArea(P2, Side);
+        if A < 0 then
+          Continue;
+        Known := False;
+        for K := 0 to High(Result) do
+          if Result[K] = A then
+            Known := True;
+        if not Known then
+          Result := Concat(Result, [A]);
+      end;
 end;
 
 function AnyAreaVisible(const Portals: TD3PortalVisibility; const Areas: TD3IntArray): Boolean;
@@ -741,6 +798,7 @@ begin
       end;
     Root := TX3DRootNode.Create;
     BuildProcModel(Model, Root, Root);
+    AddLightLibrary(Root);
     B.Scene := TCastleScene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');

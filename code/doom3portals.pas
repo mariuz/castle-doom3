@@ -59,6 +59,8 @@ type
     { Portals whose polygon center is inside the box (for doors). }
     function PortalsInBox(const Box: TBox3D): TD3IntArray;
     function PortalCenter(const I: Integer): TVector3;
+    { The area on one side (0 positive, 1 negative) of a portal. }
+    function PortalArea(const I, Side: Integer): Integer;
   end;
 
 { Clip a convex polygon by a plane (keeps the inside). }
@@ -318,6 +320,11 @@ begin
     Inc(Head);
   end;
   Result := Queue;
+end;
+
+function TD3PortalVisibility.PortalArea(const I, Side: Integer): Integer;
+begin
+  Result := FAreas[I][Side];
 end;
 
 function TD3PortalVisibility.PortalsInBox(const Box: TBox3D): TD3IntArray;

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0
+
+Light volumes.
+
+- **Doom 3 light volumes**: lights don't fade with distance any more; like Doom 3 each lights a box (point lights, `light_radius`, `rotation`) or a frustum (projected lights, `light_target` / `light_right` / `light_up`, `light_start` / `light_end`), mapped to the light's texture space like `lightProject`, shaped by projection and falloff curves. Implemented as a per-light CGE shader effect (`PLUG_light_scale`) reading the fragment's world position.
+- Lights without a `texture` use Doom 3's `lights/defaultPointLight` / `lights/defaultProjectedLight` when the game data declares them.
+- `shaderParm4` is the light shader's time offset, like Doom 3.
+- Console `r_lightVolumes [0|1]` reloads the map with plain spherical lights for comparison.
+- **Fixed**: a shut door was hidden by portal visibility when seen from the room on its other side (it now belongs to the areas on both sides of its portal).
+- Test level: a projected window light, Doom 3-style default light shaders and light images.
+- 210 checks (light texture space, projected lights, shapes).
+
+Known limitation: projection and falloff images are approximated by analytic shapes chosen from the image name (CGE doesn't bind textures referenced only by light effects).
+
 ## 0.5.0
 
 Light shaders.
