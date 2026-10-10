@@ -432,6 +432,110 @@ def proc_text():
 
 
 # --------------------------------------------------------------------------
+# Collision model (.cm)
+
+CLIP = 'textures/common/clip'
+MONSTER_CLIP = 'textures/common/monster_clip'
+
+
+def quads_of(model, skip=()):
+    """The polygons (4 corners, counter-clockwise from the front) and
+    materials of a Model's surfaces; Surface.quad always adds 4 vertexes."""
+    for surf in model.surfaces.values():
+        if surf.material in skip:
+            continue
+        for k in range(0, len(surf.verts), 4):
+            yield [surf.verts[k + c][0] for c in range(4)], surf.material
+
+
+def box_quads(mins, maxs, material):
+    m = Model('tmp')
+    box(m, material, mins, maxs)
+    return list(quads_of(m))
+
+
+def cm_model(name, polygons, brushes=()):
+    """polygons: (corners, material); brushes: (mins, maxs, contents)."""
+    verts, vindex = [], {}
+    edges, eindex = [(0, 0)], {}
+
+    def vi(p):
+        key = tuple(round(c, 4) for c in p)
+        if key not in vindex:
+            vindex[key] = len(verts)
+            verts.append(key)
+        return vindex[key]
+
+    polys = []
+    for corners, material in polygons:
+        ids = [vi(c) for c in corners]
+        pedges = []
+        for k in range(len(ids)):
+            a, b = ids[k], ids[(k + 1) % len(ids)]
+            if (a, b) in eindex:
+                pedges.append(eindex[(a, b)])
+            elif (b, a) in eindex:
+                pedges.append(-eindex[(b, a)])
+            else:
+                eindex[(a, b)] = len(edges)
+                edges.append((a, b))
+                pedges.append(eindex[(a, b)])
+        p0, p1, p2 = corners[0], corners[1], corners[2]
+        e1 = [p1[i] - p0[i] for i in range(3)]
+        e2 = [p2[i] - p0[i] for i in range(3)]
+        n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
+        ln = math.sqrt(sum(c * c for c in n)) or 1
+        n = tuple(c / ln for c in n)
+        dist = sum(n[i] * p0[i] for i in range(3))
+        mins = [min(c[i] for c in corners) for i in range(3)]
+        maxs = [max(c[i] for c in corners) for i in range(3)]
+        polys.append((pedges, n, dist, mins, maxs, material))
+
+    out = ['collisionModel "%s" {' % name, '\tvertices { /* numVertices = */ %d' % len(verts)]
+    for i, v in enumerate(verts):
+        out.append('\t/* %d */ ( %s %s %s )' % (i, fmt(v[0]), fmt(v[1]), fmt(v[2])))
+    out += ['\t}', '\tedges { /* numEdges = */ %d' % len(edges)]
+    for i, (a, b) in enumerate(edges):
+        out.append('\t/* %d */ ( %d %d ) 0 %d' % (i, a, b, 0 if i == 0 else 2))
+    out += ['\t}', '\tnodes {', '\t( -1 0 )', '\t}',
+            '\tpolygons /* numPolygons = */ %d /* numPolygonEdges = */ %d {'
+            % (len(polys), sum(len(pp[0]) for pp in polys))]
+    for (pedges, n, dist, mins, maxs, material) in polys:
+        out.append('\t%d ( %s ) ( %s %s %s ) %s ( %s %s %s ) ( %s %s %s ) "%s"' % (
+            len(pedges), ' '.join(str(e) for e in pedges), fmt(n[0]), fmt(n[1]), fmt(n[2]), fmt(dist),
+            fmt(mins[0]), fmt(mins[1]), fmt(mins[2]), fmt(maxs[0]), fmt(maxs[1]), fmt(maxs[2]), material))
+    out += ['\t}', '\tbrushes /* numBrushes = */ %d /* numBrushSides = */ %d {'
+            % (len(brushes), 6 * len(brushes))]
+    for (mins, maxs, contents) in brushes:
+        out.append('\t6 {')
+        for axis in range(3):
+            n = [0, 0, 0]
+            n[axis] = 1
+            out.append('\t\t( %d %d %d ) %s' % (n[0], n[1], n[2], fmt(maxs[axis])))
+            n[axis] = -1
+            out.append('\t\t( %d %d %d ) %s' % (n[0], n[1], n[2], fmt(-mins[axis])))
+        out.append('\t} ( %s %s %s ) ( %s %s %s ) "%s"' % (
+            fmt(mins[0]), fmt(mins[1]), fmt(mins[2]), fmt(maxs[0]), fmt(maxs[1]), fmt(maxs[2]), contents))
+    out += ['\t}', '}']
+    return '\n'.join(out)
+
+
+def cm_text():
+    world = list(quads_of(area0, skip=(GLOW,))) + list(quads_of(area1, skip=(GLOW,)))
+    # an invisible playerclip wall across the west of room A (y = 0, x -256..-120)
+    clip_box = ((-256, -4, 0), (-120, 4, 192))
+    world += box_quads(clip_box[0], clip_box[1], CLIP)
+    # a monster clip strip the player walks through (x = -40, y -256..-80)
+    world += box_quads((-44, -256, 0), (-36, -80, 192), MONSTER_CLIP)
+    brushes = [(clip_box[0], clip_box[1], 'playerclip')]
+    out = ['CM "1.00"', '', '1234567890', '']
+    out.append(cm_model('worldMap', world, brushes))
+    for m in (door, crate, crate2, spinner):
+        out.append(cm_model(m.name, list(quads_of(m)), []))
+    return '\n'.join(out) + '\n'
+
+
+# --------------------------------------------------------------------------
 # Entities (.map)
 
 def map_text():
@@ -568,6 +672,20 @@ models/test/blob
 	diffusemap	models/test/blob_d.tga
 	bumpmap		heightmap(models/test/blob_bmp.tga, 4)
 	specularmap	makeIntensity(models/test/blob_d.tga)
+}
+
+textures/common/clip
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	playerclip
+}
+
+textures/common/monster_clip
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	monsterclip
 }
 
 lights/test_ambient
@@ -974,6 +1092,7 @@ def main():
     ceiling_and_glow_textures()
     add('maps/testmap.proc', proc_text())
     add('maps/testmap.map', map_text())
+    add('maps/testmap.cm', cm_text())
     add('materials/test.mtr', MATERIALS)
     add('def/test.def', DEFS)
     add('sound/test.sndshd', SOUNDS)

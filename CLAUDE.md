@@ -4,9 +4,9 @@ Working notes for developers and AI agents on Castle Doom 3: a Doom 3 (id Tech 4
 
 ## What this is
 
-- Doom 3 data (`.proc`, `.map`, `.mtr`, `.def`, `.skin`, `.sndshd`, `.md5mesh`, `.md5anim`, `.lwo`, `.ase`, TGA / DDS images, WAV / OGG sounds) is read at runtime from PK4 archives and served to CGE through the `d3fs:` and `d3img:` URL protocols.
+- Doom 3 data (`.proc`, `.map`, `.mtr`, `.def`, `.skin`, `.sndshd`, `.md5mesh`, `.md5anim`, `.lwo`, `.ase`, `.cm`, TGA / DDS images, WAV / OGG sounds) is read at runtime from PK4 archives and served to CGE through the `d3fs:` and `d3img:` URL protocols.
 - Bundled data is only the generated test level `data/base/castle_doom3_test.pk4` (map `testmap`), written by `tools/make_test_pk4.py`. **Never commit id Software data**; a Doom 3 install is loaded with `-basepath` or a `base/` directory next to the exe (gitignored).
-- Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3StaticModels`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
+- Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3StaticModels`, `Doom3Collision`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
 
 ## Build and run (Windows)
 
@@ -27,14 +27,15 @@ Keep the project at a short path (`E:\Work\castle-doom3`): long paths break FPC 
 .\castle-doom3.exe --autotest MENU C:\TMP\cd3\s
 ```
 
-Pass the whole `--demo` value as one argument (from PowerShell `Start-Process`, quote it inside `-ArgumentList`, or the spaces in `G:x y z` split it). Script commands are listed in the README; grep the log for `Warning|Exception|Screenshot|Message|Shot:`. Screenshot log lines show the FPS, eye position (Doom 3 coordinates), yaw and area. Useful test map spots: start (-160, -160) yaw 45; LWO barrels at (-60, 190) and (-12, 206); ASE terminals at (200, 200) (`noclipmodel`, faces yaw -135) and on the balcony (820, -280, 96) (see its screen from (740, -200, 96) yaw -45); in front of the door (200, 0) yaw 0 (it opens within ~1 s); room B (420, -250); creatures are monsters 0 and 1 (`N:0`). `blob_1` has 80 health, the pistol does 14 per shot every 0.35 s (6 hits kill it).
+Pass the whole `--demo` value as one argument (from PowerShell `Start-Process`, quote it inside `-ArgumentList`, or the spaces in `G:x y z` split it). Script commands are listed in the README; grep the log for `Warning|Exception|Screenshot|Message|Shot:`. Screenshot log lines show the FPS, eye position (Doom 3 coordinates), yaw and area. Useful test map spots: start (-160, -160) yaw 45; LWO barrels at (-60, 190) and (-12, 206); ASE terminals at (200, 200) (`noclipmodel`, faces yaw -135) and on the balcony (820, -280, 96) (see its screen from (740, -200, 96) yaw -45); in front of the door (200, 0) yaw 0 (it opens within ~1 s); the invisible playerclip wall is y = 0 for x < -120 (from (-200, -100) yaw 90, `GO:1 0 1.5` stops at y = -20.7); the monster clip strip at x = -40 lets the player through; climbing to the balcony: `G:560 0 0,A:0,GO:1 0 2.5` ends with eye z 163.5; room B (420, -250); creatures are monsters 0 and 1 (`N:0`). `blob_1` has 80 health, the pistol does 14 per shot every 0.35 s (6 hits kill it).
 
-Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (127 checks; run from `tests/`). When the generator changes, update the expected counts there.
+Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (147 checks; run from `tests/`). When the generator changes, update the expected counts there.
 
 ## CGE editor integration
 
 - `editor_units="Doom3Level, Doom3Hud, Doom3Console"`; these call `RegisterSerializableComponent`. Children created by a component must call `SetTransient`.
 - `TDoom3Map` builds the map in the editor (`Loaded` + `CastleDesignMode`); in the game `TViewPlay` calls `LoadMap`. Keep it at identity transform: gameplay uses its local space as world space. `TDoom3Map.EnsureData` adds the test PK4 and loads decls when the editor runs without `GameInitialize`.
+- With a `.cm`, `World` doesn't collide (`WorldCollision` does) but stays pickable: shots / ray casts use `Pickable`, player and segment collisions use `Collides`.
 - Call `TD3Game.Clear` before `TDoom3Map.LoadMap` (movers and speakers reference the map's scenes).
 
 ## Conventions and pitfalls
@@ -44,7 +45,7 @@ Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (127 che
 - Pascal `{ }` comments end at the first `}`: don't write braces inside them (use words or `//`).
 - Orient transforms with `SetD3Rotation`, never `SetView(..., -Z ...)` by hand: CGE's default `TCastleTransform.Orientation` is `otUpYDirectionZ` (direction = local +Z). Symmetric test models hide a 180° error; the terminal's screen and `TestEntityRotation` catch it.
 - The bash tool mangles backslashes in heredocs (a backslash before `t` becomes a tab): write Windows paths into Pascal sources with the file editor or a script file.
-- Locals named like `TCastleTransform` properties (`Center`, `Up`, `Direction`...) clash inside `TDoom3Map` methods.
+- Locals named like `TCastleTransform` properties (`Center`, `Up`, `Direction`, `World`...) clash inside `TDoom3Map` methods.
 - `TCastleSoundSource` lives in `CastleBehaviors`; `Container.Pressed.KeyUp` has an `out` key string.
 - CGE cuts a light off hard at its `Radius`; keep attenuation low there (see `BuildLights`).
 - One X3D node must not be in two scenes: `MaterialAppearance` creates fresh nodes each call, textures are shared by URL.

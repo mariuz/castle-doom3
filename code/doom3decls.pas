@@ -37,6 +37,9 @@ type
     StageColor: TVector4;
     AlphaTest: Single;
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
+    { A surface parameter that clears the solid contents (water, trigger,
+      monsterclip, ikclip, aassolid... like Doom 3's clearSolid parms). }
+    ClearsSolid: Boolean;
     { A stage needs something we don't render (cube maps, GUIs, mirrors,
       videos, fragment programs). }
     HasSpecialStage: Boolean;
@@ -48,6 +51,8 @@ type
     function IsInvisible: Boolean;
     { Collides with the player? }
     function IsSolid: Boolean;
+    { Blocks the player in a collision model: solid or playerclip. }
+    function BlocksPlayer: Boolean;
   end;
 
   { A "model" declaration from a .def file. }
@@ -167,6 +172,11 @@ end;
 function TD3Material.IsSolid: Boolean;
 begin
   Result := not NonSolid;
+end;
+
+function TD3Material.BlocksPlayer: Boolean;
+begin
+  Result := PlayerClip or not (NonSolid or ClearsSolid);
 end;
 
 { TD3ModelDecl }
@@ -512,10 +522,19 @@ begin
         Result.NoShadows := True
       else
       if L = 'playerclip' then
-        Result.PlayerClip := True
-      else
+      begin
+        Result.PlayerClip := True;
+        Result.ClearsSolid := True;
+      end else
       if L = 'monsterclip' then
-        Result.MonsterClip := True
+      begin
+        Result.MonsterClip := True;
+        Result.ClearsSolid := True;
+      end else
+      if (L = 'water') or (L = 'moveableclip') or (L = 'ikclip') or (L = 'blood') or
+         (L = 'trigger') or (L = 'aassolid') or (L = 'aasobstacle') or
+         (L = 'flashlight_trigger') or (L = 'corpse') then
+        Result.ClearsSolid := True
       else
       if L = 'ambientlight' then
         Result.IsAmbientLight := True

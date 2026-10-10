@@ -24,7 +24,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
-  Doom3Proc, Doom3MapFile, Doom3Md5;
+  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision;
 
 type
   { A brush entity (its .proc model) or a static model entity (.lwo / .ase)
@@ -59,7 +59,9 @@ type
     FLightScale: Single;
     FProc: TD3ProcFile;
     FMapFile: TD3MapFile;
-    FWorld, FWorldNonSolid: TCastleScene;
+    FWorld, FWorldNonSolid, FWorldCollision: TCastleScene;
+    FCollision: TD3CollisionFile;
+    FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
     FModels: specialize TObjectList<TD3ModelEntity>;
     FLights: array of TD3LightInfo;
@@ -75,6 +77,7 @@ type
     procedure ClearMap;
     procedure Rebuild;
     procedure BuildWorld;
+    procedure BuildCollision(const Base: String);
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
     procedure BuildModelEntities;
@@ -107,6 +110,10 @@ type
     property Proc: TD3ProcFile read FProc;
     property MapFile: TD3MapFile read FMapFile;
     property World: TCastleScene read FWorld;
+    { The .cm collision model, nil when the map has none (or
+      UseCollisionModel is off): then the render geometry collides. }
+    property Collision: TD3CollisionFile read FCollision;
+    property WorldCollision: TCastleScene read FWorldCollision;
     property Brushes: specialize TObjectList<TD3BrushEntity> read FBrushes;
     property Models: specialize TObjectList<TD3ModelEntity> read FModels;
     { Player start in CGE coordinates (feet) and Doom 3 yaw. }
@@ -120,6 +127,9 @@ type
     property MapName: String read FMapName write SetMapName;
     { Create animated md5 models for monsters, characters and func_animate. }
     property SpawnModels: Boolean read FSpawnModels write SetSpawnModels default True;
+    { Collide with the map's .cm collision model (with Doom 3's invisible
+      clip brushes) instead of the render geometry, when the map has one. }
+    property UseCollisionModel: Boolean read FUseCollisionModel write FUseCollisionModel default True;
     { Multiplies all light intensities. }
     property LightScale: Single read FLightScale write FLightScale {$ifdef FPC}default 1{$endif};
     { Read-only information, visible in the editor's inspector. }
@@ -199,6 +209,7 @@ constructor TDoom3Map.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FSpawnModels := True;
+  FUseCollisionModel := True;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
@@ -215,7 +226,7 @@ end;
 function TDoom3Map.PropertySections(const PropertyName: String): TPropertySections;
 begin
   if ArrayContainsString(PropertyName, ['MapName', 'SpawnModels', 'LightScale',
-    'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount', 'StaticModelCount']) then
+    'AreaCount', 'EntityCount', 'TriangleCount', 'LightCount', 'StaticModelCount', 'UseCollisionModel']) then
     Result := [psBasic]
   else
     Result := inherited PropertySections(PropertyName);
@@ -239,6 +250,8 @@ begin
   FLights := nil;
   FreeAndNil(FWorld);
   FreeAndNil(FWorldNonSolid);
+  FreeAndNil(FWorldCollision);
+  FreeAndNil(FCollision);
   FreeAndNil(FProc);
   FreeAndNil(FMapFile);
 end;
@@ -418,6 +431,32 @@ begin
   FWorldNonSolid.Collides := False;
   FWorldNonSolid.Pickable := False;
   Add(FWorldNonSolid);
+end;
+
+procedure TDoom3Map.BuildCollision(const Base: String);
+var
+  WorldModel: TD3CollisionModel;
+begin
+  if not (FUseCollisionModel and D3Fs.FileExists(Base + '.cm')) then
+    Exit;
+  FCollision := TD3CollisionFile.Create;
+  if not FCollision.LoadFromVfs(Base + '.cm') then
+  begin
+    FreeAndNil(FCollision);
+    Exit;
+  end;
+  WorldModel := FCollision.World;
+  FWorldCollision := TCastleScene.Create(nil);
+  FWorldCollision.SetTransient;
+  FWorldCollision.Name := 'WorldCollision';
+  FWorldCollision.Load(WorldModel.BuildCollisionNode, True);
+  FWorldCollision.PreciseCollisions := True;
+  { invisible, collides (player, monsters' sight), not pickable: shots and
+    floor ray casts hit the visible world }
+  FWorldCollision.Visible := False;
+  FWorldCollision.Pickable := False;
+  Add(FWorldCollision);
+  FWorld.Collides := False;
 end;
 
 procedure TDoom3Map.BuildBrushEntities;
@@ -655,6 +694,7 @@ begin
     end;
 
   BuildWorld;
+  BuildCollision(Base);
   BuildBrushEntities;
   BuildStaticModelEntities;
   if FSpawnModels then

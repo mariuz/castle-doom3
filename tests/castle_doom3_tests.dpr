@@ -12,7 +12,7 @@ uses
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
-  Doom3StaticModels, Doom3Level, CastleTransform;
+  Doom3StaticModels, Doom3Level, Doom3Collision, CastleTransform, CastleUtils;
 
 var
   Passed, Failed: Integer;
@@ -78,7 +78,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(30, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(31, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -105,7 +105,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(9, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(11, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -325,6 +325,79 @@ begin
     S.Positions[S.Indexes[2]] - S.Positions[S.Indexes[0]]).Normalize;
 end;
 
+procedure TestCollisionModel;
+var
+  Cm: TD3CollisionFile;
+  W: TD3CollisionModel;
+  Coords: TVector3List;
+  Indexes: TInt32List;
+  I, ClipPolys, MonsterClipPolys, Fan: Integer;
+  P: TD3CmPolygon;
+  Found: Boolean;
+begin
+  Check(Decls.Material('textures/common/clip').BlocksPlayer, 'playerclip blocks the player');
+  Check(not Decls.Material('textures/common/monster_clip').BlocksPlayer, 'monsterclip does not');
+  Check(Decls.Material('textures/test/wall').BlocksPlayer, 'a plain material is solid');
+  Check(Decls.Material('textures/common/clip').IsInvisible, 'clip is not drawn');
+
+  Cm := TD3CollisionFile.Create;
+  try
+    Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
+    CheckEquals(5, Cm.ModelCount, 'cm models (world + 4 brush entities)');
+    CheckEquals(1234567890, Cm.Crc, 'cm crc');
+    W := Cm.World;
+    Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
+    if W = nil then
+      Exit;
+    CheckEquals(1, W.NodeCount, 'one leaf node');
+    CheckEquals(1, Length(W.Brushes), 'one brush');
+    if Length(W.Brushes) > 0 then
+    begin
+      CheckEquals(6, Length(W.Brushes[0].Planes), 'brush sides');
+      CheckEquals('playerclip', W.Brushes[0].Contents, 'brush contents');
+      CheckNear(-120, W.Brushes[0].Maxs.X, 'brush bounds');
+    end;
+    Check(Cm.FindModel('DOOR_1') <> nil, 'brush entity collision model');
+
+    ClipPolys := 0;
+    MonsterClipPolys := 0;
+    Fan := 0;
+    for P in W.Polygons do
+    begin
+      if P.Material = 'textures/common/clip' then
+        Inc(ClipPolys);
+      if P.Material = 'textures/common/monster_clip' then
+        Inc(MonsterClipPolys);
+      Inc(Fan, Length(P.Verts) - 2);
+    end;
+    CheckEquals(6, ClipPolys, 'playerclip box polygons');
+    CheckEquals(6, MonsterClipPolys, 'monsterclip box polygons');
+
+    { the first polygon is room A's west wall: vertexes 0 1 2 3 from edges 1..4 }
+    CheckEquals(4, Length(W.Polygons[0].Verts), 'quad polygon');
+    Check((W.Polygons[0].Verts[0] = 0) and (W.Polygons[0].Verts[1] = 1) and
+      (W.Polygons[0].Verts[2] = 2) and (W.Polygons[0].Verts[3] = 3), 'polygon vertexes from edges');
+    { every polygon's vertexes lie on its plane, also through reversed edges }
+    Found := True;
+    for P in W.Polygons do
+      for I := 0 to High(P.Verts) do
+        if Abs(TVector3.DotProduct(P.Normal, W.Vertices[P.Verts[I]]) - P.Dist) > 0.01 then
+          Found := False;
+    Check(Found, 'polygon vertexes are on their planes (signed edges decoded)');
+
+    W.PlayerTriangles(Coords, Indexes);
+    try
+      CheckEquals(3 * (Fan - 2 * MonsterClipPolys), Indexes.Count,
+        'player collision triangles: all but monsterclip');
+    finally
+      Coords.Free;
+      Indexes.Free;
+    end;
+  finally
+    Cm.Free;
+  end;
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -428,6 +501,7 @@ begin
   TestMd5;
   TestStaticModels;
   TestEntityRotation;
+  TestCollisionModel;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

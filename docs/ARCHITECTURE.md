@@ -10,7 +10,8 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
                                             ├─► Doom3Proc   (.proc areas, brush models, portals, BSP)
                                             ├─► Doom3MapFile (.map entities)
                                             ├─► Doom3Md5    (.md5mesh / .md5anim, CPU skinning)
-                                            └─► Doom3StaticModels (.lwo / .ase)
+                                            ├─► Doom3StaticModels (.lwo / .ase)
+                                            └─► Doom3Collision (.cm)
                                                          │
                                        Doom3Level (TDoom3Map component) ─► Doom3World (TD3Game: doors, AI, sounds, player)
                                                          │
@@ -30,6 +31,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 | `Doom3MapFile` | `.map` entities (key / value pairs, primitive count; brushes and patches skipped), `origin` / `angle` / `rotation` helpers, coordinate conversion. |
 | `Doom3Md5` | md5mesh joints / meshes / weights, md5anim hierarchy / baseframe / frames, absolute poses, frame interpolation (lerp + normalized quaternion lerp), skinning. `TD3Md5Instance` owns a `TCastleScene`, `PlayAnim`, `Update`. `Md5Cache` shares parsed files. |
 | `Doom3StaticModels` | LWO2 (`TAGS`, `LAYR`, `PNTS`, `VMAP` / `VMAD` `TXUV`, `POLS` `FACE` as triangle fans, `PTAG` `SURF`) and ASE (`*MATERIAL` / `*SUBMATERIAL` `*BITMAP` and UV tiling / offset, `*GEOMOBJECT` meshes, `*MESH_MTLID`, `*MATERIAL_REF`). Surfaces per material with Doom-style smooth normals (vertexes sharing position and UV). `StaticModels` caches them. |
+| `Doom3Collision` | `.cm` files: per `collisionModel` the vertices, edges (edge 0 is a dummy; a negative edge in a polygon is used backwards and starts at its second vertex), BSP nodes (counted), polygons (`numEdges ( edges ) ( normal ) dist ( min ) ( max ) "material"`) and brushes (`n { ( normal ) dist ... } ( min ) ( max ) "contents"`). `PlayerTriangles` / `BuildCollisionNode` turn the polygons whose material `BlocksPlayer` into triangle fans. |
 | `Doom3Level` | `TDoom3Map` (`TCastleTransform`, registered for the editor): builds the area scenes, lights, brush entities and md5 entities of a map. |
 | `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, player health / armor, pistol, use. |
 | `Doom3Hud`, `Doom3Console` | UI components drawn with `DrawRectangle` and `UIFont`. |
@@ -46,6 +48,12 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - A light's CGE radius is twice its Doom 3 light box, with quadratic attenuation `1 / (1 + 8 d² / r²)`: 1/3 at the box, ~3% where CGE cuts the light off (CGE stops a light hard at its radius).
 - Sound shader distances are meters (× 39.37 units); volume is dB.
 
+## Collision
+
+- With a `maps/<name>.cm` (and `UseCollisionModel`), `TDoom3Map` loads the `worldMap` model into `WorldCollision`: invisible (`Visible := False`), `PreciseCollisions`, not pickable. `World` then has `Collides := False`. So the player and `WorldSegmentCollision` (monster sight, monster movement) use Doom 3's collision geometry with its `playerclip` brushes and without render-only detail, while `WorldRayCast` (shots, monster floor following) hits what you see.
+- Contents come from the polygon's material, like Doom 3's surface parameters: `playerclip` blocks the player only; `monsterclip`, `nonsolid`, `water`, `trigger`, `ikclip`, `aassolid`... clear solid (`TD3Material.BlocksPlayer`).
+- Brush entities (doors, movers) keep colliding with their render geometry, which moves with them; their `.cm` models are parsed but not used yet. Without a `.cm`, the render geometry collides as before.
+
 ## Rendering notes
 
 - One `TCastleScene` (`World`) holds every area's solid surfaces and all lights; `WorldNonSolid` holds `nonsolid`, translucent and blended surfaces with `Collides := False`. Each area and material is its own shape, so frustum culling and per-shape light lists stay effective (`MaxLightsPerShape` 32).
@@ -55,4 +63,4 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 
 ## The test level
 
-`tools/make_test_pk4.py` writes every file of `data/base/castle_doom3_test.pk4` in real Doom 3 formats: a `.proc` with two areas, a portal and one BSP node; brush models for a door, two crates and a fan; an LWO barrel (two surfaces, n-gon caps, a `VMAD` seam) and an ASE terminal (sub-materials with UNC / drive `*BITMAP` paths); a `.map` with the player start, 8 lights, the brush entities, static models (one `noclipmodel`), two creatures and a speaker; materials exercising `heightmap()`, `addnormals()`, stage-based maps, `_flat`, additive stages, ambient and strobe light shaders and a table; procedural textures; a 7-joint md5 creature with idle and walk animations; a model decl, entityDefs with `inherit`; sound shaders and WAVs. The unit tests check the parsers against it.
+`tools/make_test_pk4.py` writes every file of `data/base/castle_doom3_test.pk4` in real Doom 3 formats: a `.proc` with two areas, a portal and one BSP node; brush models for a door, two crates and a fan; an LWO barrel (two surfaces, n-gon caps, a `VMAD` seam) and an ASE terminal (sub-materials with UNC / drive `*BITMAP` paths); a `.cm` with the world's polygons (minus the ceiling glow panels), an invisible `textures/common/clip` wall, a `textures/common/monster_clip` strip, a brush and the brush entities' models; a `.map` with the player start, 8 lights, the brush entities, static models (one `noclipmodel`), two creatures and a speaker; materials exercising `heightmap()`, `addnormals()`, stage-based maps, `_flat`, additive stages, ambient and strobe light shaders and a table; procedural textures; a 7-joint md5 creature with idle and walk animations; a model decl, entityDefs with `inherit`; sound shaders and WAVs. The unit tests check the parsers against it.
