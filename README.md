@@ -32,6 +32,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | `.md5mesh` / `.md5anim` skeletal models, model decls (`mesh`, `anim`, `offset`, `inherit`), skins | `Doom3Md5`: CPU skinning into a `TCoordinateNode` each frame, interpolated frames, one `TCastleScene` per instance |
 | `.lwo` (LightWave LWO2: `PNTS`, `POLS`, `PTAG`, `TAGS`, `VMAP` / `VMAD` UVs) and `.ase` (3ds Max ASCII: sub-materials, `*BITMAP` → material) static models for `func_static`, props, light fixtures, items, LWO doors | `Doom3StaticModels`: Doom 3's coordinate swaps and face flips, Doom-style smooth normals (shared position and UV), one `TCastleScene` per entity; map geometry (`func_*`) collides unless `noclipmodel` |
 | `.cm` collision models (vertices, signed edges, nodes, polygons with materials, brushes) with Doom 3's invisible `playerclip` brushes; contents from material surface parameters (`playerclip`, `monsterclip`, `nonsolid`, `water`, `trigger`...) | `Doom3Collision`: the world model's player-blocking polygons as an invisible scene (`Visible := False`, `PreciseCollisions`) that the player and monster sight collide with; the render scene stays pickable for shots |
+| Light shaders: stage color registers (`red`, `green`, `blue`, `alpha`, `rgb`, `rgba`, `color`, `colored`) with material expressions (`time`, `parm0-11`, `global0-7`, `table[...]`, arithmetic, comparisons, `&&` / `\|\|`) and `table` decls (`snap`, `clamp`): strobes, flickers, pulses; `shaderParm0-11` | `Doom3Expressions` (expression trees, idDeclTable lookups); `TDoom3Map` re-evaluates animated lights every frame and sets the X3D lights' `Color` / `Intensity` |
 | Portal visibility: the area BSP, `interAreaPortals`, doors closing portals, lights limited to the areas they reach | `Doom3Portals`: portal flow from the camera's area through portal polygons clipped by the camera `Frustum` and narrowed per portal; one `TCastleScene` per area and the entities, md5 models and lights of hidden areas get `Visible := False` / `IsOn := False` (console `r_usePortals`, `portals`) |
 | `entityDef` with `inherit` | merged key / value dictionaries (`Doom3Decls`) |
 | `func_door` (opens when you come near, `movedir` incl. up / down, `lip`, `speed`, `time`, `wait`, `locked`, `snd_open` / `snd_close`), `func_static`, `func_rotating` | brush entity scenes moved by `TD3Mover`; `TCastleSoundSource` behaviors for door sounds |
@@ -40,7 +41,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | Monsters (`monster_*` entityDefs with md5 models) | a tiny idAI: sight checks with `WorldSegmentCollision`, chase with wall sliding, floor following with `WorldRayCast`, melee, death |
 | HUD, console, menu | `TDoom3Hud`, `TDoom3Console` (registered components), a map list from the PK4s |
 
-The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with glowing screens, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, eight lights (point, projected, ambient), a looping hum and two animated md5 creatures that chase you.
+The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with glowing screens, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, eight lights (point, projected, ambient; flickering, pulsing and strobing light shaders), a looping hum and two animated md5 creatures that chase you.
 
 ---
 
@@ -63,7 +64,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `portals`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `portals`, `lights`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 
@@ -107,7 +108,7 @@ Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` tur
 ```powershell
 cd tests
 castle-engine compile
-.\castle-doom3-tests.exe   # 162 checks of the lexer, PK4, decls, images, .proc, .map, .cm, md5, lwo, ase parsers and portal visibility
+.\castle-doom3-tests.exe   # 193 checks of the lexer, PK4, decls, expressions, images, .proc, .map, .cm, md5, lwo, ase parsers and portal visibility
 ```
 
 ### Regenerating the test level

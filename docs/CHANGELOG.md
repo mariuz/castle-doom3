@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+Light shaders.
+
+- **Material expressions and tables** (`Doom3Expressions`): `time`, `parm0-11`, `global0-7`, `table[...]` lookups (`snap`, `clamp`, wrapping and interpolation like Doom 3), arithmetic, comparisons, `&&` / `||`, with Doom 3's operator priorities.
+- **Animated lights**: light shaders' color registers (`red`, `green`, `blue`, `rgb`, `rgba`, `color`, `colored`) are evaluated every frame with the light's `_color` and `shaderParm`s, so strobes, flickers and pulses work. A declared shader without color registers is white, an undeclared one uses `_color`, like Doom 3.
+- Console `lights` lists every light's current color.
+- Test level: a flickering (snap table), a pulsing (sine table) and a strobing light.
+- 193 checks (expressions, tables, light shaders); CI checks that the pulsing light changes.
+
 ## 0.4.0
 
 Portal visibility.

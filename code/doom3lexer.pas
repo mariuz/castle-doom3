@@ -49,6 +49,9 @@ type
     procedure SkipBracedSection;
     { Skip the rest of the current line. }
     procedure SkipLine;
+    { The rest of the current line (without a // comment), consumed.
+      Only valid when nothing was peeked. }
+    function RestOfLine: String;
     { Was the last token returned by Next a quoted string? }
     property WasQuoted: Boolean read FWasQuoted;
     property Line: Integer read FLine;
@@ -264,6 +267,21 @@ begin
       if T = '}' then
         Dec(Depth);
     end;
+end;
+
+function TDoom3Lexer.RestOfLine: String;
+var
+  Start, Len, P: Integer;
+begin
+  Len := Length(FText);
+  Start := FPos;
+  while (FPos <= Len) and (FText[FPos] <> #10) do
+    Inc(FPos);
+  Result := Copy(FText, Start, FPos - Start);
+  P := Pos('//', Result);
+  if P > 0 then
+    SetLength(Result, P - 1);
+  Result := Trim(Result);
 end;
 
 procedure TDoom3Lexer.SkipLine;

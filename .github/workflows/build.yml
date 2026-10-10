@@ -115,6 +115,8 @@ jobs:
           grep "Screenshot" test_output/portals.log | sed -n 1p | grep -q "visible areas 1" || { echo "::error::closed door should hide room B"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 2p | grep -q "visible areas 2" || { echo "::error::room B should be visible through the open door"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 3p | grep -q "visible areas 1" || { echo "::error::room B should be hidden behind the camera"; exit 1; }
+          run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,Q"
+          test "$(grep 'Lights: light_4 ' test_output/lights.log | sort -u | wc -l)" -ge 2 || { echo "::error::the pulsing light should change color"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
           ls -l test_output
           test "$(ls test_output/*.png | wc -l)" -ge 12

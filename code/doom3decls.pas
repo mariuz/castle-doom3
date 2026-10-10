@@ -14,7 +14,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleLog,
-  Doom3Lexer;
+  Doom3Lexer, Doom3Expressions;
 
 type
   TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtOther);
@@ -47,6 +47,14 @@ type
     IsAmbientLight, IsFogLight, IsBlendLight: Boolean;
     LightFalloffImage: String;
     GuiSurf: String;
+    { Color registers (red, green, blue, alpha) of the first plain stage
+      (for lights: the light's color); nil means 1. Owned. }
+    StageColorExpr: array [0..3] of TD3Expr;
+    destructor Destroy; override;
+    { The stage color for an entity's parameters at a time. }
+    function EvalStageColor(const Ctx: TD3ExprContext): TVector4;
+    { Does the stage color change with time? }
+    function StageColorAnimated: Boolean;
     { True when the surface has nothing we can draw. }
     function IsInvisible: Boolean;
     { Collides with the player? }
@@ -96,6 +104,7 @@ type
     FSkins: specialize TObjectDictionary<String, TD3Skin>;
     FSounds: specialize TObjectDictionary<String, TD3SoundShader>;
     FEntityDefs: specialize TObjectDictionary<String, TStringList>;
+    FTables: specialize TObjectDictionary<String, TD3Table>;
     FLoaded: Boolean;
     procedure IndexFile(const Path: String; const DefaultType: TD3DeclType);
     function ParseMaterial(const Name, Body: String): TD3Material;
@@ -118,6 +127,8 @@ type
     function ModelDecl(const Name: String): TD3ModelDecl;
     function Skin(const Name: String): TD3Skin;
     function SoundShader(const Name: String): TD3SoundShader;
+    { Table decl by name, nil when missing. }
+    function Table(const Name: String): TD3Table;
     property Loaded: Boolean read FLoaded;
   end;
 
@@ -131,6 +142,7 @@ var
 implementation
 
 uses
+  Math,
   Doom3Files;
 
 const
@@ -167,6 +179,36 @@ end;
 function TD3Material.IsInvisible: Boolean;
 begin
   Result := (DiffuseImage = '') and (StageImage = '');
+end;
+
+destructor TD3Material.Destroy;
+var
+  I: Integer;
+begin
+  for I := 0 to 3 do
+    FreeAndNil(StageColorExpr[I]);
+  inherited Destroy;
+end;
+
+function TD3Material.EvalStageColor(const Ctx: TD3ExprContext): TVector4;
+var
+  I: Integer;
+begin
+  for I := 0 to 3 do
+    if StageColorExpr[I] <> nil then
+      Result.Data[I] := StageColorExpr[I].Eval(Ctx)
+    else
+      Result.Data[I] := 1;
+end;
+
+function TD3Material.StageColorAnimated: Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to 3 do
+    if (StageColorExpr[I] <> nil) and StageColorExpr[I].UsesTime then
+      Exit(True);
+  Result := False;
 end;
 
 function TD3Material.IsSolid: Boolean;
@@ -256,6 +298,7 @@ begin
   FSkins := specialize TObjectDictionary<String, TD3Skin>.Create([doOwnsValues]);
   FSounds := specialize TObjectDictionary<String, TD3SoundShader>.Create([doOwnsValues]);
   FEntityDefs := specialize TObjectDictionary<String, TStringList>.Create([doOwnsValues]);
+  FTables := specialize TObjectDictionary<String, TD3Table>.Create([doOwnsValues]);
 end;
 
 destructor TD3DeclManager.Destroy;
@@ -270,6 +313,7 @@ begin
   FSkins.Free;
   FSounds.Free;
   FEntityDefs.Free;
+  FTables.Free;
   inherited Destroy;
 end;
 
@@ -284,6 +328,7 @@ begin
   FSkins.Clear;
   FSounds.Clear;
   FEntityDefs.Clear;
+  FTables.Clear;
   FLoaded := False;
 end;
 
@@ -412,14 +457,52 @@ begin
   Result := bmBlend;
 end;
 
+{ Split "a, b, c" at top level commas (not inside brackets / parentheses). }
+function SplitTopLevel(const S: String): TStringArray;
+var
+  I, Depth, Start: Integer;
+begin
+  Result := nil;
+  Depth := 0;
+  Start := 1;
+  for I := 1 to Length(S) do
+  begin
+    if S[I] in ['(', '['] then
+      Inc(Depth)
+    else
+    if S[I] in [')', ']'] then
+      Dec(Depth)
+    else
+    if (S[I] = ',') and (Depth = 0) then
+    begin
+      Result := Concat(Result, [Trim(Copy(S, Start, I - Start))]);
+      Start := I + 1;
+    end;
+  end;
+  Result := Concat(Result, [Trim(Copy(S, Start, MaxInt))]);
+end;
+
 function TD3DeclManager.ParseMaterial(const Name, Body: String): TD3Material;
 var
   Lexer: TDoom3Lexer;
-  Tok, L, Special, StageMap: String;
+  Tok, L, Special, StageMap, Line: String;
   StageBlendMode: TD3BlendMode;
-  StageSpecial, HasBlend: Boolean;
+  StageSpecial, HasBlend, HasStageColor: Boolean;
   StageAlphaTest: Single;
+  Regs: array [0..3] of TD3Expr;
+  Parts: TStringArray;
+  I: Integer;
+
+  procedure SetReg(const Index: Integer; const Text: String);
+  begin
+    FreeAndNil(Regs[Index]);
+    Regs[Index] := ParseD3ExpressionString(Text, @Table);
+  end;
+
 begin
+  HasStageColor := False;
+  for I := 0 to 3 do
+    Regs[I] := nil;
   Result := TD3Material.Create;
   Result.Name := Name;
   Result.Defined := True;
@@ -439,9 +522,39 @@ begin
         StageSpecial := False;
         HasBlend := False;
         StageAlphaTest := -1;
+        for I := 0 to 3 do
+          FreeAndNil(Regs[I]);
         while Lexer.Next(Tok) and (Tok <> '}') do
         begin
           L := LowerCase(Tok);
+          if (L = 'red') or (L = 'green') or (L = 'blue') or (L = 'alpha') then
+          begin
+            Line := Lexer.RestOfLine;
+            if L = 'red' then SetReg(0, Line) else
+            if L = 'green' then SetReg(1, Line) else
+            if L = 'blue' then SetReg(2, Line) else
+              SetReg(3, Line);
+          end else
+          if (L = 'rgb') or (L = 'rgba') then
+          begin
+            Line := Lexer.RestOfLine;
+            for I := 0 to 2 do
+              SetReg(I, Line);
+            if L = 'rgba' then
+              SetReg(3, Line);
+          end else
+          if L = 'color' then
+          begin
+            Parts := SplitTopLevel(Lexer.RestOfLine);
+            for I := 0 to Min(3, High(Parts)) do
+              SetReg(I, Parts[I]);
+          end else
+          if L = 'colored' then
+          begin
+            { the entity's shader parameters: a light's _color }
+            for I := 0 to 3 do
+              SetReg(I, 'parm' + IntToStr(I));
+          end else
           if L = 'blend' then
           begin
             StageBlendMode := ParseBlend(Lexer, Special);
@@ -460,6 +573,17 @@ begin
           else
           if Tok = '{' then
             Lexer.SkipBracedSection;
+        end;
+        { keep the color registers of the first plain stage }
+        if (Special <> 'diffusemap') and (Special <> 'bumpmap') and
+           (Special <> 'specularmap') and not StageSpecial and not HasStageColor then
+        begin
+          HasStageColor := True;
+          for I := 0 to 3 do
+          begin
+            Result.StageColorExpr[I] := Regs[I];
+            Regs[I] := nil;
+          end;
         end;
         if StageSpecial then
         begin
@@ -554,7 +678,26 @@ begin
     end;
   finally
     Lexer.Free;
+    for I := 0 to 3 do
+      FreeAndNil(Regs[I]);
   end;
+end;
+
+function TD3DeclManager.Table(const Name: String): TD3Table;
+var
+  Key, Body: String;
+begin
+  Key := LowerCase(Name);
+  if FTables.TryGetValue(Key, Result) then
+    Exit;
+  Result := nil;
+  if FBodies[dtTable].TryGetValue(Key, Body) then
+  begin
+    Result := TD3Table.Create;
+    Result.Name := Key;
+    Result.Parse(Body);
+  end;
+  FTables.Add(Key, Result);
 end;
 
 function TD3DeclManager.Material(const Name: String): TD3Material;

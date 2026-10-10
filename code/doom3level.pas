@@ -25,7 +25,7 @@ uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
   CastleCameras,
-  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals;
+  Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions;
 
 type
   { A brush entity (its .proc model) or a static model entity (.lwo / .ase)
@@ -59,6 +59,14 @@ type
     StartOn: Boolean;
     { Areas the light reaches (empty: always on) }
     Areas: TD3IntArray;
+    { The light shader (nil: Doom 3's default, "colored") and the
+      entity's shader parameters (parm0..2 = _color, parm3 = 1...) }
+    Shader: TD3Material;
+    Parms: TD3ExprContext;
+    { The shader's color changes with time }
+    Animated: Boolean;
+    { Current color (after the shader) }
+    Color: TVector3;
   end;
 
   TDoom3Map = class(TCastleTransform)
@@ -72,6 +80,7 @@ type
     FAreaScenes, FAreaNonSolid: array of TCastleScene;
     FPortals: TD3PortalVisibility;
     FPortalCulling: Boolean;
+    FTime: Single;
     FCollision: TD3CollisionFile;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
@@ -80,6 +89,8 @@ type
     FSpawnOrigin: TVector3;
     FSpawnAngle: Single;
     FStaticModelCount: Integer;
+    procedure ApplyLightColor(const I: Integer; const C: TVector3);
+    function LightShaderColor(const I: Integer): TVector3;
     procedure SetMapName(const Value: String);
     procedure SetSpawnModels(const Value: Boolean);
     function GetAreaCount: Integer;
@@ -143,6 +154,9 @@ type
     property SpawnOrigin: TVector3 read FSpawnOrigin;
     property SpawnAngle: Single read FSpawnAngle;
     function Light(const I: Integer): TD3LightInfo;
+    { Seconds since the map was loaded (the "time" of material
+      expressions). }
+    property Time: Single read FTime;
     { Area of a CGE point, -1 outside. }
     function AreaAt(const P: TVector3): Integer;
   published
@@ -182,7 +196,7 @@ uses
   Math,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
-  Doom3Files, Doom3Decls, Doom3Images, Doom3Materials, Doom3StaticModels;
+  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -273,6 +287,7 @@ procedure TDoom3Map.ClearMap;
 var
   I: Integer;
 begin
+  FTime := 0;
   FStaticModelCount := 0;
   FModels.Clear;
   FBrushes.Clear;
@@ -361,7 +376,7 @@ var
   Spot: TSpotLightNode;
   Node: TAbstractPunctualLightNode;
   Shader: TD3Material;
-  N: Integer;
+  N, I: Integer;
 begin
   N := 0;
   for E in FMapFile.Entities do
@@ -414,7 +429,6 @@ begin
       Point.Attenuation := Vector3(1, 0, 8 / Sqr(Max(1, R)));
       Node := Point;
     end;
-    Node.Color := LightColor;
     Node.Global := True;
     Node.Shadows := False;
     if (Shader <> nil) and Shader.IsAmbientLight then
@@ -439,7 +453,56 @@ begin
     else
       FLights[N].Location := TSpotLightNode(Node).Location;
     FLights[N].Areas := nil;
+    { shader parameters: _color, shaderParm0..11 }
+    FLights[N].Parms := DefaultExprContext;
+    FLights[N].Parms.Parms[0] := LightColor.X;
+    FLights[N].Parms.Parms[1] := LightColor.Y;
+    FLights[N].Parms.Parms[2] := LightColor.Z;
+    for I := 0 to 11 do
+      if E.HasKey('shaderParm' + IntToStr(I)) then
+        FLights[N].Parms.Parms[I] := E.FloatValue('shaderParm' + IntToStr(I));
+    { an undeclared light shader behaves like the default "colored" one }
+    if (Shader <> nil) and not Shader.Defined then
+      Shader := nil;
+    FLights[N].Shader := Shader;
+    FLights[N].Animated := (Shader <> nil) and Shader.StageColorAnimated;
+    ApplyLightColor(N, LightShaderColor(N));
     Inc(N);
+  end;
+end;
+
+function TDoom3Map.LightShaderColor(const I: Integer): TVector3;
+var
+  Ctx: TD3ExprContext;
+  C: TVector4;
+begin
+  if FLights[I].Shader = nil then
+    Exit(Vector3(FLights[I].Parms.Parms[0], FLights[I].Parms.Parms[1], FLights[I].Parms.Parms[2]));
+  Ctx := FLights[I].Parms;
+  Ctx.Time := FTime;
+  C := FLights[I].Shader.EvalStageColor(Ctx);
+  Result := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z));
+end;
+
+procedure TDoom3Map.ApplyLightColor(const I: Integer; const C: TVector3);
+var
+  M, Base: Single;
+  Node: TAbstractPunctualLightNode;
+begin
+  FLights[I].Color := C;
+  Node := FLights[I].Node;
+  { X3D colors are 0..1: brighter colors raise the intensity }
+  M := Max(1, Max(C.X, Max(C.Y, C.Z)));
+  Node.Color := C / M;
+  if (FLights[I].Shader <> nil) and FLights[I].Shader.IsAmbientLight then
+  begin
+    Node.Intensity := 0;
+    Node.AmbientIntensity := M;
+  end else
+  begin
+    Base := 1.5 * FLightScale;
+    Node.Intensity := Base * M;
+    Node.AmbientIntensity := 0;
   end;
 end;
 
@@ -966,8 +1029,19 @@ end;
 procedure TDoom3Map.Update(const SecondsPassed: Single; var RemoveMe: TRemoveType);
 var
   ME: TD3ModelEntity;
+  I: Integer;
+  C: TVector3;
 begin
   inherited Update(SecondsPassed, RemoveMe);
+  FTime := FTime + SecondsPassed;
+  { light shaders: strobes, flickers, pulses }
+  for I := 0 to High(FLights) do
+    if FLights[I].Animated and FLights[I].Node.IsOn then
+    begin
+      C := LightShaderColor(I);
+      if not TVector3.Equals(C, FLights[I].Color, 0.002) then
+        ApplyLightColor(I, C);
+    end;
   { animate md5 models (also in the editor, it's nice to see them move) }
   for ME in FModels do
     ME.Instance.Update(SecondsPassed);

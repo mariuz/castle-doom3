@@ -171,12 +171,15 @@ procedure TViewPlay.HandleConsoleCommand(const Cmd, Args: String);
 var
   Maps: TStringList;
   P: TVector3;
+  I: Integer;
+  L: TD3LightInfo;
+  S: String;
 begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
-    Console.Print('r_useportals [0|1], portals, quit');
+    Console.Print('r_useportals [0|1], portals, lights, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -237,6 +240,18 @@ begin
     else
       Map.PortalCulling := not Map.PortalCulling;
     Console.Print('r_usePortals ' + BoolToStr(Map.PortalCulling, '1', '0'));
+  end else
+  if Cmd = 'lights' then
+  begin
+    for I := 0 to Map.LightCount - 1 do
+    begin
+      L := Map.Light(I);
+      S := Format('%s %s color %.2f %.2f %.2f%s%s', [L.Entity.Name, L.Entity.Value('texture', '(default)'),
+        L.Color.X, L.Color.Y, L.Color.Z, BoolToStr(L.Animated, ' animated', ''),
+        BoolToStr(L.Node.IsOn, '', ' off')]);
+      Console.Print(S);
+      WritelnLog('Lights', S);
+    end;
   end else
   if Cmd = 'portals' then
   begin

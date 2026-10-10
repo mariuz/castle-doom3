@@ -142,7 +142,7 @@ end;
 
 initialization
   ApplicationProperties.ApplicationName := 'castle-doom3';
-  ApplicationProperties.Version := '0.4.0';
+  ApplicationProperties.Version := '0.5.0';
   LogFileName := 'castle-doom3.log';
   InitializeLog;
   Application.OnInitialize := @ApplicationInitialize;

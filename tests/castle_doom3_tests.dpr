@@ -12,7 +12,8 @@ uses
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
-  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, CastleTransform, CastleUtils, CastleBoxes;
+  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions,
+  CastleTransform, CastleUtils, CastleBoxes;
 
 var
   Passed, Failed: Integer;
@@ -105,11 +106,11 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(11, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(14, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
-  CheckEquals(1, Decls.DeclCount(dtTable), 'table count');
+  CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
   Check(M.Defined, 'floor is declared');
@@ -485,6 +486,104 @@ begin
   end;
 end;
 
+function EvalExpr(const Text: String; const Time: Single = 0): Single;
+var
+  E: TD3Expr;
+  Ctx: TD3ExprContext;
+begin
+  E := ParseD3ExpressionString(Text, @Decls.Table);
+  if E = nil then
+    Exit(-999);
+  try
+    Ctx := DefaultExprContext;
+    Ctx.Time := Time;
+    Ctx.Parms[0] := 0.5;
+    Ctx.Parms[5] := 3;
+    Result := E.Eval(Ctx);
+  finally
+    E.Free;
+  end;
+end;
+
+procedure TestExpressions;
+var
+  T: TD3Table;
+  M: TD3Material;
+  Ctx: TD3ExprContext;
+  C: TVector4;
+  E: TD3Expr;
+begin
+  CheckNear(7, EvalExpr('1 + 2 * 3'), 'precedence: * before +');
+  CheckNear(9, EvalExpr('( 1 + 2 ) * 3'), 'parentheses');
+  CheckNear(1, EvalExpr('7 % 3'), 'modulo');
+  CheckNear(-2, EvalExpr('-2'), 'unary minus');
+  CheckNear(1, EvalExpr('2 > 1 && 3 >= 3'), 'comparisons and &&');
+  CheckNear(0, EvalExpr('1 == 2 || 0'), '== and ||');
+  CheckNear(3, EvalExpr('time*2', 1.5), 'time without spaces');
+  CheckNear(1.5, EvalExpr('Parm0 * parm5'), 'parms, case-insensitive');
+  CheckNear(0, EvalExpr('3 / 0'), 'division by zero is 0');
+  Check(EvalExpr('1 +') = -999, 'syntax error gives nil');
+  E := ParseD3ExpressionString('0.5 * 2', @Decls.Table);
+  try
+    Check((E <> nil) and E.IsConstant, 'constant expression');
+  finally
+    E.Free;
+  end;
+  E := ParseD3ExpressionString('sinTable[ time ]', @Decls.Table);
+  try
+    Check((E <> nil) and not E.IsConstant, 'table of time is not constant');
+  finally
+    E.Free;
+  end;
+
+  CheckEquals(3, Decls.DeclCount(dtTable), 'table decls');
+  T := Decls.Table('testStrobeTable');
+  Check(T <> nil, 'table testStrobeTable');
+  if T <> nil then
+  begin
+    CheckEquals(9, Length(T.Values), 'table values + the wrap copy');
+    CheckNear(1, T.Lookup(0), 'lookup 0');
+    CheckNear(0.2, T.Lookup(0.25), 'lookup 0.25 (index 2)');
+    CheckNear(0.6, T.Lookup(0.3125), 'lookup interpolates (index 2.5)');
+    CheckNear(0.2, T.Lookup(1.25), 'lookup wraps');
+    CheckNear(0.2, T.Lookup(-0.75), 'lookup wraps negative');
+  end;
+  T := Decls.Table('testFlickerTable');
+  if T <> nil then
+  begin
+    Check(T.Snap, 'snap table');
+    CheckNear(0.3, T.Lookup(0.35), 'snap: no interpolation (index 3.5)');
+  end else
+    Check(False, 'table testFlickerTable');
+  CheckNear(1, EvalExpr('sinTable[0.25]'), 'sinTable[0.25] = 1');
+
+  M := Decls.Material('lights/test_strobe');
+  Check(M.StageColorAnimated, 'strobe light shader is animated');
+  Ctx := DefaultExprContext;
+  Ctx.Parms[0] := 0.25;
+  Ctx.Time := 0.125; { table index 0.25 -> 0.2 }
+  C := M.EvalStageColor(Ctx);
+  CheckNear(0.05, C.X, 'strobe red = table * parm0');
+  CheckNear(1, C.W, 'alpha defaults to 1');
+
+  M := Decls.Material('lights/test_pulse');
+  Ctx := DefaultExprContext;
+  Ctx.Parms[1] := 0.5;
+  Ctx.Time := 0.5; { sinTable[0.25] = 1 }
+  C := M.EvalStageColor(Ctx);
+  CheckNear(0.5, C.Y, 'pulse green (expression ends before a // comment)');
+
+  M := Decls.Material('lights/test_ambient');
+  Check(not M.StageColorAnimated, '"colored" is not animated');
+  Ctx := DefaultExprContext;
+  Ctx.Parms[2] := 0.3;
+  CheckNear(0.3, M.EvalStageColor(Ctx).Z, '"colored" uses parm2');
+  M := Decls.Material('lights/test_white');
+  CheckNear(1, M.EvalStageColor(Ctx).Z, 'a stage without color registers is white');
+  M := Decls.Material('textures/test/floor');
+  Check(M.StageColorExpr[0] = nil, 'diffuse stages have no light color');
+end;
+
 procedure TestEntityRotation;
 var
   T: TCastleTransform;
@@ -590,6 +689,7 @@ begin
   TestEntityRotation;
   TestCollisionModel;
   TestPortals;
+  TestExpressions;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
