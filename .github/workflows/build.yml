@@ -125,7 +125,7 @@ jobs:
           grep -q 'Rendered "guis/test_panel.gui" (5 windows)' test_output/guis.log || { echo "::error::the panel GUI should be rendered"; exit 1; }
           grep -q 'Rendered "guis/test_status.gui" (6 windows)' test_output/guis.log || { echo "::error::the status GUI should be rendered"; exit 1; }
           grep -q "Shadow casters: 20 brushes" test_output/shadows.log || { echo "::error::the .cm brushes should cast shadows"; exit 1; }
-          run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,Q"
+          run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,W:0.7,O:lights,Q"
           test "$(grep 'Lights: light_4 ' test_output/lights.log | sort -u | wc -l)" -ge 2 || { echo "::error::the pulsing light should change color"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
           ls -l test_output
