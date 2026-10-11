@@ -6,6 +6,7 @@ Working notes for developers and AI agents on Castle Doom 3: a Doom 3 (id Tech 4
 
 - Doom 3 data (`.proc`, `.map`, `.mtr`, `.def`, `.skin`, `.sndshd`, `.md5mesh`, `.md5anim`, `.lwo`, `.ase`, `.cm`, TGA / DDS images, WAV / OGG sounds) is read at runtime from PK4 archives and served to CGE through the `d3fs:` and `d3img:` URL protocols.
 - Bundled data is only the generated test level `data/base/castle_doom3_test.pk4` (map `testmap`), written by `tools/make_test_pk4.py`. **Never commit id Software data**; a Doom 3 install is loaded with `-basepath` or a `base/` directory next to the exe (gitignored).
+- Retail data on this machine: the free **Doom 3 demo** in `E:\Work\doom3-demo\demo\demo00.pk4` (outside the repo; `-basepath E:\Work\doom3-demo`). Maps `game/demo_mars_city1`, `game/demo_mc_underground`, `game/demo_mars_city2` each load in about a minute; `tools/smoke_maps.ps1 -BasePath E:\Work\doom3-demo` loads all three and reports time, map statistics, warnings and exceptions (logs and screenshots in `smoke_output/`, gitignored).
 - Units: `Doom3Files`, `Doom3Lexer`, `Doom3Decls`, `Doom3Images`, `Doom3Materials`, `Doom3Proc`, `Doom3MapFile`, `Doom3Md5`, `Doom3StaticModels`, `Doom3Collision`, `Doom3Portals`, `Doom3Expressions`, `Doom3LightEffects`, `Doom3Gui`, `Doom3Level` (`TDoom3Map`), `Doom3World` (`TD3Game`), `Doom3Hud`, `Doom3Console`, `Game*` views.
 
 ## Build and run (Windows)

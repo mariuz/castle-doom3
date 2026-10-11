@@ -92,12 +92,17 @@ begin
     LoadedGame := False;
     if BasePath = '' then
     begin
-      { a Doom 3 "base" directory next to the executable }
+      { a Doom 3 "base" directory next to the executable,
+        or the Doom 3 demo's "demo" directory (demo00.pk4) }
       if DirectoryExists('base') then
         LoadedGame := D3Fs.AddGameDirectory('base');
+      if (not LoadedGame) and DirectoryExists('demo') then
+        LoadedGame := D3Fs.AddGameDirectory('demo');
     end else
     begin
       LoadedGame := D3Fs.AddGameDirectory(IncludeTrailingPathDelimiter(BasePath) + 'base');
+      if not LoadedGame then
+        LoadedGame := D3Fs.AddGameDirectory(IncludeTrailingPathDelimiter(BasePath) + 'demo');
       if not LoadedGame then
         LoadedGame := D3Fs.AddGameDirectory(BasePath);
       if (GameDir <> '') and D3Fs.AddGameDirectory(IncludeTrailingPathDelimiter(BasePath) + GameDir) then

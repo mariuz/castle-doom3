@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Doom 3 demo data**: a `demo/` directory (`demo00.pk4` of the free 2004 demo) is loaded like `base/`, next to the exe or under `-basepath`. Its three maps (`game/demo_mars_city1`, `game/demo_mc_underground`, `game/demo_mars_city2`) load and spawn everything, without exceptions; they are dark and slow so far.
+- `tools/smoke_maps.ps1`: loads maps one by one from a Doom 3 install or the demo and reports load time, map statistics, warnings and exceptions, with logs and screenshots.
+
 ## 0.12.0
 
 Shadows from big md5 models.

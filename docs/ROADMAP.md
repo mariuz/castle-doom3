@@ -25,7 +25,15 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
 
 ## Next steps
 
-1. **Load the retail maps** (`game/mars_city1`, `game/admin` ...) and fix what breaks; record load times; add a CI-independent smoke test script for people who own the game.
+1. **Load the retail maps** (`game/mars_city1`, `game/admin` ...) and fix what breaks. Started with the free Doom 3 demo data (see README): its three maps load without exceptions and spawn everything (`tools/smoke_maps.ps1` reports, per map):
+
+    | Map | Areas | Triangles | Lights | Brush entities | Static models | md5 models | Monsters | Load + 2 screenshots |
+    |---|---|---|---|---|---|---|---|---|
+    | `game/demo_mars_city1` | 56 | 54,496 | 463 | 420 | 486 | 71 | 0 | 58 s |
+    | `game/demo_mc_underground` | 58 | 125,706 | 614 | 720 | 490 | 81 | 31 | 55 s |
+    | `game/demo_mars_city2` | 104 | 105,567 | 639 | 569 | 654 | 116 | 58 | 64 s |
+
+    To fix next: scenes are much darker than in Doom 3 (light intensity, ambient lights, the light volumes on retail light shaders); frame rate (12 to below 1 FPS looking around Mars City: hundreds of lights, per-light effects, shadow casters); load time; missing sound shader `guisounds_error`; monsters attack at once (no scripted AI yet). Then the full game's maps with `smoke_maps.ps1`.
 2. **Shadows from several lights** (needs CGE changes A or B below).
 3. **Exact material stages** (partly needs CGE changes D and E below): `vertexColor`, `mirrorRenderMap`, real reflections (`texgen reflect` with the cube map) and heat haze (`fragmentProgram heatHaze`) instead of the glass tint, `deform tube` / `flare` / `turbulent`, stage `if` conditions, `polygonOffset` decals.
 4. **Interactive GUIs**: the GUI script (`onTime` transitions, `onAction`, `set` / `transition` / `resetTime` / `runScript`), the cursor where the player looks, Doom 3's fonts, re-rendering when the state changes.

@@ -18,10 +18,12 @@ castle-auto-generated-resources.res
 # Logs, test outputs, screenshots and temporary files
 *.log
 test_output/
+smoke_output/
 castle-doom3-*.png
 
 # A Doom 3 install linked next to the executable (never commit id's data)
 /base/
+/demo/
 /d3xp/
 
 # Linux / macOS executable

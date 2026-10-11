@@ -92,8 +92,19 @@ Audio needs `OpenAL32.dll` (from `C:\castle-engine\bin`) next to the exe; `castl
 Sources are added in this order (later ones override earlier ones, like Doom 3's search path):
 
 1. `data/base/castle_doom3_test.pk4`: the bundled test level (`testmap`).
-2. A `base/` directory next to the executable: its `*.pk4` files sorted by name (`pak000.pk4` ... `pak004.pk4`), then its loose files.
-3. `-basepath <Doom 3 dir>` (loads `<dir>/base`), `-game <mod dir>` and `-pk4 <file>`.
+2. A `base/` directory next to the executable: its `*.pk4` files sorted by name (`pak000.pk4` ... `pak004.pk4`), then its loose files. Without `base/`, a `demo/` directory (the Doom 3 demo).
+3. `-basepath <Doom 3 dir>` (loads `<dir>/base`, or `<dir>/demo` for the demo), `-game <mod dir>` and `-pk4 <file>`.
+
+#### The free Doom 3 demo
+
+The Doom 3 demo (2004) has three maps of the full game, shortened: `game/demo_mars_city1`, `game/demo_mc_underground` and `game/demo_mars_city2`. [dhewm3's install page](https://dhewm3.org/#how-to-install) links its downloads; the Linux one, `doom3-linux-1.1.1286-demo.x86.run` (485 MB), works on every system, as only its `demo/demo00.pk4` (483,535,485 bytes, MD5 `70c2c63ef1190158f1ebd6c255b22d8e`) is needed. The `.run` file is a shell script followed by a `.tar.gz`: on Linux `sh doom3-linux-1.1.1286-demo.x86.run --tar xf demo/` extracts it; elsewhere skip the script's first 373 lines and untar the rest. Then:
+
+```powershell
+.\castle-doom3.exe -basepath "E:\Work\doom3-demo" +map game/demo_mars_city1
+.\tools\smoke_maps.ps1 -BasePath "E:\Work\doom3-demo"   # load each map, report time, stats, warnings
+```
+
+Like the full game, the demo data is id Software's: never commit it.
 
 Doom 3 BFG Edition's binary formats (`.bimage`, `.bproc`, `.bcm`) are not supported; use the original 2004 game data.
 
