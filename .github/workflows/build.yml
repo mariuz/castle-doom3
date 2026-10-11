@@ -105,7 +105,7 @@ jobs:
           }
           run_test start testmap "W:2,S,T:-45,S,Q"
           run_test door testmap "W:1,G:200 0 0,A:0,W:2.2,S,G:420 -250 0,A:20,F,W:0.4,S,Q"
-          run_test fight testmap "W:1,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,Q"
+          run_test fight testmap "W:1,O:notarget,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,Q"
           run_test menu MENU "Q"
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -q "4 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
