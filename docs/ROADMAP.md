@@ -35,6 +35,45 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
 8. **Doom 3 BFG** binary formats (`.bimage`, `.bproc`), Resurrection of Evil (`d3xp`).
 9. **Web build** (WebAssembly), as castle-doom and castle-quake2 have.
 10. **Exact light images** (needs CGE change C below): bind the projection / falloff textures in light effects, `nodiffuse` / `nospecular`.
+11. **Classic Doom 3** (see below): the first episode of the original Doom remade in Doom 3, a mod with its own game code.
+12. **Features from dhewm3** (see below): the parts of the maintained Doom 3 source port that players expect and this port doesn't have yet.
+
+## Classic Doom 3
+
+[Classic Doom 3](https://dhewm3.org/mods.html#classic-doom-3) (Flaming Sheep Software, 2007, version 1.3.1) remakes episode 1 of the original Doom (Knee-Deep in the Dead) in Doom 3. It needs the full Doom 3 data. Its data is a zip from [ModDB](https://www.moddb.com/downloads/classic-doom-3-131), extracted into the Doom 3 directory (a `cdoom/` mod directory); dhewm3 starts it with `+set fs_game cdoom`. Its game code was released under the GPL and lives in the [`cdoom` branch of dhewm3-sdk](https://github.com/dhewm/dhewm3-sdk/tree/cdoom) (commit "Import Classic Doom 3"), which tells what this port must do beyond the base game:
+
+- **Mod directory**: `-game cdoom` already mounts `<basepath>/cdoom` over `base`; also accept dhewm3's `+set fs_game cdoom` (and `fs_game_base`), list the mods found next to `base/` in the main menu, and check that the mod's decls override base ones (we keep the first definition of a decl: the mod's pk4s must be searched first).
+- **Secrets** (`idSecret` in `Misc.cpp`): an entity that marks a secret area when the player touches it (or when triggered), counted per map, with a "secret found" message.
+- **End of level and intermission** (`idTarget_EndLevelCdoom` in `Target.cpp`, `idPlayer::OpenStats` / `StatsProceed`): stops the sounds, shows the statistics GUI (kills, items, secrets and time, as percentages like Doom) and loads the next map, keeping the player's health, armor, weapons and ammo between maps.
+- **Doom pickups** (`Item.cpp`, `Player.cpp`): health bonus (`type` 4, up to the player's `maxbonushealth`), armor bonus and mega armor (`type` 5 / 6, up to `maxbonusarmor`), counting picked items (`inv_name` set) for the statistics.
+- **Kills counted** for the statistics (`AI.cpp`), **autorun** (`ui_autoRun`), **music speakers** (`s_music` key) with their own volume (`s_music_vol`).
+- Its weapons, monsters and level logic are entity defs and Doom 3 scripts: they need the gameplay of item 5 (weapons with view models, items, triggers and movers, the script interpreter and the real AI).
+- Multiplayer parts (`cdoomDM`, player skins) are out of scope.
+
+Steps: load its maps like the retail maps (item 1), implement the entities above in `Doom3World`, add a smoke test script for people who own the game and the mod (the data can't be bundled), and check that each map can be finished.
+
+## Features from dhewm3
+
+[dhewm3](https://github.com/dhewm/dhewm3) is the maintained Doom 3 GPL source port (it doesn't support Doom 3 BFG). Many of its changes are about the C++ code base (64-bit, SDL, CMake, compilers, tools) and come with Castle Game Engine here. These are the ones this port needs too:
+
+| dhewm3 feature | Here |
+|---|---|
+| Game data: patched 1.3.1 data, Resurrection of Evil (`d3xp`, `fs_game_base`), the free **Doom 3 demo** data | Load all three. The demo's maps are a free way to test the retail formats without buying the game (item 1); its data can't be bundled either. |
+| Mods menu, `fs_game` | See Classic Doom 3 above. |
+| Widescreen and any resolution; aspect-ratio-independent GUIs (HUD and menus), 4:3 crosshair scaling | Doom 3 GUIs are 640 x 480: render them 4:3 (pillarboxed) or scale by their anchors; CGE UI scaling for our own HUD. |
+| Gamepad support (with ducking and jumping on triggers) | CGE's `Controllers` (game controllers) API. |
+| OpenAL EFX reverb (EAX-like effects from the maps' `efxs/*.efx` files) | Parse `.efx` per area; needs reverb in CGE's sound engine (OpenAL EFX), not available now. |
+| Advanced settings menu (graphics, audio, controls, key bindings) | A CGE UI view: resolution, fullscreen, vsync, gamma / brightness, volume, bindings. |
+| Gamma and brightness applied in shaders | A CGE screen effect. |
+| Soft particles (fading where they meet geometry) | With particles (item 7), needs the depth buffer in the particle shader. |
+| DDS textures, BC7 (BPTC) compressed | The retail data ships DDS (`dds/` directory): check CGE loads its DXT1 / DXT5 / RXGB normal maps; BC7 for newer texture packs (hidef2k). |
+| Savegames, quicksave slots, autosave at level start (`com_disableAutoSaves`) | Save the world state (entities, movers, monsters, player, scripts). |
+| `nospecular` light parameter (`allow_nospecular`) | Item 10. |
+| MD3 models (used by mods) | A loader like the md5 one. |
+| MD5 "shrivel" effect (`SHADERPARM_MD5_SKINSCALE`, creatures burning away) | With the creature death effects (item 5). |
+| Mouse: inverted look (`m_invertLook`), High-DPI mice, always run (`in_allowAlwaysRunInSP`) | Options of our player navigation. |
+| Timedemos, `r_screenshotFormat`, the `map` command printing the current map | Our `--autotest` demo scripts already cover timedemos; small console additions. |
+| Mod support through game DLLs (Sikkmod, Denton's, Perfected Doom 3, The Lost Mission...) | Not possible as such: their C++ game code would be ported to Pascal mod by mod, like Classic Doom 3. Pure data mods work with `-game`. |
 
 ## Changes needed in Castle Game Engine
 
