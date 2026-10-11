@@ -919,6 +919,10 @@ def map_text():
          'anim': 'flyby', 'target': 'info_player_teleport_1'},
         {'classname': 'info_player_teleport', 'name': 'info_player_teleport_1',
          'origin': '500 200 0', 'angle': '180'},
+        # a character (AI script): walks to path_corner_1 when triggered
+        {'classname': 'char_test_walker', 'name': 'test_walker_1', 'origin': '-200 60 0',
+         'angle': '0', 'target': 'path_corner_1'},
+        {'classname': 'path_corner', 'name': 'path_corner_1', 'origin': '-80 60 0'},
         # moved by maps/testmap.script
         {'classname': 'func_mover', 'name': 'lift_1', 'model': 'lift_1', 'origin': '380 300 4'},
         {'classname': 'func_mover', 'name': 'bar_1', 'model': 'bar_1', 'origin': '600 -300 150'},
@@ -1251,6 +1255,14 @@ entityDef test_animated_blob {
 	"remove"				"1"
 	"def_head"				"test_blob_head"
 	"head_joint"			"head"
+}
+
+entityDef char_test_walker {
+	"editor_usage"			"A character walking to its path_corner when triggered (script object character)."
+	"spawnclass"			"idAI"
+	"scriptobject"			"character"
+	"model"					"test_blob"
+	"turn_rate"				"180"
 }
 
 entityDef monster_test_blob {
@@ -1619,6 +1631,14 @@ DOOM_MAIN_SCRIPT = """// Castle Doom 3 test level: the events and defines testma
 #define DOWN    -2
 #define YAW     1
 
+#define ANIMCHANNEL_ALL     0
+#define ANIMCHANNEL_TORSO   1
+#define ANIMCHANNEL_LEGS    2
+#define ANIMCHANNEL_HEAD    3
+
+#define eachFrame       for( 0; 1; waitFrame() )
+#define waitUntil( x )  while( !( x ) ) { waitFrame(); }
+
 // sys events
 scriptEvent void    wait( float time );
 scriptEvent void    waitFor( entity mover );
@@ -1639,6 +1659,20 @@ scriptEvent float   startSoundShader( string shaderName, float channel );
 scriptEvent void    fadeOutLight( float time );
 scriptEvent void    setGuiParm( string key, string value );
 scriptEvent void    startSpline( entity spline );
+
+// AI events (idAI)
+scriptEvent void    setState( string name );
+scriptEvent void    setNextState( string name );
+scriptEvent void    animState( float channel, string stateFunction, float blendFrames );
+scriptEvent float   inAnimState( float channel, string stateFunc );
+scriptEvent float   idleAnim( float channel, string animName );
+scriptEvent float   playCycle( float channel, string animName );
+scriptEvent float   playAnim( float channel, string animName );
+scriptEvent float   animDone( float channel, float blendOutFrames );
+scriptEvent void    moveToEntity( entity destination );
+scriptEvent void    turnTo( float yaw );
+scriptEvent float   facingIdeal();
+scriptEvent entity  getEntityKey( string key );
 
 #endif
 """
@@ -1671,6 +1705,8 @@ void lift_loop() {
 // trigger_once_1's "call" key
 void test_trigger_called() {
     trigger_calls++;
+    // the character in room A walks to its path_corner
+    sys.trigger( $test_walker_1 );
     // the panel in room A shows it
     $panel_1.setGuiParm( "gui_parm1", "TRIGGERED" );
     sys.print( "test_trigger_called by " + $trigger_once_1.getName() + "\n" );
@@ -1680,6 +1716,68 @@ void test_trigger_called() {
     // and fade it out a second later
     sys.wait( 1 );
     $light_trig.fadeOutLight( 1 );
+}
+
+// A character's AI, in the way of Doom 3's script/ai_character.script:
+// a state machine in the main thread, an animation state for the legs.
+float walker_done;
+
+object character {
+    boolean AI_FORWARD;
+    boolean AI_MOVE_DONE;
+    boolean AI_ACTIVATED;
+    boolean AI_ONGROUND;
+    boolean AI_DEST_UNREACHABLE;
+    void    init();
+    void    state_Begin();
+    void    state_Walk();
+    void    state_Done();
+    void    Legs_Idle();
+    void    Legs_Walk();
+};
+
+void character::init() {
+    setNextState( "state_Begin" );
+}
+
+void character::state_Begin() {
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    // until triggered
+    waitUntil( AI_ACTIVATED );
+    setState( "state_Walk" );
+}
+
+void character::state_Walk() {
+    // to its path_corner, then face north
+    moveToEntity( getEntityKey( "target" ) );
+    waitFrame();
+    waitUntil( AI_MOVE_DONE );
+    turnTo( 90 );
+    waitUntil( facingIdeal() );
+    setState( "state_Done" );
+}
+
+void character::state_Done() {
+    walker_done = 1;
+    eachFrame {
+    }
+}
+
+void character::Legs_Idle() {
+    idleAnim( ANIMCHANNEL_LEGS, "idle" );
+    eachFrame {
+        if ( AI_FORWARD ) {
+            animState( ANIMCHANNEL_LEGS, "Legs_Walk", 4 );
+        }
+    }
+}
+
+void character::Legs_Walk() {
+    playCycle( ANIMCHANNEL_LEGS, "walk" );
+    while( AI_FORWARD ) {
+        waitFrame();
+    }
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 4 );
 }
 
 void main() {

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Characters' AI scripts** (roadmap 5d, first part): Mars City's people (33 in Mars City 1) run their `character` script objects: state functions, animation states per channel, path commands (`path_corner`, `path_anim`, `path_cycleanim`...), walking and turning; they sit, work at computers, drink, read PDAs and walk their rounds. Console `actors`.
+- Script VM: persistent threads restarted with another function, `callFunction` / `hasFunction`, `sys.warning` / `sys.error`.
+- Test level: `test_walker_1` walks to its `path_corner` when the trigger's script activates it; 431 checks; CI checks it.
 - Scripts: `setGuiParm` redraws the entity's GUI screens with the new parameter (Mars City Underground's airlock, crane and bridge panels); `startSpline` moves a mover along a `func_splinemover` curve (Mars City's mouse). Roadmap 5c is done.
 - Test level: `bar_1` follows `spline_1`, the trigger's script writes on room A's panel; 420 checks.
 - **Animated models** (roadmap 5c): `idAnimated` entities (Mars City's ships and hangar, props) hold the first frame of their `anim`, play it when activated (`cycle`, `num_anims`, `auto_advance`, `wait`, `remove`) and fire their targets at the end; cinematic characters appear and play their `anim`; md5 characters and monsters get their heads (`def_head` at `head_joint`; 52 in Mars City 1).

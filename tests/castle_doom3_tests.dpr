@@ -114,7 +114,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(6, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(7, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(38, MapFile.Entities.Count, 'entity count');
+    CheckEquals(40, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1449,7 +1449,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(3, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(9, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1603,6 +1603,58 @@ begin
   end;
 end;
 
+{ A character running its AI script (test map: test_walker_1). }
+procedure TestActors;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  I: Integer;
+  Away, Pos: TVector3;
+  SawWalk: Boolean;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for actors');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    CheckEquals(1, Game.Actors.Count, 'one actor (test_walker_1)');
+    if Game.Actors.Count <> 1 then
+      Exit;
+    A := Game.Actors[0];
+    Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 3 do
+      Game.Update(0.1, Away);
+    { init -> setNextState -> state_Begin, which starts the legs' state }
+    CheckEquals('state_Begin', A.StateName, 'init set the state');
+    CheckEquals('Legs_Idle', A.Channels[2].StateName, 'animState on the legs');
+    CheckEquals('idle', A.Channels[2].AnimName, 'idleAnim on the legs');
+    { activation: AI_ACTIVATED, then the walk }
+    Game.Activate(Game.FindEntity('test_walker_1'));
+    SawWalk := False;
+    for I := 1 to 40 do
+    begin
+      Game.Update(0.1, Away);
+      if (A.Channels[2].StateName = 'Legs_Walk') and (A.Channels[2].AnimName = 'walk') then
+        SawWalk := True;
+    end;
+    Check(SawWalk, 'AI_FORWARD switched the legs to Legs_Walk playing walk');
+    CheckNear(1, Game.Script.GlobalValue('walker_done').F, 'the character reached state_Done');
+    Pos := CgeToD3(A.Model.Holder.Translation);
+    CheckNear(-80, Pos.X, 'the character walked to path_corner_1 x', 1);
+    CheckNear(60, Pos.Y, 'the character walked to path_corner_1 y', 1);
+    CheckNear(90, A.Yaw, 'turnTo( 90 ) turned it north');
+    CheckEquals('Legs_Idle', A.Channels[2].StateName, 'the legs are idle again');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestMovers;
 var
   World: TCastleRootTransform;
@@ -1730,6 +1782,7 @@ begin
   TestScriptVM;
   TestMapScripts;
   TestCinematics;
+  TestActors;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

@@ -149,6 +149,15 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Heads (`def_head`, a model decl, at the body's `head_joint`; `TDoom3Map.BuildHead`): a second `TD3Md5Instance` in a transform under the body's holder, moved every frame to the joint, turned by the joint's rotation since its bind pose (`JointTransform`: head meshes are upright for the bind pose, so the joint's own bind orientation must not turn them). The map log line counts them (`(N with heads)`).
 - Not done yet: screen GUIs changing during the cinematic (GUI scripts, item 4); shadows of the big moving models (the hangar's ship and doors) make some hangar shots dark.
 
+## Actors (AI scripts)
+
+- `TD3Game.SpawnActors` (after the scripts compiled) makes a `TD3Actor` for each idAI md5 entity whose `scriptobject` is a `character` (or derives from it), except monsters (they keep the game's simple AI for now) and cinematic characters (they play their `anim` when activated). The actor owns a `TD3ScriptObject` of that type (`TD3GameScriptHost.EntityObject` gives it to the VM: `self`'s fields, methods by name).
+- Like idActor, the main thread runs the object's `init`, then state functions: `setState` / `setNextState` choose the next one, which `UpdateActors` starts in the main thread on the next frame (`TD3ScriptVM.RestartThread`; `setState` also stops the current thread now with `Yield`). Each animation channel (torso, legs, head, eyelids; `ANIMCHANNEL_ALL` means the legs) has its own thread for `animState` functions (`Legs_Idle`, `Legs_Walk`...). These threads are `Persistent`: the VM keeps them when their function ends.
+- Animations: torso and legs play on the body's md5 instance (the last call wins), the head channel on the head. `animDone` compares the time since `playAnim` with the anim's length minus the blend frames (24 per second); cycles are never done.
+- Movement: `moveToEntity` / `moveToPosition` walk straight to the goal (no AAS paths, no collisions yet) at the walk animation's speed (`TD3Md5Instance.AnimSpeed`, its origin joint's speed; the instance's `LockOrigin` keeps the mesh on the entity meanwhile), turning towards it; `turnTo` turns at `turn_rate`. Each frame the actor writes `AI_FORWARD`, `AI_MOVE_DONE`, `AI_ONGROUND`, `AI_DEST_UNREACHABLE` into its object; activation sets `AI_ACTIVATED`.
+- `waitAction` makes the thread wait (`TD3ScriptThread.WaitFor` the actor) until `finishAction`; `callFunction` / `hasFunction` (in the VM) call the object's method by name in the current thread, which is how characters run their path commands (`callFunction( "path_corner" )`).
+- Not done yet: talking (`AI_TALK`, the player's use), heads looking at the player, enemies and combat (monsters' scripts), AAS navigation and collisions, pushing, cowering.
+
 ## Rendering notes
 
 - Each area's solid surfaces are one `TCastleScene` and its `nonsolid`, translucent and blended surfaces another with `Collides := False`; each material is its own shape, so frustum culling and per-shape light lists stay effective (`MaxLightsPerShape` 32).

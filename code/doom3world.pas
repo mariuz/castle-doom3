@@ -28,6 +28,13 @@
   activated and then fire their targets (TD3Animated); cinematic
   characters ("cinematic" "1") play theirs once.
 
+  Actors (TD3Actor): idAI entities whose script object is a "character"
+  (Mars City's people) run their AI script like idAI: the object's init,
+  then state functions (setState) in the main thread, and animation states
+  (animState) in a thread per channel; the game moves and turns them
+  (moveToEntity, turnTo), plays their animations and keeps their AI_*
+  flags up to date.
+
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
 unit Doom3World;
@@ -169,6 +176,44 @@ type
     DoneTime, ActivateTime: Single;
   end;
 
+  { An animation channel of an actor (ANIMCHANNEL_TORSO, LEGS, HEAD...):
+    its animation state (a script function in its own thread) and the
+    animation it plays. }
+  TD3ActorChannel = class
+    Thread: TD3ScriptThread;
+    StateName: String;
+    PendingFunction: TD3ScriptFunction;
+    PendingName: String;
+    HasPending: Boolean;
+    AnimName: String;
+    AnimStart, AnimLength: Single;
+    AnimLoop: Boolean;
+  end;
+
+  { An idAI entity running its script object (TD3Game.SpawnActors). }
+  TD3Actor = class
+    Model: TD3ModelEntity;
+    Handle: Integer;
+    Obj: TD3ScriptObject;
+    { the main thread runs init, then the state functions }
+    Main: TD3ScriptThread;
+    StateName, IdealName: String;
+    IdealFunction: TD3ScriptFunction;
+    HasIdeal: Boolean;
+    { [1..4]: ANIMCHANNEL_TORSO, LEGS, HEAD, EYELIDS (ALL means LEGS) }
+    Channels: array [1..4] of TD3ActorChannel;
+    { waitAction: the threads waiting until finishAction(name) }
+    WaitAction: String;
+    { movement, Doom 3 coordinates }
+    Moving: Boolean;
+    Goal, SavedGoal: TVector3;
+    SavedMoving: Boolean;
+    Yaw, IdealYaw, TurnRate: Single;
+    constructor Create;
+    destructor Destroy; override;
+    procedure SetFlag(const AName: String; const Value: Single);
+  end;
+
   { A light fading in or out (idLight::FadeIn / FadeOut). }
   TD3LightFade = record
     Light: Integer;
@@ -217,6 +262,7 @@ type
     FTeleportYaw: Single;
     FLightFades: specialize TList<TD3LightFade>;
     FAnimated: specialize TObjectList<TD3Animated>;
+    FActors: specialize TObjectList<TD3Actor>;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -254,6 +300,13 @@ type
     procedure ApplyScriptMover(const M: TD3ScriptMover);
     procedure UpdateScriptMovers;
     function HandleEntity(const Handle: Integer): TD3MapEntity;
+    procedure SpawnActors;
+    function FindActor(const Handle: Integer): TD3Actor;
+    function ActorChannel(const A: TD3Actor; const Channel: Single): TD3ActorChannel;
+    procedure ActorAnim(const A: TD3Actor; const Channel: Single; const AnimName: String; const Loop: Boolean);
+    function ActorEvent(const A: TD3Actor; const Thread: TD3ScriptThread; const N: String;
+      const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+    procedure UpdateActors(const SecondsPassed: Single);
     procedure SpawnAnimated(const ME: TD3ModelEntity);
     function FindAnimated(const E: TD3MapEntity): TD3Animated;
     procedure ActivateAnimated(const A: TD3Animated);
@@ -315,10 +368,13 @@ type
     function ScriptFindEntity(const AName: String): Integer;
     function ScriptEntityName(const Handle: Integer): String;
     function ScriptEntityBusy(const Handle: Integer): Boolean;
-    function ScriptEvent(const Target: Integer; const Event: TD3ScriptEvent;
+    function ScriptEvent(const Thread: TD3ScriptThread; const Target: Integer; const Event: TD3ScriptEvent;
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+    function ScriptEntityObject(const Handle: Integer): TD3ScriptObject;
     { One line: script threads, moving entities. }
     function ScriptStatus: String;
+    { One line per actor: state, legs state, animation, position. }
+    function ActorStatus: String;
     { A cinematic camera (idCameraAnim, idCameraView) sets the view. }
     function CinematicActive: Boolean;
     { The cinematic camera's view in CGE coordinates, its horizontal field
@@ -341,6 +397,7 @@ type
     property Monsters: specialize TObjectList<TD3Monster> read FMonsters;
     property Triggers: specialize TObjectList<TD3Trigger> read FTriggers;
     property Animated: specialize TObjectList<TD3Animated> read FAnimated;
+    property Actors: specialize TObjectList<TD3Actor> read FActors;
     { Game time (seconds since Spawn). }
     property Time: Single read FTime;
     property Map: TDoom3Map read FMap;
@@ -471,6 +528,7 @@ type
     function FindEntity(const AName: String): Integer; override;
     function EntityName(const E: Integer): String; override;
     function EntityBusy(const E: Integer): Boolean; override;
+    function EntityObject(const E: Integer): TD3ScriptObject; override;
     function CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
       const Event: TD3ScriptEvent; const Args: TD3ValueArray;
       var EventResult: TD3Value): Boolean; override;
@@ -497,10 +555,15 @@ begin
   Result := Game.ScriptEntityBusy(E);
 end;
 
+function TD3GameScriptHost.EntityObject(const E: Integer): TD3ScriptObject;
+begin
+  Result := Game.ScriptEntityObject(E);
+end;
+
 function TD3GameScriptHost.CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
   const Event: TD3ScriptEvent; const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
 begin
-  Result := Game.ScriptEvent(Target, Event, Args, EventResult);
+  Result := Game.ScriptEvent(Thread, Target, Event, Args, EventResult);
 end;
 
 constructor TD3Game.Create(const AMap: TDoom3Map);
@@ -521,6 +584,7 @@ begin
   FCameraAnims := specialize TObjectDictionary<String, TD3CameraAnim>.Create([doOwnsValues]);
   FLightFades := specialize TList<TD3LightFade>.Create;
   FAnimated := specialize TObjectList<TD3Animated>.Create(True);
+  FActors := specialize TObjectList<TD3Actor>.Create(True);
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
@@ -550,6 +614,7 @@ begin
   FCameraAnims.Free;
   FLightFades.Free;
   FAnimated.Free;
+  FActors.Free;
   FScriptSounds.Free;
   FSoundSources.Free;
   FSoundTransforms.Free;
@@ -574,6 +639,7 @@ begin
   FBindings.Clear;
   FCounts.Clear;
   FUnsupported.Clear;
+  FActors.Clear;
   FreeAndNil(FScript);
   FHandles.Clear;
   FScriptMovers.Clear;
@@ -586,6 +652,8 @@ begin
   FTeleportPending := False;
   FLightFades.Clear;
   FAnimated.Clear;
+  { before the VM goes (it owns the actors' threads) }
+  FActors.Clear;
   ClearScriptSounds;
   FTime := 0;
   ActivationCount := 0;
@@ -770,6 +838,7 @@ begin
     end;
   SpawnBindings;
   StartScripts;
+  SpawnActors;
   Hidden := 0;
   Dormant := 0;
   for ME in FMap.Models do
@@ -1115,6 +1184,12 @@ begin
     ActivateAnimated(FindAnimated(E));
     Exit;
   end;
+  if FindActor(EntityHandle(E)) <> nil then
+  begin
+    { idAI::Event_Activate: the script sees AI_ACTIVATED }
+    FindActor(EntityHandle(E)).SetFlag('AI_ACTIVATED', 1);
+    Exit;
+  end;
 
   ME := FMap.FindModelEntity(E.Name);
   { a cinematic character (idAI with "cinematic"): shows up and plays its
@@ -1358,7 +1433,371 @@ begin
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
+  begin
+    UpdateActors(SecondsPassed);
     FScript.Update(FTime);
+  end;
+end;
+
+constructor TD3Actor.Create;
+var
+  C: Integer;
+begin
+  inherited Create;
+  for C := Low(Channels) to High(Channels) do
+    Channels[C] := TD3ActorChannel.Create;
+end;
+
+destructor TD3Actor.Destroy;
+var
+  C: Integer;
+begin
+  for C := Low(Channels) to High(Channels) do
+    Channels[C].Free;
+  Obj.Free;
+  inherited Destroy;
+end;
+
+procedure TD3Actor.SetFlag(const AName: String; const Value: Single);
+var
+  I: Integer;
+begin
+  if Obj.Typ.FindField(AName, I) then
+    Obj.Fields[I] := D3FloatValue(Value);
+end;
+
+function TD3Game.ScriptEntityObject(const Handle: Integer): TD3ScriptObject;
+var
+  A: TD3Actor;
+begin
+  A := FindActor(Handle);
+  if A <> nil then
+    Result := A.Obj
+  else
+    Result := nil;
+end;
+
+function TD3Game.FindActor(const Handle: Integer): TD3Actor;
+begin
+  if Handle <= 0 then
+    Exit(nil);
+  for Result in FActors do
+    if Result.Handle = Handle then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.SpawnActors;
+var
+  ME: TD3ModelEntity;
+  E: TD3MapEntity;
+  T, Character: TD3ScriptType;
+  A: TD3Actor;
+  C: Integer;
+begin
+  if FScript = nil then
+    Exit;
+  Character := FScript.FindType('character');
+  if Character = nil then
+    Exit;
+  for ME in FMap.Models do
+  begin
+    E := ME.Entity;
+    { characters for now: monsters keep the game's simple AI, cinematic
+      characters just play their anim (Activate) }
+    if (E.Value('spawnclass') <> 'idAI') or E.BoolValue('cinematic') or
+       (Copy(LowerCase(E.ClassName_), 1, 8) = 'monster_') then
+      Continue;
+    T := FScript.FindType(E.Value('scriptobject'));
+    if (T = nil) or not T.IsA(Character) then
+      Continue;
+    A := TD3Actor.Create;
+    A.Model := ME;
+    A.Handle := EntityHandle(E);
+    A.Obj := TD3ScriptObject.Create(T);
+    A.Yaw := E.Angle;
+    A.IdealYaw := A.Yaw;
+    A.TurnRate := E.FloatValue('turn_rate', 360);
+    A.Main := FScript.NewPersistentThread(E.Name + ' state');
+    A.Main.Tag := A.Handle;
+    for C := Low(A.Channels) to High(A.Channels) do
+    begin
+      A.Channels[C].Thread := FScript.NewPersistentThread(E.Name + ' anim ' + IntToStr(C));
+      A.Channels[C].Thread.Tag := A.Handle;
+      A.Channels[C].Thread.Channel := C;
+    end;
+    { idActor::ConstructScriptObject: the object's init in the main thread }
+    FScript.RestartThread(A.Main, T.FindMethodToRun('init'), A.Handle);
+    FActors.Add(A);
+  end;
+  if FActors.Count > 0 then
+    WritelnLog('Doom3World', 'Actors: %d characters run their AI scripts', [FActors.Count]);
+end;
+
+function TD3Game.ActorChannel(const A: TD3Actor; const Channel: Single): TD3ActorChannel;
+var
+  C: Integer;
+begin
+  { ANIMCHANNEL_ALL = 0 plays on the body: the legs channel here }
+  C := Round(Channel);
+  if (C < Low(A.Channels)) or (C > High(A.Channels)) then
+    C := 2;
+  Result := A.Channels[C];
+end;
+
+procedure TD3Game.ActorAnim(const A: TD3Actor; const Channel: Single; const AnimName: String; const Loop: Boolean);
+var
+  C: TD3ActorChannel;
+  Instance: TD3Md5Instance;
+begin
+  C := ActorChannel(A, Channel);
+  { the head channel plays on the head model, the others on the body }
+  if Round(Channel) = 3 then
+    Instance := A.Model.HeadInstance
+  else
+    Instance := A.Model.Instance;
+  C.AnimName := AnimName;
+  C.AnimStart := FTime;
+  C.AnimLoop := Loop;
+  C.AnimLength := 0;
+  if (Instance <> nil) and Instance.PlayAnim(AnimName, Loop) then
+    C.AnimLength := Instance.AnimLength;
+end;
+
+function TD3Game.ActorEvent(const A: TD3Actor; const Thread: TD3ScriptThread; const N: String;
+  const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+var
+  C: TD3ActorChannel;
+  F: TD3ScriptFunction;
+  Other: TD3MapEntity;
+  D: Single;
+  Pos: TVector3;
+
+  function ArgF(const Index: Integer): Single;
+  begin
+    Result := D3ValueToFloat(Args[Index]);
+  end;
+
+  function NormalizeYaw(const Y: Single): Single;
+  begin
+    Result := Y - 360 * Floor((Y + 180) / 360);
+  end;
+
+  procedure MoveTo(const P: TVector3);
+  begin
+    A.Goal := P;
+    A.Moving := True;
+  end;
+
+begin
+  Result := True;
+  case N of
+    'setState', 'setNextState':
+      begin
+        { the main thread switches to the state function next frame
+          (idActor::SetState; setState stops the current one now) }
+        F := A.Obj.Typ.FindMethodToRun(D3ValueToString(Args[0]));
+        A.IdealFunction := F;
+        A.IdealName := D3ValueToString(Args[0]);
+        A.HasIdeal := True;
+        if (N = 'setState') and (Thread = A.Main) then
+          Thread.Yield;
+      end;
+    'getState': EventResult := D3StringValue(A.StateName);
+    'animState':
+      begin
+        C := ActorChannel(A, ArgF(0));
+        C.PendingFunction := A.Obj.Typ.FindMethodToRun(D3ValueToString(Args[1]));
+        C.PendingName := D3ValueToString(Args[1]);
+        C.HasPending := True;
+        if Thread = C.Thread then
+          Thread.Yield;
+      end;
+    'inAnimState':
+      begin
+        C := ActorChannel(A, ArgF(0));
+        if C.HasPending then
+          EventResult := D3FloatValue(Ord(SameText(C.PendingName, D3ValueToString(Args[1]))))
+        else
+          EventResult := D3FloatValue(Ord(SameText(C.StateName, D3ValueToString(Args[1]))));
+      end;
+    'playAnim':
+      begin
+        ActorAnim(A, ArgF(0), D3ValueToString(Args[1]), False);
+        EventResult := D3FloatValue(1);
+      end;
+    'playCycle', 'idleAnim':
+      begin
+        ActorAnim(A, ArgF(0), D3ValueToString(Args[1]), True);
+        EventResult := D3FloatValue(1);
+      end;
+    'animDone':
+      begin
+        { a played animation (not a cycle) at its end, minus the blend
+          frames (24 per second) }
+        C := ActorChannel(A, ArgF(0));
+        EventResult := D3FloatValue(Ord(not C.AnimLoop and
+          (FTime - C.AnimStart >= C.AnimLength - ArgF(1) / 24)));
+      end;
+    'stopAnim': ActorChannel(A, ArgF(0)).AnimName := '';
+    'hasAnim':
+      if Round(ArgF(0)) = 3 then
+        EventResult := D3FloatValue(Ord((A.Model.HeadInstance <> nil) and
+          A.Model.HeadInstance.HasAnim(D3ValueToString(Args[1]))))
+      else
+        EventResult := D3FloatValue(Ord(A.Model.Instance.HasAnim(D3ValueToString(Args[1]))));
+    'chooseAnim':
+      if A.Model.Instance.HasAnim(D3ValueToString(Args[1])) then
+        EventResult := D3StringValue(D3ValueToString(Args[1]));
+    'waitAction':
+      begin
+        A.WaitAction := D3ValueToString(Args[0]);
+        Thread.WaitFor(A.Handle);
+      end;
+    'finishAction':
+      if SameText(A.WaitAction, D3ValueToString(Args[0])) then
+        A.WaitAction := '';
+    'getHead', 'getEnemy', 'heardSound', 'getObstacle', 'getTalkTarget', 'closestEnemyToPoint':
+      EventResult := D3EntityValue(0);
+    'canBecomeSolid': EventResult := D3FloatValue(1);
+    'getTurnDelta': EventResult := D3FloatValue(NormalizeYaw(A.IdealYaw - A.Yaw));
+    'facingIdeal': EventResult := D3FloatValue(Ord(Abs(NormalizeYaw(A.IdealYaw - A.Yaw)) < 1));
+    'getCurrentYaw': EventResult := D3FloatValue(A.Yaw);
+    'turnTo': A.IdealYaw := ArgF(0);
+    'turnToPos':
+      begin
+        Pos := Args[0].V - CgeToD3(A.Model.Holder.Translation);
+        if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
+          A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
+      end;
+    'turnToEntity', 'faceEntity':
+      begin
+        Other := HandleEntity(Args[0].E);
+        if Other <> nil then
+        begin
+          Pos := Other.Origin - CgeToD3(A.Model.Holder.Translation);
+          if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
+            A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
+        end;
+      end;
+    'moveToEntity':
+      begin
+        Other := HandleEntity(Args[0].E);
+        if Other <> nil then
+          MoveTo(Other.Origin);
+      end;
+    'moveToPosition': MoveTo(Args[0].V);
+    'stopMove': A.Moving := False;
+    'moveStatus': EventResult := D3FloatValue(Ord(A.Moving)); // MOVE_STATUS_DONE, MOVE_STATUS_MOVING
+    'saveMove':
+      begin
+        A.SavedGoal := A.Goal;
+        A.SavedMoving := A.Moving;
+      end;
+    'restoreMove':
+      begin
+        A.Goal := A.SavedGoal;
+        A.Moving := A.SavedMoving;
+      end;
+    'getOrigin': EventResult := D3VectorValue(CgeToD3(A.Model.Holder.Translation));
+    'getAngles': EventResult := D3VectorValue(Vector3(0, A.Yaw, 0));
+    'setAngles':
+      begin
+        A.Yaw := Args[0].V.Y;
+        A.IdealYaw := A.Yaw;
+      end;
+    'distanceTo':
+      begin
+        Other := HandleEntity(Args[0].E);
+        if Other <> nil then
+        begin
+          D := (Other.Origin - CgeToD3(A.Model.Holder.Translation)).Length;
+          EventResult := D3FloatValue(D);
+        end;
+      end;
+    { what the game doesn't do (yet): nothing happens }
+    'setBoneMod', 'setNeverDormant', 'setTalkState', 'setTalkTarget', 'allowMovement',
+    'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain', 'setMoveType', 'lookAt',
+    'lookAtEnemy', 'lookAtEntity', 'animTurn', 'becomeSolid', 'becomeNonSolid',
+    'kickObstacles', 'clearEnemy', 'setEnemy', 'preventPain', 'overrideAnim',
+    'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'stopThinking', 'wakeOnFlashlight',
+    'setSmokeVisibility', 'attackBegin', 'attackEnd', 'clearBurn', 'markUsed':
+      ;
+    'getMoveType', 'getBlendFrames': EventResult := D3FloatValue(0);
+    'getSize': EventResult := D3VectorValue(Vector3(32, 32, 72));
+    else
+      Result := False;
+  end;
+end;
+
+procedure TD3Game.UpdateActors(const SecondsPassed: Single);
+var
+  A: TD3Actor;
+  Ch: Integer;
+  C: TD3ActorChannel;
+  Pos, Dir: TVector3;
+  Dist, Step, Speed, Delta, Turn: Single;
+begin
+  for A in FActors do
+  begin
+    { state switches asked last frame }
+    if A.HasIdeal then
+    begin
+      A.HasIdeal := False;
+      A.StateName := A.IdealName;
+      FScript.RestartThread(A.Main, A.IdealFunction, A.Handle);
+    end;
+    for Ch := Low(A.Channels) to High(A.Channels) do
+    begin
+      C := A.Channels[Ch];
+      if C.HasPending then
+      begin
+        C.HasPending := False;
+        C.StateName := C.PendingName;
+        FScript.RestartThread(C.Thread, C.PendingFunction, A.Handle);
+      end;
+    end;
+
+    { walking to the goal at the speed of the walk animation (its origin
+      joint stays put: the entity moves instead) }
+    Pos := CgeToD3(A.Model.Holder.Translation);
+    A.Model.Instance.LockOrigin := A.Moving;
+    if A.Moving then
+    begin
+      Dir := Vector3(A.Goal.X - Pos.X, A.Goal.Y - Pos.Y, 0);
+      Dist := Dir.Length;
+      Speed := A.Model.Instance.AnimSpeed;
+      if Speed < 10 then
+        Speed := 80;
+      Step := Speed * SecondsPassed;
+      if Dist <= Max(Step, 4) then
+      begin
+        Pos := Vector3(A.Goal.X, A.Goal.Y, Pos.Z);
+        A.Moving := False;
+      end else
+      begin
+        Pos := Pos + Dir * (Step / Dist);
+        A.IdealYaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
+      end;
+      A.Model.Holder.Translation := D3ToCge(Pos);
+    end;
+
+    { turning at turn_rate }
+    Delta := A.IdealYaw - A.Yaw;
+    Delta := Delta - 360 * Floor((Delta + 180) / 360);
+    Turn := A.TurnRate * SecondsPassed;
+    if Abs(Delta) <= Turn then
+      A.Yaw := A.IdealYaw
+    else
+      A.Yaw := A.Yaw + Sign(Delta) * Turn;
+    SetD3Rotation(A.Model.Holder, YawMatrix(A.Yaw));
+
+    { the flags idAI keeps for the script }
+    A.SetFlag('AI_FORWARD', Ord(A.Moving));
+    A.SetFlag('AI_MOVE_DONE', Ord(not A.Moving));
+    A.SetFlag('AI_ONGROUND', 1);
+    A.SetFlag('AI_DEST_UNREACHABLE', 0);
+  end;
 end;
 
 procedure TD3Game.SpawnAnimated(const ME: TD3ModelEntity);
@@ -1760,6 +2199,17 @@ begin
   FSoundTransforms.Clear;
 end;
 
+function TD3Game.ActorStatus: String;
+var
+  A: TD3Actor;
+begin
+  Result := '';
+  for A in FActors do
+    Result := Result + Format('%s: %s, legs %s (%s), at %s%s', [A.Model.Entity.Name, A.StateName,
+      A.Channels[2].StateName, A.Channels[2].AnimName, CgeToD3(A.Model.Holder.Translation).ToString,
+      BoolToStr(A.Moving, ', moving', '')]) + LineEnding;
+end;
+
 function TD3Game.ScriptStatus: String;
 var
   M: TD3ScriptMover;
@@ -2134,11 +2584,15 @@ end;
 
 function TD3Game.ScriptEntityBusy(const Handle: Integer): Boolean;
 var
+  Actor: TD3Actor;
   M: TD3ScriptMover;
   Door: TD3Mover;
   E: TD3MapEntity;
 begin
   if FScriptMovers.TryGetValue(Handle, M) and M.Busy then
+    Exit(True);
+  Actor := FindActor(Handle);
+  if (Actor <> nil) and (Actor.WaitAction <> '') then
     Exit(True);
   E := HandleEntity(Handle);
   if E <> nil then
@@ -2341,7 +2795,7 @@ begin
   end;
 end;
 
-function TD3Game.ScriptEvent(const Target: Integer; const Event: TD3ScriptEvent;
+function TD3Game.ScriptEvent(const Thread: TD3ScriptThread; const Target: Integer; const Event: TD3ScriptEvent;
   const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
 var
   N, Key: String;
@@ -2435,6 +2889,29 @@ begin
   E := HandleEntity(Target);
   if E = nil then
     Exit(False);
+  if (FindActor(Target) <> nil) and ActorEvent(FindActor(Target), Thread, N, Args, EventResult) then
+    Exit(True);
+  if N = 'randomPath' then
+  begin
+    { idEntity::Event_RandomPath: one of its targets that is a path_* }
+    Count := 0;
+    for I := 0 to E.Pairs.Count - 1 do
+    begin
+      Key := LowerCase(E.Pairs.Names[I]);
+      if (Copy(Key, 1, 6) <> 'target') or
+         ((Length(Key) > 6) and not CharInSet(Key[7], ['0'..'9'])) then
+        Continue;
+      Other := FindEntity(E.Pairs.ValueFromIndex[I]);
+      if (Other <> nil) and (Copy(LowerCase(Other.ClassName_), 1, 5) = 'path_') then
+      begin
+        Inc(Count);
+        { reservoir choice among them }
+        if Random(Count) = 0 then
+          EventResult := D3EntityValue(EntityHandle(Other));
+      end;
+    end;
+    Exit;
+  end;
   Light := -1;
   if SameText(E.ClassName_, 'light') then
     Light := FMap.FindLight(E.Name);

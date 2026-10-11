@@ -131,6 +131,16 @@ type
     Number: Integer;
     Name: String;
     State: TD3ScriptThreadState;
+    { Kept when done (not freed by Update), to be restarted
+      (TD3ScriptVM.RestartThread): an actor's state threads. }
+    Persistent: Boolean;
+    { For the host: the entity (actor) and animation channel it runs for. }
+    Tag, Channel: Integer;
+    { Stop running for this frame (host events changing the thread's
+      function, like an actor's setState). }
+    procedure Yield;
+    { Wait until TD3ScriptHost.EntityBusy(E) is false (sys.waitFor). }
+    procedure WaitFor(const E: Integer);
     property FrameDepth: Integer read FrameCount;
   end;
 
@@ -210,6 +220,13 @@ type
       const Args: TD3ValueArray): TD3ScriptThread; overload;
     { Start a thread on the next Update (like idThread::DelayedStart). }
     function QueueThread(const F: TD3ScriptFunction; const ASelf: Integer = 0): TD3ScriptThread;
+    { A thread that is kept when it ends (Persistent), not running yet. }
+    function NewPersistentThread(const AName: String): TD3ScriptThread;
+    { Run F (from the start, with ASelf) in T on the next Update, dropping
+      what T was doing. Not for the thread that is running now. }
+    procedure RestartThread(const T: TD3ScriptThread; const F: TD3ScriptFunction; const ASelf: Integer);
+    { Remove a thread (persistent ones too). }
+    procedure FreeThread(const T: TD3ScriptThread);
     { Run the threads that are done waiting. }
     procedure Update(const ATime: Single);
     procedure KillThreads;
@@ -442,6 +459,18 @@ begin
 end;
 
 { TD3ScriptThread ------------------------------------------------------------ }
+
+procedure TD3ScriptThread.Yield;
+begin
+  if State = tsRunning then
+    State := tsWaitFrame;
+end;
+
+procedure TD3ScriptThread.WaitFor(const E: Integer);
+begin
+  State := tsWaitEntity;
+  WaitEntity := E;
+end;
 
 procedure TD3ScriptThread.Push(const V: TD3Value);
 begin
@@ -2632,6 +2661,46 @@ begin
   Result := NewThread(F, ASelf, nil);
 end;
 
+function TD3ScriptVM.NewPersistentThread(const AName: String): TD3ScriptThread;
+begin
+  Result := TD3ScriptThread.Create;
+  Result.Number := FNextThread;
+  Inc(FNextThread);
+  Result.Name := AName;
+  Result.Persistent := True;
+  Result.State := tsDone;
+  SetLength(Result.Stack, 64);
+  SetLength(Result.Frames, 8);
+  FThreads.Add(Result);
+end;
+
+procedure TD3ScriptVM.RestartThread(const T: TD3ScriptThread; const F: TD3ScriptFunction; const ASelf: Integer);
+var
+  I: Integer;
+begin
+  T.Top := 0;
+  T.FrameCount := 0;
+  if (F = nil) or (F.Address < 0) then
+  begin
+    T.State := tsDone;
+    Exit;
+  end;
+  for I := 0 to High(F.LocalTypes) do
+    T.Push(DefaultValue(F.LocalTypes[I]));
+  T.FrameCount := 1;
+  T.Frames[0].Func := F;
+  T.Frames[0].ReturnPC := -1;
+  T.Frames[0].Base := 0;
+  T.Frames[0].Self := ASelf;
+  T.PC := F.Address;
+  T.State := tsRunning;
+end;
+
+procedure TD3ScriptVM.FreeThread(const T: TD3ScriptThread);
+begin
+  FThreads.Remove(T);
+end;
+
 function TD3ScriptVM.Ready(const T: TD3ScriptThread): Boolean;
 begin
   case T.State of
@@ -2659,7 +2728,7 @@ begin
       Execute(T);
     end;
   for I := FThreads.Count - 1 downto 0 do
-    if FThreads[I].State = tsDone then
+    if (FThreads[I].State = tsDone) and not FThreads[I].Persistent then
       FThreads.Delete(I);
 end;
 
@@ -2846,6 +2915,15 @@ begin
   if N = 'strToFloat' then
     R := D3FloatValue(StrToFloatDef(Trim(Args[0].S), 0, DefaultFormatSettings))
   else
+  if N = 'warning' then
+    ReportOnce('Script warning: ' + TrimRight(D3ValueToString(Args[0])))
+  else
+  if N = 'error' then
+  begin
+    { sys.error stops the thread (idThread::Error) }
+    ReportOnce(Format('Script error in thread "%s": %s', [T.Name, TrimRight(D3ValueToString(Args[0]))]));
+    T.State := tsDone;
+  end else
   if (N = 'cacheSoundShader') or (N = 'assert') then
     // nothing to do
   else
@@ -3056,6 +3134,25 @@ begin
             else
               Target := 0;
             V := DefaultValue(Ev.ReturnType);
+            { callFunction / hasFunction: a method of the entity's script
+              object by name, called in this thread }
+            if (Ev.Name = 'callFunction') or (Ev.Name = 'hasFunction') then
+            begin
+              if Target = 0 then
+                Target := Frame^.Self;
+              Obj := nil;
+              if FHost <> nil then
+                Obj := FHost.EntityObject(Target);
+              F := nil;
+              if Obj <> nil then
+                F := Obj.Typ.FindMethodToRun(D3ValueToString(Args[0]));
+              if Ev.Name = 'hasFunction' then
+                T.Push(D3FloatValue(Ord(F <> nil)))
+              else
+              if (F <> nil) and (Length(F.ParamTypes) = 0) then
+                EnterFunction(F, 0, Target);
+              Continue;
+            end;
             { the thread's own events work on any target }
             if not SysEvent(T, Target, Ev, Args, V) then
             begin

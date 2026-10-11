@@ -105,10 +105,15 @@ type
     FHullJoints: array of Integer;
     FHullTransforms: array of TMatrixTransformNode;
     procedure ApplyPose;
+    procedure LockPoseOrigin;
     procedure BuildShadowHulls(const Root: TX3DRootNode);
   public
     { The animation stands still (SetFrame). }
     Paused: Boolean;
+    { Keep the skeleton's origin joint where the animation starts in X / Y
+      (Doom 3 coordinates): the game moves the entity instead, like idAI
+      moving by the animation's delta. }
+    LockOrigin: Boolean;
     { Anims: anim name -> md5anim path (from a model decl). }
     constructor Create(const AModel: TD3Md5Model; const AAnims: TStrings;
       const SkinName: String = '');
@@ -127,6 +132,9 @@ type
     function SetFrame(const AnimName: String; const Frame: Integer): Boolean;
     { Seconds of the playing animation (0 if none). }
     function AnimLength: Single;
+    { Horizontal speed (units per second) of the playing animation's origin
+      joint, from its first to its last frame (walk / run cycles). }
+    function AnimSpeed: Single;
     { Where to attach a model (a head) to a joint, in the scene's
       coordinates (CGE): at the joint, turned by the joint's rotation since
       the bind pose (an attachment is upright when the body is in its bind
@@ -863,6 +871,19 @@ begin
   Result := (FAnim = nil) or (not FLoop and (FAnimTime >= FAnim.Duration));
 end;
 
+procedure TD3Md5Instance.LockPoseOrigin;
+var
+  First: TD3JointArray;
+  D: TVector3;
+  I: Integer;
+begin
+  First := nil;
+  FAnim.FramePose(0, First);
+  D := Vector3(FPose[0].Position.X - First[0].Position.X, FPose[0].Position.Y - First[0].Position.Y, 0);
+  for I := 0 to High(FPose) do
+    FPose[I].Position := FPose[I].Position - D;
+end;
+
 function TD3Md5Instance.SetFrame(const AnimName: String; const Frame: Integer): Boolean;
 begin
   Result := PlayAnim(AnimName, False);
@@ -871,6 +892,21 @@ begin
   FAnim.FramePose(Max(0, Frame - 1), FPose);
   ApplyPose;
   Paused := True;
+end;
+
+function TD3Md5Instance.AnimSpeed: Single;
+var
+  A, B: TD3JointArray;
+begin
+  Result := 0;
+  if (FAnim = nil) or (FAnim.Duration <= 0) or (FAnim.NumFrames < 2) then
+    Exit;
+  A := nil;
+  B := nil;
+  FAnim.FramePose(0, A);
+  FAnim.FramePose(FAnim.NumFrames - 1, B);
+  Result := Sqrt(Sqr(B[0].Position.X - A[0].Position.X) + Sqr(B[0].Position.Y - A[0].Position.Y)) /
+    FAnim.Duration;
 end;
 
 function TD3Md5Instance.AnimLength: Single;
@@ -905,6 +941,8 @@ begin
     Exit;
   FAnimTime := FAnimTime + SecondsPassed;
   FAnim.PoseAt(FAnimTime, FLoop, FPose);
+  if LockOrigin then
+    LockPoseOrigin;
   ApplyPose;
 end;
 

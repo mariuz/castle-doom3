@@ -265,7 +265,7 @@ begin
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>,');
     Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1],');
-    Console.Print('skipcinematic, quit');
+    Console.Print('skipcinematic, actors, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -388,6 +388,12 @@ begin
       end;
     Console.Print(S);
     WritelnLog('Ent', S);
+  end else
+  if Cmd = 'actors' then
+  begin
+    S := FGame.ActorStatus;
+    Console.Print(S);
+    WritelnLog('Actors', LineEnding + S);
   end else
   if Cmd = 'skipcinematic' then
     FGame.SkipCinematic
