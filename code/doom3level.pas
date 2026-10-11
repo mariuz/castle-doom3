@@ -123,10 +123,12 @@ type
     FBrushes: specialize TObjectList<TD3BrushEntity>;
     FModels: specialize TObjectList<TD3ModelEntity>;
     FHeadCount: Integer;
+    FGuiTextures: TX3DNodeList;
     FLights: array of TD3LightInfo;
     FSpawnOrigin: TVector3;
     FSpawnAngle: Single;
     FStaticModelCount: Integer;
+    procedure CollectGuiTexture(Node: TX3DNode);
     procedure SetShadowLight(const I: Integer);
     procedure ApplyLightColor(const I: Integer; const C: TVector3);
     function LightShaderColor(const I: Integer): TVector3;
@@ -222,6 +224,10 @@ type
     procedure SetLightParm(const I, Parm: Integer; const Value: Single);
     { Scale a light's color (0..1), for fading lights in and out. }
     procedure SetLightFade(const I: Integer; const Value: Single);
+    { Set a GUI parameter of an entity (a "gui_parm1"... key, which its
+      GUIs show) and redraw its GUI screens (idEntity::Event_SetGuiParm).
+      Returns the number of screens redrawn. }
+    function SetGuiParm(const E: TD3MapEntity; const Key, Value: String): Integer;
     { The brush entity or static model with this entity name, nil if none. }
     function FindBrush(const AName: String): TD3BrushEntity;
     { The md5 model entity with this entity name, nil if none. }
@@ -1657,6 +1663,47 @@ begin
     Exit;
   FLights[I].Parms.Parms[Parm] := Value;
   ApplyLightColor(I, LightShaderColor(I));
+end;
+
+procedure TDoom3Map.CollectGuiTexture(Node: TX3DNode);
+begin
+  if (TImageTextureNode(Node).FdUrl.Count > 0) and
+     (Copy(TImageTextureNode(Node).FdUrl.Items[0], 1, 6) = 'd3gui:') then
+    FGuiTextures.Add(Node);
+end;
+
+function TDoom3Map.SetGuiParm(const E: TD3MapEntity; const Key, Value: String): Integer;
+var
+  B: TD3BrushEntity;
+  I: Integer;
+  Tex: TImageTextureNode;
+  Path, NewUrl: String;
+begin
+  Result := 0;
+  E.SetValue(Key, Value);
+  B := FindBrush(E.Name);
+  if (B = nil) or (B.Scene.RootNode = nil) then
+    Exit;
+  FGuiTextures := TX3DNodeList.Create(False);
+  try
+    B.Scene.RootNode.EnumerateNodes(TImageTextureNode, @CollectGuiTexture, False);
+    for I := 0 to FGuiTextures.Count - 1 do
+    begin
+      Tex := TImageTextureNode(FGuiTextures[I]);
+      Path := GuiUrlPath(Tex.FdUrl.Items[0]);
+      if Path = '' then
+        Continue;
+      { drawn once per state, then cached }
+      NewUrl := GuiImageUrl(Path, E.Pairs);
+      if (NewUrl <> '') and (NewUrl <> Tex.FdUrl.Items[0]) then
+      begin
+        Tex.SetUrl([NewUrl]);
+        Inc(Result);
+      end;
+    end;
+  finally
+    FreeAndNil(FGuiTextures);
+  end;
 end;
 
 procedure TDoom3Map.SetLightFade(const I: Integer; const Value: Single);

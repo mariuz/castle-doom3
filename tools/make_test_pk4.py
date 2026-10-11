@@ -922,6 +922,9 @@ def map_text():
         # moved by maps/testmap.script
         {'classname': 'func_mover', 'name': 'lift_1', 'model': 'lift_1', 'origin': '380 300 4'},
         {'classname': 'func_mover', 'name': 'bar_1', 'model': 'bar_1', 'origin': '600 -300 150'},
+        # a curve for bar_1 (func_splinemover: the points of a NURBS curve)
+        {'classname': 'func_splinemover', 'name': 'spline_1', 'origin': '600 -300 150',
+         'curve_Nurbs': '4 ( 600 -300 150 650 -250 150 700 -300 150 750 -250 150 )'},
         {'classname': 'trigger_relay', 'name': 'trigger_relay_1', 'origin': '330 0 150',
          'target': 'light_trig', 'delay': '0.5'},
         {'classname': 'light', 'name': 'light_trig', 'origin': '840 300 180',
@@ -1634,6 +1637,8 @@ scriptEvent void    move( float angle, float distance );
 scriptEvent void    rotateOnce( vector angles );
 scriptEvent float   startSoundShader( string shaderName, float channel );
 scriptEvent void    fadeOutLight( float time );
+scriptEvent void    setGuiParm( string key, string value );
+scriptEvent void    startSpline( entity spline );
 
 #endif
 """
@@ -1644,6 +1649,7 @@ MAP_SCRIPT = """// Castle Doom 3 test level script: compiled after script/doom_m
 float lift_trips;
 float trigger_calls;
 float bar_turned;
+float bar_splined;
 
 // the lift in room B goes up and down forever
 void lift_loop() {
@@ -1665,6 +1671,8 @@ void lift_loop() {
 // trigger_once_1's "call" key
 void test_trigger_called() {
     trigger_calls++;
+    // the panel in room A shows it
+    $panel_1.setGuiParm( "gui_parm1", "TRIGGERED" );
     sys.print( "test_trigger_called by " + $trigger_once_1.getName() + "\n" );
     sys.wait( 1 );
     // the relay switched the light on 0.5 s after the trigger: make it green
@@ -1682,6 +1690,12 @@ void main() {
     $bar_1.rotateOnce( '0 90 0' );
     sys.waitFor( $bar_1 );
     bar_turned = 1;
+    // then along a curve (spline_1) in 2 s
+    sys.wait( 2 );
+    $bar_1.time( 2 );
+    $bar_1.startSpline( $spline_1 );
+    sys.waitFor( $bar_1 );
+    bar_splined = 1;
 }
 """
 

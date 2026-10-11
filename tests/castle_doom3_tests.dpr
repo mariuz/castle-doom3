@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(37, MapFile.Entities.Count, 'entity count');
+    CheckEquals(38, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1431,6 +1431,7 @@ var
   Away: TVector3;
   Box: TBox3D;
   Mid: Single;
+  GuisBefore: Integer;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -1468,11 +1469,19 @@ begin
     for I := 1 to 11 do
       Game.Update(0.1, Away);
     CheckNear(4 + 64, Lift.Scene.Translation.Y, 'lift up after 2 s');
-    Check(Game.Script.ThreadCount = 1, 'only the lift loop runs');
+    CheckEquals(2, Game.Script.ThreadCount, 'the lift loop and main (waiting to move bar_1 along its curve) run');
     { trigger_once_1's "call" runs test_trigger_called on the next frame }
+    GuisBefore := GuiCacheCount;
     Game.Update(0.1, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
     Game.Update(0.1, Away);
     CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the trigger''s call key ran');
+    CheckEquals('TRIGGERED', Map.FindBrush('panel_1').Entity.Value('gui_parm1'), 'setGuiParm set the key');
+    { the panel's screen shows that state already; another value redraws it }
+    CheckEquals(0, Map.SetGuiParm(Map.FindBrush('panel_1').Entity, 'gui_parm1', 'TRIGGERED'),
+      'setGuiParm redrew the panel''s GUI (same value: nothing to redraw)');
+    CheckEquals(1, Map.SetGuiParm(Map.FindBrush('panel_1').Entity, 'gui_parm1', 'AREA A'),
+      'SetGuiParm redraws the GUI screen for a new value');
+    Check(GuiCacheCount >= GuisBefore, 'GUI states are cached');
     for I := 1 to 12 do
       Game.Update(0.1, Away);
     Check(Map.Light(LightTrig).StartOn, 'the relay switched light_trig on');
@@ -1483,6 +1492,10 @@ begin
     CheckNear(0, Map.Light(LightTrig).Fade, 'fadeOutLight( 1 ) faded the light out');
     CheckNear(1, Game.Script.GlobalValue('lift_trips').F, 'the lift went up and down once');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift back down');
+    { bar_1 followed spline_1 (2 s, from 2 s after its turn) to its end }
+    CheckNear(1, Game.Script.GlobalValue('bar_splined').F, 'startSpline: waitFor returned');
+    CheckNear(750, Bar.Scene.Translation.X, 'bar_1 at the curve''s end x', 0.5);
+    CheckNear(250, Bar.Scene.Translation.Z, 'bar_1 at the curve''s end (Doom 3 y -250)', 0.5);
   finally
     FreeAndNil(Game);
     FreeAndNil(World);

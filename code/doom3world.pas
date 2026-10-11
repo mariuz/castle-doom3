@@ -149,6 +149,10 @@ type
     Rotating, RotContinuous: Boolean;
     RotFrom, RotTo, RotSpeed: TVector3;
     RotStart, RotDuration: Single;
+    { startSpline: moving along a curve (control points, Doom 3
+      coordinates) instead of a line, turning with its direction }
+    Spline: array of TVector3;
+    SplineYaw0, SplineAngleYaw0: Single;
     { sys.waitFor waits while a move or a single rotation goes on }
     function Busy: Boolean;
   end;
@@ -1985,6 +1989,84 @@ begin
   Angles := MatrixAngles(M);
 end;
 
+{ A point of a clamped uniform B-spline (degree 3, less with fewer points)
+  at T in 0..1, like idCurve_NURBS with equal weights. }
+function SplinePoint(const P: array of TVector3; const T: Single): TVector3;
+var
+  N, Degree, K, I, J, R: Integer;
+  Knots: array of Single;
+  D: array of TVector3;
+  U, A: Single;
+begin
+  N := Length(P);
+  if N = 0 then
+    Exit(TVector3.Zero);
+  if N = 1 then
+    Exit(P[0]);
+  Degree := Min(3, N - 1);
+  { clamped knots: Degree + 1 zeros, uniform inside, Degree + 1 ones }
+  SetLength(Knots, N + Degree + 1);
+  for I := 0 to High(Knots) do
+    if I <= Degree then
+      Knots[I] := 0
+    else
+    if I >= N then
+      Knots[I] := 1
+    else
+      Knots[I] := (I - Degree) / (N - Degree);
+  U := EnsureRange(T, 0, 1);
+  { the knot span holding U }
+  K := Degree;
+  while (K < N - 1) and (U >= Knots[K + 1]) do
+    Inc(K);
+  { de Boor }
+  SetLength(D, Degree + 1);
+  for J := 0 to Degree do
+    D[J] := P[J + K - Degree];
+  for R := 1 to Degree do
+    for J := Degree downto R do
+    begin
+      I := J + K - Degree;
+      if Knots[I + Degree - R + 1] - Knots[I] <= 0 then
+        A := 0
+      else
+        A := (U - Knots[I]) / (Knots[I + Degree - R + 1] - Knots[I]);
+      D[J] := D[J - 1] * (1 - A) + D[J] * A;
+    end;
+  Result := D[Degree];
+end;
+
+{ Yaw (degrees) of the curve's direction at T. }
+function SplineYaw(const P: array of TVector3; const T: Single): Single;
+var
+  D: TVector3;
+begin
+  D := SplinePoint(P, Min(1, T + 0.01)) - SplinePoint(P, Max(0, T - 0.01));
+  if Sqr(D.X) + Sqr(D.Y) < 1e-6 then
+    Exit(0);
+  Result := RadToDeg(ArcTan2(D.Y, D.X));
+end;
+
+{ The control points of a curve key: "N ( x y z x y z ... )". }
+function ParseCurve(const S: String): specialize TArray<TVector3>;
+var
+  Parts: TStringArray;
+  N, I: Integer;
+begin
+  Result := nil;
+  Parts := StringReplace(StringReplace(S, '(', ' ', [rfReplaceAll]), ')', ' ', [rfReplaceAll]).
+    Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+  if Length(Parts) < 1 then
+    Exit;
+  N := StrToIntDef(Parts[0], 0);
+  N := Min(N, (Length(Parts) - 1) div 3);
+  SetLength(Result, N);
+  for I := 0 to N - 1 do
+    Result[I] := Vector3(StrToFloatDef(Parts[1 + I * 3], 0, DefaultFormatSettings),
+      StrToFloatDef(Parts[2 + I * 3], 0, DefaultFormatSettings),
+      StrToFloatDef(Parts[3 + I * 3], 0, DefaultFormatSettings));
+end;
+
 { Fraction of a move done after T of Total seconds, accelerating for
   Accel and decelerating for Decel seconds (idExtrapolate's
   EXTRAPOLATION_ACCELLINEAR / DECELLINEAR, a trapezoid of speed). }
@@ -2133,9 +2215,18 @@ begin
     if M.Moving then
     begin
       F := MoveFraction(FTime - M.MoveStart, M.MoveDuration, M.AccelTime, M.DecelTime);
-      M.Origin := M.MoveFrom + (M.MoveTo - M.MoveFrom) * F;
+      if Length(M.Spline) > 0 then
+      begin
+        { along the curve, turning with it from the angles it had }
+        M.Origin := SplinePoint(M.Spline, F);
+        M.Angles.Y := M.SplineAngleYaw0 + SplineYaw(M.Spline, F) - M.SplineYaw0;
+      end else
+        M.Origin := M.MoveFrom + (M.MoveTo - M.MoveFrom) * F;
       if F >= 1 then
+      begin
         M.Moving := False;
+        M.Spline := nil;
+      end;
       Changed := True;
     end;
     if M.Rotating then
@@ -2371,6 +2462,9 @@ begin
   if N = 'setKey' then
     E.SetValue(Args[0].S, Args[1].S)
   else
+  if N = 'setGuiParm' then
+    FMap.SetGuiParm(E, Args[0].S, D3ValueToString(Args[1]))
+  else
   if (N = 'numTargets') or (N = 'getTarget') then
   begin
     Count := 0;
@@ -2538,7 +2632,42 @@ begin
           M.Rotating := True;
           M.RotContinuous := True;
         end;
-      'stopMoving': M.Moving := False;
+      'stopMoving', 'stopSpline':
+        begin
+          M.Moving := False;
+          M.Spline := nil;
+        end;
+      'startSpline':
+        begin
+          Other := HandleEntity(Args[0].E);
+          if Other <> nil then
+          begin
+            { the curve_* key of the spline entity (idCurve_NURBS,
+              CatmullRomSpline...), in map coordinates }
+            M.Spline := nil;
+            for I := 0 to Other.Pairs.Count - 1 do
+              if Copy(LowerCase(Other.Pairs.Names[I]), 1, 6) = 'curve_' then
+                M.Spline := ParseCurve(Other.Pairs.ValueFromIndex[I]);
+            if Length(M.Spline) > 1 then
+            begin
+              Dist := 0;
+              for I := 1 to High(M.Spline) do
+                Dist := Dist + (M.Spline[I] - M.Spline[I - 1]).Length;
+              M.MoveStart := FTime;
+              if M.MoveSpeed > 0 then
+                M.MoveDuration := Dist / M.MoveSpeed
+              else
+                M.MoveDuration := M.MoveTime;
+              M.SplineYaw0 := SplineYaw(M.Spline, 0);
+              M.SplineAngleYaw0 := M.Angles.Y;
+              M.Moving := True;
+            end else
+              M.Spline := nil;
+          end;
+        end;
+      'removeInitialSplineAngles':
+        { the mover keeps its own angles plus the curve's turn }
+        ;
       'stopRotating': M.Rotating := False;
       'isMoving': EventResult := D3FloatValue(Ord(M.Moving));
       'isRotating': EventResult := D3FloatValue(Ord(M.Rotating));

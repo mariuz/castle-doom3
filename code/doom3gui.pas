@@ -75,6 +75,9 @@ function GuiSurfPath(const GuiSurf: String; const EntityGui, EntityGui2, EntityG
   nil for world surfaces: then only explicit paths work). '' when none. }
 function GuiSurfaceUrl(const GuiSurf: String; const EntityKeys: TStrings): String;
 
+{ The GUI file drawn into a "d3gui:" texture URL ('' if it's not one). }
+function GuiUrlPath(const Url: String): String;
+
 procedure RegisterGuiProtocol;
 procedure ClearGuiCache;
 function GuiCacheCount: Integer;
@@ -655,6 +658,24 @@ begin
     G3 := EntityKeys.Values['gui3'];
   end;
   Result := GuiImageUrl(GuiSurfPath(GuiSurf, G1, G2, G3), EntityKeys);
+end;
+
+function GuiUrlPath(const Url: String): String;
+var
+  S: String;
+  I: Integer;
+begin
+  Result := '';
+  if Copy(Url, 1, 10) <> 'd3gui:/gui' then
+    Exit;
+  S := ChangeFileExt(Copy(Url, 11, MaxInt), '');
+  I := StrToIntDef(S, -1);
+  if (I < 0) or (I >= GuiKeys.Count) then
+    Exit;
+  { the cache key: path, then |key=value of the state }
+  Result := GuiKeys[I];
+  if Pos('|', Result) > 0 then
+    Result := Copy(Result, 1, Pos('|', Result) - 1);
 end;
 
 procedure ClearGuiCache;
