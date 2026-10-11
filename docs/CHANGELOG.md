@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Animated models** (roadmap 5c): `idAnimated` entities (Mars City's ships and hangar, props) hold the first frame of their `anim`, play it when activated (`cycle`, `num_anims`, `auto_advance`, `wait`, `remove`) and fire their targets at the end; cinematic characters appear and play their `anim`; md5 characters and monsters get their heads (`def_head` at `head_joint`; 52 in Mars City 1).
+- Test level: the cinematic shows an idAnimated blob with a head, which walks twice, switches `light_5` and goes; 413 checks.
 - **Cinematics** (roadmap 5c): camera anims (`.md5camera`, `Doom3Camera`) with cuts and the `old_origin` offset take over the view and fire their targets at the end; `func_cameraview`; `trigger_fade` and the scripts' screen fades; `info_player_teleport`; _Escape_ / `skipcinematic` skips a cinematic and the shots it chains to. Mars City 1's intro plays its cameras (checked against dhewm3: the first one looks at the console screen).
 - Scripts: lights fade in and out over time, `startSoundShader` / `startSound` / `stopSound` play sounds on entities.
 - Test level: `trigger_once_cin` fades out, plays a two-shot camera and teleports the player; the lift plays a sound, `light_trig` fades out; 404 checks; CI runs the cinematic.

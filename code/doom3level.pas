@@ -54,6 +54,15 @@ type
     EntityDef: TStringList; { owned by Decls, may be nil }
     { "hide": built but not shown until triggered (idAI / idAnimated) }
     Hidden: Boolean;
+    { "def_head": the head, a separate md5 model following the body's
+      "head_joint" (idActor::SetupHead) }
+    HeadInstance: TD3Md5Instance;
+    HeadHolder: TCastleTransform;
+    HeadJoint: String;
+    { The body's model decl offset (the scene's translation). }
+    Offset: TVector3;
+    { Place the head at its joint. }
+    procedure UpdateHead;
     destructor Destroy; override;
   end;
 
@@ -113,6 +122,7 @@ type
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
     FModels: specialize TObjectList<TD3ModelEntity>;
+    FHeadCount: Integer;
     FLights: array of TD3LightInfo;
     FSpawnOrigin: TVector3;
     FSpawnAngle: Single;
@@ -134,6 +144,7 @@ type
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
     procedure BuildModelEntities;
+    procedure BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
     procedure BuildStaticModelEntities;
   protected
     procedure Loaded; override;
@@ -316,8 +327,26 @@ end;
 
 { TD3ModelEntity }
 
+procedure TD3ModelEntity.UpdateHead;
+var
+  M: TMatrix4;
+  T, Scale: TVector3;
+  R: TVector4;
+begin
+  if (HeadInstance = nil) or not Instance.JointTransform(HeadJoint, M) then
+    Exit;
+  MatrixDecompose(TranslationMatrix(D3ToCge(Offset)) * M, T, R, Scale);
+  HeadHolder.Translation := T;
+  HeadHolder.Rotation := R;
+end;
+
 destructor TD3ModelEntity.Destroy;
 begin
+  if HeadInstance <> nil then
+  begin
+    HeadHolder.Remove(HeadInstance.Scene);
+    FreeAndNil(HeadInstance);
+  end;
   { the instance owns its scene; detach it before the holder goes }
   if (Instance <> nil) and (Holder <> nil) then
     Holder.Remove(Instance.Scene);
@@ -379,6 +408,7 @@ begin
   FShadowLight := -1;
   FStaticModelCount := 0;
   FModels.Clear;
+  FHeadCount := 0;
   FBrushes.Clear;
   FLights := nil;
   for I := 0 to High(FAreaScenes) do
@@ -1382,13 +1412,59 @@ begin
     Rot := E.Rotation;
     SetD3Rotation(ME.Holder, Rot);
     ME.Holder.Add(ME.Instance.Scene);
-    { "hide" "1" (or "2"): hidden until a trigger shows it (there is no
-      trigger system yet, so it stays hidden) }
+    ME.Offset := Offset;
+    if Def <> nil then
+      BuildHead(ME, Def.Values['def_head'], Def.Values['head_joint']);
+    { "hide" "1" (or "2"): hidden until a trigger shows it (TD3Game.Activate) }
     ME.Hidden := E.IntValue('hide', 0) <> 0;
     ME.Holder.Exists := not ME.Hidden;
     Add(ME.Holder);
     FModels.Add(ME);
   end;
+end;
+
+procedure TDoom3Map.BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
+var
+  HeadDef: TStringList;
+  Decl: TD3ModelDecl;
+  Md5: TD3Md5Model;
+  SkinName, ModelName: String;
+begin
+  if (HeadDefName = '') or (JointName = '') then
+    Exit;
+  { a model decl (idAFAttachment::SetBody), or an entityDef naming one }
+  ModelName := HeadDefName;
+  SkinName := '';
+  HeadDef := Decls.EntityDef(HeadDefName);
+  if HeadDef <> nil then
+  begin
+    ModelName := HeadDef.Values['model'];
+    SkinName := HeadDef.Values['skin'];
+  end;
+  Decl := Decls.ModelDecl(ModelName);
+  if Decl <> nil then
+    Md5 := Md5Cache.Model(Decl.Mesh)
+  else
+    Md5 := Md5Cache.Model(ModelName);
+  if Md5 = nil then
+    Exit;
+  if (SkinName = '') and (Decl <> nil) then
+    SkinName := Decl.Skin;
+  if Decl <> nil then
+    ME.HeadInstance := TD3Md5Instance.Create(Md5, Decl.Anims, SkinName)
+  else
+    ME.HeadInstance := TD3Md5Instance.Create(Md5, nil, SkinName);
+  ME.HeadInstance.Scene.Collides := False;
+  ME.HeadInstance.Scene.Pickable := False;
+  if Decl <> nil then
+    ME.HeadInstance.Scene.Translation := D3ToCge(Decl.Offset);
+  ME.HeadJoint := JointName;
+  ME.HeadHolder := TCastleTransform.Create(ME.Holder);
+  ME.HeadHolder.SetTransient;
+  ME.HeadHolder.Add(ME.HeadInstance.Scene);
+  ME.Holder.Add(ME.HeadHolder);
+  ME.UpdateHead;
+  Inc(FHeadCount);
 end;
 
 class function TDoom3Map.EntityInhibited(const E: TD3MapEntity): Boolean;
@@ -1484,9 +1560,9 @@ begin
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
   if FSpawnModels then
     BuildModelEntities;
-  WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models',
+  WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models (%d with heads)',
     [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count - FStaticModelCount,
-     FStaticModelCount, FModels.Count]);
+     FStaticModelCount, FModels.Count, FHeadCount]);
 end;
 
 function TDoom3Map.LoadMap(const AMapName: String): Boolean;
@@ -1635,7 +1711,14 @@ begin
     end;
   { animate md5 models (also in the editor, it's nice to see them move) }
   for ME in FModels do
+  begin
     ME.Instance.Update(SecondsPassed);
+    if ME.HeadInstance <> nil then
+    begin
+      ME.HeadInstance.Update(SecondsPassed);
+      ME.UpdateHead;
+    end;
+  end;
 end;
 
 initialization

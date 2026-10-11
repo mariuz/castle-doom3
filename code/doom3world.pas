@@ -24,6 +24,9 @@
   view from an entity; trigger_fade and sys.fadeIn / fadeOut / fadeTo fade
   the screen; info_player_teleport moves the player. TViewPlay applies
   them (CinematicActive, CinematicView, FadeColor, TakeTeleport).
+  idAnimated models (ships, props of cinematics) play their "anim" when
+  activated and then fire their targets (TD3Animated); cinematic
+  characters ("cinematic" "1") play theirs once.
 
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
@@ -150,6 +153,18 @@ type
     function Busy: Boolean;
   end;
 
+  { An idAnimated entity: an md5 model playing animations when activated
+    (func_animate, cin_base...). }
+  TD3Animated = class
+    Model: TD3ModelEntity;
+    { "num_anims": anim1, anim2... played one per activation; 0: "anim" }
+    NumAnims, AnimIndex: Integer;
+    Activated: Boolean;
+    { game time of the current animation's end (-1: none or looping),
+      of the "wait" activation (-1: none) }
+    DoneTime, ActivateTime: Single;
+  end;
+
   { A light fading in or out (idLight::FadeIn / FadeOut). }
   TD3LightFade = record
     Light: Integer;
@@ -197,6 +212,7 @@ type
     FTeleportPos: TVector3;
     FTeleportYaw: Single;
     FLightFades: specialize TList<TD3LightFade>;
+    FAnimated: specialize TObjectList<TD3Animated>;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -234,6 +250,13 @@ type
     procedure ApplyScriptMover(const M: TD3ScriptMover);
     procedure UpdateScriptMovers;
     function HandleEntity(const Handle: Integer): TD3MapEntity;
+    procedure SpawnAnimated(const ME: TD3ModelEntity);
+    function FindAnimated(const E: TD3MapEntity): TD3Animated;
+    procedure ActivateAnimated(const A: TD3Animated);
+    procedure PlayAnimatedAnim(const A: TD3Animated; const AnimName: String);
+    procedure PlayNextAnim(const A: TD3Animated);
+    procedure AnimatedDone(const A: TD3Animated);
+    procedure UpdateAnimated;
     procedure StartCamera(const E: TD3MapEntity);
     procedure StopCamera;
     procedure UpdateCamera;
@@ -313,6 +336,7 @@ type
     property Movers: specialize TObjectList<TD3Mover> read FMovers;
     property Monsters: specialize TObjectList<TD3Monster> read FMonsters;
     property Triggers: specialize TObjectList<TD3Trigger> read FTriggers;
+    property Animated: specialize TObjectList<TD3Animated> read FAnimated;
     { Game time (seconds since Spawn). }
     property Time: Single read FTime;
     property Map: TDoom3Map read FMap;
@@ -492,6 +516,7 @@ begin
   FScriptHost := TD3GameScriptHost.Create(Self);
   FCameraAnims := specialize TObjectDictionary<String, TD3CameraAnim>.Create([doOwnsValues]);
   FLightFades := specialize TList<TD3LightFade>.Create;
+  FAnimated := specialize TObjectList<TD3Animated>.Create(True);
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
@@ -520,6 +545,7 @@ begin
   FScriptMovers.Free;
   FCameraAnims.Free;
   FLightFades.Free;
+  FAnimated.Free;
   FScriptSounds.Free;
   FSoundSources.Free;
   FSoundTransforms.Free;
@@ -555,6 +581,7 @@ begin
   FFadeTime := 0;
   FTeleportPending := False;
   FLightFades.Clear;
+  FAnimated.Clear;
   ClearScriptSounds;
   FTime := 0;
   ActivationCount := 0;
@@ -715,6 +742,11 @@ begin
     SpawnMover(B);
   for ME in FMap.Models do
   begin
+    if ME.Entity.Value('spawnclass') = 'idAnimated' then
+    begin
+      SpawnAnimated(ME);
+      Continue;
+    end;
     Cls := LowerCase(ME.Entity.ClassName_);
     if (Copy(Cls, 1, 8) <> 'monster_') or ME.Hidden then
       Continue;
@@ -1074,7 +1106,28 @@ begin
       Exit;
     end;
 
+  if FindAnimated(E) <> nil then
+  begin
+    ActivateAnimated(FindAnimated(E));
+    Exit;
+  end;
+
   ME := FMap.FindModelEntity(E.Name);
+  { a cinematic character (idAI with "cinematic"): shows up and plays its
+    "anim" once, holding the last frame (its AI script's cinematic state) }
+  if (ME <> nil) and E.BoolValue('cinematic') and (Copy(Cls, 1, 8) <> 'monster_') then
+  begin
+    ME.Hidden := False;
+    ME.Holder.Exists := True;
+    if (E.Value('anim') <> '') and ME.Instance.PlayAnim(E.Value('anim'), False) then
+    begin
+      { the head plays its own animation of the same name (lip sync) }
+      if ME.HeadInstance <> nil then
+        ME.HeadInstance.PlayAnim(E.Value('anim'), False);
+      WritelnLog('Doom3World', 'Cinematic %s plays "%s"', [E.Name, E.Value('anim')]);
+    end;
+    Exit;
+  end;
   if (ME <> nil) and (Copy(Cls, 1, 8) = 'monster_') then
   begin
     if ME.Hidden then
@@ -1296,11 +1349,139 @@ begin
   UpdateBindings;
   UpdateCamera;
   UpdateLightFades;
+  UpdateAnimated;
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
     FScript.Update(FTime);
+end;
+
+procedure TD3Game.SpawnAnimated(const ME: TD3ModelEntity);
+var
+  A: TD3Animated;
+  E: TD3MapEntity;
+  Wait: Single;
+begin
+  E := ME.Entity;
+  A := TD3Animated.Create;
+  A.Model := ME;
+  A.NumAnims := E.IntValue('num_anims', 0);
+  A.DoneTime := -1;
+  A.ActivateTime := -1;
+  { idAnimated::Spawn: "start_anim" loops, else the first frame of the anim }
+  if E.Value('start_anim') <> '' then
+    ME.Instance.PlayAnim(E.Value('start_anim'), True)
+  else
+  if A.NumAnims > 0 then
+    ME.Instance.SetFrame(E.Value('anim1'), 1)
+  else
+  if E.Value('anim') <> '' then
+    ME.Instance.SetFrame(E.Value('anim'), 1);
+  Wait := E.FloatValue('wait', -1);
+  if Wait >= 0 then
+    A.ActivateTime := Wait;
+  FAnimated.Add(A);
+end;
+
+function TD3Game.FindAnimated(const E: TD3MapEntity): TD3Animated;
+begin
+  for Result in FAnimated do
+    if Result.Model.Entity = E then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.PlayAnimatedAnim(const A: TD3Animated; const AnimName: String);
+var
+  Cycle: Integer;
+begin
+  { "cycle": plays (-1: forever) }
+  Cycle := A.Model.Entity.IntValue('cycle', 1);
+  if (A.NumAnims > 0) and (A.AnimIndex >= A.NumAnims) and
+     A.Model.Entity.BoolValue('loop_last_anim') then
+    Cycle := -1;
+  if not A.Model.Instance.PlayAnim(AnimName, Cycle <> 1) then
+  begin
+    A.DoneTime := FTime;
+    Exit;
+  end;
+  if Cycle < 0 then
+    A.DoneTime := -1
+  else
+    A.DoneTime := FTime + A.Model.Instance.AnimLength * Max(1, Cycle);
+  WritelnLog('Doom3World', 'Animated %s plays "%s"', [A.Model.Entity.Name, AnimName]);
+end;
+
+procedure TD3Game.PlayNextAnim(const A: TD3Animated);
+var
+  E: TD3MapEntity;
+begin
+  E := A.Model.Entity;
+  if A.AnimIndex >= A.NumAnims then
+  begin
+    { the sequence is over: hide (and remove), or start again }
+    A.Model.Hidden := True;
+    A.Model.Holder.Exists := False;
+    A.AnimIndex := 0;
+    A.DoneTime := -1;
+    Exit;
+  end;
+  A.Model.Hidden := False;
+  A.Model.Holder.Exists := True;
+  Inc(A.AnimIndex);
+  PlayAnimatedAnim(A, E.Value('anim' + IntToStr(A.AnimIndex)));
+end;
+
+procedure TD3Game.ActivateAnimated(const A: TD3Animated);
+begin
+  { idAnimated::Event_Activate / Event_Start }
+  if A.NumAnims > 0 then
+  begin
+    PlayNextAnim(A);
+    Exit;
+  end;
+  if A.Activated then
+    Exit;
+  A.Activated := True;
+  A.Model.Hidden := False;
+  A.Model.Holder.Exists := True;
+  PlayAnimatedAnim(A, A.Model.Entity.Value('anim'));
+end;
+
+procedure TD3Game.AnimatedDone(const A: TD3Animated);
+var
+  E: TD3MapEntity;
+  Index: Integer;
+begin
+  { idAnimated::Event_AnimDone }
+  E := A.Model.Entity;
+  A.DoneTime := -1;
+  Index := Max(1, A.AnimIndex);
+  if (Index >= A.NumAnims) and E.BoolValue('remove') then
+    RemoveEntity(E)
+  else
+  if E.BoolValue('auto_advance') then
+    PlayNextAnim(A)
+  else
+    A.Activated := False;
+  ActivateTargets(E);
+end;
+
+procedure TD3Game.UpdateAnimated;
+var
+  A: TD3Animated;
+begin
+  for A in FAnimated do
+  begin
+    if (A.ActivateTime >= 0) and (FTime >= A.ActivateTime) then
+    begin
+      A.ActivateTime := -1;
+      ActivateAnimated(A);
+    end;
+    if (A.DoneTime >= 0) and (FTime >= A.DoneTime) then
+      AnimatedDone(A);
+  end;
 end;
 
 procedure TD3Game.StartCamera(const E: TD3MapEntity);

@@ -114,8 +114,8 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(5, Decls.DeclCount(dtEntityDef), 'entityDef count');
-  CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
+  CheckEquals(6, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(36, MapFile.Entities.Count, 'entity count');
+    CheckEquals(37, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1499,6 +1499,10 @@ var
   Fov, Yaw: Single;
   I: Integer;
   Away: TVector3;
+  Blob: TD3ModelEntity;
+  Light5: Integer;
+  Light5On: Boolean;
+  Walk: Single;
 begin
   Anim := TD3CameraAnim.Create;
   try
@@ -1530,10 +1534,22 @@ begin
   World.Add(Map);
   Game := nil;
   try
-    Map.SpawnModels := False;
+    { md5 models too: the cinematic's idAnimated blob }
     Check(Map.LoadMap('testmap'), 'load testmap for cinematics');
     Game := TD3Game.Create(Map);
     Game.Spawn;
+    Blob := Map.FindModelEntity('animated_blob_1');
+    Check(Blob <> nil, 'animated_blob_1 built');
+    if Blob = nil then
+      Exit;
+    CheckEquals(1, Game.Animated.Count, 'one idAnimated entity');
+    Check(not Blob.Holder.Exists, 'the idAnimated blob is hidden until triggered');
+    { def_head: a head model at the "head" joint (Doom 3 z 76 = CGE y) }
+    Check(Blob.HeadInstance <> nil, 'def_head built a head');
+    if Blob.HeadInstance <> nil then
+      CheckNear(76, Blob.HeadHolder.Translation.Y, 'the head sits at the head joint', 1);
+    Light5 := Map.FindLight('light_5');
+    Light5On := Map.Light(Light5).StartOn;
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { walk into trigger_once_cin: fade to black in 0.3 s, then the camera }
     Game.Update(0.1, D3ToCge(Vector3(340, -340, 0)) + Vector3(0, PlayerEyeHeight, 0));
@@ -1543,6 +1559,9 @@ begin
     CheckNear(1, Game.FadeColor.W, 'trigger_fade faded to black', 0.05);
     Game.Update(0.1, Away);
     Check(Game.CinematicActive, 'the relay started the camera');
+    Check(Blob.Holder.Exists, 'the relay showed the idAnimated blob');
+    Walk := Blob.Instance.AnimLength;
+    Check(Walk > 0, 'the blob plays its walk anim');
     CheckEquals('test_cam_1', Game.CinematicName, 'cinematic camera name');
     Game.CinematicView(P, D, U, Fov);
     CheckNear(380, CgeToD3(P).X, 'cinematic view at the anim''s first frames', 30);
@@ -1560,6 +1579,11 @@ begin
     CheckNear(200, CgeToD3(Feet).Y, 'teleport y');
     CheckNear(180, Yaw, 'teleport yaw');
     Check(not Game.TakeTeleport(Feet, Yaw), 'a teleport is taken once');
+    { "cycle" "2": the walk twice since the relay, then "remove" and the target }
+    for I := 1 to Round(Walk * 2 * 10) do
+      Game.Update(0.1, Away);
+    Check(not Blob.Holder.Exists, 'the idAnimated blob is removed after its anim');
+    Check(Map.Light(Light5).StartOn <> Light5On, 'the blob''s anim end fired its target (light_5)');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);

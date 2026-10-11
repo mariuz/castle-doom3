@@ -107,6 +107,8 @@ type
     procedure ApplyPose;
     procedure BuildShadowHulls(const Root: TX3DRootNode);
   public
+    { The animation stands still (SetFrame). }
+    Paused: Boolean;
     { Anims: anim name -> md5anim path (from a model decl). }
     constructor Create(const AModel: TD3Md5Model; const AAnims: TStrings;
       const SkinName: String = '');
@@ -120,6 +122,16 @@ type
     function ShadowHullCount: Integer;
     function AnimFinished: Boolean;
     procedure Update(const SecondsPassed: Single);
+    { Show one frame (1 = the first) of an animation, holding it
+      (idAnimator::SetFrame). False if there's no such animation. }
+    function SetFrame(const AnimName: String; const Frame: Integer): Boolean;
+    { Seconds of the playing animation (0 if none). }
+    function AnimLength: Single;
+    { Where to attach a model (a head) to a joint, in the scene's
+      coordinates (CGE): at the joint, turned by the joint's rotation since
+      the bind pose (an attachment is upright when the body is in its bind
+      pose). False if there's no such joint. }
+    function JointTransform(const JointName: String; out M: TMatrix4): Boolean;
     property Scene: TCastleScene read FScene;
     property Model: TD3Md5Model read FModel;
   end;
@@ -842,6 +854,7 @@ begin
   FAnim := A;
   FAnimTime := 0;
   FLoop := Loop;
+  Paused := False;
   Result := True;
 end;
 
@@ -850,9 +863,45 @@ begin
   Result := (FAnim = nil) or (not FLoop and (FAnimTime >= FAnim.Duration));
 end;
 
+function TD3Md5Instance.SetFrame(const AnimName: String; const Frame: Integer): Boolean;
+begin
+  Result := PlayAnim(AnimName, False);
+  if not Result then
+    Exit;
+  FAnim.FramePose(Max(0, Frame - 1), FPose);
+  ApplyPose;
+  Paused := True;
+end;
+
+function TD3Md5Instance.AnimLength: Single;
+begin
+  if FAnim <> nil then
+    Result := FAnim.Duration
+  else
+    Result := 0;
+end;
+
+function TD3Md5Instance.JointTransform(const JointName: String; out M: TMatrix4): Boolean;
+var
+  I: Integer;
+  Bind: TMatrix4;
+begin
+  I := FModel.JointIndex(JointName);
+  Result := I >= 0;
+  if not Result then
+  begin
+    M := TMatrix4.Identity;
+    Exit;
+  end;
+  { current joint * inverse of the bind pose rotation (a transpose) }
+  Bind := JointMatrix(FModel.Joints[I]);
+  Bind.Columns[3] := Vector4(0, 0, 0, 1);
+  M := JointMatrix(FPose[I]) * Bind.Transpose;
+end;
+
 procedure TD3Md5Instance.Update(const SecondsPassed: Single);
 begin
-  if FAnim = nil then
+  if (FAnim = nil) or Paused then
     Exit;
   FAnimTime := FAnimTime + SecondsPassed;
   FAnim.PoseAt(FAnimTime, FLoop, FPose);

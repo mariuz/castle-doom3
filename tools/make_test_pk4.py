@@ -907,7 +907,12 @@ def map_text():
         {'classname': 'trigger_fade', 'name': 'trigger_fade_out', 'origin': '340 -340 150',
          'fadeColor': '0 0 0 1', 'fadeTime': '0.3'},
         {'classname': 'trigger_relay', 'name': 'trigger_relay_cin', 'origin': '360 -340 150',
-         'delay': '0.3', 'target': 'trigger_fade_in', 'target1': 'test_cam_1'},
+         'delay': '0.3', 'target': 'trigger_fade_in', 'target1': 'test_cam_1',
+         'target2': 'animated_blob_1'},
+        # an idAnimated model of the cinematic: appears, walks twice, then
+        # switches light_5 (its target) and is removed
+        {'classname': 'test_animated_blob', 'name': 'animated_blob_1', 'origin': '650 150 0',
+         'angle': '90', 'hide': '1', 'target': 'light_5'},
         {'classname': 'trigger_fade', 'name': 'trigger_fade_in', 'origin': '380 -340 150',
          'fadeColor': '0 0 0 0', 'fadeTime': '0.5'},
         {'classname': 'test_cinematic_cam', 'name': 'test_cam_1', 'origin': '600 0 100',
@@ -1227,6 +1232,22 @@ entityDef trigger_fade {
 entityDef info_player_teleport {
 	"editor_usage"			"Moves the player here when triggered."
 	"spawnclass"			"idPlayerStart"
+}
+
+model test_blob_head {
+	mesh					models/md5/test/blob.md5mesh
+	anim idle				models/md5/test/blob_idle.md5anim
+}
+
+entityDef test_animated_blob {
+	"editor_usage"			"Plays its anim (walk, twice) when triggered, fires its targets and goes."
+	"spawnclass"			"idAnimated"
+	"model"					"test_blob"
+	"anim"					"walk"
+	"cycle"					"2"
+	"remove"				"1"
+	"def_head"				"test_blob_head"
+	"head_joint"			"head"
 }
 
 entityDef monster_test_blob {
