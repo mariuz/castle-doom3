@@ -145,9 +145,11 @@ jobs:
           grep -q "Teleport to info_player_teleport_1" test_output/cinematic.log || { echo "::error::the camera's end should teleport the player"; exit 1; }
           grep "Screenshot" test_output/cinematic.log | sed -n 2p | grep -Eq "eye 500 (200|199.9)" || { echo "::error::the player should be at info_player_teleport_1 after the cinematic"; exit 1; }
           run_test monster testmap "W:1,O:god,G:740 300 96,A:0,W:4,O:actors,S,Q"
+          run_test projectile testmap "W:1,O:god,G:560 300 0,A:0,W:3,S,Q"
+          grep -q "Projectile of blob_scripted_1 hits the player" test_output/projectile.log || { echo "::error::the scripted monster's range anim should throw a projectile that hits the player"; exit 1; }
           grep -q "blob_scripted_1 hits the player" test_output/monster.log || { echo "::error::the scripted monster should chase and hit the player (AI script, melee frame command)"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 24
+          test "$(ls test_output/*.png | wc -l)" -ge 25
 
       - name: Upload screenshots and logs
         if: always()

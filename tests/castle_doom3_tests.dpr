@@ -114,7 +114,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(9, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(11, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -162,7 +162,7 @@ begin
   begin
     CheckEquals('models/md5/test/blob.md5mesh', Model.Mesh, 'model mesh');
     CheckEquals('models/md5/test/blob_walk.md5anim', Model.AnimFile('walk'), 'model anim (with frame commands)');
-    CheckEquals(3, Model.Anims.Count, 'model anim count');
+    CheckEquals(4, Model.Anims.Count, 'model anim count');
   end;
 
   Snd := Decls.SoundShader('test_hum');
@@ -1449,7 +1449,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(17, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(18, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1728,6 +1728,49 @@ begin
   end;
 end;
 
+{ A scripted monster throwing projectiles (launch_missile frame command). }
+procedure TestProjectiles;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  M: TD3Monster;
+  I: Integer;
+  Eye: TVector3;
+  SawFlying: Boolean;
+  RemoveMe: TRemoveType;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for projectiles');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    { the player on room B's floor, below the balcony: out of melee reach }
+    Eye := D3ToCge(Vector3(560, 300, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    SawFlying := False;
+    for I := 1 to 40 do
+    begin
+      Game.Update(0.1, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.1, RemoveMe);
+      if (Game.Projectiles.Count > 0) and (Game.Projectiles[0].Visual <> nil) then
+        SawFlying := True;
+    end;
+    Check(Game.ProjectilesLaunched > 0, 'the range anim''s launch_missile fired a projectile');
+    Check(SawFlying, 'a glowing projectile flew (light_color: a visible ball)');
+    Check(Game.Health < 100, Format('a projectile hit the player (health %d)', [Game.Health]));
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestMovers;
 var
   World: TCastleRootTransform;
@@ -1857,6 +1900,7 @@ begin
   TestCinematics;
   TestActors;
   TestScriptedMonster;
+  TestProjectiles;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

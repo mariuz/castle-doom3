@@ -256,6 +256,9 @@ var
   I: Integer;
   L: TD3LightInfo;
   S: String;
+  Words: TStringArray;
+  E: TD3MapEntity;
+  Dist: Single;
   Gui: TD3Gui;
   GuiImage: TCastleImage;
 begin
@@ -265,7 +268,7 @@ begin
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>,');
     Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1],');
-    Console.Print('skipcinematic, actors, quit');
+    Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -388,6 +391,30 @@ begin
       end;
     Console.Print(S);
     WritelnLog('Ent', S);
+  end else
+  if Cmd = 'activate' then
+  begin
+    { as if a trigger targeted it }
+    if FGame.FindEntity(Args) <> nil then
+      FGame.Activate(FGame.FindEntity(Args))
+    else
+      Console.Print('activate: no entity ' + Args);
+  end else
+  if Cmd = 'near' then
+  begin
+    { stand in front of an entity, facing it: near <name> [distance] }
+    Words := Args.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if (Length(Words) > 0) and (FGame.FindEntity(Words[0]) <> nil) then
+    begin
+      E := FGame.FindEntity(Words[0]);
+      Dist := 100;
+      if Length(Words) > 1 then
+        Dist := StrToFloatDef(Words[1], 100);
+      P := E.Origin + Vector3(Cos(DegToRad(E.Angle)), Sin(DegToRad(E.Angle)), 0) * Dist;
+      PlaceCamera(D3ToCge(P), E.Angle + 180);
+      Console.Print(Format('near %s at %s', [E.Name, P.ToString]));
+    end else
+      Console.Print('near: no entity ' + Args);
   end else
   if Cmd = 'actors' then
   begin

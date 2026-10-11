@@ -37,7 +37,8 @@
   (ScriptedMonsterObjects: zombies) run theirs too, with the player as
   their enemy: checkForEnemy, moveToEnemy, testMeleeAttack and the melee
   frame commands of their animations; shots set AI_PAIN, death starts
-  state_Killed.
+  state_Killed. launch_missile frame commands fire projectiles
+  (TD3Projectile: the monster's def_projectile) at the player.
 
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
@@ -50,6 +51,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
+  CastleRenderOptions,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5;
 
 type
@@ -233,6 +235,22 @@ type
     procedure SetFlag(const AName: String; const Value: Single);
   end;
 
+  { A projectile in flight (idProjectile): fired by a monster's
+    launch_missile frame command, it hurts the player it reaches and
+    detonates on the world. CGE coordinates. }
+  TD3Projectile = class
+    Position, Velocity: TVector3;
+    { downwards, units per second per second }
+    Gravity: Single;
+    Fuse, Radius: Single;
+    Damage: Integer;
+    Owner: String;
+    ExplodeSound: String;
+    { a glowing ball (fireballs), nil for bullets }
+    Visual: TCastleTransform;
+    destructor Destroy; override;
+  end;
+
   { A light fading in or out (idLight::FadeIn / FadeOut). }
   TD3LightFade = record
     Light: Integer;
@@ -282,6 +300,7 @@ type
     FLightFades: specialize TList<TD3LightFade>;
     FAnimated: specialize TObjectList<TD3Animated>;
     FActors: specialize TObjectList<TD3Actor>;
+    FProjectiles: specialize TObjectList<TD3Projectile>;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -328,6 +347,9 @@ type
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     procedure UpdateActors(const SecondsPassed: Single);
     procedure ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
+    procedure LaunchProjectiles(const A: TD3Actor; const JointName: String);
+    procedure UpdateProjectiles(const SecondsPassed: Single);
+    procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
     procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
     function StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
@@ -367,6 +389,8 @@ type
     SinceFire: Single;
     { Entities activated since the map was spawned (statistics, tests). }
     ActivationCount: Integer;
+    { Projectiles launched since the map was spawned (statistics, tests). }
+    ProjectilesLaunched: Integer;
     { Script threads and the entities they move stand still (g_stopTime). }
     ScriptsPaused: Boolean;
     constructor Create(const AMap: TDoom3Map);
@@ -422,6 +446,7 @@ type
     property Triggers: specialize TObjectList<TD3Trigger> read FTriggers;
     property Animated: specialize TObjectList<TD3Animated> read FAnimated;
     property Actors: specialize TObjectList<TD3Actor> read FActors;
+    property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
     { Game time (seconds since Spawn). }
     property Time: Single read FTime;
     property Map: TDoom3Map read FMap;
@@ -616,6 +641,7 @@ begin
   FLightFades := specialize TList<TD3LightFade>.Create;
   FAnimated := specialize TObjectList<TD3Animated>.Create(True);
   FActors := specialize TObjectList<TD3Actor>.Create(True);
+  FProjectiles := specialize TObjectList<TD3Projectile>.Create(True);
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
@@ -646,6 +672,7 @@ begin
   FLightFades.Free;
   FAnimated.Free;
   FActors.Free;
+  FProjectiles.Free;
   FScriptSounds.Free;
   FSoundSources.Free;
   FSoundTransforms.Free;
@@ -685,6 +712,8 @@ begin
   FAnimated.Clear;
   { before the VM goes (it owns the actors' threads) }
   FActors.Clear;
+  FProjectiles.Clear;
+  ProjectilesLaunched := 0;
   ClearScriptSounds;
   FTime := 0;
   ActivationCount := 0;
@@ -1476,6 +1505,7 @@ begin
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
+  UpdateProjectiles(SecondsPassed);
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
@@ -1672,6 +1702,17 @@ var
     A.Goal := P;
     A.Moving := True;
     A.ChaseEnemy := False;
+    { the script sees the move started at once (idAI::MoveToPosition) }
+    A.SetFlag('AI_MOVE_DONE', 0);
+    A.SetFlag('AI_FORWARD', 1);
+  end;
+
+  procedure MoveDone;
+  begin
+    A.Moving := False;
+    A.ChaseEnemy := False;
+    A.SetFlag('AI_MOVE_DONE', 1);
+    A.SetFlag('AI_FORWARD', 0);
   end;
 
 begin
@@ -1772,9 +1813,19 @@ begin
     'moveToEnemy':
       if A.HasEnemy then
       begin
-        A.ChaseEnemy := True;
-        A.Moving := True;
-      end;
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        if Sqrt(Sqr(Pos.X) + Sqr(Pos.Y)) <= A.MeleeRange then
+          { already there }
+          MoveDone
+        else
+        begin
+          A.ChaseEnemy := True;
+          A.Moving := True;
+          A.SetFlag('AI_MOVE_DONE', 0);
+          A.SetFlag('AI_FORWARD', 1);
+        end;
+      end else
+        MoveDone;
     'enemyRange', 'enemyRange2D':
       begin
         Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
@@ -1794,6 +1845,27 @@ begin
           EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
       end;
     'canReachEnemy', 'enemyInCombatCone', 'canSee': EventResult := D3FloatValue(1);
+    'canHitEnemyFromAnim':
+      EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
+    'entityInAttackCone':
+      begin
+        { within attack_cone degrees of its facing }
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        D := RadToDeg(ArcTan2(Pos.Y, Pos.X)) - A.Yaw;
+        D := D - 360 * Floor((D + 180) / 360);
+        EventResult := D3FloatValue(Ord((Args[0].E = PlayerHandle) and
+          (Abs(D) <= A.Model.Entity.FloatValue('attack_cone', 70) / 2)));
+      end;
+    'predictEnemyPos': EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+    'animLength':
+      EventResult := D3FloatValue(A.Model.Instance.AnimDurationOf(
+        A.Model.Instance.ResolveAnim(D3ValueToString(Args[1]))));
+    { no dodging, leaping, combat nodes or touching yet }
+    'touches', 'testAnimMove', 'testAnimMoveTowardEnemy': EventResult := D3FloatValue(0);
+    'getCombatNode', 'findEnemyInCombatNodes', 'getClosestHiddenTarget': EventResult := D3EntityValue(0);
+    'getJumpVelocity': EventResult := D3VectorValue(TVector3.Zero);
+    'setLinearVelocity':
+      ;
     'getPainAnim': EventResult := D3StringValue('pain');
     'stopThinking':
       begin
@@ -1834,11 +1906,7 @@ begin
           MoveTo(Other.Origin);
       end;
     'moveToPosition': MoveTo(Args[0].V);
-    'stopMove':
-      begin
-        A.Moving := False;
-        A.ChaseEnemy := False;
-      end;
+    'stopMove', 'moveToCover': MoveDone;
     'moveStatus': EventResult := D3FloatValue(Ord(A.Moving)); // MOVE_STATUS_DONE, MOVE_STATUS_MOVING
     'saveMove':
       begin
@@ -2023,6 +2091,199 @@ begin
   end;
 end;
 
+destructor TD3Projectile.Destroy;
+begin
+  FreeAndNil(Visual);
+  inherited Destroy;
+end;
+
+procedure TD3Game.PlaySoundAt(const ShaderName: String; const Position: TVector3);
+var
+  Snd: TCastleSound;
+  T: TCastleTransform;
+  Source: TCastleSoundSource;
+  Playing: TCastlePlayingSoundSource;
+begin
+  Snd := SoundFromShader(ShaderName);
+  if Snd = nil then
+    Exit;
+  { a transform kept with the script sounds' ones (freed with the map) }
+  T := TCastleTransform.Create(nil);
+  T.Translation := Position;
+  FMap.Add(T);
+  FSoundTransforms.Add(T);
+  Source := TCastleSoundSource.Create(T);
+  T.AddBehavior(Source);
+  Playing := TCastlePlayingSoundSource.Create(nil);
+  Playing.Sound := Snd;
+  Playing.FreeOnStop := True;
+  Source.Play(Playing);
+end;
+
+procedure TD3Game.LaunchProjectiles(const A: TD3Actor; const JointName: String);
+var
+  E: TD3MapEntity;
+  Def, DamageDef: TStringList;
+  From, Target, Dir, Side, Up2, Vel: TVector3;
+  M: TMatrix4;
+  Speed, Gravity, Accuracy, Spread, Dist, H, V2, Root, Angle: Single;
+  Count, I, Damage: Integer;
+  P: TD3Projectile;
+  Ball: TCastleSphere;
+
+  { a direction turned randomly within Degrees of Dir }
+  function Jitter(const D: TVector3; const Degrees: Single): TVector3;
+  var
+    R1, R2: Single;
+  begin
+    if Degrees <= 0 then
+      Exit(D);
+    R1 := DegToRad(Degrees) * (Random * 2 - 1);
+    R2 := DegToRad(Degrees) * (Random * 2 - 1);
+    Result := (D + Side * Tan(R1) + Up2 * Tan(R2)).Normalize;
+  end;
+
+begin
+  E := A.Model.Entity;
+  Def := Decls.EntityDef(E.Value('def_projectile'));
+  if (Def = nil) or not A.HasEnemy then
+    Exit;
+  { from the joint (the gun, the hand), else the chest }
+  if A.Model.Instance.JointPosition(JointName, From) then
+    From := A.Model.Instance.Scene.LocalToWorld(From)
+  else
+    From := A.Model.Holder.Translation + Vector3(0, 48, 0);
+  Target := FPlayerEye - Vector3(0, 20, 0);
+  { idProjectile's velocity: x is the speed along the launch direction }
+  Speed := ParseVector3(Def.Values['velocity'], Vector3(500, 0, 0)).X;
+  if Speed <= 0 then
+    Speed := 500;
+  Gravity := StrToFloatDef(Def.Values['gravity'], 0, DefaultFormatSettings);
+  Dir := (Target - From).Normalize;
+  if Gravity > 0 then
+  begin
+    { the lower arc that reaches the target, if there's one }
+    Dist := Sqrt(Sqr(Target.X - From.X) + Sqr(Target.Z - From.Z));
+    H := Target.Y - From.Y;
+    V2 := Sqr(Speed);
+    Root := Sqr(V2) - Gravity * (Gravity * Sqr(Dist) + 2 * H * V2);
+    if (Root >= 0) and (Dist > 1) then
+    begin
+      Angle := ArcTan((V2 - Sqrt(Root)) / (Gravity * Dist));
+      Dir := Vector3(Target.X - From.X, 0, Target.Z - From.Z).Normalize * Cos(Angle) +
+        Vector3(0, Sin(Angle), 0);
+    end;
+  end;
+  Side := TVector3.CrossProduct(Dir, Vector3(0, 1, 0));
+  if Side.IsZero then
+    Side := Vector3(1, 0, 0);
+  Side := Side.Normalize;
+  Up2 := TVector3.CrossProduct(Side, Dir).Normalize;
+  Accuracy := E.FloatValue('attack_accuracy', 0);
+  Spread := E.FloatValue('projectile_spread', 0);
+  Count := Max(1, E.IntValue('num_projectiles', 1));
+  Damage := 10;
+  DamageDef := Decls.EntityDef(Def.Values['def_damage']);
+  if DamageDef <> nil then
+    Damage := StrToIntDef(DamageDef.Values['damage'], Damage);
+  { the whole volley aims together, each pellet spreads }
+  Dir := Jitter(Dir, Accuracy);
+  for I := 1 to Count do
+  begin
+    P := TD3Projectile.Create;
+    P.Position := From;
+    Vel := Jitter(Dir, Spread);
+    P.Velocity := Vel * Speed;
+    P.Gravity := Gravity;
+    P.Fuse := StrToFloatDef(Def.Values['fuse'], 4, DefaultFormatSettings);
+    P.Radius := Max(2, ParseVector3(Def.Values['maxs'], Vector3(1, 1, 1)).X);
+    P.Damage := Damage;
+    P.Owner := E.Name;
+    P.ExplodeSound := Def.Values['snd_explode'];
+    if StrToFloatDef(Def.Values['light_radius'], 0, DefaultFormatSettings) > 0 then
+    begin
+      { a glowing ball in the light's color (the particles are item 7) }
+      Ball := TCastleSphere.Create(nil);
+      Ball.Radius := P.Radius * 1.5;
+      Ball.Material := pmUnlit;
+      Ball.Color := Vector4(ParseVector3(Def.Values['light_color'], Vector3(1, 0.7, 0.2)), 1);
+      Ball.Collides := False;
+      Ball.Pickable := False;
+      Ball.CastShadows := False;
+      Ball.Translation := From;
+      FMap.Add(Ball);
+      P.Visual := Ball;
+    end;
+    FProjectiles.Add(P);
+    Inc(ProjectilesLaunched);
+  end;
+end;
+
+procedure TD3Game.UpdateProjectiles(const SecondsPassed: Single);
+var
+  I: Integer;
+  P: TD3Projectile;
+  NewPos, Step, Feet, Closest: TVector3;
+  Len, HitDist, T: Single;
+  Hit: TCastleTransform;
+  Detonate: Boolean;
+
+  { the point of segment A..B closest to the player's axis (feet to eye) }
+  function DistanceToPlayer(const A, B: TVector3): Single;
+  var
+    K: Integer;
+    Q: TVector3;
+  begin
+    Result := MaxSingle;
+    for K := 0 to 8 do
+    begin
+      Q := A + (B - A) * (K / 8);
+      Closest := Vector3(FPlayerEye.X, EnsureRange(Q.Y, Feet.Y, FPlayerEye.Y), FPlayerEye.Z);
+      Result := Min(Result, (Q - Closest).Length);
+    end;
+  end;
+
+begin
+  Feet := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  for I := FProjectiles.Count - 1 downto 0 do
+  begin
+    P := FProjectiles[I];
+    P.Fuse := P.Fuse - SecondsPassed;
+    P.Velocity.Y := P.Velocity.Y - P.Gravity * SecondsPassed;
+    Step := P.Velocity * SecondsPassed;
+    NewPos := P.Position + Step;
+    Len := Step.Length;
+    Detonate := P.Fuse <= 0;
+    { the player }
+    if not Detonate and not PlayerDead and (DistanceToPlayer(P.Position, NewPos) <= P.Radius + PlayerRadius) then
+    begin
+      DamagePlayer(P.Damage);
+      WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
+      Detonate := True;
+    end;
+    { the world }
+    if not Detonate and (Len > 0) then
+    begin
+      Hit := FMap.World.WorldRayCast(P.Position, Step / Len, HitDist);
+      if (Hit <> nil) and (HitDist <= Len) then
+      begin
+        T := HitDist / Len;
+        NewPos := P.Position + Step * T;
+        Detonate := True;
+      end;
+    end;
+    P.Position := NewPos;
+    if P.Visual <> nil then
+      P.Visual.Translation := NewPos;
+    if Detonate then
+    begin
+      if P.ExplodeSound <> '' then
+        PlaySoundAt(P.ExplodeSound, P.Position);
+      FProjectiles.Delete(I);
+    end;
+  end;
+end;
+
 function TD3Game.ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
 var
   Eye, ToPlayer: TVector3;
@@ -2073,6 +2334,7 @@ var
   DamageDef: TStringList;
   ToPlayer: TVector3;
   Damage: Integer;
+  F: TD3ScriptFunction;
 begin
   Found := nil;
   for A in FActors do
@@ -2085,10 +2347,27 @@ begin
   Arg := Trim(Copy(Command, Length(Cmd) + 2, MaxInt));
   if Copy(Cmd, 1, 5) = 'sound' then
   begin
-    { sound, sound_voice, sound_body...: a snd_ key of the entity }
+    { sound, sound_voice, sound_body...: a snd_ key of the entity, or a
+      sound shader }
     Shader := A.Model.Entity.Value(Arg);
-    if Shader <> '' then
-      StartScriptSound(A.Handle, Shader, 0);
+    if Shader = '' then
+      Shader := Arg;
+    StartScriptSound(A.Handle, Shader, 0);
+  end else
+  if Cmd = 'launch_missile' then
+    LaunchProjectiles(A, Arg)
+  else
+  if Cmd = 'call' then
+  begin
+    { a method of its script object, in a thread of its own }
+    F := A.Obj.Typ.FindMethodToRun(Arg);
+    if F <> nil then
+      FScript.StartThread(F, A.Handle);
+  end else
+  if Cmd = 'trigger' then
+  begin
+    if FindEntity(Arg) <> nil then
+      Activate(FindEntity(Arg));
   end else
   if Cmd = 'melee' then
   begin
@@ -2475,11 +2754,11 @@ begin
     StopScriptSound(Handle, Channel);
   Playing := TCastlePlayingSoundSource.Create(nil);
   Playing.Sound := Snd;
+  { channel 0 sounds free themselves (set before playing) }
+  Playing.FreeOnStop := Channel = 0;
   Source.Play(Playing);
   if Channel <> 0 then
-    FScriptSounds.AddOrSetValue(IntToStr(Handle) + ':' + IntToStr(Channel), Playing)
-  else
-    Playing.FreeOnStop := True;
+    FScriptSounds.AddOrSetValue(IntToStr(Handle) + ':' + IntToStr(Channel), Playing);
   Result := Snd.Duration;
 end;
 
@@ -3262,6 +3541,21 @@ begin
   if N = 'setKey' then
     E.SetValue(Args[0].S, Args[1].S)
   else
+  if N = 'getNextKey' then
+  begin
+    { the first key starting with Args[0] after the key Args[1] ('' = from
+      the start), '' when there's no more }
+    Count := -1;
+    if Args[1].S <> '' then
+      Count := E.Pairs.IndexOfName(Args[1].S);
+    EventResult := D3StringValue('');
+    for I := Count + 1 to E.Pairs.Count - 1 do
+      if SameText(Copy(E.Pairs.Names[I], 1, Length(Args[0].S)), Args[0].S) then
+      begin
+        EventResult := D3StringValue(E.Pairs.Names[I]);
+        Break;
+      end;
+  end else
   if N = 'setGuiParm' then
     FMap.SetGuiParm(E, Args[0].S, D3ValueToString(Args[1]))
   else
@@ -3603,5 +3897,6 @@ begin
 end;
 
 initialization
-  ScriptedMonsterObjects := ['monster_zombie', 'monster_test'];
+  ScriptedMonsterObjects := ['monster_zombie', 'monster_zombie_security_pistol', 'monster_demon_imp',
+    'monster_test'];
 end.

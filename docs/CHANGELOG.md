@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Imps' and security zombies' AI scripts, projectiles** (roadmap 5d, third part): imps throw fireballs (on an arc) and claw, pistol / shotgun / machine gun zombies shoot, all through their own scripts; projectiles come from the animations' `launch_missile` frame commands and the monsters' `def_projectile`. Frame commands `call` and `trigger`. Console `near <entity> [distance]`, `activate <entity>`.
+- Fixed: a sound started by a script on channel 0 raised an exception (FreeOnStop set during playback).
+- Test level: `blob_scripted_1` throws glowing balls from afar; 444 checks; CI checks a hit.
 - **Zombies' AI scripts** (roadmap 5d, second part): zombies run `monster_zombie` (with `monster_base`): they wait for triggers or the player, chase with collisions, swing when in reach (damage from the melee frame commands of their animations), feel pain and die through their scripts. Model decls keep frame commands; anim names resolve to their numbered variants.
 - Test level: `blob_scripted_1` on the balcony runs a monster script; 440 checks; CI checks its hits.
 - **Characters' AI scripts** (roadmap 5d, first part): Mars City's people (33 in Mars City 1) run their `character` script objects: state functions, animation states per channel, path commands (`path_corner`, `path_anim`, `path_cycleanim`...), walking and turning; they sit, work at computers, drink, read PDAs and walk their rounds. Console `actors`.

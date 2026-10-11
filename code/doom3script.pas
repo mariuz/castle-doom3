@@ -2850,6 +2850,9 @@ begin
   if N = 'getTime' then
     R := D3FloatValue(FTime)
   else
+  if N = 'getFrameTime' then
+    R := D3FloatValue(1 / 60)
+  else
   if N = 'getTicsPerSecond' then
     R := D3FloatValue(60)
   else

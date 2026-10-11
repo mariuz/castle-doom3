@@ -155,6 +155,8 @@ type
       the bind pose (an attachment is upright when the body is in its bind
       pose). False if there's no such joint. }
     function JointTransform(const JointName: String; out M: TMatrix4): Boolean;
+    { Where a joint is now, in the scene's coordinates (CGE). }
+    function JointPosition(const JointName: String; out P: TVector3): Boolean;
     property Scene: TCastleScene read FScene;
     property Model: TD3Md5Model read FModel;
   end;
@@ -975,6 +977,18 @@ begin
     Result := FAnim.Duration
   else
     Result := 0;
+end;
+
+function TD3Md5Instance.JointPosition(const JointName: String; out P: TVector3): Boolean;
+var
+  I: Integer;
+begin
+  I := FModel.JointIndex(JointName);
+  Result := I >= 0;
+  if Result then
+    P := D3ToCge(FPose[I].Position)
+  else
+    P := TVector3.Zero;
 end;
 
 function TD3Md5Instance.JointTransform(const JointName: String; out M: TMatrix4): Boolean;

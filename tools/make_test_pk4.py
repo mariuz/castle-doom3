@@ -1219,6 +1219,9 @@ model test_blob {
 	anim melee				models/md5/test/blob_walk.md5anim {
 		frame 4				melee damage_test_melee
 	}
+	anim range				models/md5/test/blob_walk.md5anim {
+		frame 3				launch_missile body
+	}
 }
 
 entityDef monster_default {
@@ -1275,11 +1278,29 @@ entityDef damage_test_melee {
 	"damage"				"7"
 }
 
+entityDef damage_test_projectile {
+	"damage"				"5"
+}
+
+entityDef projectile_test {
+	"editor_usage"			"A glowing ball thrown by blob_scripted_1."
+	"spawnclass"			"idProjectile"
+	"mins"					"-3 -3 -3"
+	"maxs"					"3 3 3"
+	"velocity"				"500 0 0"
+	"gravity"				"0"
+	"fuse"					"4"
+	"def_damage"			"damage_test_projectile"
+	"light_color"			"0.2 0.8 1"
+	"light_radius"			"100"
+}
+
 entityDef monster_test_scripted {
 	"inherit"				"monster_default"
 	"editor_usage"			"A test creature running an AI script (script object monster_test)."
 	"model"					"test_blob"
 	"scriptobject"			"monster_test"
+	"def_projectile"		"projectile_test"
 	"health"				"40"
 	"melee_range"			"40"
 	"turn_rate"				"360"
@@ -1701,6 +1722,8 @@ scriptEvent void    waitAction( string name );
 scriptEvent void    finishAction( string name );
 scriptEvent void    stopMove();
 scriptEvent void    stopThinking();
+scriptEvent float   enemyRange();
+scriptEvent float   canHitEnemyFromAnim( string anim );
 
 #endif
 """
@@ -1812,6 +1835,7 @@ void character::Legs_Walk() {
 // enemy, chase it, melee attacks (the anim's melee frame command hits),
 // state_Killed when it dies.
 float monster_killed;
+float next_range_attack;
 
 object monster_test {
     boolean AI_FORWARD;
@@ -1830,6 +1854,7 @@ object monster_test {
     void    state_Killed();
     void    Torso_Idle();
     void    Torso_Melee();
+    void    Torso_Range();
     void    Legs_Idle();
     void    Legs_Walk();
 };
@@ -1858,6 +1883,14 @@ void monster_test::state_Combat() {
             waitAction( "melee" );
             continue;
         }
+        // from afar: throw something (the range anim launches it)
+        if ( ( enemyRange() > 150 ) && ( sys.getTime() > next_range_attack ) && canHitEnemyFromAnim( "range" ) ) {
+            stopMove();
+            animState( ANIMCHANNEL_TORSO, "Torso_Range", 4 );
+            waitAction( "range" );
+            next_range_attack = sys.getTime() + 1.5;
+            continue;
+        }
         moveToEnemy();
     }
 }
@@ -1876,6 +1909,13 @@ void monster_test::Torso_Melee() {
     playAnim( ANIMCHANNEL_TORSO, "melee" );
     waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
     finishAction( "melee" );
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 4 );
+}
+
+void monster_test::Torso_Range() {
+    playAnim( ANIMCHANNEL_TORSO, "range" );
+    waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
+    finishAction( "range" );
     animState( ANIMCHANNEL_TORSO, "Torso_Idle", 4 );
 }
 
