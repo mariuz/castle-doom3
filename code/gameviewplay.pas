@@ -68,7 +68,7 @@ implementation
 uses
   Math,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
-  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, GameViewMenu;
+  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
 begin
@@ -203,7 +203,8 @@ begin
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
-    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], portals, lights, quit');
+    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>,');
+    Console.Print('portals, lights, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -282,6 +283,17 @@ begin
       LightVolumes := not LightVolumes;
     Console.Print('r_lightVolumes ' + BoolToStr(LightVolumes, '1', '0') + ', reloading the map');
     LoadLevel(MapName);
+  end else
+  if Cmd = 'r_md5shadowtris' then
+  begin
+    if Args <> '' then
+    begin
+      MaxShadowCastingTriangles := StrToIntDef(Args, MaxShadowCastingTriangles);
+      Console.Print(Format('r_md5ShadowTris %d, reloading the map', [MaxShadowCastingTriangles]));
+      LoadLevel(MapName);
+    end else
+      Console.Print(Format('r_md5ShadowTris %d (bigger md5 meshes cast with joint boxes)',
+        [MaxShadowCastingTriangles]));
   end else
   if Cmd = 'lights' then
   begin

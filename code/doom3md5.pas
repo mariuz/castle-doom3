@@ -101,7 +101,11 @@ type
     FAnimTime: Single;
     FLoop: Boolean;
     FAnims: TStringList;
+    { shadow casting boxes, one per joint, for meshes too big to cast }
+    FHullJoints: array of Integer;
+    FHullTransforms: array of TMatrixTransformNode;
     procedure ApplyPose;
+    procedure BuildShadowHulls(const Root: TX3DRootNode);
   public
     { Anims: anim name -> md5anim path (from a model decl). }
     constructor Create(const AModel: TD3Md5Model; const AAnims: TStrings;
@@ -112,16 +116,34 @@ type
     function PlayAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
     function HasAnim(const AnimName: String): Boolean;
     function TriangleCount: Integer;
+    { Joints casting shadows with a box (0 when the mesh itself casts). }
+    function ShadowHullCount: Integer;
     function AnimFinished: Boolean;
     procedure Update(const SecondsPassed: Single);
     property Scene: TCastleScene read FScene;
     property Model: TD3Md5Model read FModel;
   end;
 
+type
+  TD3IndexArray = array of Int32;
+
+{ Rotate a Doom 3 vector by an md5 joint orientation. }
+function QuatRotate(const Q: TQuaternion; const V: TVector3): TVector3;
+
+{ The transformation of a joint's space, in CGE coordinates. }
+function JointMatrix(const Joint: TD3Joint): TMatrix4;
+{ The 12 triangles of a box from its 8 corners (index bits: x, y, z),
+  counter-clockwise seen from outside. }
+function BoxTriangles(const Corners: array of TVector3): TD3IndexArray;
+
 var
   Md5Cache: TD3Md5Cache;
-  { md5 models with more triangles don't cast shadow volumes }
+  { md5 models with more triangles cast shadow volumes from a box per joint
+    instead of their mesh }
   MaxShadowCastingTriangles: Integer = 1500;
+  { Size of the joint boxes relative to the box of the joint's vertexes:
+    smaller than the mesh, so they stay inside it. }
+  ShadowHullScale: Single = 0.6;
 
 implementation
 
@@ -568,6 +590,58 @@ begin
   FAnims.Add(Key, Result);
 end;
 
+{ The transformation of a joint's space, in CGE coordinates: D3ToCge of
+  position + rotation of a Doom 3 vector. }
+function JointMatrix(const Joint: TD3Joint): TMatrix4;
+var
+  K: Integer;
+  Axis: TVector3;
+begin
+  Result := TMatrix4.Identity;
+  for K := 0 to 2 do
+  begin
+    Axis := TVector3.Zero;
+    Axis.Data[K] := 1;
+    Result.Columns[K] := Vector4(D3ToCge(QuatRotate(Joint.Orientation, CgeToD3(Axis))), 0);
+  end;
+  Result.Columns[3] := Vector4(D3ToCge(Joint.Position), 1);
+end;
+
+{ The 12 triangles of a box from its corners (index bits: x, y, z), counter-
+  clockwise seen from outside. }
+function BoxTriangles(const Corners: array of TVector3): TD3IndexArray;
+const
+  Faces: array [0..5, 0..3] of Integer = (
+    (0, 2, 6, 4), (1, 3, 7, 5), (0, 1, 5, 4), (2, 3, 7, 6), (0, 1, 3, 2), (4, 5, 7, 6));
+var
+  F: Integer;
+  Center, Normal, FaceCenter: TVector3;
+  Q: array [0..3] of Integer;
+begin
+  SetLength(Result, 36);
+  Center := (Corners[0] + Corners[7]) / 2;
+  for F := 0 to 5 do
+  begin
+    Q[0] := Faces[F, 0];
+    Q[1] := Faces[F, 1];
+    Q[2] := Faces[F, 2];
+    Q[3] := Faces[F, 3];
+    FaceCenter := (Corners[Q[0]] + Corners[Q[2]]) / 2;
+    Normal := TVector3.CrossProduct(Corners[Q[1]] - Corners[Q[0]], Corners[Q[2]] - Corners[Q[0]]);
+    if TVector3.DotProduct(Normal, FaceCenter - Center) < 0 then
+    begin
+      Q[1] := Faces[F, 3];
+      Q[3] := Faces[F, 1];
+    end;
+    Result[F * 6] := Q[0];
+    Result[F * 6 + 1] := Q[1];
+    Result[F * 6 + 2] := Q[2];
+    Result[F * 6 + 3] := Q[0];
+    Result[F * 6 + 4] := Q[2];
+    Result[F * 6 + 5] := Q[3];
+  end;
+end;
+
 { TD3Md5Instance }
 
 constructor TD3Md5Instance.Create(const AModel: TD3Md5Model; const AAnims: TStrings;
@@ -621,15 +695,20 @@ begin
     Shape := TShapeNode.Create;
     Shape.Geometry := Geometry;
     Shape.Appearance := MaterialAppearance(MaterialName);
+    { CGE finds shadow volume silhouettes by comparing every edge with
+      every other edge, again whenever the mesh animates: big meshes cast
+      with joint boxes instead }
+    if TriangleCount > MaxShadowCastingTriangles then
+      Shape.Appearance.ShadowCaster := False;
     Root.AddChildren(Shape);
   end;
+  if TriangleCount > MaxShadowCastingTriangles then
+    BuildShadowHulls(Root);
 
   AddLightLibrary(Root);
   FScene := TCastleScene.Create(nil);
   FScene.Load(Root, True);
-  { CGE finds shadow volume silhouettes by comparing every edge with every
-    other edge, again whenever the mesh animates: only small meshes cast }
-  FScene.CastShadows := TriangleCount <= MaxShadowCastingTriangles;
+  FScene.CastShadows := (TriangleCount <= MaxShadowCastingTriangles) or (ShadowHullCount > 0);
   ApplyPose;
   { prefer an idle animation, as the game does }
   if not PlayAnim('idle') then
@@ -655,6 +734,78 @@ begin
       FModel.SkinMesh(I, FPose, FPositions[I]);
       FCoords[I].SetPoint(FPositions[I]);
     end;
+  for I := 0 to High(FHullTransforms) do
+    FHullTransforms[I].Matrix := JointMatrix(FPose[FHullJoints[I]]);
+end;
+
+function TD3Md5Instance.ShadowHullCount: Integer;
+begin
+  Result := Length(FHullJoints);
+end;
+
+procedure TD3Md5Instance.BuildShadowHulls(const Root: TX3DRootNode);
+var
+  J, W, I, K, Count: Integer;
+  Mesh: TD3Md5Mesh;
+  BoxMin, BoxMax, Center, Half: TVector3;
+  Corners: array [0..7] of TVector3;
+  Shape: TShapeNode;
+  Geometry: TIndexedTriangleSetNode;
+  Coord: TCoordinateNode;
+  Unlit: TUnlitMaterialNode;
+  Transform: TMatrixTransformNode;
+begin
+  for J := 0 to High(FModel.Joints) do
+  begin
+    { the joint-space positions of the weights the joint dominates }
+    Count := 0;
+    BoxMin := Vector3(MaxSingle, MaxSingle, MaxSingle);
+    BoxMax := -BoxMin;
+    for Mesh in FModel.Meshes do
+      for W := 0 to High(Mesh.Weights) do
+        if (Mesh.Weights[W].Joint = J) and (Mesh.Weights[W].Bias >= 0.5) then
+        begin
+          for K := 0 to 2 do
+          begin
+            BoxMin.Data[K] := Min(BoxMin.Data[K], Mesh.Weights[W].Position.Data[K]);
+            BoxMax.Data[K] := Max(BoxMax.Data[K], Mesh.Weights[W].Position.Data[K]);
+          end;
+          Inc(Count);
+        end;
+    if Count < 4 then
+      Continue;
+    Center := (BoxMin + BoxMax) / 2;
+    Half := (BoxMax - BoxMin) * (ShadowHullScale / 2);
+    { a flat box would be degenerate (CGE skips such casters) }
+    for K := 0 to 2 do
+      Half.Data[K] := Max(Half.Data[K], 1);
+    for I := 0 to 7 do
+      Corners[I] := D3ToCge(Center + Vector3(
+        Half.X * (2 * (I and 1) - 1),
+        Half.Y * (2 * ((I shr 1) and 1) - 1),
+        Half.Z * (2 * ((I shr 2) and 1) - 1)));
+    Coord := TCoordinateNode.Create;
+    Coord.SetPoint(Corners);
+    Geometry := TIndexedTriangleSetNode.Create;
+    Geometry.Coord := Coord;
+    Geometry.SetIndex(BoxTriangles(Corners));
+    Geometry.Ccw := True;
+    Geometry.Solid := True;
+    Unlit := TUnlitMaterialNode.Create;
+    Unlit.EmissiveColor := TVector3.Zero;
+    Shape := TShapeNode.Create;
+    Shape.Geometry := Geometry;
+    Shape.Material := Unlit;
+    Transform := TMatrixTransformNode.Create;
+    Transform.AddChildren(Shape);
+    Root.AddChildren(Transform);
+    SetLength(FHullJoints, Length(FHullJoints) + 1);
+    FHullJoints[High(FHullJoints)] := J;
+    SetLength(FHullTransforms, Length(FHullTransforms) + 1);
+    FHullTransforms[High(FHullTransforms)] := Transform;
+  end;
+  WritelnLog('Doom3Md5', 'Shadow hulls: "%s" has %d triangles, casts with %d joint boxes',
+    [FModel.Name, TriangleCount, Length(FHullJoints)]);
 end;
 
 function TD3Md5Instance.TriangleCount: Integer;

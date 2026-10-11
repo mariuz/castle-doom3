@@ -40,6 +40,12 @@ begin
   Check(Expected = Actual, Format('%s: expected "%s", got "%s"', [What, Expected, Actual]));
 end;
 
+procedure CheckVec3(const Expected, Actual: TVector3; const What: String);
+begin
+  Check(TVector3.Equals(Expected, Actual, 0.01),
+    Format('%s: expected %s, got %s', [What, Expected.ToString, Actual.ToString]));
+end;
+
 procedure CheckNear(const Expected, Actual: Single; const What: String; const Eps: Single = 0.01);
 begin
   Check(Abs(Expected - Actual) <= Eps, Format('%s: expected %.4f, got %.4f', [What, Expected, Actual]));
@@ -274,7 +280,13 @@ var
   Anim: TD3Md5Anim;
   Pose: TD3JointArray;
   Positions: array of TVector3;
-  Body: Integer;
+  Body, I, J, W, Reversed: Integer;
+  Corners: array [0..7] of TVector3;
+  Tris: TD3IndexArray;
+  Closed, Outward: Boolean;
+  Weight: TD3Md5Weight;
+  Instance: TD3Md5Instance;
+  SavedMax: Integer;
 begin
   Model := Md5Cache.Model('models/md5/test/blob.md5mesh');
   Check(Model <> nil, 'load blob.md5mesh');
@@ -308,6 +320,62 @@ begin
   CheckNear(42, Pose[Body].Position.Z, 'frame 12 body bobs up 2 units', 0.05);
   Anim.PoseAt(0.25, True, Pose);
   CheckNear(41.41, Pose[Body].Position.Z, 'PoseAt 0.25 s (frame 6)', 0.05);
+
+  { shadow hulls: a joint's matrix places joint-space points like skinning }
+  Anim.FramePose(12, Pose);
+  for W := 0 to High(Model.Meshes[0].Weights) do
+    if Model.Meshes[0].Weights[W].Joint = Body then
+    begin
+      Weight := Model.Meshes[0].Weights[W];
+      CheckVec3(D3ToCge(Pose[Body].Position + QuatRotate(Pose[Body].Orientation, Weight.Position)),
+        JointMatrix(Pose[Body]).MultPoint(D3ToCge(Weight.Position)), 'joint matrix = skinning');
+      Break;
+    end;
+  { the hull box is closed (every edge used once each way) and faces out }
+  for I := 0 to 7 do
+    Corners[I] := Vector3(10 * (I and 1), 4 * ((I shr 1) and 1), 7 * ((I shr 2) and 1));
+  Tris := BoxTriangles(Corners);
+  CheckEquals(36, Length(Tris), 'box triangles');
+  Closed := True;
+  Outward := True;
+  for I := 0 to 11 do
+  begin
+    for J := 0 to 2 do
+    begin
+      Reversed := 0;
+      for W := 0 to 35 do
+        if (Tris[W] = Tris[I * 3 + (J + 1) mod 3]) and
+           (Tris[(W div 3) * 3 + (W mod 3 + 1) mod 3] = Tris[I * 3 + J]) then
+          Inc(Reversed);
+      if Reversed <> 1 then
+        Closed := False;
+    end;
+    if TVector3.DotProduct(
+      TVector3.CrossProduct(Corners[Tris[I * 3 + 1]] - Corners[Tris[I * 3]],
+        Corners[Tris[I * 3 + 2]] - Corners[Tris[I * 3]]),
+      (Corners[Tris[I * 3]] + Corners[Tris[I * 3 + 1]] + Corners[Tris[I * 3 + 2]]) / 3 -
+        Vector3(5, 2, 3.5)) <= 0 then
+      Outward := False;
+  end;
+  Check(Closed, 'hull box is closed');
+  Check(Outward, 'hull box faces outward');
+  { a mesh over the limit casts with joint boxes }
+  SavedMax := MaxShadowCastingTriangles;
+  MaxShadowCastingTriangles := 10;
+  Instance := TD3Md5Instance.Create(Model, nil);
+  try
+    CheckEquals(6, Instance.ShadowHullCount, 'joint boxes of the blob (not the root)');
+    Check(Instance.Scene.CastShadows, 'the boxes cast');
+  finally
+    Instance.Free;
+    MaxShadowCastingTriangles := SavedMax;
+  end;
+  Instance := TD3Md5Instance.Create(Model, nil);
+  try
+    CheckEquals(0, Instance.ShadowHullCount, 'small meshes cast themselves');
+  finally
+    Instance.Free;
+  end;
 end;
 
 function FindSurface(const M: TD3StaticModel; const Material: String): TD3StaticSurface;

@@ -1,6 +1,6 @@
 # Doom 3 comparison and roadmap
 
-Status of version 0.11.0. "Done" items are tested against the bundled test level; real Doom 3 data has not been tested yet (it can't be bundled), so expect fixes when the first retail maps are loaded.
+Status of version 0.12.0. "Done" items are tested against the bundled test level; real Doom 3 data has not been tested yet (it can't be bundled), so expect fixes when the first retail maps are loaded.
 
 ## Done
 
@@ -14,7 +14,7 @@ Status of version 0.11.0. "Done" items are tested against the bundled test level
 - Collision models (`.cm`): the world's player-blocking polygons (solid and `playerclip`) collide instead of the render geometry.
 - GUIs: `.gui` windowDef trees rendered (software) onto `guisurf` surfaces with the entity's `gui_*` state.
 - Material stages: texture matrices (`scroll`, `translate`, `scale`, `centerScale`, `shear`, `rotate`) and animated colors on surfaces; `cameraCubeMap` / `cubeMap` skies as a skybox; every plain stage drawn (overlays), `deform sprite` billboards, glass stand-ins.
-- Stencil shadows (CGE shadow volumes) for the strongest light at the player, from brush entities, static models, small md5 models and the level's `.cm` brushes (walls, pillars); `noshadows` materials and lights.
+- Stencil shadows (CGE shadow volumes) for the strongest light at the player, from brush entities, static models, md5 models (big ones through a box per joint) and the level's `.cm` brushes (walls, pillars); `noshadows` materials and lights.
 - Light volumes: Doom 3's box / frustum lights without distance attenuation, `light_start` / `light_end`, projection and falloff shapes (analytic stand-ins for the images), `shaderParm4` time offsets.
 - Light shaders: animated stage color registers with expressions and tables (strobes, flickers, pulses), `colored`, `shaderParm`s.
 - Portal visibility: areas, entities, models and lights hidden when not visible through the portals; doors close portals.
@@ -26,7 +26,7 @@ Status of version 0.11.0. "Done" items are tested against the bundled test level
 ## Next steps
 
 1. **Load the retail maps** (`game/mars_city1`, `game/admin` ...) and fix what breaks; record load times; add a CI-independent smoke test script for people who own the game.
-2. **Shadows from several lights**: CGE's shadow volumes use one main light; several lights need shadow maps (CGE supports them for spot / directional lights) or more stencil passes in CGE; larger md5 casters without the quadratic edge search.
+2. **Shadows from several lights** (needs CGE work): CGE's shadow volumes use one main light and its shadow maps only spot / directional lights; Doom 3 needs several point-light stencil passes, or cube shadow maps, in CGE's renderer.
 3. **Exact material stages**: `vertexColor`, `mirrorRenderMap`, real reflections (`texgen reflect` with the cube map) and heat haze (`fragmentProgram heatHaze`) instead of the glass tint, `deform tube` / `flare` / `turbulent`, stage `if` conditions, `polygonOffset` decals.
 4. **Interactive GUIs**: the GUI script (`onTime` transitions, `onAction`, `set` / `transition` / `resetTime` / `runScript`), the cursor where the player looks, Doom 3's fonts, re-rendering when the state changes.
 5. **Gameplay**: lights switched by triggers, monsters blocked by `monsterclip` instead of `playerclip`, brush entity `.cm` models for movers, weapons with view models (`models/md5/weapons/`), ammo and items (`item_*`, `ammo_*`), triggers (`trigger_once` / `multiple`, `target` chains, `func_elevator`, `func_plat`, `func_mover` with scripts), PDAs, the real AI (`ai/*.script`, animation events, `af` ragdolls as a later step), monster `def_head` and attachments.

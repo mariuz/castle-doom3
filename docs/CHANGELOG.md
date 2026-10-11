@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.0
+
+Shadows from big md5 models.
+
+- **md5 shadow hulls**: md5 meshes over 1500 triangles (retail monsters) used not to cast at all, because CGE searches silhouette edges quadratically and again on every animation frame. They now cast with one closed box per joint, around the vertexes the joint moves, shrunk to stay inside the body and moved by a per-joint matrix transform, so their edges never change.
+- Console `r_md5ShadowTris <n>`: the triangle limit (reloads the map; 0 makes every md5 model cast with boxes).
+- Shots log which monster they hit.
+- 296 checks (joint matrices match skinning, boxes are closed and face out, box counts); CI checks the boxes are built.
+
+Still one shadow casting light: more need shadow volume or cube shadow map support for several point lights in CGE (roadmap item 2).
+
 ## 0.11.0
 
 More material stages.
