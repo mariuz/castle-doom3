@@ -33,7 +33,11 @@
   then state functions (setState) in the main thread, and animation states
   (animState) in a thread per channel; the game moves and turns them
   (moveToEntity, turnTo), plays their animations and keeps their AI_*
-  flags up to date.
+  flags up to date. Monsters whose script object the game supports
+  (ScriptedMonsterObjects: zombies) run theirs too, with the player as
+  their enemy: checkForEnemy, moveToEnemy, testMeleeAttack and the melee
+  frame commands of their animations; shots set AI_PAIN, death starts
+  state_Killed.
 
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
@@ -46,7 +50,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
-  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera;
+  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5;
 
 type
   TD3MessageEvent = procedure (const Msg: String) of object;
@@ -81,8 +85,12 @@ type
 
   TD3MonsterState = (msIdle, msChase, msAttack, msDead);
 
+  TD3Actor = class;
+
   TD3Monster = class
     Model: TD3ModelEntity;
+    { set when its AI script runs it (the simple AI is off) }
+    Actor: TD3Actor;
     State: TD3MonsterState;
     Health: Integer;
     Yaw: Single;
@@ -204,6 +212,17 @@ type
     Channels: array [1..4] of TD3ActorChannel;
     { waitAction: the threads waiting until finishAction(name) }
     WaitAction: String;
+    { the monster (health, shots) of a scripted monster, nil for characters }
+    Monster: TD3Monster;
+    { stopThinking: its threads stopped }
+    Thinking: Boolean;
+    { the player is its enemy; moving to it }
+    HasEnemy, ChaseEnemy: Boolean;
+    MeleeRange: Single;
+    { frames left before AI_PAIN goes back to false }
+    PainFrames: Integer;
+    { the body animation applied last (channel:name:start time) }
+    BodyKey: String;
     { movement, Doom 3 coordinates }
     Moving: Boolean;
     Goal, SavedGoal: TVector3;
@@ -273,6 +292,7 @@ type
     { classes whose activation is not supported yet (logged once) }
     FUnsupported: TStringList;
     FTime: Single;
+    FPlayerEye: TVector3;
     FOnMessage: TD3MessageEvent;
     FFireCooldown: Single;
     FDeadTime: Single;
@@ -307,6 +327,10 @@ type
     function ActorEvent(const A: TD3Actor; const Thread: TD3ScriptThread; const N: String;
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     procedure UpdateActors(const SecondsPassed: Single);
+    procedure ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
+    procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
+    function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
+    function StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
     procedure SpawnAnimated(const ME: TD3ModelEntity);
     function FindAnimated(const E: TD3MapEntity): TD3Animated;
     procedure ActivateAnimated(const A: TD3Animated);
@@ -408,6 +432,13 @@ const
   { Doom 3 player: eye at 68 above the feet, bounding box 32 wide }
   PlayerEyeHeight = 68;
   PlayerRadius = 16;
+  { the player's entity handle for scripts (it's not a map entity) }
+  PlayerHandle = $7FFFFF00;
+
+var
+  { Script objects of monsters that run their AI script (the others use the
+    game's simple AI): the object or one it derives from. }
+  ScriptedMonsterObjects: array of String;
 
 implementation
 
@@ -415,7 +446,7 @@ uses
   Math,
   CastleLog, CastleUtils,
   Generics.Defaults,
-  Doom3Files, Doom3Md5, Doom3Collision;
+  Doom3Files, Doom3Collision;
 
 const
   MonsterWalkSpeed = 90;
@@ -791,6 +822,39 @@ begin
   if not E.BoolValue('s_waitfortrigger') then
     S.Source.Play(Snd);
   FSpeakers.Add(S);
+end;
+
+function TD3Game.StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
+var
+  NewPos, Center, FloorStart: TVector3;
+  FloorDist: Single;
+  Hit: TCastleTransform;
+begin
+  { CGE coordinates: From is the feet }
+  if Step.IsZero then
+    Exit(From);
+  Center := From + Vector3(0, Height / 2, 0);
+  NewPos := From + Step;
+  { blocked by a wall or a closed door? try sliding along one axis }
+  if FMap.World.WorldSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
+    Step.Normalize * Radius) then
+  begin
+    NewPos := From + Vector3(Step.X, 0, 0);
+    if FMap.World.WorldSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
+      Vector3(Sign(Step.X) * Radius, 0, 0)) then
+    begin
+      NewPos := From + Vector3(0, 0, Step.Z);
+      if FMap.World.WorldSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
+        Vector3(0, 0, Sign(Step.Z) * Radius)) then
+        NewPos := From;
+    end;
+  end;
+  { follow the floor (steps up to 18, falls) }
+  FloorStart := NewPos + Vector3(0, 24, 0);
+  Hit := FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist);
+  if (Hit <> nil) and (FloorDist < 24 + 400) then
+    NewPos.Y := FloorStart.Y - FloorDist;
+  Result := NewPos;
 end;
 
 procedure TD3Game.SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
@@ -1306,6 +1370,8 @@ var
   Hit: TCastleTransform;
 begin
   M.StateTime := M.StateTime + SecondsPassed;
+  if (M.Actor <> nil) and (M.State <> msDead) then
+    Exit;
   if M.State = msDead then
   begin
     { sink into the floor, then disappear }
@@ -1350,27 +1416,7 @@ begin
           Exit;
         end;
         Step := ToPlayer.Normalize * (MonsterWalkSpeed * SecondsPassed);
-        NewPos := M.Position + Step;
-        { blocked by a wall or a closed door? try sliding along one axis }
-        if FMap.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
-          Step.Normalize * M.Radius) then
-        begin
-          NewPos := M.Position + Vector3(Step.X, 0, 0);
-          if FMap.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
-            Vector3(Sign(Step.X) * M.Radius, 0, 0)) then
-          begin
-            NewPos := M.Position + Vector3(0, 0, Step.Z);
-            if FMap.World.WorldSegmentCollision(M.Center, NewPos + Vector3(0, M.Height / 2, 0) +
-              Vector3(0, 0, Sign(Step.Z) * M.Radius)) then
-              NewPos := M.Position;
-          end;
-        end;
-        { follow the floor (steps up to 18, falls) }
-        FloorStart := NewPos + Vector3(0, 24, 0);
-        Hit := FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist);
-        if (Hit <> nil) and (FloorDist < 24 + 400) then
-          NewPos.Y := FloorStart.Y - FloorDist;
-        M.Model.Holder.Translation := NewPos;
+        M.Model.Holder.Translation := StepTowards(M.Position, Step, M.Radius, M.Height);
       end;
     msAttack:
       begin
@@ -1409,6 +1455,7 @@ begin
   FFireCooldown := Max(0, FFireCooldown - SecondsPassed);
   SinceFire := SinceFire + SecondsPassed;
   FTime := FTime + SecondsPassed;
+  FPlayerEye := PlayerEye;
   if PlayerDead then
     FDeadTime := FDeadTime + SecondsPassed;
   Feet := PlayerEye - Vector3(0, PlayerEyeHeight, 0);
@@ -1493,28 +1540,58 @@ var
   E: TD3MapEntity;
   T, Character: TD3ScriptType;
   A: TD3Actor;
-  C: Integer;
+  C, MonsterCount: Integer;
+  IsMonster, Supported: Boolean;
+  SName: String;
+  Mon, M: TD3Monster;
 begin
   if FScript = nil then
     Exit;
   Character := FScript.FindType('character');
-  if Character = nil then
-    Exit;
+  MonsterCount := 0;
   for ME in FMap.Models do
   begin
     E := ME.Entity;
-    { characters for now: monsters keep the game's simple AI, cinematic
+    { characters, and monsters whose script object is supported; cinematic
       characters just play their anim (Activate) }
-    if (E.Value('spawnclass') <> 'idAI') or E.BoolValue('cinematic') or
-       (Copy(LowerCase(E.ClassName_), 1, 8) = 'monster_') then
+    if (E.Value('spawnclass') <> 'idAI') or E.BoolValue('cinematic') then
       Continue;
     T := FScript.FindType(E.Value('scriptobject'));
-    if (T = nil) or not T.IsA(Character) then
+    if T = nil then
+      Continue;
+    IsMonster := Copy(LowerCase(E.ClassName_), 1, 8) = 'monster_';
+    if IsMonster then
+    begin
+      Supported := False;
+      for SName in ScriptedMonsterObjects do
+        if (FScript.FindType(SName) <> nil) and T.IsA(FScript.FindType(SName)) then
+          Supported := True;
+      if not Supported then
+        Continue;
+    end else
+    if (Character = nil) or not T.IsA(Character) then
       Continue;
     A := TD3Actor.Create;
     A.Model := ME;
     A.Handle := EntityHandle(E);
     A.Obj := TD3ScriptObject.Create(T);
+    A.Thinking := True;
+    A.MeleeRange := E.FloatValue('melee_range', 64);
+    ME.Instance.OnFrameCommand := @ActorFrameCommand;
+    if IsMonster then
+    begin
+      { health and shots: the game's monster, its simple AI off }
+      Mon := nil;
+      for M in FMonsters do
+        if M.Model = ME then
+          Mon := M;
+      if Mon = nil then
+        Mon := SpawnMonster(ME);
+      Mon.Actor := A;
+      Mon.Dormant := False;
+      A.Monster := Mon;
+      Inc(MonsterCount);
+    end;
     A.Yaw := E.Angle;
     A.IdealYaw := A.Yaw;
     A.TurnRate := E.FloatValue('turn_rate', 360);
@@ -1531,7 +1608,7 @@ begin
     FActors.Add(A);
   end;
   if FActors.Count > 0 then
-    WritelnLog('Doom3World', 'Actors: %d characters run their AI scripts', [FActors.Count]);
+    WritelnLog('Doom3World', 'Actors: %d run their AI scripts (%d monsters)', [FActors.Count, MonsterCount]);
 end;
 
 function TD3Game.ActorChannel(const A: TD3Actor; const Channel: Single): TD3ActorChannel;
@@ -1556,12 +1633,19 @@ begin
     Instance := A.Model.HeadInstance
   else
     Instance := A.Model.Instance;
-  C.AnimName := AnimName;
   C.AnimStart := FTime;
   C.AnimLoop := Loop;
   C.AnimLength := 0;
-  if (Instance <> nil) and Instance.PlayAnim(AnimName, Loop) then
-    C.AnimLength := Instance.AnimLength;
+  C.AnimName := '';
+  if Instance = nil then
+    Exit;
+  { name1, name2... chosen now, so its length is the one played }
+  C.AnimName := Instance.ResolveAnim(AnimName);
+  C.AnimLength := Instance.AnimDurationOf(C.AnimName);
+  { the head plays its channel at once; the body's anim is chosen in
+    UpdateActors from the torso and legs channels }
+  if Round(Channel) = 3 then
+    Instance.PlayAnim(C.AnimName, Loop);
 end;
 
 function TD3Game.ActorEvent(const A: TD3Actor; const Thread: TD3ScriptThread; const N: String;
@@ -1587,6 +1671,7 @@ var
   begin
     A.Goal := P;
     A.Moving := True;
+    A.ChaseEnemy := False;
   end;
 
 begin
@@ -1657,7 +1742,69 @@ begin
     'finishAction':
       if SameText(A.WaitAction, D3ValueToString(Args[0])) then
         A.WaitAction := '';
-    'getHead', 'getEnemy', 'heardSound', 'getObstacle', 'getTalkTarget', 'closestEnemyToPoint':
+    'getEnemy':
+      if A.HasEnemy then
+        EventResult := D3EntityValue(PlayerHandle)
+      else
+        EventResult := D3EntityValue(0);
+    'setEnemy', 'locateEnemy':
+      { the player is the only enemy there is }
+      if not NoTarget and not PlayerDead then
+        A.HasEnemy := True;
+    'clearEnemy':
+      begin
+        A.HasEnemy := False;
+        A.ChaseEnemy := False;
+      end;
+    'checkForEnemy', 'findEnemy':
+      if ActorCanSeePlayer(A, (N = 'checkForEnemy') and (ArgF(0) <> 0)) then
+      begin
+        A.HasEnemy := True;
+        EventResult := D3EntityValue(PlayerHandle);
+      end;
+    'faceEnemy':
+      if A.HasEnemy then
+      begin
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
+          A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
+      end;
+    'moveToEnemy':
+      if A.HasEnemy then
+      begin
+        A.ChaseEnemy := True;
+        A.Moving := True;
+      end;
+    'enemyRange', 'enemyRange2D':
+      begin
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        if N = 'enemyRange2D' then
+          Pos.Z := 0;
+        EventResult := D3FloatValue(Pos.Length);
+      end;
+    'enemyPosition': EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+    'testMeleeAttack', 'canHitEnemy':
+      begin
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        D := Sqrt(Sqr(Pos.X) + Sqr(Pos.Y));
+        if N = 'testMeleeAttack' then
+          EventResult := D3FloatValue(Ord(A.HasEnemy and not PlayerDead and
+            (D <= A.MeleeRange + PlayerRadius)))
+        else
+          EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
+      end;
+    'canReachEnemy', 'enemyInCombatCone', 'canSee': EventResult := D3FloatValue(1);
+    'getPainAnim': EventResult := D3StringValue('pain');
+    'stopThinking':
+      begin
+        A.Thinking := False;
+        A.Moving := False;
+        Thread.Yield;
+      end;
+    'getHealth':
+      if A.Monster <> nil then
+        EventResult := D3FloatValue(A.Monster.Health);
+    'getHead', 'heardSound', 'getObstacle', 'getTalkTarget', 'closestEnemyToPoint':
       EventResult := D3EntityValue(0);
     'canBecomeSolid': EventResult := D3FloatValue(1);
     'getTurnDelta': EventResult := D3FloatValue(NormalizeYaw(A.IdealYaw - A.Yaw));
@@ -1687,7 +1834,11 @@ begin
           MoveTo(Other.Origin);
       end;
     'moveToPosition': MoveTo(Args[0].V);
-    'stopMove': A.Moving := False;
+    'stopMove':
+      begin
+        A.Moving := False;
+        A.ChaseEnemy := False;
+      end;
     'moveStatus': EventResult := D3FloatValue(Ord(A.Moving)); // MOVE_STATUS_DONE, MOVE_STATUS_MOVING
     'saveMove':
       begin
@@ -1719,8 +1870,8 @@ begin
     'setBoneMod', 'setNeverDormant', 'setTalkState', 'setTalkTarget', 'allowMovement',
     'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain', 'setMoveType', 'lookAt',
     'lookAtEnemy', 'lookAtEntity', 'animTurn', 'becomeSolid', 'becomeNonSolid',
-    'kickObstacles', 'clearEnemy', 'setEnemy', 'preventPain', 'overrideAnim',
-    'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'stopThinking', 'wakeOnFlashlight',
+    'kickObstacles', 'preventPain', 'overrideAnim',
+    'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'wakeOnFlashlight',
     'setSmokeVisibility', 'attackBegin', 'attackEnd', 'clearBurn', 'markUsed':
       ;
     'getMoveType', 'getBlendFrames': EventResult := D3FloatValue(0);
@@ -1734,9 +1885,10 @@ procedure TD3Game.UpdateActors(const SecondsPassed: Single);
 var
   A: TD3Actor;
   Ch: Integer;
-  C: TD3ActorChannel;
+  C, Torso, Legs, Body: TD3ActorChannel;
   Pos, Dir: TVector3;
-  Dist, Step, Speed, Delta, Turn: Single;
+  Dist, Step, Speed, Delta, Turn, Arrive: Single;
+  BodyKey: String;
 begin
   for A in FActors do
   begin
@@ -1758,6 +1910,54 @@ begin
       end;
     end;
 
+    if not A.Thinking then
+    begin
+      { stopThinking: its threads end }
+      A.Main.State := tsDone;
+      for Ch := Low(A.Channels) to High(A.Channels) do
+        A.Channels[Ch].Thread.State := tsDone;
+      Continue;
+    end;
+
+    { the body plays a torso action (playAnim, until done), else the legs'
+      anim, else the torso's (idle) }
+    Torso := A.Channels[1];
+    Legs := A.Channels[2];
+    if (Torso.AnimName <> '') and not Torso.AnimLoop and
+       (FTime - Torso.AnimStart < Torso.AnimLength) then
+      Body := Torso
+    else
+    if Legs.AnimName <> '' then
+      Body := Legs
+    else
+      Body := Torso;
+    BodyKey := Body.AnimName + ':' + FloatToStr(Body.AnimStart);
+    if (Body.AnimName <> '') and (BodyKey <> A.BodyKey) then
+    begin
+      A.BodyKey := BodyKey;
+      A.Model.Instance.PlayAnim(Body.AnimName, Body.AnimLoop);
+    end;
+
+    { AI_PAIN lasts the frame of the hit }
+    if A.PainFrames > 0 then
+      Dec(A.PainFrames)
+    else
+      A.SetFlag('AI_PAIN', 0);
+
+    { chasing the player: the goal follows it, done within melee range }
+    if A.ChaseEnemy then
+    begin
+      if not A.HasEnemy or NoTarget or PlayerDead then
+      begin
+        A.ChaseEnemy := False;
+        A.Moving := False;
+      end else
+      begin
+        A.Goal := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+        A.Moving := True;
+      end;
+    end;
+
     { walking to the goal at the speed of the walk animation (its origin
       joint stays put: the entity moves instead) }
     Pos := CgeToD3(A.Model.Holder.Translation);
@@ -1770,16 +1970,39 @@ begin
       if Speed < 10 then
         Speed := 80;
       Step := Speed * SecondsPassed;
-      if Dist <= Max(Step, 4) then
+      if A.ChaseEnemy then
+        Arrive := A.MeleeRange
+      else
+        Arrive := Max(Step, 4);
+      if Dist <= Arrive then
       begin
-        Pos := Vector3(A.Goal.X, A.Goal.Y, Pos.Z);
+        if not A.ChaseEnemy then
+          Pos := Vector3(A.Goal.X, A.Goal.Y, Pos.Z);
         A.Moving := False;
+        A.ChaseEnemy := False;
       end else
       begin
-        Pos := Pos + Dir * (Step / Dist);
         A.IdealYaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
+        if A.Monster <> nil then
+          { monsters collide with the world }
+          Pos := CgeToD3(StepTowards(A.Model.Holder.Translation,
+            D3ToCge(Dir * (Step / Dist)), A.Monster.Radius, A.Monster.Height))
+        else
+          Pos := Pos + Dir * (Step / Dist);
       end;
       A.Model.Holder.Translation := D3ToCge(Pos);
+    end;
+
+    { what it knows of its enemy }
+    if A.HasEnemy then
+    begin
+      A.SetFlag('AI_ENEMY_VISIBLE', Ord(ActorCanSeePlayer(A, False)));
+      A.SetFlag('AI_ENEMY_IN_FOV', Ord(ActorCanSeePlayer(A, True)));
+      A.SetFlag('AI_ENEMY_DEAD', Ord(PlayerDead));
+    end else
+    begin
+      A.SetFlag('AI_ENEMY_VISIBLE', 0);
+      A.SetFlag('AI_ENEMY_IN_FOV', 0);
     end;
 
     { turning at turn_rate }
@@ -1797,6 +2020,91 @@ begin
     A.SetFlag('AI_MOVE_DONE', Ord(not A.Moving));
     A.SetFlag('AI_ONGROUND', 1);
     A.SetFlag('AI_DEST_UNREACHABLE', 0);
+  end;
+end;
+
+function TD3Game.ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
+var
+  Eye, ToPlayer: TVector3;
+  Angle: Single;
+begin
+  Result := False;
+  if NoTarget or PlayerDead or not A.Model.Holder.Exists then
+    Exit;
+  Eye := A.Model.Holder.Translation + Vector3(0, 64, 0);
+  ToPlayer := FPlayerEye - Eye;
+  if ToPlayer.Length > MonsterSightRange then
+    Exit;
+  if UseFov then
+  begin
+    { in front of it (a 180 degree field of view, idAI's default fov) }
+    Angle := RadToDeg(ArcTan2(-ToPlayer.Z, ToPlayer.X)) - A.Yaw;
+    Angle := Angle - 360 * Floor((Angle + 180) / 360);
+    if Abs(Angle) > 90 then
+      Exit;
+  end;
+  Result := CanSee(Eye, FPlayerEye);
+end;
+
+procedure TD3Game.ActorDamaged(const A: TD3Actor; const Killed: Boolean);
+begin
+  if not A.Thinking then
+    Exit;
+  { the attacker becomes its enemy }
+  A.HasEnemy := not NoTarget;
+  A.SetFlag('AI_PAIN', 1);
+  A.PainFrames := 1;
+  if Killed then
+  begin
+    { idAI::Killed: AI_DEAD, then the state_Killed state }
+    A.SetFlag('AI_DEAD', 1);
+    A.Moving := False;
+    A.ChaseEnemy := False;
+    A.IdealFunction := A.Obj.Typ.FindMethodToRun('state_Killed');
+    A.IdealName := 'state_Killed';
+    A.HasIdeal := True;
+  end;
+end;
+
+procedure TD3Game.ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
+var
+  A, Found: TD3Actor;
+  Cmd, Arg, Shader: String;
+  DamageDef: TStringList;
+  ToPlayer: TVector3;
+  Damage: Integer;
+begin
+  Found := nil;
+  for A in FActors do
+    if A.Model.Instance = Sender then
+      Found := A;
+  if (Found = nil) or not Found.Thinking then
+    Exit;
+  A := Found;
+  Cmd := LowerCase(Copy(Command, 1, Pos(' ', Command + ' ') - 1));
+  Arg := Trim(Copy(Command, Length(Cmd) + 2, MaxInt));
+  if Copy(Cmd, 1, 5) = 'sound' then
+  begin
+    { sound, sound_voice, sound_body...: a snd_ key of the entity }
+    Shader := A.Model.Entity.Value(Arg);
+    if Shader <> '' then
+      StartScriptSound(A.Handle, Shader, 0);
+  end else
+  if Cmd = 'melee' then
+  begin
+    { idAI::AttackMelee: hits the player in reach (a bit more than the
+      melee range, the swing reaches) }
+    ToPlayer := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+    if A.HasEnemy and not PlayerDead and
+       (Sqrt(Sqr(ToPlayer.X) + Sqr(ToPlayer.Y)) <= (A.MeleeRange + PlayerRadius) * 1.5) then
+    begin
+      Damage := 10;
+      DamageDef := Decls.EntityDef(Arg);
+      if DamageDef <> nil then
+        Damage := StrToIntDef(DamageDef.Values['damage'], Damage);
+      DamagePlayer(Damage);
+      WritelnLog('Doom3World', '%s hits the player (%s, %d)', [A.Model.Entity.Name, Arg, Damage]);
+    end;
   end;
 end;
 
@@ -2877,6 +3185,9 @@ begin
       if E <> nil then
         StartCamera(E);
     end else
+    if N = 'influenceActive' then
+      EventResult := D3FloatValue(0)
+    else
     if N = 'firstPerson' then
     begin
       FCameraEntity := nil;
@@ -2886,6 +3197,18 @@ begin
     Exit;
   end;
 
+  if Target = PlayerHandle then
+  begin
+    case N of
+      'getOrigin', 'getWorldOrigin':
+        EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+      'getName': EventResult := D3StringValue('player1');
+      'getHealth': EventResult := D3FloatValue(Health);
+      else
+        Result := False;
+    end;
+    Exit;
+  end;
   E := HandleEntity(Target);
   if E = nil then
     Exit(False);
@@ -3192,7 +3515,7 @@ begin
   BestDist := WallDist;
   for Mon in FMonsters do
   begin
-    if Mon.State = msDead then
+    if (Mon.State = msDead) or not Mon.Model.Holder.Exists then
       Continue;
     ToCenter := Mon.Center - Origin;
     T := TVector3.DotProduct(ToCenter, D);
@@ -3219,7 +3542,7 @@ begin
     Dec(Best.Health, PistolDamage);
     Best.PainTime := 0.2;
     Best.Dormant := False;
-    if Best.State = msIdle then
+    if (Best.State = msIdle) and (Best.Actor = nil) then
     begin
       Best.State := msChase;
       Best.Model.Instance.PlayAnim('walk');
@@ -3228,10 +3551,13 @@ begin
     begin
       Best.State := msDead;
       Best.StateTime := 0;
-      Best.Model.Instance.PlayAnim('idle', False);
+      if Best.Actor = nil then
+        Best.Model.Instance.PlayAnim('idle', False);
       Inc(Kills);
       Message('Killed ' + Best.Model.Entity.Name);
     end;
+    if Best.Actor <> nil then
+      ActorDamaged(Best.Actor, Best.Health <= 0);
   end;
 end;
 
@@ -3276,4 +3602,6 @@ begin
   Result := Health <= 0;
 end;
 
+initialization
+  ScriptedMonsterObjects := ['monster_zombie', 'monster_test'];
 end.

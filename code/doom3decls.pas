@@ -110,6 +110,9 @@ type
     Offset: TVector3;
     { Anim name (lowercase) -> md5anim file (the first one listed). }
     Anims: TStringList;
+    { Frame commands: lines "animname=frame command arguments" (frame
+      1-based), like "melee_attack1=11 melee melee_zombie_maint_Right". }
+    FrameCommands: TStringList;
     constructor Create;
     destructor Destroy; override;
     function AnimFile(const AnimName: String): String;
@@ -385,11 +388,13 @@ constructor TD3ModelDecl.Create;
 begin
   inherited Create;
   Anims := TStringList.Create;
+  FrameCommands := TStringList.Create;
 end;
 
 destructor TD3ModelDecl.Destroy;
 begin
   Anims.Free;
+  FrameCommands.Free;
   inherited Destroy;
 end;
 
@@ -1039,6 +1044,7 @@ end;
 
 function TD3DeclManager.ModelDecl(const Name: String): TD3ModelDecl;
 var
+  Command: String;
   Key, Body, Tok, L, AnimName: String;
   Lexer: TDoom3Lexer;
   Parent: TD3ModelDecl;
@@ -1066,6 +1072,7 @@ begin
           Result.Skin := Parent.Skin;
           Result.Offset := Parent.Offset;
           Result.Anims.Assign(Parent.Anims);
+          Result.FrameCommands.Assign(Parent.FrameCommands);
         end;
       end else
       if L = 'mesh' then
@@ -1092,7 +1099,25 @@ begin
         while Lexer.Check(',') do
           Lexer.NextStr;
         if Lexer.Check('{') then
-          Lexer.SkipBracedSection;
+        begin
+          { frame <n> <command> <arguments...>, up to the next frame or the closing brace }
+          Command := '';
+          while not Lexer.AtEnd do
+          begin
+            Tok := Lexer.NextStr;
+            if (Tok = '}') or SameText(Tok, 'frame') then
+            begin
+              if Command <> '' then
+                Result.FrameCommands.Add(AnimName + '=' + Command);
+              Command := '';
+              if Tok = '}' then
+                Break;
+              Command := Lexer.NextStr;
+            end else
+            if Command <> '' then
+              Command := Command + ' ' + Tok;
+          end;
+        end;
       end else
       if Tok = '{' then
         Lexer.SkipBracedSection;

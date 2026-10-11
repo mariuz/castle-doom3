@@ -1408,6 +1408,8 @@ begin
     ME.Entity := E;
     ME.EntityDef := Def;
     ME.Instance := TD3Md5Instance.Create(Md5, Anims, SkinName);
+    if Decl <> nil then
+      ME.Instance.FrameCommands := Decl.FrameCommands;
     ME.Instance.Scene.Collides := False;
     ME.Instance.Scene.Pickable := False;
     ME.Instance.Scene.Translation := D3ToCge(Offset);

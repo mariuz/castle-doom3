@@ -90,6 +90,9 @@ type
   end;
 
   { An animated instance: a TCastleScene skinned from a model and anims. }
+  TD3Md5Instance = class;
+  TD3FrameCommandEvent = procedure (const Sender: TD3Md5Instance; const Command: String) of object;
+
   TD3Md5Instance = class
   strict private
     FModel: TD3Md5Model;
@@ -106,14 +109,26 @@ type
     FHullTransforms: array of TMatrixTransformNode;
     procedure ApplyPose;
     procedure LockPoseOrigin;
+    procedure FireFrameCommands(const FromTime, ToTime: Single);
     procedure BuildShadowHulls(const Root: TX3DRootNode);
   public
     { The animation stands still (SetFrame). }
     Paused: Boolean;
+    { The model decl's frame commands (not owned; "animname=frame command"). }
+    FrameCommands: TStrings;
+    { Called for each frame command the playing animation passes. }
+    OnFrameCommand: TD3FrameCommandEvent;
+    { The anim playing (its name in the decl, e.g. "idle2"). }
+    PlayingAnim: String;
     { Keep the skeleton's origin joint where the animation starts in X / Y
       (Doom 3 coordinates): the game moves the entity instead, like idAI
       moving by the animation's delta. }
     LockOrigin: Boolean;
+    { The decl's anim for a name: itself, or one of name1, name2... at
+      random (idDeclModelDef::GetAnim). '' if none. }
+    function ResolveAnim(const AName: String): String;
+    { Seconds of an anim (0 if there's no such anim). }
+    function AnimDurationOf(const AName: String): Single;
     { Anims: anim name -> md5anim path (from a model decl). }
     constructor Create(const AModel: TD3Md5Model; const AAnims: TStrings;
       const SkinName: String = '');
@@ -843,17 +858,60 @@ end;
 
 function TD3Md5Instance.HasAnim(const AnimName: String): Boolean;
 begin
-  Result := FAnims.IndexOfName(LowerCase(AnimName)) >= 0;
+  Result := ResolveAnim(AnimName) <> '';
 end;
 
-function TD3Md5Instance.PlayAnim(const AnimName: String; const Loop: Boolean): Boolean;
+function TD3Md5Instance.ResolveAnim(const AName: String): String;
+var
+  Base, Key: String;
+  I, Count: Integer;
+begin
+  Base := LowerCase(AName);
+  if FAnims.IndexOfName(Base) >= 0 then
+    Exit(Base);
+  if ExtractFileExt(Base) = '.md5anim' then
+    Exit(AName);
+  { name1, name2...: one of them at random }
+  Result := '';
+  Count := 0;
+  for I := 0 to FAnims.Count - 1 do
+  begin
+    Key := FAnims.Names[I];
+    if (Length(Key) > Length(Base)) and (Copy(Key, 1, Length(Base)) = Base) and
+       (StrToIntDef(Copy(Key, Length(Base) + 1, MaxInt), -1) >= 0) then
+    begin
+      Inc(Count);
+      if Random(Count) = 0 then
+        Result := Key;
+    end;
+  end;
+end;
+
+function TD3Md5Instance.AnimDurationOf(const AName: String): Single;
 var
   Path: String;
   A: TD3Md5Anim;
 begin
-  Path := FAnims.Values[LowerCase(AnimName)];
-  if (Path = '') and (ExtractFileExt(LowerCase(AnimName)) = '.md5anim') then
-    Path := AnimName;
+  Result := 0;
+  Path := FAnims.Values[LowerCase(AName)];
+  if (Path = '') and (ExtractFileExt(LowerCase(AName)) = '.md5anim') then
+    Path := AName;
+  if Path = '' then
+    Exit;
+  A := Md5Cache.Anim(Path);
+  if A <> nil then
+    Result := A.Duration;
+end;
+
+function TD3Md5Instance.PlayAnim(const AnimName: String; const Loop: Boolean): Boolean;
+var
+  Path, Resolved: String;
+  A: TD3Md5Anim;
+begin
+  Resolved := ResolveAnim(AnimName);
+  Path := FAnims.Values[Resolved];
+  if (Path = '') and (ExtractFileExt(LowerCase(Resolved)) = '.md5anim') then
+    Path := Resolved;
   if Path = '' then
     Exit(False);
   A := Md5Cache.Anim(Path);
@@ -863,8 +921,10 @@ begin
   FAnimTime := 0;
   FLoop := Loop;
   Paused := False;
+  PlayingAnim := Resolved;
   Result := True;
 end;
+
 
 function TD3Md5Instance.AnimFinished: Boolean;
 begin
@@ -935,11 +995,52 @@ begin
   M := JointMatrix(FPose[I]) * Bind.Transpose;
 end;
 
+procedure TD3Md5Instance.FireFrameCommands(const FromTime, ToTime: Single);
+var
+  I, K, KF, Frame, F0, F1, N: Integer;
+  Line: String;
+begin
+  { the frames (0-based) entered in (FromTime, ToTime], looping like PoseAt }
+  N := FAnim.NumFrames;
+  if N <= 0 then
+    Exit;
+  F0 := Trunc(FromTime * FAnim.FrameRate);
+  F1 := Trunc(ToTime * FAnim.FrameRate);
+  if FromTime <= 0 then
+    F0 := -1;
+  for K := F0 + 1 to Min(F1, F0 + N) do
+  begin
+    if FLoop then
+      KF := K mod N
+    else
+    begin
+      if K > N - 1 then
+        Break;
+      KF := K;
+    end;
+    for I := 0 to FrameCommands.Count - 1 do
+    begin
+      if FrameCommands.Names[I] <> PlayingAnim then
+        Continue;
+      Line := FrameCommands.ValueFromIndex[I];
+      Frame := StrToIntDef(Copy(Line, 1, Pos(' ', Line) - 1), 1) - 1;
+      if Frame = KF then
+        OnFrameCommand(Self, Copy(Line, Pos(' ', Line) + 1, MaxInt));
+    end;
+  end;
+end;
+
+
 procedure TD3Md5Instance.Update(const SecondsPassed: Single);
+var
+  OldTime: Single;
 begin
   if (FAnim = nil) or Paused then
     Exit;
+  OldTime := FAnimTime;
   FAnimTime := FAnimTime + SecondsPassed;
+  if Assigned(OnFrameCommand) and (FrameCommands <> nil) then
+    FireFrameCommands(OldTime, FAnimTime);
   FAnim.PoseAt(FAnimTime, FLoop, FPose);
   if LockOrigin then
     LockPoseOrigin;

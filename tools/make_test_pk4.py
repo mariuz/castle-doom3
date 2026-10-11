@@ -919,6 +919,9 @@ def map_text():
          'anim': 'flyby', 'target': 'info_player_teleport_1'},
         {'classname': 'info_player_teleport', 'name': 'info_player_teleport_1',
          'origin': '500 200 0', 'angle': '180'},
+        # a monster running its AI script, on the balcony
+        {'classname': 'monster_test_scripted', 'name': 'blob_scripted_1', 'origin': '840 300 96',
+         'angle': '180'},
         # a character (AI script): walks to path_corner_1 when triggered
         {'classname': 'char_test_walker', 'name': 'test_walker_1', 'origin': '-200 60 0',
          'angle': '0', 'target': 'path_corner_1'},
@@ -1213,6 +1216,9 @@ model test_blob {
 	anim walk				models/md5/test/blob_walk.md5anim {
 		frame 6				sound_body snd_footstep
 	}
+	anim melee				models/md5/test/blob_walk.md5anim {
+		frame 4				melee damage_test_melee
+	}
 }
 
 entityDef monster_default {
@@ -1263,6 +1269,20 @@ entityDef char_test_walker {
 	"scriptobject"			"character"
 	"model"					"test_blob"
 	"turn_rate"				"180"
+}
+
+entityDef damage_test_melee {
+	"damage"				"7"
+}
+
+entityDef monster_test_scripted {
+	"inherit"				"monster_default"
+	"editor_usage"			"A test creature running an AI script (script object monster_test)."
+	"model"					"test_blob"
+	"scriptobject"			"monster_test"
+	"health"				"40"
+	"melee_range"			"40"
+	"turn_rate"				"360"
 }
 
 entityDef monster_test_blob {
@@ -1673,6 +1693,14 @@ scriptEvent void    moveToEntity( entity destination );
 scriptEvent void    turnTo( float yaw );
 scriptEvent float   facingIdeal();
 scriptEvent entity  getEntityKey( string key );
+scriptEvent entity  checkForEnemy( float useFOV );
+scriptEvent void    faceEnemy();
+scriptEvent void    moveToEnemy();
+scriptEvent float   testMeleeAttack();
+scriptEvent void    waitAction( string name );
+scriptEvent void    finishAction( string name );
+scriptEvent void    stopMove();
+scriptEvent void    stopThinking();
 
 #endif
 """
@@ -1773,6 +1801,94 @@ void character::Legs_Idle() {
 }
 
 void character::Legs_Walk() {
+    playCycle( ANIMCHANNEL_LEGS, "walk" );
+    while( AI_FORWARD ) {
+        waitFrame();
+    }
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 4 );
+}
+
+// A monster's AI, in the way of Doom 3's monster scripts: wait for the
+// enemy, chase it, melee attacks (the anim's melee frame command hits),
+// state_Killed when it dies.
+float monster_killed;
+
+object monster_test {
+    boolean AI_FORWARD;
+    boolean AI_MOVE_DONE;
+    boolean AI_ACTIVATED;
+    boolean AI_ONGROUND;
+    boolean AI_DEST_UNREACHABLE;
+    boolean AI_PAIN;
+    boolean AI_DEAD;
+    boolean AI_ENEMY_VISIBLE;
+    boolean AI_ENEMY_IN_FOV;
+    boolean AI_ENEMY_DEAD;
+    void    init();
+    void    state_Begin();
+    void    state_Combat();
+    void    state_Killed();
+    void    Torso_Idle();
+    void    Torso_Melee();
+    void    Legs_Idle();
+    void    Legs_Walk();
+};
+
+void monster_test::init() {
+    setState( "state_Begin" );
+}
+
+void monster_test::state_Begin() {
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    while( !AI_PAIN ) {
+        if ( checkForEnemy( 1 ) ) {
+            break;
+        }
+        waitFrame();
+    }
+    setState( "state_Combat" );
+}
+
+void monster_test::state_Combat() {
+    eachFrame {
+        faceEnemy();
+        if ( testMeleeAttack() ) {
+            animState( ANIMCHANNEL_TORSO, "Torso_Melee", 4 );
+            waitAction( "melee" );
+            continue;
+        }
+        moveToEnemy();
+    }
+}
+
+void monster_test::state_Killed() {
+    stopMove();
+    monster_killed = 1;
+    stopThinking();
+}
+
+void monster_test::Torso_Idle() {
+    idleAnim( ANIMCHANNEL_TORSO, "idle" );
+}
+
+void monster_test::Torso_Melee() {
+    playAnim( ANIMCHANNEL_TORSO, "melee" );
+    waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
+    finishAction( "melee" );
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 4 );
+}
+
+void monster_test::Legs_Idle() {
+    idleAnim( ANIMCHANNEL_LEGS, "idle" );
+    eachFrame {
+        if ( AI_FORWARD ) {
+            animState( ANIMCHANNEL_LEGS, "Legs_Walk", 4 );
+        }
+    }
+}
+
+void monster_test::Legs_Walk() {
     playCycle( ANIMCHANNEL_LEGS, "walk" );
     while( AI_FORWARD ) {
         waitFrame();

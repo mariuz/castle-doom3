@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Zombies' AI scripts** (roadmap 5d, second part): zombies run `monster_zombie` (with `monster_base`): they wait for triggers or the player, chase with collisions, swing when in reach (damage from the melee frame commands of their animations), feel pain and die through their scripts. Model decls keep frame commands; anim names resolve to their numbered variants.
+- Test level: `blob_scripted_1` on the balcony runs a monster script; 440 checks; CI checks its hits.
 - **Characters' AI scripts** (roadmap 5d, first part): Mars City's people (33 in Mars City 1) run their `character` script objects: state functions, animation states per channel, path commands (`path_corner`, `path_anim`, `path_cycleanim`...), walking and turning; they sit, work at computers, drink, read PDAs and walk their rounds. Console `actors`.
 - Script VM: persistent threads restarted with another function, `callFunction` / `hasFunction`, `sys.warning` / `sys.error`.
 - Test level: `test_walker_1` walks to its `path_corner` when the trigger's script activates it; 431 checks; CI checks it.

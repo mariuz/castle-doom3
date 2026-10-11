@@ -114,7 +114,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(7, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(9, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -162,7 +162,7 @@ begin
   begin
     CheckEquals('models/md5/test/blob.md5mesh', Model.Mesh, 'model mesh');
     CheckEquals('models/md5/test/blob_walk.md5anim', Model.AnimFile('walk'), 'model anim (with frame commands)');
-    CheckEquals(2, Model.Anims.Count, 'model anim count');
+    CheckEquals(3, Model.Anims.Count, 'model anim count');
   end;
 
   Snd := Decls.SoundShader('test_hum');
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(40, MapFile.Entities.Count, 'entity count');
+    CheckEquals(41, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1449,7 +1449,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(9, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(17, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1622,10 +1622,13 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for actors');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(1, Game.Actors.Count, 'one actor (test_walker_1)');
-    if Game.Actors.Count <> 1 then
+    CheckEquals(2, Game.Actors.Count, 'two actors (blob_scripted_1, test_walker_1)');
+    A := nil;
+    for I := 0 to Game.Actors.Count - 1 do
+      if Game.Actors[I].Model.Entity.Name = 'test_walker_1' then
+        A := Game.Actors[I];
+    if A = nil then
       Exit;
-    A := Game.Actors[0];
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     for I := 1 to 3 do
       Game.Update(0.1, Away);
@@ -1649,6 +1652,76 @@ begin
     CheckNear(60, Pos.Y, 'the character walked to path_corner_1 y', 1);
     CheckNear(90, A.Yaw, 'turnTo( 90 ) turned it north');
     CheckEquals('Legs_Idle', A.Channels[2].StateName, 'the legs are idle again');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+{ A monster running its AI script (test map: blob_scripted_1). }
+procedure TestScriptedMonster;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  I: Integer;
+  Eye, Target: TVector3;
+  RemoveMe: TRemoveType;
+
+  { the game, and the map's md5 animations (their frame commands) }
+  procedure Step;
+  begin
+    Game.Update(0.1, Eye);
+    RemoveMe := rtNone;
+    Map.Update(0.1, RemoveMe);
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the scripted monster');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    A := nil;
+    for I := 0 to Game.Actors.Count - 1 do
+      if Game.Actors[I].Model.Entity.Name = 'blob_scripted_1' then
+        A := Game.Actors[I];
+    Check(A <> nil, 'blob_scripted_1 runs its script');
+    if A = nil then
+      Exit;
+    Check(A.Monster <> nil, 'the scripted monster has its game monster (health, shots)');
+    { only this one hunts: the others (simple AI) sleep }
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    { the player on the balcony, 100 units west of it, in its view }
+    Eye := D3ToCge(Vector3(740, 300, 96)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 5 do
+      Step;
+    CheckEquals('state_Combat', A.StateName, 'it saw the player: state_Combat');
+    for I := 1 to 30 do
+      Step;
+    Check(Game.Health < 100, Format('its melee frame command hurt the player (health %d)', [Game.Health]));
+    Check(Abs(CgeToD3(A.Model.Holder.Translation).X - 740) < 80, 'it came to the player');
+    { shoot it (40 health, 14 per shot) }
+    for I := 1 to 20 do
+    begin
+      Target := A.Model.Holder.Translation + Vector3(0, 36, 0);
+      Game.Fire(Eye, (Target - Eye).Normalize);
+      Step;
+      if A.Monster.State = msDead then
+        Break;
+    end;
+    Check(A.Monster.State = msDead, 'shot dead');
+    for I := 1 to 3 do
+      Step;
+    CheckNear(1, Game.Script.GlobalValue('monster_killed').F, 'death started state_Killed');
+    Check(not A.Thinking, 'stopThinking');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
@@ -1783,6 +1856,7 @@ begin
   TestMapScripts;
   TestCinematics;
   TestActors;
+  TestScriptedMonster;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
