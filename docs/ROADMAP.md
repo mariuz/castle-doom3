@@ -38,16 +38,36 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
 
 ## Changes needed in Castle Game Engine
 
-Things this port works around because Castle Game Engine (7.0-alpha.3) can't do them yet. Each is a change to propose upstream (https://github.com/castle-engine/castle-engine); the workaround stays until it lands.
+Things this port works around because Castle Game Engine (7.0-alpha.3) can't do them yet. Each is a change to propose upstream (https://github.com/castle-engine/castle-engine); the workaround stays until it lands in a CGE release (CI builds against `cge-unstable`).
 
-**A. Shadow volumes from several lights.** `TCastleViewport` takes one main light for shadow volumes (`MainLightForShadowVolumes`, the light with `shadowVolumesMain`), and `RenderFromView3D` runs the stencil pass (`RenderShadowVolume`) once for it. Doom 3 shadows every light: one stencil clear + shadow volume pass + additive lit pass per shadow casting light that reaches the view. Needed in CGE:
-- a list of shadow volume lights (for example every light with `shadowVolumes TRUE`, or a limit like 4 chosen by the application) instead of one main light;
-- per light: clear the stencil, render the casters' volumes for that light, render the receivers lit only by that light where the stencil is 0, additively;
-- the light's scissor rectangle / depth bounds to keep each pass small, as Doom 3 does.
+| | Change | Status | Unblocks |
+|---|---|---|---|
+| A | Shadow volumes from several lights | Draft PR [#740](https://github.com/castle-engine/castle-engine/pull/740) | Roadmap item 2 |
+| B | Shadow maps for point lights | Not started | Item 2 (alternative to A) |
+| C | Textures in light source effects | Not started | Item 10 |
+| D | Depth function / polygon offset per appearance | Not started | Items 3, decals |
+| E | Screen and environment textures in materials | Not started | Item 3 (glass, heat haze) |
+| F | Silhouette edges kept across animation | Not started | Removes md5 shadow hulls |
+| G | Shadow casters that aren't drawn | Not started | Removes hidden caster geometry |
+| H | Light attenuation to zero at the radius | Not started | Exact light falloff |
+| I | Light passes added in linear color space | Not started (found while doing A) | A with PBR materials |
+
+A, B, D and F were checked against the CGE source; the others come from building this port.
+
+**A. Shadow volumes from several lights.** `TCastleViewport` takes one main light for shadow volumes (`MainLightForShadowVolumes`, the light with `shadowVolumesMain`), and `RenderFromView3D` runs the stencil pass (`RenderShadowVolume`) once for it. Doom 3 shadows every light: one stencil clear + shadow volume pass + additive lit pass per shadow casting light that reaches the view.
 
 Workaround: `TDoom3Map.UpdateShadowLight` picks the strongest light at the player every frame.
 
-Proposed upstream: [castle-engine/castle-engine#740](https://github.com/castle-engine/castle-engine/pull/740) adds `TCastleViewport.ShadowVolumesMaxLights`: each light with `shadowVolumes = shadowVolumesMain = TRUE` gets a stencil clear, its shadow volumes and an additive "light contribution only" pass (shader define `CASTLE_LIGHT_CONTRIBUTION_ONLY`: no emissive, ambient or fog color). It was checked with this port's test level: up to 8 lights, Phong materials with light volume effects, no artefacts. Once it is in a CGE release, `UpdateShadowLight` can mark the few strongest lights in the visible areas instead of one. Known limit: the passes add after gamma correction, which is exact for Phong materials (ours) but too bright for PBR with gamma correction.
+Proposed upstream: [castle-engine/castle-engine#740](https://github.com/castle-engine/castle-engine/pull/740) (draft) adds `TCastleViewport.ShadowVolumesMaxLights` (default 1 = unchanged):
+- the receivers are rendered once with the casting lights off (ambient, emissive, other lights, depth buffer);
+- per light: stencil clear, its shadow volumes, then an additive (`one, one`) pass of only that light where the stencil is 0, with shaders built with `CASTLE_LIGHT_CONTRIBUTION_ONLY` (no emissive, ambient or fog color, unlit shapes black);
+- an example (`examples/viewport_and_scenes/shadow_volumes_several_lights`), API docs, and a rendering test in CGE's suite.
+
+It was checked with this port's test level (up to 8 lights, Phong materials with light volume effects, no artefacts). Still missing after it:
+- a scissor rectangle / depth bounds per light, so each pass only covers the light's screen area, as Doom 3 does: every pass now covers all the receivers;
+- the gamma issue (change I);
+- the cge-www manual page `shadow_volumes.adoc` still says one light (to update if the PR is accepted);
+- here: once it is in a CGE release, `UpdateShadowLight` marks the few strongest lights of the visible areas (`shadowVolumes` and `shadowVolumesMain`) and sets `ShadowVolumesMaxLights`; tested locally with a temporary patch, not committed because CI builds against released CGE.
 
 **B. Shadow maps for point lights.** `CastleInternalShadowMaps` computes projections only for spot and directional lights (`AutoCalculateProjectionForDirectionalLight`, spot cut-off angles): a point light needs a cube shadow map (6 faces, or a dual paraboloid map) and the shader lookup for it. Also, shadow map receivers are the shapes of the same scene as the light (`ProcessShadowMapsReceivers` per scene); the map's areas and lights are separate scenes here, so receivers in other scenes (or global lights casting into every scene) are needed too. Either A or B gives several shadow casting lights.
 
@@ -63,3 +83,4 @@ Proposed upstream: [castle-engine/castle-engine#740](https://github.com/castle-e
 
 **H. Light attenuation to zero at the radius.** CGE cuts a light off hard at its `radius` and its attenuation never reaches zero, so a Doom 3 light box needs a radius twice its size and a low attenuation to hide the edge (`BuildLights`). Needed: an optional smooth falloff to zero at the radius (as glTF `KHR_lights_punctual` range).
 
+**I. Light passes added in linear color space.** The additive passes of A blend in the color buffer after the shader has applied gamma correction or tone mapping, and gamma(a) + gamma(b) > gamma(a + b): shapes rendered with gamma correction (`ColorSpace = csLinear`, or the default `csLinearWhenPhysicalMaterial` with PBR materials) come out too bright where several lights overlap. Needed: render the shadowed passes to a linear framebuffer (sRGB framebuffer with `GL_FRAMEBUFFER_SRGB`, or a floating point one) and convert once at the end. This port uses Phong materials without gamma correction, so A is exact here.
