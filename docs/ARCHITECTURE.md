@@ -38,7 +38,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 | `Doom3Portals` | `TD3PortalVisibility`: the portals in CGE coordinates, per area portal lists, `Compute` (portal flow with polygon clipping and per-portal narrowing, closed portals), `AreasWithinRadius` (areas a light reaches), `PortalsInBox` (portals a door closes), `ClipPolygon`. |
 | `Doom3Gui` | `.gui` files: `TD3Gui` / `TD3GuiWindow` (windowDef, editDef, choiceDef... trees; properties as comma-separated tokens; events and variable declarations skipped), `RenderGui` (software rendering), `GuiImageUrl` (cache per path and state, `d3gui:` protocol), `GuiSurfaceUrl` / `GuiSurfPath` (guisurf keywords). |
 | `Doom3Level` | `TDoom3Map` (`TCastleTransform`, registered for the editor): builds the area scenes, lights, brush entities and md5 entities of a map. |
-| `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, player health / armor, pistol, use. |
+| `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, triggers and entity activation, player health / armor, pistol, use. |
 | `Doom3Hud`, `Doom3Console` | UI components drawn with `DrawRectangle` and `UIFont`. |
 | `GameViewPlay`, `GameViewMenu`, `GameInitialize` | Views, input, demo-script harness, data source setup and command line. |
 
@@ -109,6 +109,12 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Lights are all in the `Lights` scene (global lights). Each knows the areas it reaches (flood from its area through portals within its Doom 3 radius); a light is switched off while none of them is visible, so fewer lights reach the shaders.
 - A `func_door` closes the portals inside its bounding box (grown by 16) while it is shut (`TD3Mover.Portals`), like idDoor's area portal.
 - Outside the map (noclip), with `PortalCulling` off, or in the editor everything is drawn.
+
+## Entity activation and triggers
+
+- Like `idEntity::ActivateTargets`, firing an entity activates every entity named by its `target`, `target1`, `target2`... keys. `TD3Game.ActivateTargets(E, Delay)` only queues the firing (game time + delay); `UpdateTriggers` runs the due ones each frame, at most 1000 per frame, so loops of relays can't recurse or hang.
+- `TD3Game.Activate` is `Event_Activate` per class: `light` toggles on / off (`TDoom3Map.SetLightOn`, the light's `StartOn`; portal visibility still turns lights in hidden areas off), `trigger_relay` fires its targets after `delay`, `trigger_count` every `count` activations, `trigger_once` / `multiple` fire (or become touchable after `triggerFirst`), `trigger_hurt` switches on / off, `speaker` starts / stops, `func_door` unlocks or opens / closes, `monster_*` appear (`hide`) or wake up (`trigger`), entities with a `hide` key show / hide (`TD3BrushEntity.SetHidden`, `Scene.Exists`, so they don't collide either), `func_remove` hides its targets for good. Other classes are logged once (`Not supported yet: activating <class>`), as are `call` keys (script functions).
+- Trigger volumes: brush triggers have no render geometry (their material is `trigger`, not drawn), only a `.cm` model named like the entity, in entity-local coordinates: `SpawnTrigger` places its vertices at the origin (rotated) and takes their box. The player's box (feet to eye + 6, radius 16) touching it fires `trigger_once` (then disabled) and `trigger_multiple` (again after `wait`); `trigger_hurt` damages every `delay` seconds by the `damage` of its `def_damage` entityDef.
 
 ## Rendering notes
 

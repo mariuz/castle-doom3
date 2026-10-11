@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes,
+  Doom3Materials, X3DNodes, Doom3World, CastleScene,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -113,7 +113,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(24, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(23, MapFile.Entities.Count, 'entity count');
+    CheckEquals(26, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -416,7 +416,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(6, Cm.ModelCount, 'cm models (world + 5 brush entities)');
+    CheckEquals(7, Cm.ModelCount, 'cm models (world + 5 brush entities + 1 trigger)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -1147,6 +1147,66 @@ begin
   end;
 end;
 
+procedure TestTriggers;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  LightTrig, I: Integer;
+  Relay: TD3MapEntity;
+begin
+  { the map in a world, like in a viewport (sound sources need one) }
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for triggers');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    CheckEquals(1, Game.Triggers.Count, 'one trigger volume (trigger_once_1)');
+    if Game.Triggers.Count <> 1 then
+      Exit;
+    { the volume comes from the .cm model at the entity origin (330 0 56):
+      x 306..354, Doom 3 z 0..112 = CGE y }
+    CheckNear(306, Game.Triggers[0].Box.Data[0].X, 'trigger volume min x');
+    CheckNear(354, Game.Triggers[0].Box.Data[1].X, 'trigger volume max x');
+    CheckNear(112, Game.Triggers[0].Box.Data[1].Y, 'trigger volume top');
+
+    LightTrig := Map.FindLight('light_trig');
+    Check(LightTrig >= 0, 'light_trig exists');
+    if LightTrig < 0 then
+      Exit;
+    Check(not Map.Light(LightTrig).StartOn, 'light_trig starts off');
+
+    { the player outside: nothing fires }
+    Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Check(not Game.Triggers[0].Disabled, 'trigger waits outside');
+    { the player inside: trigger_once fires trigger_relay_1 (delay 0.5) }
+    Game.Update(0.1, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Check(Game.Triggers[0].Disabled, 'trigger_once fired once');
+    Check(not Map.Light(LightTrig).StartOn, 'light waits for the relay delay');
+    for I := 1 to 7 do
+      Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Check(Map.Light(LightTrig).StartOn, 'relay switched light_trig on after 0.5 s');
+
+    { activating a light again toggles it off }
+    Relay := Game.FindEntity('trigger_relay_1');
+    Check(Relay <> nil, 'find trigger_relay_1 by name');
+    if Relay <> nil then
+    begin
+      Game.Activate(Relay);
+      for I := 1 to 7 do
+        Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+      Check(not Map.Light(LightTrig).StartOn, 'activating the relay again switches the light off');
+    end;
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 begin
   InitializeLog;
   D3Fs.RegisterProtocol;
@@ -1173,6 +1233,7 @@ begin
   TestMaterialStages;
   TestGuis;
   TestShadowCasters;
+  TestTriggers;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

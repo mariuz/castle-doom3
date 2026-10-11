@@ -40,6 +40,9 @@ type
     LocalMin, LocalMax: TVector3;
     { Areas the entity's bounding box touches (empty: always drawn). }
     Areas: TD3IntArray;
+    { "hide": not shown (nor colliding) until activated }
+    Hidden: Boolean;
+    procedure SetHidden(const Value: Boolean);
     destructor Destroy; override;
   end;
 
@@ -196,6 +199,15 @@ type
     property SpawnOrigin: TVector3 read FSpawnOrigin;
     property SpawnAngle: Single read FSpawnAngle;
     function Light(const I: Integer): TD3LightInfo;
+    { Index of the light entity with this name, -1 if none. }
+    function FindLight(const AName: String): Integer;
+    { Switch a light on or off (like idLight::On / Off); portal visibility
+      still turns it off in hidden areas. }
+    procedure SetLightOn(const I: Integer; const Value: Boolean);
+    { The brush entity or static model with this entity name, nil if none. }
+    function FindBrush(const AName: String): TD3BrushEntity;
+    { The md5 model entity with this entity name, nil if none. }
+    function FindModelEntity(const AName: String): TD3ModelEntity;
     { Seconds since the map was loaded (the "time" of material
       expressions). }
     property Time: Single read FTime;
@@ -281,6 +293,13 @@ begin
 end;
 
 { TD3BrushEntity }
+
+procedure TD3BrushEntity.SetHidden(const Value: Boolean);
+begin
+  Hidden := Value;
+  { Exists (not Visible, which portal visibility sets) also stops collisions }
+  Scene.Exists := not Value;
+end;
 
 destructor TD3BrushEntity.Destroy;
 begin
@@ -1215,6 +1234,7 @@ begin
     Rot := E.Rotation;
     SetD3Rotation(B.Scene, Rot);
     Add(B.Scene);
+    B.SetHidden(E.IntValue('hide', 0) <> 0);
     FBrushes.Add(B);
   end;
 end;
@@ -1284,6 +1304,7 @@ begin
     Rot := E.Rotation;
     SetD3Rotation(B.Scene, Rot);
     Add(B.Scene);
+    B.SetHidden(E.IntValue('hide', 0) <> 0);
     FBrushes.Add(B);
     Inc(FStaticModelCount);
   end;
@@ -1505,6 +1526,38 @@ end;
 function TDoom3Map.Light(const I: Integer): TD3LightInfo;
 begin
   Result := FLights[I];
+end;
+
+function TDoom3Map.FindLight(const AName: String): Integer;
+begin
+  for Result := 0 to High(FLights) do
+    if SameText(FLights[Result].Entity.Name, AName) then
+      Exit;
+  Result := -1;
+end;
+
+procedure TDoom3Map.SetLightOn(const I: Integer; const Value: Boolean);
+begin
+  FLights[I].StartOn := Value;
+  { applied by UpdateVisibility, also when the light's areas are visible }
+  FLights[I].Node.IsOn := Value and
+    ((FPortals = nil) or (not FPortalCulling) or AnyAreaVisible(FPortals, FLights[I].Areas));
+end;
+
+function TDoom3Map.FindBrush(const AName: String): TD3BrushEntity;
+begin
+  for Result in FBrushes do
+    if SameText(Result.Entity.Name, AName) then
+      Exit;
+  Result := nil;
+end;
+
+function TDoom3Map.FindModelEntity(const AName: String): TD3ModelEntity;
+begin
+  for Result in FModels do
+    if SameText(Result.Entity.Name, AName) then
+      Exit;
+  Result := nil;
 end;
 
 function TDoom3Map.AreaAt(const P: TVector3): Integer;

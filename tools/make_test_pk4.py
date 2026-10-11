@@ -543,6 +543,7 @@ WALL = 'textures/test/wall'
 CEIL = 'textures/test/ceiling'
 METAL = 'textures/test/metal'
 GLOW = 'textures/test/lightpanel'
+TRIGONCE = 'textures/common/trigonce'
 DOOR = 'textures/test/door'
 GLASS = 'textures/test/glass'
 FLARE = 'textures/test/flare'
@@ -800,6 +801,8 @@ def cm_text():
     out.append(cm_model('worldMap', world, brushes))
     for m in (door, crate, crate2, spinner, panel):
         out.append(cm_model(m.name, list(quads_of(m)), []))
+    # the volume of trigger_once_1 (entity-local, like dmap writes it)
+    out.append(cm_model('trigger_once_1', box_quads((-24, -80, -56), (24, 80, 56), TRIGONCE), []))
     return '\n'.join(out) + '\n'
 
 
@@ -870,6 +873,14 @@ def map_text():
         # sounds
         {'classname': 'speaker', 'name': 'speaker_1', 'origin': '590 0 200',
          's_shader': 'test_hum', 's_looping': '1'},
+        # entity activation: walking into room B fires trigger_once_1, which
+        # fires trigger_relay_1, which switches light_trig on 0.5 s later
+        {'classname': 'trigger_once', 'name': 'trigger_once_1', 'model': 'trigger_once_1',
+         'origin': '330 0 56', 'target': 'trigger_relay_1'},
+        {'classname': 'trigger_relay', 'name': 'trigger_relay_1', 'origin': '330 0 150',
+         'target': 'light_trig', 'delay': '0.5'},
+        {'classname': 'light', 'name': 'light_trig', 'origin': '840 300 180',
+         'light_radius': '180 180 160', '_color': '1 0.2 0.2', 'start_off': '1'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1019,6 +1030,13 @@ models/test/blob
 	diffusemap	models/test/blob_d.tga
 	bumpmap		heightmap(models/test/blob_bmp.tga, 4)
 	specularmap	makeIntensity(models/test/blob_d.tga)
+}
+
+textures/common/trigonce
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	trigger
 }
 
 textures/common/clip

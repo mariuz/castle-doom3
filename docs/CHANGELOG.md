@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Triggers and entity activation** (roadmap 5a): `trigger_once` / `trigger_multiple` / `trigger_hurt` volumes (from the `.cm`) touched by the player, `trigger_relay` and `trigger_count`, `target` chains with `delay` / `wait` / `triggerFirst` / `noTouch`: lights switch on / off, speakers start / stop, hidden entities and monsters appear, dormant monsters wake, doors unlock or open, `func_remove` removes. Unsupported activations are logged once.
+- Test level: `trigger_once_1` in room B fires `trigger_relay_1`, which switches the red `light_trig` on 0.5 s later; 311 checks (a `TD3Game` stepped on the test map), CI walks into it.
 - **Doom 3 demo data**: a `demo/` directory (`demo00.pk4` of the free 2004 demo) is loaded like `base/`, next to the exe or under `-basepath`. Its three maps (`game/demo_mars_city1`, `game/demo_mc_underground`, `game/demo_mars_city2`) load and spawn everything, without exceptions; they are dark and slow so far.
 - Lights and entities belong to all areas their bounds touch, through the `.proc` BSP (`TD3ProcFile.BoxAreas`), not only the area of their origin: retail lights sit inside their fixtures.
 - Monsters honor `hide` (hidden until triggered), `trigger` (dormant until triggered or hurt) and the skill flags `not_easy` / `not_medium` / `not_hard` (medium, Doom 3's default): no more invisible monsters attacking at the start of `demo_mc_underground`.
