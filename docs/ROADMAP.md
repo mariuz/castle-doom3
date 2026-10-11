@@ -44,7 +44,7 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 |---|---|---|---|
 | A | Shadow volumes from several lights | Draft PR [#740](https://github.com/castle-engine/castle-engine/pull/740) | Roadmap item 2 |
 | B | Shadow maps for point lights | Not started | Item 2 (alternative to A) |
-| C | Textures in light source effects | Not started | Item 10 |
+| C | Textures in light source effects | Draft PR [#741](https://github.com/castle-engine/castle-engine/pull/741) | Item 10 |
 | D | Depth function / polygon offset per appearance | Not started | Items 3, decals |
 | E | Screen and environment textures in materials | Not started | Item 3 (glass, heat haze) |
 | F | Silhouette edges kept across animation | Not started | Removes md5 shadow hulls |
@@ -52,7 +52,7 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 | H | Light attenuation to zero at the radius | Not started | Exact light falloff |
 | I | Light passes added in linear color space | Not started (found while doing A) | A with PBR materials |
 
-A, B, D and F were checked against the CGE source; the others come from building this port.
+A, B, C, D and F were checked against the CGE source; the others come from building this port.
 
 **A. Shadow volumes from several lights.** `TCastleViewport` takes one main light for shadow volumes (`MainLightForShadowVolumes`, the light with `shadowVolumesMain`), and `RenderFromView3D` runs the stencil pass (`RenderShadowVolume`) once for it. Doom 3 shadows every light: one stencil clear + shadow volume pass + additive lit pass per shadow casting light that reaches the view.
 
@@ -72,6 +72,8 @@ It was checked with this port's test level (up to 8 lights, Phong materials with
 **B. Shadow maps for point lights.** `CastleInternalShadowMaps` computes projections only for spot and directional lights (`AutoCalculateProjectionForDirectionalLight`, spot cut-off angles): a point light needs a cube shadow map (6 faces, or a dual paraboloid map) and the shader lookup for it. Also, shadow map receivers are the shapes of the same scene as the light (`ProcessShadowMapsReceivers` per scene); the map's areas and lights are separate scenes here, so receivers in other scenes (or global lights casting into every scene) are needed too. Either A or B gives several shadow casting lights.
 
 **C. Textures in light source effects.** A sampler declared in an `Effect` on a light (`PLUG_light_scale`) is never bound, because CGE loads textures only for shapes' appearances. Doom 3 lights are a projection image times a falloff image, both textures. Needed: load and bind `ImageTexture` fields of light effects (as for material effects). Workaround: `Doom3LightEffects` uses analytic shapes (round, square, the default falloff), not the light's images.
+
+Cause (found while fixing it): shapes prepare the textures of the lights of their own scene (`TShape.EnumerateTextures` over `State.Lights`), but our lights are global lights in a separate scene (`TDoom3Map.LightScene`, `CastGlobalLights`), so nothing prepared them and `TTextureResources.Bind` failed. Proposed upstream: [castle-engine/castle-engine#741](https://github.com/castle-engine/castle-engine/pull/741) (draft): `TCastleScene.PrepareGlobalLightsTextures` prepares the textures of its global lights' effects (and `EnvironmentLight` textures) every frame in `LocalRender`, before frustum culling (a scene with only lights has an empty bounding box), and in `PrepareResources`; example `examples/shaders/shader_effects_on_light` (a light projecting an image), and a test that fails on master. Once it is in a CGE release, `CreateLightEffect` can take the light shader's projection image and the `lightFalloffImage` as `SFNode` fields (`sampler2D`), replacing the analytic shapes; `PLUG_light_scale` is a float, so colored projection images still need a plug changing the light color.
 
 **D. Depth offset for coplanar layers.** CGE renders with `DepthFunc = less` and uses `glPolygonOffset` only for wireframe. Doom 3 draws every material stage on the same triangles (`depthFunc equal` / `lequal`) and decals with `polygonOffset`. Needed: a per-appearance depth function (`lequal` / `equal`) and polygon offset (factor, units), for example an Appearance field or a `DepthMode` node like InstantReality's (`depthFunc`, `polygonOffset`). Workaround: overlay stages are copies moved 0.25 units along the normals (`OverlayOffset`), which can show at grazing angles.
 
