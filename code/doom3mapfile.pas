@@ -62,6 +62,11 @@ function ParseVector3(const S: String; const Default: TVector3): TVector3;
 function YawToCgeDir(const YawDeg: Single): TVector3;
 { Doom 3 rotation matrix (idMat3, rows = axes) of a yaw in degrees. }
 function YawMatrix(const YawDeg: Single): TMatrix3;
+{ idAngles::ToMat3: Angles are pitch, yaw, roll in degrees; the rows of the
+  result are the rotated axes (forward, left, up). }
+function AnglesMatrix(const Angles: TVector3): TMatrix3;
+{ idMat3::ToAngles }
+function MatrixAngles(const M: TMatrix3): TVector3;
 
 implementation
 
@@ -114,6 +119,42 @@ begin
   Result := TMatrix3.Identity;
   Result.Data[0, 0] := C; Result.Data[0, 1] := S;
   Result.Data[1, 0] := -S; Result.Data[1, 1] := C;
+end;
+
+function AnglesMatrix(const Angles: TVector3): TMatrix3;
+var
+  SP, CP, SY, CY, SR, CR: Single;
+begin
+  SinCos(DegToRad(Angles.X), SP, CP);
+  SinCos(DegToRad(Angles.Y), SY, CY);
+  SinCos(DegToRad(Angles.Z), SR, CR);
+  Result.Data[0, 0] := CP * CY;
+  Result.Data[0, 1] := CP * SY;
+  Result.Data[0, 2] := -SP;
+  Result.Data[1, 0] := SR * SP * CY + CR * -SY;
+  Result.Data[1, 1] := SR * SP * SY + CR * CY;
+  Result.Data[1, 2] := SR * CP;
+  Result.Data[2, 0] := CR * SP * CY + -SR * -SY;
+  Result.Data[2, 1] := CR * SP * SY + -SR * CY;
+  Result.Data[2, 2] := CR * CP;
+end;
+
+function MatrixAngles(const M: TMatrix3): TVector3;
+var
+  SP, Theta: Single;
+begin
+  SP := EnsureRange(M.Data[0, 2], -1, 1);
+  Theta := -ArcSin(SP);
+  Result.X := RadToDeg(Theta);
+  if Cos(Theta) > 8192 * 1.192092896e-07 then
+  begin
+    Result.Y := RadToDeg(ArcTan2(M.Data[0, 1], M.Data[0, 0]));
+    Result.Z := RadToDeg(ArcTan2(M.Data[1, 2], M.Data[2, 2]));
+  end else
+  begin
+    Result.Y := RadToDeg(-ArcTan2(M.Data[1, 0], M.Data[1, 1]));
+    Result.Z := 0;
+  end;
 end;
 
 { TD3MapEntity }

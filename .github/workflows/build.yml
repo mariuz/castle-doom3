@@ -134,6 +134,8 @@ jobs:
           run_test triggers testmap "W:1,O:notarget,G:200 0 0,A:0,W:2,G:330 0 0,W:1.5,G:700 200 96,A:30,W:0.3,S,Q"
           grep -q "Trigger trigger_once_1 fired" test_output/triggers.log || { echo "::error::walking into trigger_once_1 should fire it"; exit 1; }
           grep -q "Light light_trig on" test_output/triggers.log || { echo "::error::trigger_relay_1 should switch light_trig on"; exit 1; }
+          grep -q "Script: testmap main" test_output/triggers.log || { echo "::error::the map script's main should run"; exit 1; }
+          grep -q "test_trigger_called by trigger_once_1" test_output/triggers.log || { echo "::error::trigger_once_1's call key should run its script function"; exit 1; }
           grep -q "Spawned 3 movers.*1 bound entities" test_output/triggers.log || { echo "::error::door_1, door_2 and spinner_1 should be movers, door_light_1 bound"; exit 1; }
           ls -l test_output
           test "$(ls test_output/*.png | wc -l)" -ge 21

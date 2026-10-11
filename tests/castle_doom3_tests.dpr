@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes, Doom3World, CastleScene,
+  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -86,7 +86,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(48, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(50, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -219,7 +219,7 @@ begin
   Proc := TD3ProcFile.Create;
   try
     Check(Proc.LoadFromVfs('maps/testmap.proc'), 'load testmap.proc');
-    CheckEquals(9, Proc.ModelCount, 'proc model count');
+    CheckEquals(11, Proc.ModelCount, 'proc model count');
     CheckEquals(2, Proc.NumAreas, 'proc areas');
     CheckEquals(1, Length(Proc.Portals), 'proc portals');
     CheckEquals(1, Length(Proc.Nodes), 'proc nodes');
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(28, MapFile.Entities.Count, 'entity count');
+    CheckEquals(30, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -416,7 +416,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(9, Cm.ModelCount, 'cm models (world + 7 brush entities + 1 trigger)');
+    CheckEquals(11, Cm.ModelCount, 'cm models (world + 9 brush entities + 1 trigger)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -1207,6 +1207,287 @@ begin
   end;
 end;
 
+type
+  { Entities 1 (busy until released) and 2 (with a script object) for
+    TestScriptVM; events are logged in Calls. }
+  TTestScriptHost = class(TD3ScriptHost)
+    Busy: Boolean;
+    Obj: TD3ScriptObject;
+    Calls: TStringList;
+    Printed: String;
+    constructor Create;
+    destructor Destroy; override;
+    function FindEntity(const AName: String): Integer; override;
+    function EntityObject(const E: Integer): TD3ScriptObject; override;
+    function EntityBusy(const E: Integer): Boolean; override;
+    function CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
+      const Event: TD3ScriptEvent; const Args: TD3ValueArray;
+      var EventResult: TD3Value): Boolean; override;
+    procedure Print(const S: String); override;
+  end;
+
+constructor TTestScriptHost.Create;
+begin
+  inherited;
+  Calls := TStringList.Create;
+end;
+
+destructor TTestScriptHost.Destroy;
+begin
+  Calls.Free;
+  Obj.Free;
+  inherited;
+end;
+
+function TTestScriptHost.FindEntity(const AName: String): Integer;
+begin
+  if AName = 'mover' then
+    Result := 1
+  else
+  if AName = 'thing' then
+    Result := 2
+  else
+    Result := 0;
+end;
+
+function TTestScriptHost.EntityObject(const E: Integer): TD3ScriptObject;
+begin
+  if E = 2 then
+    Result := Obj
+  else
+    Result := nil;
+end;
+
+function TTestScriptHost.EntityBusy(const E: Integer): Boolean;
+begin
+  Result := (E = 1) and Busy;
+end;
+
+function TTestScriptHost.CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
+  const Event: TD3ScriptEvent; const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+var
+  S: String;
+  I: Integer;
+begin
+  S := Format('%d.%s(', [Target, Event.Name]);
+  for I := 0 to High(Args) do
+  begin
+    if I > 0 then
+      S := S + ',';
+    S := S + D3ValueToString(Args[I]);
+  end;
+  Calls.Add(S + ')');
+  if Event.Name = 'getName' then
+    EventResult := D3StringValue('ent' + IntToStr(Target));
+  Result := True;
+end;
+
+procedure TTestScriptHost.Print(const S: String);
+begin
+  Printed := Printed + S;
+end;
+
+const
+  TestScriptSource =
+    '#define TWICE( x ) ( (x) * 2 )' + LineEnding +
+    '#define ANSWER 42' + LineEnding +
+    '#ifndef ANSWER' + LineEnding +
+    'this is not compiled' + LineEnding +
+    '#endif' + LineEnding +
+    'scriptEvent void wait( float time );' + LineEnding +
+    'scriptEvent void waitFor( entity mover );' + LineEnding +
+    'scriptEvent void waitFrame();' + LineEnding +
+    'scriptEvent void waitForThread( float threadNumber );' + LineEnding +
+    'scriptEvent void killthread( string threadName );' + LineEnding +
+    'scriptEvent void print( string text );' + LineEnding +
+    'scriptEvent void trigger( entity ent );' + LineEnding +
+    'scriptEvent string getName();' + LineEnding +
+    'scriptEvent void move( float dir, float dist );' + LineEnding +
+    'float prec1, prec2, prec3, prec4, prec5, macro1, int1;' + LineEnding +
+    'vector v = ''1 2 3'';' + LineEnding +
+    'float dot, comp;' + LineEnding +
+    'string str;' + LineEnding +
+    'float loops, fact, steps, waited, after, killed, threaded;' + LineEnding +
+    'float objresult, field1;' + LineEnding +
+    'object base { float hits; float value(); void hit(); };' + LineEnding +
+    'object derived : base { float value(); };' + LineEnding +
+    'float base::value() { return 1; }' + LineEnding +
+    'float derived::value() { return 2 + hits; }' + LineEnding +
+    'void base::hit() { hits++; }' + LineEnding +
+    'namespace ns {' + LineEnding +
+    '  float factorial( float n ) { if ( n <= 1 ) { return 1; } return n * factorial( n - 1 ); }' + LineEnding +
+    '  void counter() { while ( 1 ) { steps++; sys.waitFrame(); } }' + LineEnding +
+    '}' + LineEnding +
+    'void waiter() { sys.wait( 1 ); waited = 1; }' + LineEnding +
+    'void main() {' + LineEnding +
+    '  float i, t;' + LineEnding +
+    '  prec1 = 2 + 3 * 4;' + LineEnding +           // 14
+    '  prec2 = 1 | 2 + 4;' + LineEnding +           // (1 | 2) + 4 = 7: | is a priority 3 operator
+    '  prec3 = 2 * 3 == 6;' + LineEnding +          // 1
+    '  prec4 = 10 - 4 - 3;' + LineEnding +          // 3
+    '  prec5 = -2 * -3;' + LineEnding +             // 6
+    '  macro1 = TWICE( ANSWER + 1 );' + LineEnding +  // 86
+    '  int1 = int( 7.9 ) + 8 % 3;' + LineEnding +   // 9
+    '  dot = v * ''1 1 1'';' + LineEnding +         // 6
+    '  v_y = 5;' + LineEnding +
+    '  comp = v_y + v_z;' + LineEnding +            // 8
+    '  str = "a" + 1.5 + "b" + 2;' + LineEnding +   // a1.5b2
+    '  for ( i = 0; i < 10; i++ ) { if ( i == 2 ) { continue; } if ( i == 5 ) { break; } loops += i; }' + LineEnding + // 0+1+3+4 = 8
+    '  do { loops = loops + 100; } while ( loops < 300 );' + LineEnding + // 308
+    '  fact = ns::factorial( 5 );' + LineEnding +    // 120
+    '  thread ns::counter();' + LineEnding +
+    '  t = thread waiter();' + LineEnding +
+    '  sys.waitFor( $mover );' + LineEnding +
+    '  sys.waitForThread( t );' + LineEnding +
+    '  after = waited;' + LineEnding +
+    '  sys.killthread( "ns::counter" );' + LineEnding +
+    '  killed = steps;' + LineEnding +
+    '  $thing.hit();' + LineEnding +
+    '  $thing.hit();' + LineEnding +
+    '  objresult = $thing.value();' + LineEnding +  // derived: 2 + 2 hits
+    '  sys.trigger( $mover );' + LineEnding +
+    '  $mover.move( -1, 64 );' + LineEnding +
+    '  sys.print( $mover.getName() + "\n" );' + LineEnding +
+    '  $null_entity.move( 1, 2 );' + LineEnding +
+    '}' + LineEnding;
+
+procedure TestScriptVM;
+var
+  VM: TD3ScriptVM;
+  Host: TTestScriptHost;
+  T: TD3ScriptThread;
+  I: Integer;
+  Steps: Single;
+begin
+  VM := TD3ScriptVM.Create;
+  Host := TTestScriptHost.Create;
+  try
+    VM.Host := Host;
+    try
+      VM.CompileText(TestScriptSource, 'test.script');
+    except
+      on E: ED3ScriptError do
+      begin
+        Check(False, 'test script compiles: ' + E.Message);
+        Exit;
+      end;
+    end;
+    Check(VM.FindFunction('ns::factorial') <> nil, 'namespaced function');
+    Check(VM.FindType('derived') <> nil, 'object type');
+    if VM.FindType('derived') = nil then
+      Exit;
+    Host.Obj := TD3ScriptObject.Create(VM.FindType('derived'));
+    Host.Busy := True;
+    T := VM.StartThread(VM.FindFunction('main'));
+    Check(T <> nil, 'main waits for the mover');
+    CheckNear(14, VM.GlobalValue('prec1').F, '2 + 3 * 4');
+    CheckNear(7, VM.GlobalValue('prec2').F, '1 | 2 + 4 (| has * priority)');
+    CheckNear(1, VM.GlobalValue('prec3').F, '2 * 3 == 6');
+    CheckNear(3, VM.GlobalValue('prec4').F, '10 - 4 - 3 (left associative)');
+    CheckNear(6, VM.GlobalValue('prec5').F, 'unary minus');
+    CheckNear(86, VM.GlobalValue('macro1').F, 'macro with a parameter');
+    CheckNear(9, VM.GlobalValue('int1').F, 'int() and %');
+    CheckNear(6, VM.GlobalValue('dot').F, 'vector * vector is the dot product');
+    CheckNear(8, VM.GlobalValue('comp').F, 'vector components v_y / v_z');
+    CheckEquals('a1.5b2', VM.GlobalValue('str').S, 'string concatenation');
+    CheckNear(308, VM.GlobalValue('loops').F, 'for / continue / break / do-while');
+    CheckNear(120, VM.GlobalValue('fact').F, 'recursion');
+    CheckNear(1, VM.GlobalValue('steps').F, 'a thread runs at once until it waits');
+    { frames: the mover keeps main waiting }
+    for I := 1 to 3 do
+      VM.Update(0.1 * I);
+    Check(VM.ThreadByNumber(T.Number) <> nil, 'main still waits for the busy mover');
+    Host.Busy := False;
+    VM.Update(0.4);
+    CheckNear(0, VM.GlobalValue('after').F, 'main now waits for the waiter thread');
+    VM.Update(1.1);
+    { main wakes up the frame after the waiter ended }
+    VM.Update(1.15);
+    CheckNear(1, VM.GlobalValue('after').F, 'sys.wait( 1 ) and waitForThread');
+    Steps := VM.GlobalValue('killed').F;
+    Check(Steps >= 5, 'the counter thread ran every frame');
+    VM.Update(1.25);
+    CheckNear(Steps, VM.GlobalValue('steps').F, 'killthread stopped the counter');
+    CheckNear(2, Host.Obj.Fields[0].F, 'object field updated by a method');
+    CheckNear(4, VM.GlobalValue('objresult').F, 'virtual method of the derived type');
+    Check(Host.Calls.IndexOf('0.trigger(1)') >= 0, 'sys.trigger goes to the host');
+    Check(Host.Calls.IndexOf('1.move(-1,64)') >= 0, 'entity event with arguments');
+    CheckEquals('ent1' + #10, Host.Printed, 'event result used in an expression');
+    CheckEquals(0, VM.ThreadCount, 'all threads ended');
+  finally
+    VM.Free;
+    Host.Free;
+  end;
+end;
+
+{ The test map's scripts (maps/testmap.script) run by a TD3Game. }
+procedure TestMapScripts;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Lift, Bar: TD3BrushEntity;
+  LightTrig, I: Integer;
+  Away: TVector3;
+  Box: TBox3D;
+  Mid: Single;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for scripts');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Check(Game.Script <> nil, 'the test map''s scripts compile');
+    Lift := Map.FindBrush('lift_1');
+    Bar := Map.FindBrush('bar_1');
+    LightTrig := Map.FindLight('light_trig');
+    Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
+    if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
+      Exit;
+    CheckEquals(3, Game.Script.FunctionCount, 'script functions');
+    CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
+    Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
+      for 0.5 s, decelerating for 0.5 s); the bar turns in 1 s }
+    for I := 1 to 11 do
+      Game.Update(0.1, Away);
+    Mid := Lift.Scene.Translation.Y;
+    Check((Mid > 20) and (Mid < 52), Format('lift half way after 1 s (%.1f)', [Mid]));
+    CheckNear(1, Game.Script.GlobalValue('bar_turned').F, 'sys.waitFor( $bar_1 ) returned');
+    { the bar reached along local +x (east): turned by yaw +90 it reaches
+      north, Doom 3 y -300..-252 = CGE z 252..300 }
+    Box := Bar.Scene.BoundingBox;
+    CheckNear(596, Box.Data[0].X, 'turned bar min x', 0.5);
+    CheckNear(604, Box.Data[1].X, 'turned bar max x', 0.5);
+    CheckNear(252, Box.Data[0].Z, 'turned bar min z (Doom 3 -y)', 0.5);
+    CheckNear(300, Box.Data[1].Z, 'turned bar max z', 0.5);
+    for I := 1 to 11 do
+      Game.Update(0.1, Away);
+    CheckNear(4 + 64, Lift.Scene.Translation.Y, 'lift up after 2 s');
+    Check(Game.Script.ThreadCount = 1, 'only the lift loop runs');
+    { trigger_once_1's "call" runs test_trigger_called on the next frame }
+    Game.Update(0.1, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Game.Update(0.1, Away);
+    CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the trigger''s call key ran');
+    for I := 1 to 12 do
+      Game.Update(0.1, Away);
+    Check(Map.Light(LightTrig).StartOn, 'the relay switched light_trig on');
+    CheckNear(0, Map.Light(LightTrig).Parms.Parms[0], 'setColor: red 0');
+    CheckNear(1, Map.Light(LightTrig).Parms.Parms[1], 'setColor: green 1');
+    for I := 1 to 17 do
+      Game.Update(0.1, Away);
+    CheckNear(1, Game.Script.GlobalValue('lift_trips').F, 'the lift went up and down once');
+    CheckNear(4, Lift.Scene.Translation.Y, 'lift back down');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestMovers;
 var
   World: TCastleRootTransform;
@@ -1331,6 +1612,8 @@ begin
   TestShadowCasters;
   TestTriggers;
   TestMovers;
+  TestScriptVM;
+  TestMapScripts;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

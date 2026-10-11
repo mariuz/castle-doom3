@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Scripts** (roadmap 5c): a compiler and virtual machine for Doom 3's script language (`Doom3Script`). The demo's whole program (`script/doom_main.script`, 80 files, 1713 functions) compiles in about 0.2 s; the map's `main`, worldspawn's and triggers' `call` keys run as script threads that wait for time, frames, movers and other threads. Events: triggering, lights on / off and colors, doors (open, close, lock), hide / show / remove, entity keys and targets, `bind` / `unbind`, and idMover's moves and rotations with acceleration, so Mars City Underground's machines (cranes, arms, howitzers, pistons) move. Unsupported events are logged once.
+- Console: `scripts` (threads, moving entities), `g_stopTime` (freeze them).
+- Test level: `maps/testmap.script` moves `lift_1` up and down, turns `bar_1`, and `trigger_once_1` calls a script function; 376 checks.
 - **Movers** (roadmap 5b): entities get their entityDef's keys as defaults; doors travel the size of their rotated bounds (most retail doors are rotated) with Doom 3's defaults (speed 100, `triggersize` 60); door `team`s open, close and lock together; `target_lock`; `func_rotating` honors `start_on` and is toggled by activation; `bind` makes brush entities and models follow their parent.
 - Test level: `door_2` in `door_1`'s team, `door_light_1` bound to `door_1`; 330 checks.
 - **Triggers and entity activation** (roadmap 5a): `trigger_once` / `trigger_multiple` / `trigger_hurt` volumes (from the `.cm`) touched by the player, `trigger_relay` and `trigger_count`, `target` chains with `delay` / `wait` / `triggerFirst` / `noTouch`: lights switch on / off, speakers start / stop, hidden entities and monsters appear, dormant monsters wake, doors unlock or open, `func_remove` removes. Unsupported activations are logged once.

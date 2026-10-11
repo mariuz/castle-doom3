@@ -206,7 +206,7 @@ begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>,');
-    Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, quit');
+    Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1], quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -329,6 +329,21 @@ begin
       end;
     Console.Print(S);
     WritelnLog('Ent', S);
+  end else
+  if Cmd = 'scripts' then
+  begin
+    S := FGame.ScriptStatus;
+    Console.Print(S);
+    WritelnLog('Scripts', S);
+  end else
+  if Cmd = 'g_stoptime' then
+  begin
+    { freeze script threads and the entities they move }
+    if Args <> '' then
+      FGame.ScriptsPaused := StrToIntDef(Args, 1) <> 0
+    else
+      FGame.ScriptsPaused := not FGame.ScriptsPaused;
+    Console.Print('g_stopTime ' + BoolToStr(FGame.ScriptsPaused, '1', '0'));
   end else
   if Cmd = 'lightsat' then
   begin

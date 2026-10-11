@@ -204,6 +204,9 @@ type
     { Switch a light on or off (like idLight::On / Off); portal visibility
       still turns it off in hidden areas. }
     procedure SetLightOn(const I: Integer; const Value: Boolean);
+    { Set a light's shader parameter (0..2 are its color), like
+      idLight::SetShaderParm / SetColor. }
+    procedure SetLightParm(const I, Parm: Integer; const Value: Single);
     { The brush entity or static model with this entity name, nil if none. }
     function FindBrush(const AName: String): TD3BrushEntity;
     { The md5 model entity with this entity name, nil if none. }
@@ -1564,6 +1567,14 @@ begin
   { applied by UpdateVisibility, also when the light's areas are visible }
   FLights[I].Node.IsOn := Value and
     ((FPortals = nil) or (not FPortalCulling) or AnyAreaVisible(FPortals, FLights[I].Areas));
+end;
+
+procedure TDoom3Map.SetLightParm(const I, Parm: Integer; const Value: Single);
+begin
+  if (Parm < 0) or (Parm > High(FLights[I].Parms.Parms)) then
+    Exit;
+  FLights[I].Parms.Parms[Parm] := Value;
+  ApplyLightColor(I, LightShaderColor(I));
 end;
 
 function TDoom3Map.FindBrush(const AName: String): TD3BrushEntity;

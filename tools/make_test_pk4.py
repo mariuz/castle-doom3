@@ -14,6 +14,8 @@ Contents (all made here, MIT licensed like the rest of the project):
   models/md5/test/blob.*   a skinned creature: md5mesh + idle / walk md5anims
   def/test.def             model decl and entityDefs
   sound/test.sndshd        sound shaders, sound/test/*.wav
+  script/doom_main.script  the scriptEvents and defines the test script uses
+  maps/testmap.script      the map script: a lift, a turning bar, a trigger call
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -625,6 +627,12 @@ box(door2, METAL, (-4, -24, -8), (4, 24, 8))
 # a small light panel bound to door_1 (it rides up with the door)
 doorlight = Model('door_light_1')
 box(doorlight, GLOW, (-1, -8, -8), (1, 8, 8))
+# a lift in room B moved by the map script (func_mover)
+lift = Model('lift_1')
+box(lift, {'*': METAL, '+z': FLOOR}, (-32, -32, -4), (32, 32, 4))
+# a bar the map script turns by 90 degrees (it reaches along local +x)
+bar = Model('bar_1')
+box(bar, {'*': METAL, '+x': DOOR}, (0, -4, -4), (48, 4, 4))
 spinner = Model('spinner_1')
 box(spinner, {'*': METAL}, (-64, -6, -6), (64, 6, 6))
 box(spinner, {'*': METAL}, (-6, -64, -6), (6, 64, 6))
@@ -638,7 +646,7 @@ def fmt(v):
 
 def proc_text():
     out = ['mapProcFile003', '']
-    for m in (area0, area1, door, crate, crate2, spinner, panel, door2, doorlight):
+    for m in (area0, area1, door, crate, crate2, spinner, panel, door2, doorlight, lift, bar):
         surfs = list(m.surfaces.values())
         out.append('model { /* name = */ "%s" /* numSurfaces = */ %d' % (m.name, len(surfs)))
         out.append('')
@@ -806,7 +814,7 @@ def cm_text():
     brushes += [(mins, maxs, 'solid,opaque') for mins, maxs in solids]
     out = ['CM "1.00"', '', '1234567890', '']
     out.append(cm_model('worldMap', world, brushes))
-    for m in (door, crate, crate2, spinner, panel, door2, doorlight):
+    for m in (door, crate, crate2, spinner, panel, door2, doorlight, lift, bar):
         out.append(cm_model(m.name, list(quads_of(m)), []))
     # the volume of trigger_once_1 (entity-local, like dmap writes it)
     out.append(cm_model('trigger_once_1', box_quads((-24, -80, -56), (24, 80, 56), TRIGONCE), []))
@@ -888,7 +896,10 @@ def map_text():
         # entity activation: walking into room B fires trigger_once_1, which
         # fires trigger_relay_1, which switches light_trig on 0.5 s later
         {'classname': 'trigger_once', 'name': 'trigger_once_1', 'model': 'trigger_once_1',
-         'origin': '330 0 56', 'target': 'trigger_relay_1'},
+         'origin': '330 0 56', 'target': 'trigger_relay_1', 'call': 'test_trigger_called'},
+        # moved by maps/testmap.script
+        {'classname': 'func_mover', 'name': 'lift_1', 'model': 'lift_1', 'origin': '380 300 4'},
+        {'classname': 'func_mover', 'name': 'bar_1', 'model': 'bar_1', 'origin': '600 -300 150'},
         {'classname': 'trigger_relay', 'name': 'trigger_relay_1', 'origin': '330 0 150',
          'target': 'light_trig', 'delay': '0.5'},
         {'classname': 'light', 'name': 'light_trig', 'origin': '840 300 180',
@@ -1537,7 +1548,84 @@ def sounds():
     add('sound/test/step.wav', wav(step, rate))
 
 
+# Scripts. The event declarations are the engine's interface (written here,
+# like the rest of the test data); a Doom 3 install has its own
+# script/doom_events.script.
+DOOM_MAIN_SCRIPT = """// Castle Doom 3 test level: the events and defines testmap.script uses.
+#ifndef __TEST_DEFS__
+#define __TEST_DEFS__
+
+#define UP      -1
+#define DOWN    -2
+#define YAW     1
+
+// sys events
+scriptEvent void    wait( float time );
+scriptEvent void    waitFor( entity mover );
+scriptEvent void    waitFrame();
+scriptEvent void    print( string text );
+scriptEvent void    trigger( entity ent );
+scriptEvent float   getTime();
+
+// entity events
+scriptEvent string  getName();
+scriptEvent void    setColor( float red, float green, float blue );
+scriptEvent void    time( float time );
+scriptEvent void    accelTime( float time );
+scriptEvent void    decelTime( float time );
+scriptEvent void    move( float angle, float distance );
+scriptEvent void    rotateOnce( vector angles );
+
+#endif
+"""
+
+MAP_SCRIPT = """// Castle Doom 3 test level script: compiled after script/doom_main.script,
+// main() runs on the first frame.
+
+float lift_trips;
+float trigger_calls;
+float bar_turned;
+
+// the lift in room B goes up and down forever
+void lift_loop() {
+    $lift_1.time( 2 );
+    $lift_1.accelTime( 0.5 );
+    $lift_1.decelTime( 0.5 );
+    while ( 1 ) {
+        $lift_1.move( UP, 64 );
+        sys.waitFor( $lift_1 );
+        sys.wait( 1 );
+        $lift_1.move( DOWN, 64 );
+        sys.waitFor( $lift_1 );
+        lift_trips++;
+        sys.wait( 1 );
+    }
+}
+
+// trigger_once_1's "call" key
+void test_trigger_called() {
+    trigger_calls++;
+    sys.print( "test_trigger_called by " + $trigger_once_1.getName() + "\n" );
+    sys.wait( 1 );
+    // the relay switched the light on 0.5 s after the trigger: make it green
+    $light_trig.setColor( 0, 1, 0 );
+}
+
+void main() {
+    sys.print( "testmap main\n" );
+    thread lift_loop();
+    // turn the bar to point along +y (yaw +90 is counter-clockwise from above)
+    $bar_1.time( 1 );
+    $bar_1.rotateOnce( '0 90 0' );
+    sys.waitFor( $bar_1 );
+    bar_turned = 1;
+}
+"""
+
+
 def main():
+    add('script/doom_main.script', DOOM_MAIN_SCRIPT)
+    add('maps/testmap.script', MAP_SCRIPT)
     floor_textures()
     wall_textures()
     metal_textures()

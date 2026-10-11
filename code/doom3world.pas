@@ -12,6 +12,13 @@
   its targets. Firings wait in a queue (their "delay"), processed in Update,
   so chains of relays can't recurse.
 
+  Scripts (Doom3Script): script/doom_main.script and maps/<map>.script are
+  compiled when the map spawns; the map script's main, worldspawn's "call"
+  keys and triggers' "call" keys start script threads. Their events reach
+  the game through TD3GameScriptHost: sys.trigger, lights on / off and
+  colors, doors, hide / show, entity keys, bind / unbind, and idMover's
+  moves and rotations (TD3ScriptMover) that sys.waitFor waits for.
+
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
 unit Doom3World;
@@ -23,7 +30,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
-  Doom3Level, Doom3MapFile, Doom3Decls;
+  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script;
 
 type
   TD3MessageEvent = procedure (const Msg: String) of object;
@@ -107,10 +114,34 @@ type
 
   { An entity bound to a mover ("bind"): it keeps its placement relative
     to the parent (idEntity::Bind). }
-  TD3Binding = record
+  TD3Binding = class
     Child, Parent: TCastleTransform;
-    { Child's transformation relative to the parent's at spawn. }
+    { Child's transformation relative to the parent's (set at bind time,
+      changed by script moves of the child). }
     ChildInParent: TMatrix4;
+    { Number of bound ancestors (parents are updated before children). }
+    Depth: Integer;
+  end;
+
+  { An entity moved by script events (idMover's move, moveTo, rotateOnce,
+    rotate...). Origin and Angles (pitch, yaw, roll) are Doom 3 ones,
+    relative to the master when the entity is bound. }
+  TD3ScriptMover = class
+    Handle: Integer;
+    Transform: TCastleTransform;
+    Origin, Angles: TVector3;
+    { idMover settings: "time" (seconds), "speed" (units per second, wins
+      over time for moves when > 0), "accelTime", "decelTime" }
+    MoveTime, MoveSpeed, AccelTime, DecelTime: Single;
+    Moving: Boolean;
+    MoveFrom, MoveTo: TVector3;
+    MoveStart, MoveDuration: Single;
+    { rotateOnce / rotateTo (to RotTo) or rotate (RotSpeed per second) }
+    Rotating, RotContinuous: Boolean;
+    RotFrom, RotTo, RotSpeed: TVector3;
+    RotStart, RotDuration: Single;
+    { sys.waitFor waits while a move or a single rotation goes on }
+    function Busy: Boolean;
   end;
 
   TD3PendingTargets = record
@@ -130,7 +161,13 @@ type
     { map entities by lowercase name }
     FEntities: specialize TDictionary<String, TD3MapEntity>;
     FPending: specialize TList<TD3PendingTargets>;
-    FBindings: specialize TList<TD3Binding>;
+    FBindings: specialize TObjectList<TD3Binding>;
+    FBindingsSorted: Boolean;
+    FScript: TD3ScriptVM;
+    FScriptHost: TD3ScriptHost;
+    { entity handles of scripts: index in FMap.MapFile.Entities + 1 }
+    FHandles: specialize TDictionary<String, Integer>;
+    FScriptMovers: specialize TObjectDictionary<Integer, TD3ScriptMover>;
     { trigger_count activations so far, by lowercase name }
     FCounts: specialize TDictionary<String, Integer>;
     { classes whose activation is not supported yet (logged once) }
@@ -153,6 +190,17 @@ type
     procedure UpdateTriggers(const Feet: TVector3);
     procedure SpawnBindings;
     procedure UpdateBindings;
+    function TransformOf(const AName: String): TCastleTransform;
+    function FindBinding(const Child: TCastleTransform): TD3Binding;
+    procedure Bind(const Child, Parent: TCastleTransform);
+    procedure Unbind(const Child: TCastleTransform);
+    procedure StartScripts;
+    procedure CallScript(const FunctionName: String; const Who: String);
+    function ScriptMover(const Handle: Integer): TD3ScriptMover;
+    procedure ApplyScriptMover(const M: TD3ScriptMover);
+    procedure UpdateScriptMovers;
+    function HandleEntity(const Handle: Integer): TD3MapEntity;
+    function EntityHandle(const E: TD3MapEntity): Integer;
     { Doors of the same team as Door (Door itself too). }
     procedure OpenTeam(const Door: TD3Mover);
     procedure CloseTeam(const Door: TD3Mover);
@@ -170,6 +218,8 @@ type
     SinceFire: Single;
     { Entities activated since the map was spawned (statistics, tests). }
     ActivationCount: Integer;
+    { Script threads and the entities they move stand still (g_stopTime). }
+    ScriptsPaused: Boolean;
     constructor Create(const AMap: TDoom3Map);
     destructor Destroy; override;
     { Create movers, monsters, speakers for the loaded map. }
@@ -189,6 +239,16 @@ type
     procedure Activate(const E: TD3MapEntity);
     { The map entity with this name, nil if none. }
     function FindEntity(const AName: String): TD3MapEntity;
+    { For TD3GameScriptHost: scripts' entity handles and events. }
+    function ScriptFindEntity(const AName: String): Integer;
+    function ScriptEntityName(const Handle: Integer): String;
+    function ScriptEntityBusy(const Handle: Integer): Boolean;
+    function ScriptEvent(const Target: Integer; const Event: TD3ScriptEvent;
+      const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+    { One line: script threads, moving entities. }
+    function ScriptStatus: String;
+    { The compiled scripts of the map (nil: none, or they don't compile). }
+    property Script: TD3ScriptVM read FScript;
     { Seconds the player has been dead. }
     property DeadTime: Single read FDeadTime;
     property Movers: specialize TObjectList<TD3Mover> read FMovers;
@@ -210,6 +270,7 @@ implementation
 uses
   Math,
   CastleLog, CastleUtils,
+  Generics.Defaults,
   Doom3Files, Doom3Md5, Doom3Collision;
 
 const
@@ -315,6 +376,46 @@ end;
 
 { TD3Game }
 
+type
+  { Scripts' view of the game: forwards to TD3Game. }
+  TD3GameScriptHost = class(TD3ScriptHost)
+    Game: TD3Game;
+    constructor Create(const AGame: TD3Game);
+    function FindEntity(const AName: String): Integer; override;
+    function EntityName(const E: Integer): String; override;
+    function EntityBusy(const E: Integer): Boolean; override;
+    function CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
+      const Event: TD3ScriptEvent; const Args: TD3ValueArray;
+      var EventResult: TD3Value): Boolean; override;
+  end;
+
+constructor TD3GameScriptHost.Create(const AGame: TD3Game);
+begin
+  inherited Create;
+  Game := AGame;
+end;
+
+function TD3GameScriptHost.FindEntity(const AName: String): Integer;
+begin
+  Result := Game.ScriptFindEntity(AName);
+end;
+
+function TD3GameScriptHost.EntityName(const E: Integer): String;
+begin
+  Result := Game.ScriptEntityName(E);
+end;
+
+function TD3GameScriptHost.EntityBusy(const E: Integer): Boolean;
+begin
+  Result := Game.ScriptEntityBusy(E);
+end;
+
+function TD3GameScriptHost.CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
+  const Event: TD3ScriptEvent; const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+begin
+  Result := Game.ScriptEvent(Target, Event, Args, EventResult);
+end;
+
 constructor TD3Game.Create(const AMap: TDoom3Map);
 begin
   inherited Create;
@@ -326,7 +427,10 @@ begin
   FTriggers := specialize TObjectList<TD3Trigger>.Create(True);
   FEntities := specialize TDictionary<String, TD3MapEntity>.Create;
   FPending := specialize TList<TD3PendingTargets>.Create;
-  FBindings := specialize TList<TD3Binding>.Create;
+  FBindings := specialize TObjectList<TD3Binding>.Create(True);
+  FHandles := specialize TDictionary<String, Integer>.Create;
+  FScriptMovers := specialize TObjectDictionary<Integer, TD3ScriptMover>.Create([doOwnsValues]);
+  FScriptHost := TD3GameScriptHost.Create(Self);
   FCounts := specialize TDictionary<String, Integer>.Create;
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
@@ -346,6 +450,10 @@ begin
   FBindings.Free;
   FCounts.Free;
   FUnsupported.Free;
+  FreeAndNil(FScript);
+  FScriptHost.Free;
+  FHandles.Free;
+  FScriptMovers.Free;
   inherited Destroy;
 end;
 
@@ -367,6 +475,9 @@ begin
   FBindings.Clear;
   FCounts.Clear;
   FUnsupported.Clear;
+  FreeAndNil(FScript);
+  FHandles.Clear;
+  FScriptMovers.Clear;
   FTime := 0;
   ActivationCount := 0;
 end;
@@ -544,6 +655,7 @@ begin
         SpawnTrigger(E);
     end;
   SpawnBindings;
+  StartScripts;
   Hidden := 0;
   Dormant := 0;
   for ME in FMap.Models do
@@ -659,8 +771,6 @@ begin
   P.Time := FTime + Max(0, Delay);
   P.Entity := E;
   FPending.Add(P);
-  if E.HasKey('call') then
-    Unsupported('script function calls ("call" key of ' + E.ClassName_ + ')');
 end;
 
 procedure TD3Game.ActivateTargetsNow(const E: TD3MapEntity);
@@ -669,6 +779,9 @@ var
   Key: String;
   Target: TD3MapEntity;
 begin
+  { idTrigger::CallScript: the "call" function, in a new script thread }
+  if E.HasKey('call') then
+    CallScript(E.Value('call'), E.Name);
   for I := 0 to E.Pairs.Count - 1 do
   begin
     Key := LowerCase(E.Pairs.Names[I]);
@@ -1073,10 +1186,35 @@ begin
       for P in Mover.Portals do
         FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
+  if not ScriptsPaused then
+    UpdateScriptMovers;
   UpdateBindings;
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
+  if (FScript <> nil) and not ScriptsPaused then
+    FScript.Update(FTime);
+end;
+
+function TD3Game.ScriptStatus: String;
+var
+  M: TD3ScriptMover;
+  Moving, Turning: Integer;
+begin
+  if FScript = nil then
+    Exit('No scripts');
+  Moving := 0;
+  Turning := 0;
+  for M in FScriptMovers.Values do
+  begin
+    if M.Moving then
+      Inc(Moving);
+    if M.Rotating then
+      Inc(Turning);
+  end;
+  Result := Format('%d script threads, %d script movers (%d moving, %d rotating), %d bound entities%s',
+    [FScript.ThreadCount, FScriptMovers.Count, Moving, Turning, FBindings.Count,
+     BoolToStr(ScriptsPaused, ', paused', '')]);
 end;
 
 procedure TD3Game.OpenTeam(const Door: TD3Mover);
@@ -1117,51 +1255,113 @@ begin
         M.Locked := Value;
 end;
 
-procedure TD3Game.SpawnBindings;
+function TD3Game.TransformOf(const AName: String): TCastleTransform;
+var
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+begin
+  B := FMap.FindBrush(AName);
+  if B <> nil then
+    Exit(B.Scene);
+  ME := FMap.FindModelEntity(AName);
+  if ME <> nil then
+    Exit(ME.Holder);
+  Result := nil;
+end;
 
-  function TransformOf(const AName: String): TCastleTransform;
-  var
-    B: TD3BrushEntity;
-    ME: TD3ModelEntity;
+function TD3Game.FindBinding(const Child: TCastleTransform): TD3Binding;
+begin
+  for Result in FBindings do
+    if Result.Child = Child then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.Bind(const Child, Parent: TCastleTransform);
+var
+  Bnd: TD3Binding;
+  P: TCastleTransform;
+  Guard: Integer;
+begin
+  if (Child = nil) or (Parent = nil) or (Child = Parent) then
+    Exit;
+  { no loops: the parent must not be bound to the child }
+  P := Parent;
+  Guard := 0;
+  while (P <> nil) and (Guard < 100) do
   begin
-    B := FMap.FindBrush(AName);
-    if B <> nil then
-      Exit(B.Scene);
-    ME := FMap.FindModelEntity(AName);
-    if ME <> nil then
-      Exit(ME.Holder);
-    Result := nil;
+    if P = Child then
+      Exit;
+    Bnd := FindBinding(P);
+    if Bnd = nil then
+      Break;
+    P := Bnd.Parent;
+    Inc(Guard);
   end;
+  Bnd := FindBinding(Child);
+  if Bnd = nil then
+  begin
+    Bnd := TD3Binding.Create;
+    Bnd.Child := Child;
+    FBindings.Add(Bnd);
+  end;
+  Bnd.Parent := Parent;
+  { both are children of the map (world space): child = parent * relative }
+  Bnd.ChildInParent := Parent.InverseTransform * Child.Transform;
+  FBindingsSorted := False;
+end;
 
+procedure TD3Game.Unbind(const Child: TCastleTransform);
+var
+  Bnd: TD3Binding;
+begin
+  Bnd := FindBinding(Child);
+  if Bnd <> nil then
+    FBindings.Remove(Bnd);
+  FBindingsSorted := False;
+end;
+
+procedure TD3Game.SpawnBindings;
 var
   E: TD3MapEntity;
-  Bnd: TD3Binding;
 begin
   if FMap.MapFile = nil then
     Exit;
+  { lights and other entities are not bound yet }
   for E in FMap.MapFile.Entities do
-  begin
-    if E.Value('bind') = '' then
-      Continue;
-    Bnd.Child := TransformOf(E.Name);
-    Bnd.Parent := TransformOf(E.Value('bind'));
-    if (Bnd.Child = nil) or (Bnd.Parent = nil) or (Bnd.Child = Bnd.Parent) then
-      Continue; // lights and other entities: not bound yet
-    { both are children of the map (world space): child = parent * relative }
-    Bnd.ChildInParent := Bnd.Parent.InverseTransform * Bnd.Child.Transform;
-    FBindings.Add(Bnd);
-  end;
+    if E.Value('bind') <> '' then
+      Bind(TransformOf(E.Name), TransformOf(E.Value('bind')));
+end;
+
+function CompareBindingDepth(constref A, B: TD3Binding): Integer;
+begin
+  Result := A.Depth - B.Depth;
 end;
 
 procedure TD3Game.UpdateBindings;
 var
-  Bnd: TD3Binding;
+  Bnd, P: TD3Binding;
   M: TMatrix4;
   T, Scale: TVector3;
   R: TVector4;
 begin
-  { in spawn order: a child bound to a bound parent follows it a frame later
-    at worst }
+  { parents before their children, so chains (a crane's arm on its
+    carrier) follow in the same frame }
+  if not FBindingsSorted then
+  begin
+    for Bnd in FBindings do
+    begin
+      Bnd.Depth := 0;
+      P := FindBinding(Bnd.Parent);
+      while (P <> nil) and (Bnd.Depth < 100) do
+      begin
+        Inc(Bnd.Depth);
+        P := FindBinding(P.Parent);
+      end;
+    end;
+    FBindings.Sort(specialize TComparer<TD3Binding>.Construct(@CompareBindingDepth));
+    FBindingsSorted := True;
+  end;
   for Bnd in FBindings do
   begin
     M := Bnd.Parent.Transform * Bnd.ChildInParent;
@@ -1171,6 +1371,591 @@ begin
     MatrixDecompose(M, T, R, Scale);
     Bnd.Child.Translation := T;
     Bnd.Child.Rotation := R;
+  end;
+end;
+
+{ Scripts -------------------------------------------------------------------- }
+
+{ CGE transformation of a Doom 3 origin and idMat3 (rows = axes). }
+function D3PlacementMatrix(const Origin: TVector3; const M: TMatrix3): TMatrix4;
+var
+  C: Integer;
+  U, W, Col: TVector3;
+begin
+  Result := TMatrix4.Identity;
+  for C := 0 to 2 do
+  begin
+    U := CgeToD3(TVector3.One[C]);
+    W := Vector3(
+      U.X * M.Data[0, 0] + U.Y * M.Data[1, 0] + U.Z * M.Data[2, 0],
+      U.X * M.Data[0, 1] + U.Y * M.Data[1, 1] + U.Z * M.Data[2, 1],
+      U.X * M.Data[0, 2] + U.Y * M.Data[1, 2] + U.Z * M.Data[2, 2]);
+    Col := D3ToCge(W);
+    Result.Data[C, 0] := Col.X;
+    Result.Data[C, 1] := Col.Y;
+    Result.Data[C, 2] := Col.Z;
+  end;
+  Col := D3ToCge(Origin);
+  Result.Data[3, 0] := Col.X;
+  Result.Data[3, 1] := Col.Y;
+  Result.Data[3, 2] := Col.Z;
+end;
+
+{ The Doom 3 origin and angles of a CGE transformation. }
+procedure D3PlacementFromMatrix(const T: TMatrix4; out Origin, Angles: TVector3);
+var
+  M: TMatrix3;
+  I: Integer;
+  Axis, V: TVector3;
+begin
+  Origin := CgeToD3(Vector3(T.Data[3, 0], T.Data[3, 1], T.Data[3, 2]));
+  for I := 0 to 2 do
+  begin
+    { the image of Doom 3 local axis I }
+    Axis := D3ToCge(TVector3.One[I]);
+    V := Vector3(
+      T.Data[0, 0] * Axis.X + T.Data[1, 0] * Axis.Y + T.Data[2, 0] * Axis.Z,
+      T.Data[0, 1] * Axis.X + T.Data[1, 1] * Axis.Y + T.Data[2, 1] * Axis.Z,
+      T.Data[0, 2] * Axis.X + T.Data[1, 2] * Axis.Y + T.Data[2, 2] * Axis.Z);
+    V := CgeToD3(V);
+    M.Data[I, 0] := V.X;
+    M.Data[I, 1] := V.Y;
+    M.Data[I, 2] := V.Z;
+  end;
+  Angles := MatrixAngles(M);
+end;
+
+{ Fraction of a move done after T of Total seconds, accelerating for
+  Accel and decelerating for Decel seconds (idExtrapolate's
+  EXTRAPOLATION_ACCELLINEAR / DECELLINEAR, a trapezoid of speed). }
+function MoveFraction(const T, Total, Accel, Decel: Single): Single;
+var
+  A, D, V: Single;
+begin
+  if (Total <= 0) or (T >= Total) then
+    Exit(1);
+  if T <= 0 then
+    Exit(0);
+  A := Max(0, Accel);
+  D := Max(0, Decel);
+  if A + D > Total then
+  begin
+    A := Total * A / (A + D);
+    D := Total - A;
+  end;
+  { top speed so that the whole move covers 1 }
+  V := 1 / (Total - A / 2 - D / 2);
+  if T < A then
+    Result := 0.5 * V * Sqr(T) / A
+  else
+  if T <= Total - D then
+    Result := 0.5 * V * A + V * (T - A)
+  else
+    Result := 1 - 0.5 * V * Sqr(Total - T) / D;
+  Result := EnsureRange(Result, 0, 1);
+end;
+
+function TD3ScriptMover.Busy: Boolean;
+begin
+  Result := Moving or (Rotating and not RotContinuous);
+end;
+
+function TD3Game.HandleEntity(const Handle: Integer): TD3MapEntity;
+begin
+  if (FMap.MapFile = nil) or (Handle < 1) or (Handle > FMap.MapFile.Entities.Count) then
+    Exit(nil);
+  Result := FMap.MapFile.Entities[Handle - 1];
+end;
+
+function TD3Game.EntityHandle(const E: TD3MapEntity): Integer;
+begin
+  if (E = nil) or not FHandles.TryGetValue(LowerCase(E.Name), Result) then
+    Result := 0;
+end;
+
+function TD3Game.ScriptFindEntity(const AName: String): Integer;
+begin
+  if not FHandles.TryGetValue(LowerCase(AName), Result) then
+    Result := 0;
+end;
+
+function TD3Game.ScriptEntityName(const Handle: Integer): String;
+var
+  E: TD3MapEntity;
+begin
+  E := HandleEntity(Handle);
+  if E <> nil then
+    Result := E.Name
+  else
+    Result := '';
+end;
+
+function TD3Game.ScriptEntityBusy(const Handle: Integer): Boolean;
+var
+  M: TD3ScriptMover;
+  Door: TD3Mover;
+  E: TD3MapEntity;
+begin
+  if FScriptMovers.TryGetValue(Handle, M) and M.Busy then
+    Exit(True);
+  E := HandleEntity(Handle);
+  if E <> nil then
+    for Door in FMovers do
+      if (Door.Brush.Entity = E) and (Door.Kind = mkDoor) and
+         (Door.State in [dsOpening, dsClosing]) then
+        Exit(True);
+  Result := False;
+end;
+
+function TD3Game.ScriptMover(const Handle: Integer): TD3ScriptMover;
+var
+  E: TD3MapEntity;
+  T: TCastleTransform;
+  Bnd: TD3Binding;
+  Local: TMatrix4;
+begin
+  if FScriptMovers.TryGetValue(Handle, Result) then
+    Exit;
+  Result := nil;
+  E := HandleEntity(Handle);
+  if E = nil then
+    Exit;
+  T := TransformOf(E.Name);
+  if T = nil then
+    Exit;
+  Result := TD3ScriptMover.Create;
+  Result.Handle := Handle;
+  Result.Transform := T;
+  Bnd := FindBinding(T);
+  if Bnd <> nil then
+    Local := Bnd.ChildInParent
+  else
+    Local := T.Transform;
+  D3PlacementFromMatrix(Local, Result.Origin, Result.Angles);
+  { idMover spawn args: "move_time" (default 1), "move_speed", "accel_time",
+    "decel_time" }
+  Result.MoveTime := E.FloatValue('move_time', 1);
+  Result.MoveSpeed := E.FloatValue('move_speed', 0);
+  Result.AccelTime := E.FloatValue('accel_time', 0);
+  Result.DecelTime := E.FloatValue('decel_time', 0);
+  FScriptMovers.Add(Handle, Result);
+end;
+
+procedure TD3Game.ApplyScriptMover(const M: TD3ScriptMover);
+var
+  Local: TMatrix4;
+  Bnd: TD3Binding;
+  T, Scale: TVector3;
+  R: TVector4;
+begin
+  Local := D3PlacementMatrix(M.Origin, AnglesMatrix(M.Angles));
+  Bnd := FindBinding(M.Transform);
+  if Bnd <> nil then
+  begin
+    { UpdateBindings places it }
+    Bnd.ChildInParent := Local;
+    Exit;
+  end;
+  MatrixDecompose(Local, T, R, Scale);
+  M.Transform.Translation := T;
+  M.Transform.Rotation := R;
+end;
+
+procedure TD3Game.UpdateScriptMovers;
+var
+  M: TD3ScriptMover;
+  F: Single;
+  Changed: Boolean;
+begin
+  for M in FScriptMovers.Values do
+  begin
+    Changed := False;
+    if M.Moving then
+    begin
+      F := MoveFraction(FTime - M.MoveStart, M.MoveDuration, M.AccelTime, M.DecelTime);
+      M.Origin := M.MoveFrom + (M.MoveTo - M.MoveFrom) * F;
+      if F >= 1 then
+        M.Moving := False;
+      Changed := True;
+    end;
+    if M.Rotating then
+    begin
+      if M.RotContinuous then
+        M.Angles := M.RotFrom + M.RotSpeed * (FTime - M.RotStart)
+      else
+      begin
+        F := MoveFraction(FTime - M.RotStart, M.RotDuration, M.AccelTime, M.DecelTime);
+        M.Angles := M.RotFrom + (M.RotTo - M.RotFrom) * F;
+        if F >= 1 then
+          M.Rotating := False;
+      end;
+      Changed := True;
+    end;
+    if Changed then
+      ApplyScriptMover(M);
+  end;
+end;
+
+procedure TD3Game.StartScripts;
+var
+  Base, Key: String;
+  Start: QWord;
+  I: Integer;
+  E: TD3MapEntity;
+  F: TD3ScriptFunction;
+begin
+  FHandles.Clear;
+  if FMap.MapFile = nil then
+    Exit;
+  for I := 0 to FMap.MapFile.Entities.Count - 1 do
+    if FMap.MapFile.Entities[I].Name <> '' then
+      FHandles.AddOrSetValue(LowerCase(FMap.MapFile.Entities[I].Name), I + 1);
+  { like idGameLocal: the game's scripts, then the map's own }
+  Base := TDoom3Map.MapBasePath(FMap.MapName);
+  if not D3Fs.FileExists('script/doom_main.script') and not D3Fs.FileExists(Base + '.script') then
+    Exit;
+  Start := GetTickCount64;
+  FScript := TD3ScriptVM.Create;
+  FScript.Host := FScriptHost;
+  try
+    if D3Fs.FileExists('script/doom_main.script') then
+      FScript.CompileFile('script/doom_main.script');
+    if D3Fs.FileExists(Base + '.script') then
+      FScript.CompileFile(Base + '.script');
+  except
+    on Ex: ED3ScriptError do
+    begin
+      WritelnWarning('Doom3World', 'Script error, scripts are off: %s', [Ex.Message]);
+      FreeAndNil(FScript);
+      Exit;
+    end;
+  end;
+  WritelnLog('Doom3World', 'Scripts: %d functions from %d files compiled in %.2f s',
+    [FScript.FunctionCount, FScript.FileCount, (GetTickCount64 - Start) / 1000]);
+  { idWorldspawn: the map script's main, then worldspawn's "call" keys,
+    all on the first frame }
+  F := FScript.FindFunction('main');
+  if F <> nil then
+    FScript.QueueThread(F);
+  E := FMap.MapFile.Entities[0];
+  for I := 0 to E.Pairs.Count - 1 do
+  begin
+    Key := LowerCase(E.Pairs.Names[I]);
+    if Copy(Key, 1, 4) = 'call' then
+      CallScript(E.Pairs.ValueFromIndex[I], E.Name);
+  end;
+end;
+
+procedure TD3Game.CallScript(const FunctionName: String; const Who: String);
+var
+  F: TD3ScriptFunction;
+begin
+  if FScript = nil then
+  begin
+    Unsupported('script function calls without scripts ("call" of ' + Who + ')');
+    Exit;
+  end;
+  F := FScript.FindFunction(FunctionName);
+  if F = nil then
+  begin
+    WritelnWarning('Doom3World', 'Script function "%s" (called by %s) not found', [FunctionName, Who]);
+    Exit;
+  end;
+  FScript.QueueThread(F);
+end;
+
+{ idMover::VectorForDir }
+function MoveDirVector(const Dir: Single; const Angles: TVector3): TVector3;
+var
+  Axis: TMatrix3;
+  D: Integer;
+begin
+  D := Round(Dir);
+  Axis := AnglesMatrix(Angles);
+  case D of
+    -1: Result := Vector3(0, 0, 1);   // UP
+    -2: Result := Vector3(0, 0, -1);  // DOWN
+    -3: Result := Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);   // LEFT
+    -4: Result := -Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);  // RIGHT
+    -5: Result := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);   // FORWARD
+    -6: Result := -Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);  // BACK
+    -7: Result := Vector3(Axis.Data[2, 0], Axis.Data[2, 1], Axis.Data[2, 2]);   // REL_UP
+    -8: Result := -Vector3(Axis.Data[2, 0], Axis.Data[2, 1], Axis.Data[2, 2]);  // REL_DOWN
+    -9: Result := Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);   // REL_LEFT
+    -10: Result := -Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]); // REL_RIGHT
+    -11: Result := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);  // REL_FORWARD
+    -12: Result := -Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]); // REL_BACK
+    else
+      Result := Vector3(Cos(DegToRad(Dir)), Sin(DegToRad(Dir)), 0);
+  end;
+end;
+
+function TD3Game.ScriptEvent(const Target: Integer; const Event: TD3ScriptEvent;
+  const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+var
+  N, Key: String;
+  E, Other: TD3MapEntity;
+  M: TD3ScriptMover;
+  Light, I, Count: Integer;
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+  Door: TD3Mover;
+  Dist: Single;
+
+  function ArgF(const Index: Integer): Single;
+  begin
+    Result := D3ValueToFloat(Args[Index]);
+  end;
+
+  procedure StartMove(const Dest: TVector3);
+  begin
+    M.MoveFrom := M.Origin;
+    M.MoveTo := Dest;
+    M.MoveStart := FTime;
+    Dist := (Dest - M.Origin).Length;
+    if M.MoveSpeed > 0 then
+      M.MoveDuration := Dist / M.MoveSpeed
+    else
+      M.MoveDuration := M.MoveTime;
+    M.Moving := True;
+  end;
+
+  procedure StartRotation(const Dest: TVector3);
+  begin
+    M.RotFrom := M.Angles;
+    M.RotTo := Dest;
+    M.RotStart := FTime;
+    M.RotDuration := M.MoveTime;
+    M.Rotating := True;
+    M.RotContinuous := False;
+  end;
+
+  function DoorOf(const AE: TD3MapEntity): TD3Mover;
+  begin
+    for Result in FMovers do
+      if (Result.Brush.Entity = AE) and (Result.Kind = mkDoor) then
+        Exit;
+    Result := nil;
+  end;
+
+begin
+  Result := True;
+  N := Event.Name;
+
+  { sys events }
+  if Target = 0 then
+  begin
+    if N = 'trigger' then
+    begin
+      E := HandleEntity(Args[0].E);
+      if E <> nil then
+        Activate(E);
+    end else
+    if N = 'getEntity' then
+      EventResult := D3EntityValue(ScriptFindEntity(Args[0].S))
+    else
+    if (N = 'setcvar') or (N = 'getcvar') then
+      // cvars are not shared with scripts: getcvar returns ""
+    else
+      Result := False;
+    Exit;
+  end;
+
+  E := HandleEntity(Target);
+  if E = nil then
+    Exit(False);
+  Light := -1;
+  if SameText(E.ClassName_, 'light') then
+    Light := FMap.FindLight(E.Name);
+
+  { all entities }
+  if N = 'getName' then
+    EventResult := D3StringValue(E.Name)
+  else
+  if N = 'activate' then
+    Activate(E)
+  else
+  if (N = 'getKey') or (N = 'getFloatKey') or (N = 'getIntKey') or
+     (N = 'getBoolKey') or (N = 'getVectorKey') or (N = 'getEntityKey') then
+  begin
+    Key := Args[0].S;
+    case N of
+      'getKey': EventResult := D3StringValue(E.Value(Key));
+      'getFloatKey': EventResult := D3FloatValue(E.FloatValue(Key));
+      'getIntKey': EventResult := D3FloatValue(Trunc(E.FloatValue(Key)));
+      'getBoolKey': EventResult := D3FloatValue(Ord(E.FloatValue(Key) <> 0));
+      'getVectorKey': EventResult := D3VectorValue(E.VectorValue(Key, TVector3.Zero));
+      else EventResult := D3EntityValue(ScriptFindEntity(E.Value(Key)));
+    end;
+  end else
+  if N = 'setKey' then
+    E.SetValue(Args[0].S, Args[1].S)
+  else
+  if (N = 'numTargets') or (N = 'getTarget') then
+  begin
+    Count := 0;
+    for I := 0 to E.Pairs.Count - 1 do
+    begin
+      Key := LowerCase(E.Pairs.Names[I]);
+      if (Copy(Key, 1, 6) <> 'target') or
+         ((Length(Key) > 6) and not CharInSet(Key[7], ['0'..'9'])) then
+        Continue;
+      Other := FindEntity(E.Pairs.ValueFromIndex[I]);
+      if Other = nil then
+        Continue;
+      if (N = 'getTarget') and (Count = Round(ArgF(0))) then
+      begin
+        EventResult := D3EntityValue(EntityHandle(Other));
+        Exit;
+      end;
+      Inc(Count);
+    end;
+    if N = 'numTargets' then
+      EventResult := D3FloatValue(Count);
+  end else
+  if (N = 'hide') or (N = 'show') or (N = 'isHidden') or (N = 'remove') then
+  begin
+    if N = 'remove' then
+    begin
+      RemoveEntity(E);
+      Exit;
+    end;
+    if Light >= 0 then
+    begin
+      if N = 'isHidden' then
+        EventResult := D3FloatValue(Ord(not FMap.Light(Light).StartOn))
+      else
+        FMap.SetLightOn(Light, N = 'show');
+      Exit;
+    end;
+    B := FMap.FindBrush(E.Name);
+    ME := FMap.FindModelEntity(E.Name);
+    if N = 'isHidden' then
+    begin
+      if B <> nil then
+        EventResult := D3FloatValue(Ord(B.Hidden))
+      else
+      if ME <> nil then
+        EventResult := D3FloatValue(Ord(ME.Hidden));
+      Exit;
+    end;
+    if B <> nil then
+      B.SetHidden(N = 'hide');
+    if ME <> nil then
+    begin
+      ME.Hidden := N = 'hide';
+      ME.Holder.Exists := not ME.Hidden;
+    end;
+  end else
+
+  { lights }
+  if (Light >= 0) and ((N = 'On') or (N = 'Off') or (N = 'fadeInLight') or (N = 'fadeOutLight')) then
+    { fades are instant for now }
+    FMap.SetLightOn(Light, (N = 'On') or (N = 'fadeInLight'))
+  else
+  if (Light >= 0) and (N = 'setColor') then
+  begin
+    FMap.SetLightParm(Light, 0, ArgF(0));
+    FMap.SetLightParm(Light, 1, ArgF(1));
+    FMap.SetLightParm(Light, 2, ArgF(2));
+  end else
+  if (Light >= 0) and ((N = 'setShaderParm') or (N = 'setLightParm')) then
+    FMap.SetLightParm(Light, Round(ArgF(0)), ArgF(1))
+  else
+
+  { doors (idDoor) }
+  if (DoorOf(E) <> nil) and ((N = 'open') or (N = 'close') or (N = 'lock') or
+     (N = 'isOpen') or (N = 'isLocked')) then
+  begin
+    Door := DoorOf(E);
+    case N of
+      'open': OpenTeam(Door);
+      'close': CloseTeam(Door);
+      'lock': LockTeam(Door, ArgF(0) <> 0);
+      'isOpen': EventResult := D3FloatValue(Ord(Door.State <> dsClosed));
+      else EventResult := D3FloatValue(Ord(Door.Locked));
+    end;
+  end else
+
+  { binding }
+  if (N = 'bind') or (N = 'bindPosition') then
+  begin
+    Other := HandleEntity(Args[0].E);
+    if Other <> nil then
+    begin
+      Bind(TransformOf(E.Name), TransformOf(Other.Name));
+      { a script mover's origin and angles become relative to the master }
+      if FScriptMovers.TryGetValue(Target, M) and (FindBinding(M.Transform) <> nil) then
+        D3PlacementFromMatrix(FindBinding(M.Transform).ChildInParent, M.Origin, M.Angles);
+    end;
+  end else
+  if (N = 'unbind') or (N = 'removeBinds') then
+  begin
+    if N = 'unbind' then
+    begin
+      Unbind(TransformOf(E.Name));
+      if FScriptMovers.TryGetValue(Target, M) then
+        D3PlacementFromMatrix(M.Transform.Transform, M.Origin, M.Angles);
+    end;
+  end else
+
+  { idMover }
+  begin
+    M := ScriptMover(Target);
+    if M = nil then
+      Exit(False);
+    case N of
+      'time': M.MoveTime := ArgF(0);
+      'speed': M.MoveSpeed := ArgF(0);
+      'accelTime': M.AccelTime := ArgF(0);
+      'decelTime': M.DecelTime := ArgF(0);
+      'move': StartMove(M.Origin + MoveDirVector(ArgF(0), M.Angles) * ArgF(1));
+      'moveTo':
+        begin
+          Other := HandleEntity(Args[0].E);
+          if Other <> nil then
+            StartMove(Other.Origin);
+        end;
+      'moveToPos': StartMove(Args[0].V);
+      'rotateOnce': StartRotation(M.Angles + Args[0].V);
+      'rotateTo': StartRotation(Args[0].V);
+      'rotateUpTo', 'rotateDownTo':
+        begin
+          M.RotTo := M.Angles;
+          M.RotTo.Data[EnsureRange(Round(ArgF(0)), 0, 2)] := ArgF(1);
+          StartRotation(M.RotTo);
+        end;
+      'rotate':
+        begin
+          { degrees per second around each axis, until stopped }
+          M.RotFrom := M.Angles;
+          M.RotSpeed := Args[0].V;
+          M.RotStart := FTime;
+          M.Rotating := True;
+          M.RotContinuous := True;
+        end;
+      'stopMoving': M.Moving := False;
+      'stopRotating': M.Rotating := False;
+      'isMoving': EventResult := D3FloatValue(Ord(M.Moving));
+      'isRotating': EventResult := D3FloatValue(Ord(M.Rotating));
+      'getOrigin': EventResult := D3VectorValue(M.Origin);
+      'getWorldOrigin': EventResult := D3VectorValue(CgeToD3(M.Transform.WorldTranslation));
+      'getAngles': EventResult := D3VectorValue(M.Angles);
+      'setOrigin':
+        begin
+          M.Moving := False;
+          M.Origin := Args[0].V;
+          ApplyScriptMover(M);
+        end;
+      'setAngles':
+        begin
+          M.Rotating := False;
+          M.Angles := Args[0].V;
+          ApplyScriptMover(M);
+        end;
+      else
+        Result := False;
+    end;
   end;
 end;
 
