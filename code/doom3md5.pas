@@ -129,6 +129,10 @@ type
 
 { Rotate a Doom 3 vector by an md5 joint orientation. }
 function QuatRotate(const Q: TQuaternion; const V: TVector3): TVector3;
+{ Doom 3 quaternion from its stored x y z (md5 files). }
+function QuatFromXYZ(const V: TVector3): TQuaternion;
+{ Normalized linear interpolation along the shortest arc. }
+function QuatNlerp(const A, B: TQuaternion; const T: Single): TQuaternion;
 
 { The transformation of a joint's space, in CGE coordinates. }
 function JointMatrix(const Joint: TD3Joint): TMatrix4;

@@ -86,6 +86,8 @@ type
     VolumeMin, VolumeMax: TVector3;
     { "noshadows": never the shadow casting light }
     NoShadows: Boolean;
+    { Color scale of idLight::FadeIn / FadeOut (1 = full). }
+    Fade: Single;
   end;
 
   TDoom3Map = class(TCastleTransform)
@@ -207,6 +209,8 @@ type
     { Set a light's shader parameter (0..2 are its color), like
       idLight::SetShaderParm / SetColor. }
     procedure SetLightParm(const I, Parm: Integer; const Value: Single);
+    { Scale a light's color (0..1), for fading lights in and out. }
+    procedure SetLightFade(const I: Integer; const Value: Single);
     { The brush entity or static model with this entity name, nil if none. }
     function FindBrush(const AName: String): TD3BrushEntity;
     { The md5 model entity with this entity name, nil if none. }
@@ -726,6 +730,7 @@ begin
       FLights[N].VolumeMin, FLights[N].VolumeMax);
     { shader parameters: _color, shaderParm0..11 }
     FLights[N].Parms := DefaultExprContext;
+    FLights[N].Fade := 1;
     FLights[N].Parms.Parms[0] := LightColor.X;
     FLights[N].Parms.Parms[1] := LightColor.Y;
     FLights[N].Parms.Parms[2] := LightColor.Z;
@@ -753,12 +758,13 @@ var
   C: TVector4;
 begin
   if FLights[I].Shader = nil then
-    Exit(Vector3(FLights[I].Parms.Parms[0], FLights[I].Parms.Parms[1], FLights[I].Parms.Parms[2]));
+    Exit(Vector3(FLights[I].Parms.Parms[0], FLights[I].Parms.Parms[1], FLights[I].Parms.Parms[2]) *
+      FLights[I].Fade);
   Ctx := FLights[I].Parms;
   { shaderParm4 is Doom 3's time offset (SHADERPARM_TIMEOFFSET) }
   Ctx.Time := FTime - FLights[I].Parms.Parms[4];
   C := FLights[I].Shader.EvalStageColor(Ctx);
-  Result := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z));
+  Result := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z)) * FLights[I].Fade;
 end;
 
 procedure TDoom3Map.ApplyLightColor(const I: Integer; const C: TVector3);
@@ -1574,6 +1580,14 @@ begin
   if (Parm < 0) or (Parm > High(FLights[I].Parms.Parms)) then
     Exit;
   FLights[I].Parms.Parms[Parm] := Value;
+  ApplyLightColor(I, LightShaderColor(I));
+end;
+
+procedure TDoom3Map.SetLightFade(const I: Integer; const Value: Single);
+begin
+  if FLights[I].Fade = Value then
+    Exit;
+  FLights[I].Fade := Value;
   ApplyLightColor(I, LightShaderColor(I));
 end;
 

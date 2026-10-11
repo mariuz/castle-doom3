@@ -26,6 +26,7 @@ type
     Hud: TDoom3Hud;
     LabelFps: TCastleLabel;
     Console: TDoom3Console;
+    FadeRect: TCastleRectangleControl;
   private
     FGame: TD3Game;
     FSky: TCastleBackground;
@@ -37,6 +38,12 @@ type
     FDemoHeld: array of TKey;
     FShots: Integer;
     FQuitting: Boolean;
+    { a cinematic camera has the view: the player's view to go back to }
+    FInCinematic: Boolean;
+    FPlayerEye, FPlayerDir: TVector3;
+    FPlayerFov: Single;
+    FPlayerFovAxis: TFieldOfViewAxis;
+    procedure UpdateCinematic;
     procedure LoadLevel(const AMapName: String);
     procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
@@ -125,6 +132,51 @@ begin
     Vector3(0, 1, 0));
 end;
 
+procedure TViewPlay.UpdateCinematic;
+var
+  P, D, U: TVector3;
+  Fov, Yaw: Single;
+  C: TVector4;
+begin
+  if FGame.CinematicActive then
+  begin
+    if not FInCinematic then
+    begin
+      FInCinematic := True;
+      FPlayerEye := Camera.Translation;
+      FPlayerDir := Camera.Direction;
+      FPlayerFov := Camera.Perspective.FieldOfView;
+      FPlayerFovAxis := Camera.Perspective.FieldOfViewAxis;
+    end;
+    FGame.CinematicView(P, D, U, Fov);
+    Camera.SetWorldView(P, D, U);
+    { Doom 3's fov is horizontal }
+    Camera.Perspective.FieldOfViewAxis := faHorizontal;
+    Camera.Perspective.FieldOfView := DegToRad(EnsureRange(Fov, 1, 170));
+  end else
+  if FInCinematic then
+  begin
+    FInCinematic := False;
+    Camera.SetWorldView(FPlayerEye, FPlayerDir, Vector3(0, 1, 0));
+    Camera.Perspective.FieldOfViewAxis := FPlayerFovAxis;
+    Camera.Perspective.FieldOfView := FPlayerFov;
+  end;
+  { info_player_teleport }
+  if FGame.TakeTeleport(P, Yaw) then
+  begin
+    if FInCinematic then
+    begin
+      FPlayerEye := P + Vector3(0, PlayerEyeHeight, 0);
+      FPlayerDir := YawToCgeDir(Yaw);
+    end else
+      PlaceCamera(P, Yaw);
+  end;
+  Hud.Exists := not FInCinematic;
+  C := FGame.FadeColor;
+  FadeRect.Exists := C.W > 0.002;
+  FadeRect.Color := C;
+end;
+
 procedure TViewPlay.LoadLevel(const AMapName: String);
 begin
   WritelnLog('GameViewPlay', 'Loading map "%s"', [AMapName]);
@@ -137,6 +189,12 @@ begin
     Exit;
   end;
   FGame.Clear;
+  if FInCinematic then
+  begin
+    FInCinematic := False;
+    Camera.Perspective.FieldOfViewAxis := FPlayerFovAxis;
+    Camera.Perspective.FieldOfView := FPlayerFov;
+  end;
   if not Map.LoadMap(AMapName) then
   begin
     Hud.ShowMessage('Cannot load map ' + AMapName, 6);
@@ -206,7 +264,8 @@ begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>,');
-    Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1], quit');
+    Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1],');
+    Console.Print('skipcinematic, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -330,6 +389,9 @@ begin
     Console.Print(S);
     WritelnLog('Ent', S);
   end else
+  if Cmd = 'skipcinematic' then
+    FGame.SkipCinematic
+  else
   if Cmd = 'scripts' then
   begin
     S := FGame.ScriptStatus;
@@ -422,9 +484,10 @@ begin
     ShadowName := Map.Light(Map.ShadowLight).Entity.Name
   else
     ShadowName := 'none';
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, shadows %s)',
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, shadows %s%s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
-     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, ShadowName]);
+     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, ShadowName,
+     Iff(FGame.CinematicName <> '', ', cinematic ' + FGame.CinematicName, '')]);
 end;
 
 procedure TViewPlay.ReleaseDemoKeys;
@@ -581,7 +644,7 @@ begin
     Exit;
   LabelFps.Caption := 'FPS: ' + Container.Fps.ToString;
 
-  WalkNavigation.Exists := not Console.IsOpen and not FGame.PlayerDead;
+  WalkNavigation.Exists := not Console.IsOpen and not FGame.PlayerDead and not FInCinematic;
 
   if (AutoTestPrefix = '') and not Console.IsOpen then
   begin
@@ -597,7 +660,12 @@ begin
     end;
   end;
 
-  FGame.Update(SecondsPassed, Camera.Translation);
+  { during cinematics the player stays where the camera was }
+  if FInCinematic then
+    FGame.Update(SecondsPassed, FPlayerEye)
+  else
+    FGame.Update(SecondsPassed, Camera.Translation);
+  UpdateCinematic;
   Map.UpdateVisibility(Camera);
   MuzzleFlash.Exists := FGame.SinceFire < 0.07;
 
@@ -622,7 +690,11 @@ begin
 
   if Event.IsKey(keyEscape) then
   begin
-    Container.View := ViewMenu;
+    { Escape skips a cinematic, like in Doom 3 }
+    if FInCinematic then
+      FGame.SkipCinematic
+    else
+      Container.View := ViewMenu;
     Exit(True);
   end;
   if Event.IsKey(keyF) then

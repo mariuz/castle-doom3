@@ -137,8 +137,12 @@ jobs:
           grep -q "Script: testmap main" test_output/triggers.log || { echo "::error::the map script's main should run"; exit 1; }
           grep -q "test_trigger_called by trigger_once_1" test_output/triggers.log || { echo "::error::trigger_once_1's call key should run its script function"; exit 1; }
           grep -q "Spawned 3 movers.*1 bound entities" test_output/triggers.log || { echo "::error::door_1, door_2 and spinner_1 should be movers, door_light_1 bound"; exit 1; }
+          run_test cinematic testmap "W:1,O:notarget,G:340 -340 0,A:90,W:1,S,W:3.5,S,Q"
+          grep "Screenshot" test_output/cinematic.log | sed -n 1p | grep -q "cinematic test_cam_1" || { echo "::error::trigger_once_cin should start the camera test_cam_1"; exit 1; }
+          grep -q "Teleport to info_player_teleport_1" test_output/cinematic.log || { echo "::error::the camera's end should teleport the player"; exit 1; }
+          grep "Screenshot" test_output/cinematic.log | sed -n 2p | grep -Eq "eye 500 (200|199.9)" || { echo "::error::the player should be at info_player_teleport_1 after the cinematic"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 21
+          test "$(ls test_output/*.png | wc -l)" -ge 23
 
       - name: Upload screenshots and logs
         if: always()

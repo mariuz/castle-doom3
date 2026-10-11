@@ -19,6 +19,12 @@
   colors, doors, hide / show, entity keys, bind / unbind, and idMover's
   moves and rotations (TD3ScriptMover) that sys.waitFor waits for.
 
+  Cinematics: activating an idCameraAnim entity plays its .md5camera
+  (Doom3Camera) as the view, then fires its targets; idCameraView shows the
+  view from an entity; trigger_fade and sys.fadeIn / fadeOut / fadeTo fade
+  the screen; info_player_teleport moves the player. TViewPlay applies
+  them (CinematicActive, CinematicView, FadeColor, TakeTeleport).
+
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
 unit Doom3World;
@@ -30,7 +36,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
-  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script;
+  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera;
 
 type
   TD3MessageEvent = procedure (const Msg: String) of object;
@@ -144,6 +150,12 @@ type
     function Busy: Boolean;
   end;
 
+  { A light fading in or out (idLight::FadeIn / FadeOut). }
+  TD3LightFade = record
+    Light: Integer;
+    From, Target, Start, Duration: Single;
+  end;
+
   TD3PendingTargets = record
     Time: Single;
     { activate the targets of this entity }
@@ -168,6 +180,28 @@ type
     { entity handles of scripts: index in FMap.MapFile.Entities + 1 }
     FHandles: specialize TDictionary<String, Integer>;
     FScriptMovers: specialize TObjectDictionary<Integer, TD3ScriptMover>;
+    { cinematics: the playing camera anim (idCameraAnim) or camera view
+      (idCameraView) }
+    FCameraAnims: specialize TObjectDictionary<String, TD3CameraAnim>;
+    FCameraEntity: TD3MapEntity;
+    FCameraAnim: TD3CameraAnim;
+    FCameraStart: Single;
+    FCameraOffset: TVector3;
+    FCameraCycles: Integer;
+    { skipping a cinematic also skips the cameras started by it until then }
+    FSkipUntil: Single;
+    { screen fade (idPlayerView::Fade) }
+    FFadeFrom, FFadeTo: TVector4;
+    FFadeStart, FFadeTime: Single;
+    FTeleportPending: Boolean;
+    FTeleportPos: TVector3;
+    FTeleportYaw: Single;
+    FLightFades: specialize TList<TD3LightFade>;
+    { script sounds: sound sources by entity handle, playing sounds by
+      "handle:channel" }
+    FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
+    FSoundTransforms: specialize TObjectList<TCastleTransform>;
+    FScriptSounds: specialize TObjectDictionary<String, TCastlePlayingSoundSource>;
     { trigger_count activations so far, by lowercase name }
     FCounts: specialize TDictionary<String, Integer>;
     { classes whose activation is not supported yet (logged once) }
@@ -200,6 +234,17 @@ type
     procedure ApplyScriptMover(const M: TD3ScriptMover);
     procedure UpdateScriptMovers;
     function HandleEntity(const Handle: Integer): TD3MapEntity;
+    procedure StartCamera(const E: TD3MapEntity);
+    procedure StopCamera;
+    procedure UpdateCamera;
+    procedure StartFade(const Target: TVector4; const Seconds: Single);
+    procedure FadeLight(const Light: Integer; const Target, Seconds: Single);
+    procedure UpdateLightFades;
+    function ScriptSoundSource(const Handle: Integer): TCastleSoundSource;
+    function StartScriptSound(const Handle: Integer; const ShaderName: String;
+      const Channel: Integer): Single;
+    procedure StopScriptSound(const Handle, Channel: Integer);
+    procedure ClearScriptSounds;
     function EntityHandle(const E: TD3MapEntity): Integer;
     { Doors of the same team as Door (Door itself too). }
     procedure OpenTeam(const Door: TD3Mover);
@@ -247,6 +292,20 @@ type
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     { One line: script threads, moving entities. }
     function ScriptStatus: String;
+    { A cinematic camera (idCameraAnim, idCameraView) sets the view. }
+    function CinematicActive: Boolean;
+    { The cinematic camera's view in CGE coordinates, its horizontal field
+      of view in degrees. }
+    procedure CinematicView(out Position, Direction, Up: TVector3; out FovDeg: Single);
+    { Stop the cinematic camera (its targets fire), like Escape in Doom 3. }
+    procedure SkipCinematic;
+    { Color over the screen (alpha 0: nothing), from trigger_fade and the
+      scripts' fades. }
+    function FadeColor: TVector4;
+    { info_player_teleport asked to move the player: where (feet). }
+    function TakeTeleport(out FeetPos: TVector3; out YawDeg: Single): Boolean;
+    { The name of the playing cinematic camera entity, '' if none. }
+    function CinematicName: String;
     { The compiled scripts of the map (nil: none, or they don't compile). }
     property Script: TD3ScriptVM read FScript;
     { Seconds the player has been dead. }
@@ -431,6 +490,11 @@ begin
   FHandles := specialize TDictionary<String, Integer>.Create;
   FScriptMovers := specialize TObjectDictionary<Integer, TD3ScriptMover>.Create([doOwnsValues]);
   FScriptHost := TD3GameScriptHost.Create(Self);
+  FCameraAnims := specialize TObjectDictionary<String, TD3CameraAnim>.Create([doOwnsValues]);
+  FLightFades := specialize TList<TD3LightFade>.Create;
+  FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
+  FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
+  FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
   FCounts := specialize TDictionary<String, Integer>.Create;
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
@@ -454,6 +518,11 @@ begin
   FScriptHost.Free;
   FHandles.Free;
   FScriptMovers.Free;
+  FCameraAnims.Free;
+  FLightFades.Free;
+  FScriptSounds.Free;
+  FSoundSources.Free;
+  FSoundTransforms.Free;
   inherited Destroy;
 end;
 
@@ -478,6 +547,15 @@ begin
   FreeAndNil(FScript);
   FHandles.Clear;
   FScriptMovers.Clear;
+  FCameraEntity := nil;
+  FCameraAnim := nil;
+  FSkipUntil := 0;
+  FFadeFrom := Vector4(0, 0, 0, 0);
+  FFadeTo := Vector4(0, 0, 0, 0);
+  FFadeTime := 0;
+  FTeleportPending := False;
+  FLightFades.Clear;
+  ClearScriptSounds;
   FTime := 0;
   ActivationCount := 0;
 end;
@@ -850,6 +928,7 @@ var
   Mon: TD3Monster;
   S: TD3Speaker;
   Handled: Boolean;
+  SpawnClass: String;
 begin
   Inc(ActivationCount);
   Cls := LowerCase(E.ClassName_);
@@ -864,6 +943,32 @@ begin
       FMap.SetLightOn(I, not FMap.Light(I).StartOn);
       WritelnLog('Doom3World', 'Light %s %s', [E.Name, BoolToStr(FMap.Light(I).StartOn, 'on', 'off')]);
     end;
+    Exit;
+  end;
+
+  { by the entityDef's game class }
+  SpawnClass := E.Value('spawnclass');
+  if (SpawnClass = 'idCameraAnim') or (SpawnClass = 'idCameraView') then
+  begin
+    { start, or stop when it plays (idCameraAnim::Event_Activate) }
+    if FCameraEntity = E then
+      StopCamera
+    else
+      StartCamera(E);
+    Exit;
+  end;
+  if SpawnClass = 'idTrigger_Fade' then
+  begin
+    StartFade(E.Vector4Value('fadeColor', Vector4(0, 0, 0, 1)), E.FloatValue('fadeTime', 1));
+    Exit;
+  end;
+  if SpawnClass = 'idPlayerStart' then
+  begin
+    { idPlayerStart::Event_TeleportPlayer }
+    FTeleportPending := True;
+    FTeleportPos := D3ToCge(E.Origin);
+    FTeleportYaw := E.Angle;
+    WritelnLog('Doom3World', 'Teleport to %s', [E.Name]);
     Exit;
   end;
 
@@ -1189,11 +1294,285 @@ begin
   if not ScriptsPaused then
     UpdateScriptMovers;
   UpdateBindings;
+  UpdateCamera;
+  UpdateLightFades;
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
     FScript.Update(FTime);
+end;
+
+procedure TD3Game.StartCamera(const E: TD3MapEntity);
+var
+  Path: String;
+  Anim: TD3CameraAnim;
+begin
+  FCameraAnim := nil;
+  if E.Value('spawnclass') = 'idCameraAnim' then
+  begin
+    { "anim x" key of the entityDef: the file (x.camera = x.md5camera) }
+    Path := D3CameraAnimPath(E.Value('anim ' + E.Value('anim')));
+    if not FCameraAnims.TryGetValue(Path, Anim) then
+    begin
+      Anim := TD3CameraAnim.Create;
+      if not Anim.LoadFromVfs(Path) then
+      begin
+        WritelnWarning('Doom3World', 'Camera anim "%s" of %s not found', [Path, E.Name]);
+        FreeAndNil(Anim);
+      end;
+      FCameraAnims.Add(Path, Anim);
+    end;
+    if Anim = nil then
+    begin
+      { nothing to show: go on with what follows it }
+      ActivateTargets(E);
+      Exit;
+    end;
+    FCameraAnim := Anim;
+    { the anim is in the map's space, moved by origin - old_origin }
+    if E.HasKey('old_origin') then
+      FCameraOffset := E.Origin - E.VectorValue('old_origin', TVector3.Zero)
+    else
+      FCameraOffset := TVector3.Zero;
+    FCameraCycles := Max(1, E.IntValue('cycle', 1));
+  end;
+  FCameraEntity := E;
+  FCameraStart := FTime;
+  WritelnLog('Doom3World', 'Cinematic camera %s', [E.Name]);
+  if FTime < FSkipUntil then
+  begin
+    { the cinematic goes on with this camera: skip it too }
+    FSkipUntil := FTime + 1;
+    StopCamera;
+  end;
+end;
+
+procedure TD3Game.StopCamera;
+var
+  E: TD3MapEntity;
+begin
+  E := FCameraEntity;
+  FCameraEntity := nil;
+  FCameraAnim := nil;
+  { idCameraAnim::Stop activates its targets }
+  if (E <> nil) and (E.Value('spawnclass') = 'idCameraAnim') then
+  begin
+    WritelnLog('Doom3World', 'Cinematic camera %s done', [E.Name]);
+    ActivateTargets(E);
+  end;
+end;
+
+procedure TD3Game.UpdateCamera;
+begin
+  if (FCameraAnim = nil) or (FTime - FCameraStart < FCameraAnim.Duration) then
+    Exit;
+  Dec(FCameraCycles);
+  if FCameraCycles > 0 then
+    FCameraStart := FCameraStart + FCameraAnim.Duration
+  else
+    StopCamera;
+end;
+
+procedure TD3Game.SkipCinematic;
+begin
+  if FCameraEntity <> nil then
+  begin
+    { like gameLocal.SkipCinematic: the cameras the cinematic starts next
+      (a chain of shots) are skipped too }
+    FSkipUntil := FTime + 1;
+    StopCamera;
+  end;
+end;
+
+function TD3Game.CinematicActive: Boolean;
+begin
+  Result := FCameraEntity <> nil;
+end;
+
+function TD3Game.CinematicName: String;
+begin
+  if FCameraEntity <> nil then
+    Result := FCameraEntity.Name
+  else
+    Result := '';
+end;
+
+procedure TD3Game.CinematicView(out Position, Direction, Up: TVector3; out FovDeg: Single);
+var
+  Origin, Fwd, U: TVector3;
+  M: TMatrix3;
+  Target: TD3MapEntity;
+begin
+  if FCameraAnim <> nil then
+  begin
+    FCameraAnim.Sample(FTime - FCameraStart, Origin, Fwd, U, FovDeg);
+    Origin := Origin + FCameraOffset;
+  end else
+  if FCameraEntity <> nil then
+  begin
+    { idCameraView: from the entity, along its axis or at "cameraTarget" }
+    Origin := FCameraEntity.Origin;
+    M := FCameraEntity.Rotation;
+    Fwd := Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2]);
+    U := Vector3(M.Data[2, 0], M.Data[2, 1], M.Data[2, 2]);
+    Target := FindEntity(FCameraEntity.Value('cameraTarget'));
+    if (Target <> nil) and (Target <> FCameraEntity) and
+       not (Target.Origin - Origin).IsZero then
+    begin
+      Fwd := (Target.Origin - Origin).Normalize;
+      U := Vector3(0, 0, 1);
+    end;
+    FovDeg := FCameraEntity.FloatValue('fov', 90);
+  end else
+  begin
+    Origin := TVector3.Zero;
+    Fwd := Vector3(1, 0, 0);
+    U := Vector3(0, 0, 1);
+    FovDeg := 90;
+  end;
+  Position := D3ToCge(Origin);
+  Direction := D3ToCge(Fwd);
+  Up := D3ToCge(U);
+end;
+
+procedure TD3Game.StartFade(const Target: TVector4; const Seconds: Single);
+begin
+  FFadeFrom := FadeColor;
+  FFadeTo := Target;
+  FFadeStart := FTime;
+  FFadeTime := Max(0, Seconds);
+end;
+
+function TD3Game.FadeColor: TVector4;
+var
+  F: Single;
+begin
+  if FFadeTime <= 0 then
+    Exit(FFadeTo);
+  F := EnsureRange((FTime - FFadeStart) / FFadeTime, 0, 1);
+  Result := FFadeFrom + (FFadeTo - FFadeFrom) * F;
+end;
+
+function TD3Game.TakeTeleport(out FeetPos: TVector3; out YawDeg: Single): Boolean;
+begin
+  Result := FTeleportPending;
+  FeetPos := FTeleportPos;
+  YawDeg := FTeleportYaw;
+  FTeleportPending := False;
+end;
+
+procedure TD3Game.FadeLight(const Light: Integer; const Target, Seconds: Single);
+var
+  F: TD3LightFade;
+  I: Integer;
+begin
+  for I := FLightFades.Count - 1 downto 0 do
+    if FLightFades[I].Light = Light then
+      FLightFades.Delete(I);
+  if Seconds <= 0 then
+  begin
+    FMap.SetLightFade(Light, Target);
+    Exit;
+  end;
+  F.Light := Light;
+  F.From := FMap.Light(Light).Fade;
+  F.Target := Target;
+  F.Start := FTime;
+  F.Duration := Seconds;
+  FLightFades.Add(F);
+end;
+
+procedure TD3Game.UpdateLightFades;
+var
+  I: Integer;
+  F: TD3LightFade;
+  T: Single;
+begin
+  for I := FLightFades.Count - 1 downto 0 do
+  begin
+    F := FLightFades[I];
+    T := EnsureRange((FTime - F.Start) / F.Duration, 0, 1);
+    FMap.SetLightFade(F.Light, F.From + (F.Target - F.From) * T);
+    if T >= 1 then
+      FLightFades.Delete(I);
+  end;
+end;
+
+function TD3Game.ScriptSoundSource(const Handle: Integer): TCastleSoundSource;
+var
+  E: TD3MapEntity;
+  T: TCastleTransform;
+begin
+  if FSoundSources.TryGetValue(Handle, Result) then
+    Exit;
+  Result := nil;
+  E := HandleEntity(Handle);
+  if E = nil then
+    Exit;
+  { the sound follows the entity's scene, or stays at its origin }
+  T := TransformOf(E.Name);
+  if T = nil then
+  begin
+    T := TCastleTransform.Create(nil);
+    T.Translation := D3ToCge(E.Origin);
+    FMap.Add(T);
+    FSoundTransforms.Add(T);
+  end;
+  Result := TCastleSoundSource.Create(T);
+  T.AddBehavior(Result);
+  FSoundSources.Add(Handle, Result);
+end;
+
+function TD3Game.StartScriptSound(const Handle: Integer; const ShaderName: String;
+  const Channel: Integer): Single;
+var
+  Snd: TCastleSound;
+  Source: TCastleSoundSource;
+  Playing: TCastlePlayingSoundSource;
+begin
+  Result := 0;
+  Snd := SoundFromShader(ShaderName);
+  if Snd = nil then
+    Exit;
+  Source := ScriptSoundSource(Handle);
+  if Source = nil then
+    Exit;
+  { a new sound on a channel replaces the old one (channel 0: any) }
+  if Channel <> 0 then
+    StopScriptSound(Handle, Channel);
+  Playing := TCastlePlayingSoundSource.Create(nil);
+  Playing.Sound := Snd;
+  Source.Play(Playing);
+  if Channel <> 0 then
+    FScriptSounds.AddOrSetValue(IntToStr(Handle) + ':' + IntToStr(Channel), Playing)
+  else
+    Playing.FreeOnStop := True;
+  Result := Snd.Duration;
+end;
+
+procedure TD3Game.StopScriptSound(const Handle, Channel: Integer);
+var
+  Key: String;
+  Playing: TCastlePlayingSoundSource;
+begin
+  Key := IntToStr(Handle) + ':' + IntToStr(Channel);
+  if FScriptSounds.TryGetValue(Key, Playing) then
+  begin
+    Playing.Stop;
+    FScriptSounds.Remove(Key);
+  end;
+end;
+
+procedure TD3Game.ClearScriptSounds;
+var
+  Playing: TCastlePlayingSoundSource;
+begin
+  for Playing in FScriptSounds.Values do
+    Playing.Stop;
+  FScriptSounds.Clear;
+  FSoundSources.Clear;
+  FSoundTransforms.Clear;
 end;
 
 function TD3Game.ScriptStatus: String;
@@ -1757,6 +2136,26 @@ begin
     if (N = 'setcvar') or (N = 'getcvar') then
       // cvars are not shared with scripts: getcvar returns ""
     else
+    if N = 'fadeIn' then
+      StartFade(Vector4(Args[0].V, 0), ArgF(1))
+    else
+    if N = 'fadeOut' then
+      StartFade(Vector4(Args[0].V, 1), ArgF(1))
+    else
+    if N = 'fadeTo' then
+      StartFade(Vector4(Args[0].V, ArgF(1)), ArgF(2))
+    else
+    if N = 'setCamera' then
+    begin
+      E := HandleEntity(Args[0].E);
+      if E <> nil then
+        StartCamera(E);
+    end else
+    if N = 'firstPerson' then
+    begin
+      FCameraEntity := nil;
+      FCameraAnim := nil;
+    end else
       Result := False;
     Exit;
   end;
@@ -1849,9 +2248,33 @@ begin
   end else
 
   { lights }
-  if (Light >= 0) and ((N = 'On') or (N = 'Off') or (N = 'fadeInLight') or (N = 'fadeOutLight')) then
-    { fades are instant for now }
-    FMap.SetLightOn(Light, (N = 'On') or (N = 'fadeInLight'))
+  if (Light >= 0) and ((N = 'On') or (N = 'Off')) then
+    FMap.SetLightOn(Light, N = 'On')
+  else
+  if (Light >= 0) and (N = 'fadeOutLight') then
+    FadeLight(Light, 0, ArgF(0))
+  else
+  if (Light >= 0) and (N = 'fadeInLight') then
+  begin
+    { an off light comes on dark, then brightens }
+    if not FMap.Light(Light).StartOn then
+    begin
+      FMap.SetLightFade(Light, 0);
+      FMap.SetLightOn(Light, True);
+    end;
+    FadeLight(Light, 1, ArgF(0));
+  end else
+  if (N = 'startSoundShader') or (N = 'startSound') then
+  begin
+    { startSound names an entity key holding the shader (snd_...) }
+    if N = 'startSound' then
+      Key := E.Value(Args[0].S)
+    else
+      Key := Args[0].S;
+    EventResult := D3FloatValue(StartScriptSound(Target, Key, Round(ArgF(1))));
+  end else
+  if N = 'stopSound' then
+    StopScriptSound(Target, Round(ArgF(0)))
   else
   if (Light >= 0) and (N = 'setColor') then
   begin

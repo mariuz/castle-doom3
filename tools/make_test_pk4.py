@@ -16,6 +16,7 @@ Contents (all made here, MIT licensed like the rest of the project):
   sound/test.sndshd        sound shaders, sound/test/*.wav
   script/doom_main.script  the scriptEvents and defines the test script uses
   maps/testmap.script      the map script: a lift, a turning bar, a trigger call
+  models/md5/cameras/test_flyby.md5camera  a camera anim (two shots) for a cinematic
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -818,6 +819,8 @@ def cm_text():
         out.append(cm_model(m.name, list(quads_of(m)), []))
     # the volume of trigger_once_1 (entity-local, like dmap writes it)
     out.append(cm_model('trigger_once_1', box_quads((-24, -80, -56), (24, 80, 56), TRIGONCE), []))
+    # the volume of trigger_once_cin, which starts the cinematic
+    out.append(cm_model('trigger_once_cin', box_quads((-24, -24, -56), (24, 24, 56), TRIGONCE), []))
     return '\n'.join(out) + '\n'
 
 
@@ -897,6 +900,20 @@ def map_text():
         # fires trigger_relay_1, which switches light_trig on 0.5 s later
         {'classname': 'trigger_once', 'name': 'trigger_once_1', 'model': 'trigger_once_1',
          'origin': '330 0 56', 'target': 'trigger_relay_1', 'call': 'test_trigger_called'},
+        # a cinematic: fade out, a camera anim (test_cam_1), fade in, then the
+        # player is teleported to info_player_teleport_1
+        {'classname': 'trigger_once', 'name': 'trigger_once_cin', 'model': 'trigger_once_cin',
+         'origin': '340 -340 56', 'target': 'trigger_fade_out', 'target1': 'trigger_relay_cin'},
+        {'classname': 'trigger_fade', 'name': 'trigger_fade_out', 'origin': '340 -340 150',
+         'fadeColor': '0 0 0 1', 'fadeTime': '0.3'},
+        {'classname': 'trigger_relay', 'name': 'trigger_relay_cin', 'origin': '360 -340 150',
+         'delay': '0.3', 'target': 'trigger_fade_in', 'target1': 'test_cam_1'},
+        {'classname': 'trigger_fade', 'name': 'trigger_fade_in', 'origin': '380 -340 150',
+         'fadeColor': '0 0 0 0', 'fadeTime': '0.5'},
+        {'classname': 'test_cinematic_cam', 'name': 'test_cam_1', 'origin': '600 0 100',
+         'anim': 'flyby', 'target': 'info_player_teleport_1'},
+        {'classname': 'info_player_teleport', 'name': 'info_player_teleport_1',
+         'origin': '500 200 0', 'angle': '180'},
         # moved by maps/testmap.script
         {'classname': 'func_mover', 'name': 'lift_1', 'model': 'lift_1', 'origin': '380 300 4'},
         {'classname': 'func_mover', 'name': 'bar_1', 'model': 'bar_1', 'origin': '600 -300 150'},
@@ -1191,6 +1208,25 @@ entityDef monster_default {
 	"spawnclass"			"idAI"
 	"health"				"50"
 	"size"					"32 32 72"
+}
+
+// game classes: spawnclass is what the game code looks at
+entityDef test_cinematic_cam {
+	"editor_usage"			"Plays a camera anim (.md5camera) when triggered, then fires its targets."
+	"spawnclass"			"idCameraAnim"
+	"anim flyby"			"models/md5/cameras/test_flyby.camera"
+}
+
+entityDef trigger_fade {
+	"editor_usage"			"Fades the screen to fadeColor over fadeTime seconds."
+	"spawnclass"			"idTrigger_Fade"
+	"fadeColor"				"0 0 0 1"
+	"fadeTime"				"1"
+}
+
+entityDef info_player_teleport {
+	"editor_usage"			"Moves the player here when triggered."
+	"spawnclass"			"idPlayerStart"
 }
 
 entityDef monster_test_blob {
@@ -1575,6 +1611,8 @@ scriptEvent void    accelTime( float time );
 scriptEvent void    decelTime( float time );
 scriptEvent void    move( float angle, float distance );
 scriptEvent void    rotateOnce( vector angles );
+scriptEvent float   startSoundShader( string shaderName, float channel );
+scriptEvent void    fadeOutLight( float time );
 
 #endif
 """
@@ -1592,6 +1630,7 @@ void lift_loop() {
     $lift_1.accelTime( 0.5 );
     $lift_1.decelTime( 0.5 );
     while ( 1 ) {
+        $lift_1.startSoundShader( "test_door", 1 );
         $lift_1.move( UP, 64 );
         sys.waitFor( $lift_1 );
         sys.wait( 1 );
@@ -1609,6 +1648,9 @@ void test_trigger_called() {
     sys.wait( 1 );
     // the relay switched the light on 0.5 s after the trigger: make it green
     $light_trig.setColor( 0, 1, 0 );
+    // and fade it out a second later
+    sys.wait( 1 );
+    $light_trig.fadeOutLight( 1 );
 }
 
 void main() {
@@ -1623,8 +1665,67 @@ void main() {
 """
 
 
+def quat_from_axes(f, u):
+    """Doom 3 md5 quaternion x y z (w = -sqrt(...)) turning +X to f and +Z to u."""
+    l = (u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0])
+    # rotation matrix with columns f, l, u
+    m = [[f[0], l[0], u[0]], [f[1], l[1], u[1]], [f[2], l[2], u[2]]]
+    tr = m[0][0] + m[1][1] + m[2][2]
+    if tr > 0:
+        w = math.sqrt(1 + tr) / 2
+        x = (m[2][1] - m[1][2]) / (4 * w)
+        y = (m[0][2] - m[2][0]) / (4 * w)
+        z = (m[1][0] - m[0][1]) / (4 * w)
+    else:
+        i = max(range(3), key=lambda k: m[k][k])
+        j, k = (i + 1) % 3, (i + 2) % 3
+        r = math.sqrt(1 + m[i][i] - m[j][j] - m[k][k])
+        q = [0, 0, 0]
+        q[i] = r / 2
+        q[j] = (m[j][i] + m[i][j]) / (2 * r)
+        q[k] = (m[k][i] + m[i][k]) / (2 * r)
+        w = (m[k][j] - m[j][k]) / (2 * r)
+        x, y, z = q
+    if w > 0:
+        # stored with a negative w: the same rotation is -q
+        x, y, z = -x, -y, -z
+    return x, y, z
+
+
+def normalize(v):
+    n = math.sqrt(sum(c * c for c in v))
+    return tuple(c / n for c in v)
+
+
+def md5camera_text():
+    """3 s at 24 frames per second: a dolly along room B's south side
+    looking north, then (a cut) a shot from the balcony down at the door."""
+    frames = []
+    for i in range(37):
+        t = i / 36
+        frames.append(((380 + 320 * t, -300, 120), (0, 1, 0), 90))
+    for i in range(36):
+        t = i / 35
+        pos = (800, 300, 200 - 40 * t)
+        frames.append((pos, normalize((450 - pos[0], 0 - pos[1], 40 - pos[2])), 70))
+    out = ['MD5Version 10', 'commandline "generated by tools/make_test_pk4.py"', '',
+           'numFrames %d' % len(frames), 'frameRate 24', 'numCuts 1', '', 'cuts {', '\t37', '}', '',
+           'camera {']
+    for pos, fwd, fov in frames:
+        # up: world up made perpendicular to the view direction
+        up = (0, 0, 1)
+        d = sum(a * b for a, b in zip(up, fwd))
+        up = normalize(tuple(a - d * b for a, b in zip(up, fwd)))
+        q = quat_from_axes(fwd, up)
+        out.append('\t( %s ) ( %s ) %s' % (' '.join(fmt(c) for c in pos),
+                                           ' '.join('%.9f' % c for c in q), fmt(fov)))
+    out.append('}')
+    return '\n'.join(out) + '\n'
+
+
 def main():
     add('script/doom_main.script', DOOM_MAIN_SCRIPT)
+    add('models/md5/cameras/test_flyby.md5camera', md5camera_text())
     add('maps/testmap.script', MAP_SCRIPT)
     floor_textures()
     wall_textures()

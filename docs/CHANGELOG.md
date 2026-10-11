@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Cinematics** (roadmap 5c): camera anims (`.md5camera`, `Doom3Camera`) with cuts and the `old_origin` offset take over the view and fire their targets at the end; `func_cameraview`; `trigger_fade` and the scripts' screen fades; `info_player_teleport`; _Escape_ / `skipcinematic` skips a cinematic and the shots it chains to. Mars City 1's intro plays its cameras (checked against dhewm3: the first one looks at the console screen).
+- Scripts: lights fade in and out over time, `startSoundShader` / `startSound` / `stopSound` play sounds on entities.
+- Test level: `trigger_once_cin` fades out, plays a two-shot camera and teleports the player; the lift plays a sound, `light_trig` fades out; 404 checks; CI runs the cinematic.
 - **Scripts** (roadmap 5c): a compiler and virtual machine for Doom 3's script language (`Doom3Script`). The demo's whole program (`script/doom_main.script`, 80 files, 1713 functions) compiles in about 0.2 s; the map's `main`, worldspawn's and triggers' `call` keys run as script threads that wait for time, frames, movers and other threads. Events: triggering, lights on / off and colors, doors (open, close, lock), hide / show / remove, entity keys and targets, `bind` / `unbind`, and idMover's moves and rotations with acceleration, so Mars City Underground's machines (cranes, arms, howitzers, pistons) move. Unsupported events are logged once.
 - Console: `scripts` (threads, moving entities), `g_stopTime` (freeze them).
 - Test level: `maps/testmap.script` moves `lift_1` up and down, turns `bar_1`, and `trigger_once_1` calls a script function; 376 checks.

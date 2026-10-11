@@ -28,6 +28,8 @@ type
     function IntValue(const Key: String; const Default: Integer = 0): Integer;
     function BoolValue(const Key: String; const Default: Boolean = False): Boolean;
     function VectorValue(const Key: String; const Default: TVector3): TVector3;
+    { "x y z w" }
+    function Vector4Value(const Key: String; const Default: TVector4): TVector4;
     function ClassName_: String;
     function Name: String;
     { "origin" in Doom 3 coordinates }
@@ -214,6 +216,17 @@ end;
 function TD3MapEntity.VectorValue(const Key: String; const Default: TVector3): TVector3;
 begin
   Result := ParseVector3(Value(Key), Default);
+end;
+
+function TD3MapEntity.Vector4Value(const Key: String; const Default: TVector4): TVector4;
+var
+  Parts: TStringArray;
+  I: Integer;
+begin
+  Result := Default;
+  Parts := Trim(Value(Key)).Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+  for I := 0 to Min(3, High(Parts)) do
+    Result.Data[I] := D3StrToFloat(Parts[I], Default.Data[I]);
 end;
 
 function TD3MapEntity.ClassName_: String;

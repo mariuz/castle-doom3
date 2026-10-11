@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script,
+  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -86,7 +86,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(50, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(51, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -114,7 +114,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(2, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(5, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(1, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(30, MapFile.Entities.Count, 'entity count');
+    CheckEquals(36, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -416,7 +416,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(11, Cm.ModelCount, 'cm models (world + 9 brush entities + 1 trigger)');
+    CheckEquals(12, Cm.ModelCount, 'cm models (world + 9 brush entities + 2 triggers)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -1165,8 +1165,8 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for triggers');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(1, Game.Triggers.Count, 'one trigger volume (trigger_once_1)');
-    if Game.Triggers.Count <> 1 then
+    CheckEquals(2, Game.Triggers.Count, 'two trigger volumes (trigger_once_1, trigger_once_cin)');
+    if Game.Triggers.Count <> 2 then
       Exit;
     { the volume comes from the .cm model at the entity origin (330 0 56):
       x 306..354, Doom 3 z 0..112 = CGE y }
@@ -1478,10 +1478,88 @@ begin
     Check(Map.Light(LightTrig).StartOn, 'the relay switched light_trig on');
     CheckNear(0, Map.Light(LightTrig).Parms.Parms[0], 'setColor: red 0');
     CheckNear(1, Map.Light(LightTrig).Parms.Parms[1], 'setColor: green 1');
-    for I := 1 to 17 do
+    for I := 1 to 20 do
       Game.Update(0.1, Away);
+    CheckNear(0, Map.Light(LightTrig).Fade, 'fadeOutLight( 1 ) faded the light out');
     CheckNear(1, Game.Script.GlobalValue('lift_trips').F, 'the lift went up and down once');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift back down');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+procedure TestCinematics;
+var
+  Anim: TD3CameraAnim;
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Origin, Fwd, Up, P, D, U, Feet: TVector3;
+  Fov, Yaw: Single;
+  I: Integer;
+  Away: TVector3;
+begin
+  Anim := TD3CameraAnim.Create;
+  try
+    Check(Anim.LoadFromVfs(D3CameraAnimPath('models/md5/cameras/test_flyby.camera')),
+      'load test_flyby.md5camera (decls say .camera)');
+    CheckEquals(73, Length(Anim.Frames), 'camera frames');
+    CheckEquals(1, Length(Anim.Cuts), 'camera cuts');
+    { 73 frames, one of them skipped at the cut: 71 frame steps at 24 fps }
+    CheckNear(71 / 24, Anim.Duration, 'camera anim duration');
+    Anim.Sample(0, Origin, Fwd, Up, Fov);
+    CheckNear(380, Origin.X, 'first frame origin x');
+    CheckNear(1, Fwd.Y, 'first shot looks north (+Y)');
+    CheckNear(1, Up.Z, 'first shot up is +Z');
+    CheckNear(90, Fov, 'first shot fov');
+    { before the cut, the first shot's last frame (no blend into the next shot) }
+    Anim.Sample(36.5 / 24, Origin, Fwd, Up, Fov);
+    CheckNear(700, Origin.X, 'just before the cut: the first shot''s end');
+    { after the cut (Doom 3 skips frame 37): the balcony shot }
+    Anim.Sample(37.5 / 24, Origin, Fwd, Up, Fov);
+    CheckNear(800, Origin.X, 'after the cut: the second shot''s origin');
+    CheckNear(70, Fov, 'after the cut: the second shot''s fov');
+    Check(Fwd.X < 0, 'second shot looks back west');
+  finally
+    Anim.Free;
+  end;
+
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for cinematics');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    { walk into trigger_once_cin: fade to black in 0.3 s, then the camera }
+    Game.Update(0.1, D3ToCge(Vector3(340, -340, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Check(not Game.CinematicActive, 'no camera before the relay''s delay');
+    for I := 1 to 3 do
+      Game.Update(0.1, Away);
+    CheckNear(1, Game.FadeColor.W, 'trigger_fade faded to black', 0.05);
+    Game.Update(0.1, Away);
+    Check(Game.CinematicActive, 'the relay started the camera');
+    CheckEquals('test_cam_1', Game.CinematicName, 'cinematic camera name');
+    Game.CinematicView(P, D, U, Fov);
+    CheckNear(380, CgeToD3(P).X, 'cinematic view at the anim''s first frames', 30);
+    CheckNear(-1, D.Z, 'cinematic view looks north (CGE -Z)', 0.01);
+    Check(Game.FadeColor.W < 1, 'fading back in');
+    for I := 1 to 6 do
+      Game.Update(0.1, Away);
+    CheckNear(0, Game.FadeColor.W, 'faded in after 0.5 s');
+    { the anim lasts 71 / 24 s, then the camera fires info_player_teleport_1 }
+    for I := 1 to 30 do
+      Game.Update(0.1, Away);
+    Check(not Game.CinematicActive, 'the camera stopped at the anim''s end');
+    Check(Game.TakeTeleport(Feet, Yaw), 'the camera''s target teleports the player');
+    CheckNear(500, CgeToD3(Feet).X, 'teleport x');
+    CheckNear(200, CgeToD3(Feet).Y, 'teleport y');
+    CheckNear(180, Yaw, 'teleport yaw');
+    Check(not Game.TakeTeleport(Feet, Yaw), 'a teleport is taken once');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
@@ -1614,6 +1692,7 @@ begin
   TestMovers;
   TestScriptVM;
   TestMapScripts;
+  TestCinematics;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

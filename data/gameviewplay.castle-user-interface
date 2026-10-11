@@ -114,6 +114,19 @@
       ]
     },
     {
+      "$$ClassName" : "TCastleRectangleControl",
+      "ColorPersistent" : {
+        "$$ClassName" : "TCastleColorPersistent",
+        "Alpha" : 0.0000000000000000E+000,
+        "Blue" : 0.0000000000000000E+000,
+        "Green" : 0.0000000000000000E+000,
+        "Red" : 0.0000000000000000E+000
+      },
+      "Exists" : false,
+      "FullSize" : true,
+      "Name" : "FadeRect"
+    },
+    {
       "$$ClassName" : "TDoom3Hud",
       "FullSize" : true,
       "Name" : "Hud"
