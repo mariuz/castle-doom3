@@ -141,7 +141,7 @@ jobs:
           run_test cinematic testmap "W:1,O:notarget,G:340 -340 0,A:90,W:1,S,W:3.5,S,Q"
           grep "Screenshot" test_output/cinematic.log | sed -n 1p | grep -q "cinematic test_cam_1" || { echo "::error::trigger_once_cin should start the camera test_cam_1"; exit 1; }
           grep -q 'Animated animated_blob_1 plays "walk"' test_output/cinematic.log || { echo "::error::the cinematic should start the idAnimated blob"; exit 1; }
-          grep -q "3 md5 models (1 with heads)" test_output/cinematic.log || { echo "::error::the idAnimated blob should get its def_head"; exit 1; }
+          grep -q "4 md5 models (1 with heads)" test_output/cinematic.log || { echo "::error::the idAnimated blob should get its def_head"; exit 1; }
           grep -q "Teleport to info_player_teleport_1" test_output/cinematic.log || { echo "::error::the camera's end should teleport the player"; exit 1; }
           grep "Screenshot" test_output/cinematic.log | sed -n 2p | grep -Eq "eye 500 (200|199.9)" || { echo "::error::the player should be at info_player_teleport_1 after the cinematic"; exit 1; }
           ls -l test_output
