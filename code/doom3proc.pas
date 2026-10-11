@@ -49,6 +49,8 @@ type
     Children: array [0..1] of Int32;
   end;
 
+  TD3AreaList = array of Integer;
+
   TD3ProcFile = class
   strict private
     FModels: specialize TObjectList<TD3ProcModel>;
@@ -70,6 +72,10 @@ type
     function FindModel(const Name: String): TD3ProcModel;
     { Area containing a point (Doom 3 coordinates), -1 in the void. }
     function PointInArea(const P: TVector3): Integer;
+    { Areas touched by a box (Doom 3 coordinates), sorted: the box pushed
+      down the BSP tree, like idRenderWorld links a light or an entity to
+      the areas its bounds touch. }
+    function BoxAreas(const BoxMin, BoxMax: TVector3): TD3AreaList;
   end;
 
 implementation
@@ -267,6 +273,62 @@ function TD3ProcFile.FindModel(const Name: String): TD3ProcModel;
 begin
   if not FModelIndex.TryGetValue(LowerCase(Name), Result) then
     Result := nil;
+end;
+
+function TD3ProcFile.BoxAreas(const BoxMin, BoxMax: TVector3): TD3AreaList;
+var
+  Found: array of Boolean;
+  Stack: array of Integer;
+  Center, Half: TVector3;
+  N, Child, Side, I, Steps: Integer;
+  D, R: Single;
+  Plane: TVector4;
+begin
+  Result := nil;
+  if NumAreas <= 0 then
+    Exit;
+  if Length(Nodes) = 0 then
+  begin
+    { no BSP: a single area }
+    SetLength(Result, 1);
+    Result[0] := 0;
+    Exit;
+  end;
+  SetLength(Found, NumAreas);
+  Center := (BoxMin + BoxMax) * 0.5;
+  Half := (BoxMax - BoxMin) * 0.5;
+  Stack := [0];
+  Steps := 0;
+  while (Length(Stack) > 0) and (Steps < 1000000) do
+  begin
+    Inc(Steps);
+    N := Stack[High(Stack)];
+    SetLength(Stack, Length(Stack) - 1);
+    Plane := Nodes[N].Plane;
+    D := Plane.X * Center.X + Plane.Y * Center.Y + Plane.Z * Center.Z + Plane.W;
+    R := Abs(Plane.X) * Half.X + Abs(Plane.Y) * Half.Y + Abs(Plane.Z) * Half.Z;
+    for Side := 0 to 1 do
+    begin
+      { child 0 is in front (D > 0, see PointInArea) }
+      if (Side = 0) and (D <= -R) then
+        Continue;
+      if (Side = 1) and (D > R) then
+        Continue;
+      Child := Nodes[N].Children[Side];
+      if Child = 0 then
+        Continue; // solid
+      if Child < 0 then
+      begin
+        if -1 - Child < NumAreas then
+          Found[-1 - Child] := True;
+      end else
+      if Child < Length(Nodes) then
+        Stack := Concat(Stack, [Child]);
+    end;
+  end;
+  for I := 0 to NumAreas - 1 do
+    if Found[I] then
+      Result := Concat(Result, [I]);
 end;
 
 function TD3ProcFile.PointInArea(const P: TVector3): Integer;

@@ -33,7 +33,17 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
     | `game/demo_mc_underground` | 58 | 125,706 | 614 | 720 | 490 | 81 | 31 | 55 s |
     | `game/demo_mars_city2` | 104 | 105,567 | 639 | 569 | 654 | 116 | 58 | 64 s |
 
-    To fix next: scenes are much darker than in Doom 3 (light intensity, ambient lights, the light volumes on retail light shaders); frame rate (12 to below 1 FPS looking around Mars City: hundreds of lights, per-light effects, shadow casters); load time; missing sound shader `guisounds_error`; monsters attack at once (no scripted AI yet). Then the full game's maps with `smoke_maps.ps1`.
+    Compared with dhewm3 on the same data and view (`game/demo_mc_underground`'s elevator), brightness is within ~5%: the light math is right. Mars City 1's start is dark because its main lights are `start_off`, switched on by the intro's scripts and triggers (and dhewm3 shows a cinematic there). Done: lights and entities belong to the areas their bounds touch through the BSP (not only their origin's area; lights sit inside their fixtures), monsters honor `hide` (hidden until triggered), `trigger` (dormant) and the skill flags (`not_easy` / `not_medium` / `not_hard`, medium by default), undefined `textures/common/entitygui*` materials are the entity's GUI screens.
+
+    To fix next:
+    - **Triggers and scripts** (item 5): `start_off` lights turned on by `trigger_relay`s, hidden monsters shown, the intro's script; until then many areas are darker than in the game.
+    - **Shader compiles**: each light has its own Effect (light volume, uniform named after the light), so every set of lights on a shape is a new GLSL program: the first view of an area stalls (12 to below 1 FPS while turning in a fresh run), later runs use the driver's cache. Share the effect code between lights (uniform per light slot) or prepare shaders at load. CGE change J below is needed for correctness first.
+    - **Frame rate** in steady state is GPU-bound and shadow volumes cost about half (`r_shadows 0`: 22 -> 43 FPS at Mars City's start).
+    - **String tables**: GUIs show `#str_04006`: load `strings/*.lang`.
+    - The elevator's back wall in `demo_mc_underground` is black (lit in dhewm3), cause not found yet (`ent func_static_4843`: built and visible; its GUI renders).
+    - Load time (about a minute per map), missing sound shader `guisounds_error`.
+
+    Then the full game's maps with `smoke_maps.ps1`.
 2. **Shadows from several lights** (needs CGE changes A or B below).
 3. **Exact material stages** (partly needs CGE changes D and E below): `vertexColor`, `mirrorRenderMap`, real reflections (`texgen reflect` with the cube map) and heat haze (`fragmentProgram heatHaze`) instead of the glass tint, `deform tube` / `flare` / `turbulent`, stage `if` conditions, `polygonOffset` decals.
 4. **Interactive GUIs**: the GUI script (`onTime` transitions, `onAction`, `set` / `transition` / `resetTime` / `runScript`), the cursor where the player looks, Doom 3's fonts, re-rendering when the state changes.
@@ -98,6 +108,7 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 | G | Shadow casters that aren't drawn | Not started | Removes hidden caster geometry |
 | H | Light attenuation to zero at the radius | Not started | Exact light falloff |
 | I | Light passes added in linear color space | Not started (found while doing A) | A with PBR materials |
+| J | Light effects in the shader code hash (bug) | Fix committed locally (CGE branch `light-effects-hash`), PR not opened | Correct light volumes with many lights |
 
 A, B, C, D and F were checked against the CGE source; the others come from building this port.
 
@@ -133,5 +144,7 @@ Follow-up, colored light images: `PLUG_light_scale` multiplies the light by a fl
 **G. Casters that aren't drawn.** Shadow volumes are rendered only for visible scenes and shapes. Doom 3 has shadow-only geometry (`shadowModel`s in `.proc`, the closed solids of the map). Needed: a scene or shape that casts shadow volumes without being drawn (for example `Appearance.shadowCaster` with a "render" flag, or a `TCastleScene.Visible := False` that still casts). Workaround: the `.cm` brush casters are real black geometry 1 unit inside the walls, and md5 joint boxes are drawn inside the body.
 
 **H. Light attenuation to zero at the radius.** CGE cuts a light off hard at its `radius` and its attenuation never reaches zero, so a Doom 3 light box needs a radius twice its size and a low attenuation to hide the edge (`BuildLights`). Needed: an optional smooth falloff to zero at the radius (as glTF `KHR_lights_punctual` range).
+
+**J. Light effects in the shader code hash (a CGE bug).** Effects on materials, groups and textures are added to the shader program's hash by node reference (`TShaderCodeHash.AddEffects`), because effects with the same code can have different uniform values, set when the program is linked. Effects on lights are not (`TLightShader.Prepare`): shapes lit by different lights of the same type share one program, with the first shape's light effects and their uniforms. With this port's per-light volume effects, most shapes of a retail map used other lights' volumes. The fix adds `Hash.AddEffects(Node.FdEffects)` in `TLightShader.Prepare` (a few lines, committed on a local branch of the CGE fork); with it Mars City 1's start gets a little brighter (mean luma 11.4 -> 13.7). It means more shader programs (one per set of light effects), so the shader compile item above matters more.
 
 **I. Light passes added in linear color space.** The additive passes of A blend in the color buffer after the shader has applied gamma correction or tone mapping, and gamma(a) + gamma(b) > gamma(a + b): shapes rendered with gamma correction (`ColorSpace = csLinear`, or the default `csLinearWhenPhysicalMaterial` with PBR materials) come out too bright where several lights overlap. Needed: render the shadowed passes to a linear framebuffer (sRGB framebuffer with `GL_FRAMEBUFFER_SRGB`, or a floating point one) and convert once at the end. This port uses Phong materials without gamma correction, so A is exact here.

@@ -143,6 +143,9 @@ begin
   M := Decls.Material('textures/does/not_exist');
   Check(not M.Defined, 'undeclared material is implicit');
   CheckEquals('textures/does/not_exist', M.DiffuseImage, 'implicit material uses its name as image');
+  M := Decls.Material('textures/common/entitygui2');
+  CheckEquals('entity2', M.GuiSurf, 'undefined entitygui2 is the entity''s gui2 screen');
+  CheckEquals('', M.DiffuseImage, 'undefined entitygui2 has no image');
 
   Def := Decls.EntityDef('monster_test_blob');
   Check(Def <> nil, 'entityDef monster_test_blob');

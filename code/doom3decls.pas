@@ -974,7 +974,17 @@ begin
     Result.Name := Key;
     Result.AlphaTest := -1;
     Result.StageColor := Vector4(1, 1, 1, 1);
-    Result.DiffuseImage := Key;
+    { The generic entity GUI screens ("guiSurf entity" .. "entity3" in
+      Doom 3's materials/common.mtr), when the data doesn't define them
+      (the demo): show the entity's gui / gui2 / gui3 instead of a missing
+      image. }
+    if Key = 'textures/common/entitygui' then
+      Result.GuiSurf := 'entity'
+    else
+    if (Key = 'textures/common/entitygui2') or (Key = 'textures/common/entitygui3') then
+      Result.GuiSurf := 'entity' + Copy(Key, Length(Key), 1)
+    else
+      Result.DiffuseImage := Key;
   end;
   FMaterials.Add(Key, Result);
 end;

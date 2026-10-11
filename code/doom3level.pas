@@ -49,6 +49,8 @@ type
     Holder: TCastleTransform;
     Instance: TD3Md5Instance;
     EntityDef: TStringList; { owned by Decls, may be nil }
+    { "hide": built but not shown until triggered (idAI / idAnimated) }
+    Hidden: Boolean;
     destructor Destroy; override;
   end;
 
@@ -74,8 +76,11 @@ type
     Matrix: TMatrix4;
     Projected: Boolean;
     Shape: TD3LightShape;
-    { Area of the light's origin (-1 outside) }
+    { Area of the light's origin (-1 outside: lights often sit inside
+      their fixture; then the first area of Areas) }
     OriginArea: Integer;
+    { Bounding box of the light volume (Doom 3 coordinates) }
+    VolumeMin, VolumeMax: TVector3;
     { "noshadows": never the shadow casting light }
     NoShadows: Boolean;
   end;
@@ -194,6 +199,11 @@ type
     { Seconds since the map was loaded (the "time" of material
       expressions). }
     property Time: Single read FTime;
+    { Doom 3's skill level (g_skill): 0 easy, 1 medium, 2 hard, 3 nightmare. }
+    class var Skill: Integer;
+    { Not spawned at the current skill (idGameLocal::InhibitEntitySpawn:
+      "not_easy", "not_medium", "not_hard"; nightmare counts as hard). }
+    class function EntityInhibited(const E: TD3MapEntity): Boolean;
     { Area of a CGE point, -1 outside. }
     function AreaAt(const P: TVector3): Integer;
   published
@@ -515,6 +525,52 @@ begin
   end;
 end;
 
+{ Rotate a Doom 3 vector by an entity rotation (rows: the rotated axes). }
+function RotateD3(const M: TMatrix3; const V: TVector3): TVector3;
+begin
+  Result := Vector3(
+    V.X * M.Data[0, 0] + V.Y * M.Data[1, 0] + V.Z * M.Data[2, 0],
+    V.X * M.Data[0, 1] + V.Y * M.Data[1, 1] + V.Z * M.Data[2, 1],
+    V.X * M.Data[0, 2] + V.Y * M.Data[1, 2] + V.Z * M.Data[2, 2]);
+end;
+
+{ Bounding box of a light volume in Doom 3 coordinates: the rotated
+  light_radius box around the light center, or the pyramid of a
+  projected light (origin, target +- right +- up). }
+procedure LightVolumeBox(const Origin: TVector3; const Rot: TMatrix3; const Projected: Boolean;
+  const LightCenter, LightRadius, Target, Up, Right: TVector3; out BoxMin, BoxMax: TVector3);
+var
+  Corners: array [0..4] of TVector3;
+  Half, C: TVector3;
+  I, J: Integer;
+begin
+  if Projected then
+  begin
+    Corners[0] := Origin;
+    for I := 0 to 3 do
+      Corners[I + 1] := Origin + RotateD3(Rot,
+        Target + Right * (2 * (I and 1) - 1) + Up * (2 * ((I shr 1) and 1) - 1));
+    BoxMin := Corners[0];
+    BoxMax := Corners[0];
+    for I := 1 to 4 do
+      for J := 0 to 2 do
+      begin
+        BoxMin.Data[J] := Min(BoxMin.Data[J], Corners[I].Data[J]);
+        BoxMax.Data[J] := Max(BoxMax.Data[J], Corners[I].Data[J]);
+      end;
+  end else
+  begin
+    C := Origin + RotateD3(Rot, LightCenter);
+    for J := 0 to 2 do
+      Half.Data[J] :=
+        Abs(Rot.Data[0, J]) * LightRadius.X +
+        Abs(Rot.Data[1, J]) * LightRadius.Y +
+        Abs(Rot.Data[2, J]) * LightRadius.Z;
+    BoxMin := C - Half;
+    BoxMax := C + Half;
+  end;
+end;
+
 procedure TDoom3Map.BuildLights(const Root: TX3DRootNode);
 var
   E: TD3MapEntity;
@@ -644,6 +700,8 @@ begin
     else
       FLights[N].Location := TSpotLightNode(Node).Location;
     FLights[N].Areas := nil;
+    LightVolumeBox(E.Origin, Rot, Projected, LightCenter, LightRadius, TargetVec, UpVec, RightVec,
+      FLights[N].VolumeMin, FLights[N].VolumeMax);
     { shader parameters: _color, shaderParm0..11 }
     FLights[N].Parms := DefaultExprContext;
     FLights[N].Parms.Parms[0] := LightColor.X;
@@ -709,7 +767,8 @@ var
   I, Area: Integer;
   M: TD3ProcModel;
   Surf: TD3ProcSurface;
-  Sprites: Integer;
+  Sprites, J: Integer;
+  BspAreas: TD3AreaList;
 begin
   { one solid and one non-solid scene per area, so portal visibility can
     hide areas; shapes stay per material inside them }
@@ -773,9 +832,15 @@ begin
   FPortals := TD3PortalVisibility.Create(FProc);
   for I := 0 to High(FLights) do
   begin
+    { like Doom 3, a light belongs to all areas its volume touches (its
+      origin is often inside the fixture, outside any area) }
+    BspAreas := FProc.BoxAreas(FLights[I].VolumeMin, FLights[I].VolumeMax);
+    SetLength(FLights[I].Areas, Length(BspAreas));
+    for J := 0 to High(BspAreas) do
+      FLights[I].Areas[J] := BspAreas[J];
     FLights[I].OriginArea := AreaAt(FLights[I].Location);
-    FLights[I].Areas := FPortals.AreasWithinRadius(FLights[I].Location, FLights[I].Radius,
-      FLights[I].OriginArea);
+    if (FLights[I].OriginArea < 0) and (Length(FLights[I].Areas) > 0) then
+      FLights[I].OriginArea := FLights[I].Areas[0];
   end;
 end;
 
@@ -836,32 +901,29 @@ end;
 function BoxAreas(const Map: TDoom3Map; const Box: TBox3D): TD3IntArray;
 var
   I, A, K, P2, Side: Integer;
-  P: TVector3;
+  D3Min, D3Max, C0, C1: TVector3;
+  BspAreas: TD3AreaList;
   Known: Boolean;
 begin
   Result := nil;
   if Box.IsEmpty then
     Exit;
-  for I := 0 to 8 do
+  { all areas the box touches (the box pushed down the BSP tree), in Doom 3
+    coordinates: a model mostly inside a wall (an elevator in its shaft)
+    may have few of its points in an area }
+  C0 := CgeToD3(Box.Data[0]);
+  C1 := CgeToD3(Box.Data[1]);
+  for I := 0 to 2 do
   begin
-    if I = 8 then
-      P := Box.Center
-    else
-      P := Vector3(
-        Box.Data[I and 1].X,
-        Box.Data[(I shr 1) and 1].Y,
-        Box.Data[(I shr 2) and 1].Z);
-    { corners can sit exactly on walls: pull them in a little }
-    P := P + (Box.Center - P) * 0.05;
-    A := Map.AreaAt(P);
-    if A < 0 then
-      Continue;
-    Known := False;
-    for K := 0 to High(Result) do
-      if Result[K] = A then
-        Known := True;
-    if not Known then
-      Result := Concat(Result, [A]);
+    D3Min.Data[I] := Min(C0.Data[I], C1.Data[I]);
+    D3Max.Data[I] := Max(C0.Data[I], C1.Data[I]);
+  end;
+  if Map.Proc <> nil then
+  begin
+    BspAreas := Map.Proc.BoxAreas(D3Min, D3Max);
+    SetLength(Result, Length(BspAreas));
+    for I := 0 to High(BspAreas) do
+      Result[I] := BspAreas[I];
   end;
   { an entity in a portal (a door) belongs to the areas on both sides }
   if Map.Portals <> nil then
@@ -1112,6 +1174,8 @@ var
 begin
   for E in FMapFile.Entities do
   begin
+    if EntityInhibited(E) then
+      Continue;
     if SameText(E.ClassName_, 'worldspawn') then
       Continue;
     { brush entities: the .proc model is named like the entity (or its
@@ -1184,6 +1248,8 @@ var
 begin
   for E in FMapFile.Entities do
   begin
+    if EntityInhibited(E) then
+      Continue;
     if SameText(E.ClassName_, 'worldspawn') then
       Continue;
     Def := Decls.EntityDef(E.ClassName_);
@@ -1237,6 +1303,8 @@ var
 begin
   for E in FMapFile.Entities do
   begin
+    if EntityInhibited(E) then
+      Continue;
     Def := Decls.EntityDef(E.ClassName_);
     ModelName := E.Value('model');
     if (ModelName = '') and (Def <> nil) then
@@ -1284,8 +1352,21 @@ begin
     Rot := E.Rotation;
     SetD3Rotation(ME.Holder, Rot);
     ME.Holder.Add(ME.Instance.Scene);
+    { "hide" "1" (or "2"): hidden until a trigger shows it (there is no
+      trigger system yet, so it stays hidden) }
+    ME.Hidden := E.IntValue('hide', 0) <> 0;
+    ME.Holder.Exists := not ME.Hidden;
     Add(ME.Holder);
     FModels.Add(ME);
+  end;
+end;
+
+class function TDoom3Map.EntityInhibited(const E: TD3MapEntity): Boolean;
+begin
+  case Skill of
+    0: Result := E.BoolValue('not_easy');
+    1: Result := E.BoolValue('not_medium');
+    else Result := E.BoolValue('not_hard');
   end;
 end;
 
@@ -1459,4 +1540,5 @@ end;
 
 initialization
   RegisterSerializableComponent(TDoom3Map, 'Doom 3 Map');
+  TDoom3Map.Skill := 1; // Doom 3's default g_skill: medium
 end.

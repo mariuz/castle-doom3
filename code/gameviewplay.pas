@@ -68,7 +68,7 @@ implementation
 uses
   Math,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
-  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, GameViewMenu;
+  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
 begin
@@ -198,13 +198,15 @@ var
   I: Integer;
   L: TD3LightInfo;
   S: String;
+  Gui: TD3Gui;
+  GuiImage: TCastleImage;
 begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>,');
-    Console.Print('portals, lights, quit');
+    Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -294,6 +296,57 @@ begin
     end else
       Console.Print(Format('r_md5ShadowTris %d (bigger md5 meshes cast with joint boxes)',
         [MaxShadowCastingTriangles]));
+  end else
+  if Cmd = 'guidump' then
+  begin
+    { draw a GUI file (no state) and save it next to the screenshots }
+    Gui := TD3Gui.Create;
+    try
+      if Gui.LoadFromVfs(Args) then
+      begin
+        GuiImage := RenderGui(Gui, nil);
+        try
+          S := Iff(AutoTestPrefix <> '', AutoTestPrefix, 'castle-doom3') + '_gui.png';
+          SaveImage(GuiImage, S);
+          Console.Print('Saved ' + S);
+          WritelnLog('GuiDump', '%s (%d windows) -> %s', [Args, Gui.WindowCount, S]);
+        finally FreeAndNil(GuiImage) end;
+      end else
+        Console.Print('Cannot load GUI ' + Args);
+    finally FreeAndNil(Gui) end;
+  end else
+  if Cmd = 'ent' then
+  begin
+    { a built entity (brush entity or static model): scene state }
+    S := 'not built (no brush or static model entity named ' + Args + ')';
+    for I := 0 to Map.Brushes.Count - 1 do
+      if SameText(Map.Brushes[I].Entity.Name, Args) then
+      begin
+        S := Format('%s %s exists=%s visible=%s areas=%d box=%s', [Args, Map.Brushes[I].Entity.ClassName_,
+          BoolToStr(Map.Brushes[I].Scene.Exists, '1', '0'), BoolToStr(Map.Brushes[I].Scene.Visible, '1', '0'),
+          Length(Map.Brushes[I].Areas), Map.Brushes[I].Scene.WorldBoundingBox.ToString]);
+        Break;
+      end;
+    Console.Print(S);
+    WritelnLog('Ent', S);
+  end else
+  if Cmd = 'lightsat' then
+  begin
+    { lights reaching the player: Doom 3 light texture coordinates (s, t, q)
+      and strength at the floor below the eye and at the eye }
+    P := Camera.Translation - Vector3(0, PlayerEyeHeight - 1, 0);
+    for I := 0 to Map.LightCount - 1 do
+    begin
+      L := Map.Light(I);
+      if (Map.LightStrengthAt(I, P) > 0) or (Map.LightStrengthAt(I, Camera.Translation) > 0) then
+      begin
+        S := Format('%s %s on=%s floor %.2f eye %.2f stq %s', [L.Entity.Name, L.Entity.Value('texture', '(default)'),
+          BoolToStr(L.Node.IsOn, '1', '0'), Map.LightStrengthAt(I, P), Map.LightStrengthAt(I, Camera.Translation),
+          LightTexCoord(L.Matrix, P).ToString]);
+        Console.Print(S);
+        WritelnLog('LightsAt', S);
+      end;
+    end;
   end else
   if Cmd = 'lights' then
   begin

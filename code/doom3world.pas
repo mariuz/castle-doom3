@@ -52,6 +52,9 @@ type
     Yaw: Single;
     AttackTimer, StateTime, PainTime: Single;
     Radius, Height: Single;
+    { "trigger" "1": doesn't wake up on sight, only when triggered (no
+      triggers yet) or hurt }
+    Dormant: Boolean;
     function Position: TVector3;
     function Center: TVector3;
   end;
@@ -391,6 +394,7 @@ var
   B: TD3BrushEntity;
   ME: TD3ModelEntity;
   E: TD3MapEntity;
+  Hidden, Dormant: Integer;
   Mon: TD3Monster;
   Cls: String;
 begin
@@ -401,7 +405,7 @@ begin
   for ME in FMap.Models do
   begin
     Cls := LowerCase(ME.Entity.ClassName_);
-    if (Copy(Cls, 1, 8) <> 'monster_') then
+    if (Copy(Cls, 1, 8) <> 'monster_') or ME.Hidden then
       Continue;
     Mon := TD3Monster.Create;
     Mon.Model := ME;
@@ -412,6 +416,7 @@ begin
     Mon.Radius := 20;
     Mon.Height := 72;
     Mon.Yaw := ME.Entity.Angle;
+    Mon.Dormant := ME.Entity.BoolValue('trigger');
     if ME.Entity.Value('anim') <> '' then
       ME.Instance.PlayAnim(ME.Entity.Value('anim'));
     FMonsters.Add(Mon);
@@ -420,8 +425,16 @@ begin
     for E in FMap.MapFile.Entities do
       if SameText(E.ClassName_, 'speaker') then
         SpawnSpeaker(E);
-  WritelnLog('Doom3World', 'Spawned %d movers, %d monsters, %d speakers',
-    [FMovers.Count, FMonsters.Count, FSpeakers.Count]);
+  Hidden := 0;
+  Dormant := 0;
+  for ME in FMap.Models do
+    if ME.Hidden and (Copy(LowerCase(ME.Entity.ClassName_), 1, 8) = 'monster_') then
+      Inc(Hidden);
+  for Mon in FMonsters do
+    if Mon.Dormant then
+      Inc(Dormant);
+  WritelnLog('Doom3World', 'Spawned %d movers, %d monsters (%d dormant until triggered, %d hidden), %d speakers',
+    [FMovers.Count, FMonsters.Count, Dormant, Hidden, FSpeakers.Count]);
 end;
 
 function TD3Game.CanSee(const A, B: TVector3): Boolean;
@@ -456,7 +469,7 @@ begin
 
   case M.State of
     msIdle:
-      if (not NoTarget) and not PlayerDead and (Dist < MonsterSightRange) and
+      if (not M.Dormant) and (not NoTarget) and not PlayerDead and (Dist < MonsterSightRange) and
          CanSee(Eye, PlayerPos + Vector3(0, PlayerEyeHeight, 0)) then
       begin
         M.State := msChase;
@@ -606,6 +619,7 @@ begin
   begin
     Dec(Best.Health, PistolDamage);
     Best.PainTime := 0.2;
+    Best.Dormant := False;
     if Best.State = msIdle then
     begin
       Best.State := msChase;
