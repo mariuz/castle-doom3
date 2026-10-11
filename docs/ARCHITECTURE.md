@@ -116,6 +116,14 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - `TD3Game.Activate` is `Event_Activate` per class: `light` toggles on / off (`TDoom3Map.SetLightOn`, the light's `StartOn`; portal visibility still turns lights in hidden areas off), `trigger_relay` fires its targets after `delay`, `trigger_count` every `count` activations, `trigger_once` / `multiple` fire (or become touchable after `triggerFirst`), `trigger_hurt` switches on / off, `speaker` starts / stops, `func_door` unlocks or opens / closes, `monster_*` appear (`hide`) or wake up (`trigger`), entities with a `hide` key show / hide (`TD3BrushEntity.SetHidden`, `Scene.Exists`, so they don't collide either), `func_remove` hides its targets for good. Other classes are logged once (`Not supported yet: activating <class>`), as are `call` keys (script functions).
 - Trigger volumes: brush triggers have no render geometry (their material is `trigger`, not drawn), only a `.cm` model named like the entity, in entity-local coordinates: `SpawnTrigger` places its vertices at the origin (rotated) and takes their box. The player's box (feet to eye + 6, radius 16) touching it fires `trigger_once` (then disabled) and `trigger_multiple` (again after `wait`); `trigger_hurt` damages every `delay` seconds by the `damage` of its `def_damage` entityDef.
 
+## Movers
+
+- `TDoom3Map.Rebuild` merges each entity's entityDef (`classname`, `inherit` chains) into its keys first, skipping `editor_*`: the map's keys win, like Doom 3's spawn args. So `func_door` gets its def's speed, `triggersize`, sounds, `func_rotating` its `start_on`.
+- `func_door` (`TD3Mover`, `mkDoor`): like `idDoor`, it travels the size of its *world* bounds along `movedir` minus `lip` (most retail doors are rotated), and opens when the player's eye enters those bounds grown by `triggersize` (default 60). Doors with the same `team` open, close and lock together (`TD3Game.OpenTeam` / `CloseTeam` / `LockTeam`). A door's area portals are closed while it is shut.
+- `target_lock` locks (`locked` 1) or unlocks (0) its target doors and their teams. Activating a locked door unlocks it.
+- `func_rotating` (`mkRotating`) turns while `Running` (`start_on`); activation stops / starts it.
+- `bind`: brush entities and static / md5 models named by another entity's `bind` follow it (`TD3Binding`: the child's transform relative to the parent's at spawn, reapplied with `MatrixDecompose` when the parent moved). Bound lights and binding to md5 joints (`bindToJoint`) are not done; `func_mover` / `func_elevator` paths come with scripts (roadmap 5c).
+
 ## Rendering notes
 
 - Each area's solid surfaces are one `TCastleScene` and its `nonsolid`, translucent and blended surfaces another with `Collides := False`; each material is its own shape, so frustum culling and per-shape light lists stay effective (`MaxLightsPerShape` 32).

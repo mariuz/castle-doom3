@@ -618,6 +618,13 @@ box(crate2, METAL, (-24, -24, -24), (24, 24, 24))
 panel = Model('panel_1')
 box(panel, METAL, (-2, -32, -24), (2, 32, 24), skip=('+x',))
 gui_quad(panel, GUISCREEN, [(2, -32, -24), (2, 32, -24), (2, 32, 24), (2, -32, 24)], (1, 0, 0))
+# a second door of door_1's team: a bar over the doorway on room B's side,
+# rotated 90 degrees (its local y is world x), sliding +x
+door2 = Model('door_2')
+box(door2, METAL, (-4, -24, -8), (4, 24, 8))
+# a small light panel bound to door_1 (it rides up with the door)
+doorlight = Model('door_light_1')
+box(doorlight, GLOW, (-1, -8, -8), (1, 8, 8))
 spinner = Model('spinner_1')
 box(spinner, {'*': METAL}, (-64, -6, -6), (64, 6, 6))
 box(spinner, {'*': METAL}, (-6, -64, -6), (6, 64, 6))
@@ -631,7 +638,7 @@ def fmt(v):
 
 def proc_text():
     out = ['mapProcFile003', '']
-    for m in (area0, area1, door, crate, crate2, spinner, panel):
+    for m in (area0, area1, door, crate, crate2, spinner, panel, door2, doorlight):
         surfs = list(m.surfaces.values())
         out.append('model { /* name = */ "%s" /* numSurfaces = */ %d' % (m.name, len(surfs)))
         out.append('')
@@ -799,7 +806,7 @@ def cm_text():
     brushes += [(mins, maxs, 'solid,opaque') for mins, maxs in solids]
     out = ['CM "1.00"', '', '1234567890', '']
     out.append(cm_model('worldMap', world, brushes))
-    for m in (door, crate, crate2, spinner, panel):
+    for m in (door, crate, crate2, spinner, panel, door2, doorlight):
         out.append(cm_model(m.name, list(quads_of(m)), []))
     # the volume of trigger_once_1 (entity-local, like dmap writes it)
     out.append(cm_model('trigger_once_1', box_quads((-24, -80, -56), (24, 80, 56), TRIGONCE), []))
@@ -846,7 +853,12 @@ def map_text():
         # brush entities
         {'classname': 'func_door', 'name': 'door_1', 'model': 'door_1',
          'origin': '264 0 56', 'movedir': '-1', 'speed': '160', 'lip': '8', 'wait': '3',
-         'snd_open': 'test_door', 'snd_close': 'test_door'},
+         'snd_open': 'test_door', 'snd_close': 'test_door', 'team': 'tunnel'},
+        {'classname': 'func_door', 'name': 'door_2', 'model': 'door_2',
+         'origin': '300 0 124', 'angle': '90', 'movedir': '0', 'speed': '160',
+         'lip': '8', 'team': 'tunnel'},
+        {'classname': 'func_static', 'name': 'door_light_1', 'model': 'door_light_1',
+         'origin': '259 0 80', 'bind': 'door_1'},
         {'classname': 'func_static', 'name': 'crate_1', 'model': 'crate_1',
          'origin': '128 -160 32', 'angle': '20'},
         {'classname': 'func_static', 'name': 'crate_2', 'model': 'crate_2',

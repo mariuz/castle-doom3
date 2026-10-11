@@ -219,7 +219,7 @@ begin
   Proc := TD3ProcFile.Create;
   try
     Check(Proc.LoadFromVfs('maps/testmap.proc'), 'load testmap.proc');
-    CheckEquals(7, Proc.ModelCount, 'proc model count');
+    CheckEquals(9, Proc.ModelCount, 'proc model count');
     CheckEquals(2, Proc.NumAreas, 'proc areas');
     CheckEquals(1, Length(Proc.Portals), 'proc portals');
     CheckEquals(1, Length(Proc.Nodes), 'proc nodes');
@@ -248,7 +248,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(26, MapFile.Entities.Count, 'entity count');
+    CheckEquals(28, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -416,7 +416,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(7, Cm.ModelCount, 'cm models (world + 5 brush entities + 1 trigger)');
+    CheckEquals(9, Cm.ModelCount, 'cm models (world + 7 brush entities + 1 trigger)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -1207,6 +1207,102 @@ begin
   end;
 end;
 
+procedure TestMovers;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Door1, Door2, M: TD3Mover;
+  DoorLight: TD3BrushEntity;
+  LightStart: TVector3;
+  I: Integer;
+  Lock: TD3MapEntity;
+  Far: TVector3;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for movers');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Door1 := nil;
+    Door2 := nil;
+    for M in Game.Movers do
+      if M.Brush.Entity.Name = 'door_1' then
+        Door1 := M
+      else
+      if M.Brush.Entity.Name = 'door_2' then
+        Door2 := M;
+    Check((Door1 <> nil) and (Door2 <> nil), 'door_1 and door_2 are movers');
+    DoorLight := Map.FindBrush('door_light_1');
+    Check(DoorLight <> nil, 'door_light_1 exists');
+    if (Door1 = nil) or (Door2 = nil) or (DoorLight = nil) then
+      Exit;
+
+    { travel: the world box along the move direction minus lip; door_2 is
+      rotated 90 degrees, so its 48 units long local y moves along x }
+    CheckNear(112 - 8, Door1.Distance, 'door_1 distance (height - lip)');
+    CheckNear(48 - 8, Door2.Distance, 'door_2 distance from its rotated box');
+    CheckEquals('tunnel', Door2.Team, 'door_2 team');
+    { the entityDef's keys are merged into the entity (none in the test def:
+      func_door spawn defaults come from the code then) }
+    CheckNear(3, Door2.Wait, 'door_2 default wait');
+
+    { activating door_1 opens its team }
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    LightStart := DoorLight.Scene.Translation;
+    Game.Activate(Door1.Brush.Entity);
+    Check(Door2.State in [dsOpening, dsOpen], 'activating door_1 opens door_2 (team)');
+    for I := 1 to 10 do
+      Game.Update(0.1, Far);
+    Check(Door1.State = dsOpen, 'door_1 open after 1 s');
+    { the bound panel rides up with door_1 }
+    CheckNear(LightStart.Y + Door1.Distance, DoorLight.Scene.Translation.Y,
+      'door_light_1 follows door_1 (bind)');
+    CheckNear(LightStart.X, DoorLight.Scene.Translation.X, 'door_light_1 stays above its spot');
+
+    { both close after wait; then target_lock-like locking keeps them shut }
+    for I := 1 to 50 do
+      Game.Update(0.1, Far);
+    Check((Door1.State = dsClosed) and (Door2.State = dsClosed), 'the team closes after wait');
+    CheckNear(LightStart.Y, DoorLight.Scene.Translation.Y, 'door_light_1 back down');
+
+    { a target_lock (made here: the test map has none) locks the whole team }
+    Lock := TD3MapEntity.Create;
+    try
+      Lock.SetValue('classname', 'target_lock');
+      Lock.SetValue('target', 'door_2');
+      Lock.SetValue('locked', '1');
+      Game.Activate(Lock);
+      Check(Door1.Locked and Door2.Locked, 'target_lock locks the team');
+      Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+      Check(Door1.State = dsClosed, 'a locked door stays shut when the player comes near');
+      Lock.SetValue('locked', '0');
+      Game.Activate(Lock);
+      Check(not Door1.Locked and not Door2.Locked, 'target_lock with locked 0 unlocks');
+      Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+      Check(Door1.State = dsOpening, 'unlocked: the player opens it');
+    finally
+      Lock.Free;
+    end;
+
+    { func_rotating: activation stops and starts it }
+    for M in Game.Movers do
+      if M.Kind = mkRotating then
+      begin
+        Check(M.Running, 'spinner_1 starts on');
+        Game.Activate(M.Brush.Entity);
+        Check(not M.Running, 'activating spinner_1 stops it');
+      end;
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 begin
   InitializeLog;
   D3Fs.RegisterProtocol;
@@ -1234,6 +1330,7 @@ begin
   TestGuis;
   TestShadowCasters;
   TestTriggers;
+  TestMovers;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

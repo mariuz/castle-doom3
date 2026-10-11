@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Movers** (roadmap 5b): entities get their entityDef's keys as defaults; doors travel the size of their rotated bounds (most retail doors are rotated) with Doom 3's defaults (speed 100, `triggersize` 60); door `team`s open, close and lock together; `target_lock`; `func_rotating` honors `start_on` and is toggled by activation; `bind` makes brush entities and models follow their parent.
+- Test level: `door_2` in `door_1`'s team, `door_light_1` bound to `door_1`; 330 checks.
 - **Triggers and entity activation** (roadmap 5a): `trigger_once` / `trigger_multiple` / `trigger_hurt` volumes (from the `.cm`) touched by the player, `trigger_relay` and `trigger_count`, `target` chains with `delay` / `wait` / `triggerFirst` / `noTouch`: lights switch on / off, speakers start / stop, hidden entities and monsters appear, dormant monsters wake, doors unlock or open, `func_remove` removes. Unsupported activations are logged once.
 - Test level: `trigger_once_1` in room B fires `trigger_relay_1`, which switches the red `light_trig` on 0.5 s later; 311 checks (a `TD3Game` stepped on the test map), CI walks into it.
 - **Doom 3 demo data**: a `demo/` directory (`demo00.pk4` of the free 2004 demo) is loaded like `base/`, next to the exe or under `-basepath`. Its three maps (`game/demo_mars_city1`, `game/demo_mc_underground`, `game/demo_mars_city2`) load and spawn everything, without exceptions; they are dark and slow so far.

@@ -44,9 +44,13 @@ type
     Sounds: TCastleSoundSource;
     { portals this door closes when it is shut }
     Portals: array of Integer;
+    { "team": doors that open and close together (double doors) }
+    Team: String;
     { rotating }
     RotAxis: TVector3;
     RotSpeed, Angle: Single;
+    { func_rotating turning ("start_on", toggled by activation) }
+    Running: Boolean;
     procedure Update(const SecondsPassed: Single);
     procedure Open;
     procedure Close;
@@ -101,6 +105,14 @@ type
     Damage: Integer;
   end;
 
+  { An entity bound to a mover ("bind"): it keeps its placement relative
+    to the parent (idEntity::Bind). }
+  TD3Binding = record
+    Child, Parent: TCastleTransform;
+    { Child's transformation relative to the parent's at spawn. }
+    ChildInParent: TMatrix4;
+  end;
+
   TD3PendingTargets = record
     Time: Single;
     { activate the targets of this entity }
@@ -118,6 +130,7 @@ type
     { map entities by lowercase name }
     FEntities: specialize TDictionary<String, TD3MapEntity>;
     FPending: specialize TList<TD3PendingTargets>;
+    FBindings: specialize TList<TD3Binding>;
     { trigger_count activations so far, by lowercase name }
     FCounts: specialize TDictionary<String, Integer>;
     { classes whose activation is not supported yet (logged once) }
@@ -138,6 +151,12 @@ type
     { func_remove: remove (hide) an entity for good }
     procedure RemoveEntity(const E: TD3MapEntity);
     procedure UpdateTriggers(const Feet: TVector3);
+    procedure SpawnBindings;
+    procedure UpdateBindings;
+    { Doors of the same team as Door (Door itself too). }
+    procedure OpenTeam(const Door: TD3Mover);
+    procedure CloseTeam(const Door: TD3Mover);
+    procedure LockTeam(const Door: TD3Mover; const Value: Boolean);
     procedure UpdateMonster(const M: TD3Monster; const SecondsPassed: Single;
       const PlayerPos: TVector3);
     procedure SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
@@ -233,6 +252,7 @@ var
 begin
   case Kind of
     mkRotating:
+      if Running then
       begin
         Angle := Angle + RotSpeed * SecondsPassed;
         Brush.Scene.Rotation := Vector4(RotAxis, DegToRad(Angle));
@@ -306,6 +326,7 @@ begin
   FTriggers := specialize TObjectList<TD3Trigger>.Create(True);
   FEntities := specialize TDictionary<String, TD3MapEntity>.Create;
   FPending := specialize TList<TD3PendingTargets>.Create;
+  FBindings := specialize TList<TD3Binding>.Create;
   FCounts := specialize TDictionary<String, Integer>.Create;
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
@@ -322,6 +343,7 @@ begin
   FTriggers.Free;
   FEntities.Free;
   FPending.Free;
+  FBindings.Free;
   FCounts.Free;
   FUnsupported.Free;
   inherited Destroy;
@@ -342,6 +364,7 @@ begin
   FTriggers.Clear;
   FEntities.Clear;
   FPending.Clear;
+  FBindings.Clear;
   FCounts.Clear;
   FUnsupported.Clear;
   FTime := 0;
@@ -400,20 +423,26 @@ begin
       Dir := Vector3(0, 0, -1) { down }
     else
       Dir := Vector3(Cos(DegToRad(MoveAngle)), Sin(DegToRad(MoveAngle)), 0);
-    Size := B.LocalMax - B.LocalMin;
+    { like idDoor: the size of the door's world bounds along the move
+      direction (doors are often rotated: "rotation" on 137 of the demo's
+      155 doors), minus "lip" }
+    Box := B.Scene.BoundingBox;
+    Size := CgeToD3(Box.Size);
+    Size := Vector3(Abs(Size.X), Abs(Size.Y), Abs(Size.Z));
     M.Distance := Abs(Dir.X) * Size.X + Abs(Dir.Y) * Size.Y + Abs(Dir.Z) * Size.Z -
       E.FloatValue('lip', 8);
     M.MoveDir := D3ToCge(Dir);
-    M.Speed := E.FloatValue('speed', 400);
+    { defaults of Doom 3's func_door entityDef (used when the data has none) }
+    M.Speed := E.FloatValue('speed', 100);
     if E.HasKey('time') and (E.FloatValue('time') > 0) then
       M.Speed := Max(1, M.Distance) / E.FloatValue('time');
     M.Wait := E.FloatValue('wait', 3);
     M.Locked := E.BoolValue('locked');
     M.NoTouch := E.BoolValue('no_touch');
+    M.Team := LowerCase(E.Value('team'));
     { Doom 3 doors open when you enter a trigger around them }
-    TriggerSize := E.FloatValue('triggersize', 120);
-    Box := Box3D(D3ToCge(E.Origin + B.LocalMin), D3ToCge(E.Origin + B.LocalMax));
-    M.TriggerBox := Box.Grow(TriggerSize * 0.5);
+    TriggerSize := E.FloatValue('triggersize', 60);
+    M.TriggerBox := Box.Grow(TriggerSize);
     M.SoundOpen := SoundFromShader(E.Value('snd_open'));
     M.SoundClose := SoundFromShader(E.Value('snd_close'));
     if (M.SoundOpen <> nil) or (M.SoundClose <> nil) then
@@ -440,6 +469,7 @@ begin
     else
       M.RotAxis := D3ToCge(Vector3(0, 0, 1));
     M.Angle := E.Angle;
+    M.Running := E.BoolValue('start_on', True);
     FMovers.Add(M);
   end;
 end;
@@ -513,6 +543,7 @@ begin
       if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') then
         SpawnTrigger(E);
     end;
+  SpawnBindings;
   Hidden := 0;
   Dormant := 0;
   for ME in FMap.Models do
@@ -521,8 +552,8 @@ begin
   for Mon in FMonsters do
     if Mon.Dormant then
       Inc(Dormant);
-  WritelnLog('Doom3World', 'Spawned %d movers, %d monsters (%d dormant until triggered, %d hidden), %d speakers, %d triggers',
-    [FMovers.Count, FMonsters.Count, Dormant, Hidden, FSpeakers.Count, FTriggers.Count]);
+  WritelnLog('Doom3World', 'Spawned %d movers, %d monsters (%d dormant until triggered, %d hidden), %d speakers, %d triggers, %d bound entities',
+    [FMovers.Count, FMonsters.Count, Dormant, Hidden, FSpeakers.Count, FTriggers.Count, FBindings.Count]);
 end;
 
 function TD3Game.SpawnMonster(const ME: TD3ModelEntity): TD3Monster;
@@ -794,17 +825,34 @@ begin
       Exit;
     end;
 
+  if Cls = 'target_lock' then
+  begin
+    { idTarget_LockDoor: "locked" 1 locks its target doors, 0 unlocks }
+    for I := 0 to E.Pairs.Count - 1 do
+      if Copy(LowerCase(E.Pairs.Names[I]), 1, 6) = 'target' then
+        for Mover in FMovers do
+          if (Mover.Kind = mkDoor) and
+             SameText(Mover.Brush.Entity.Name, E.Pairs.ValueFromIndex[I]) then
+            LockTeam(Mover, E.IntValue('locked', 1) <> 0);
+    Exit;
+  end;
+
   for Mover in FMovers do
-    if (Mover.Brush.Entity = E) and (Mover.Kind = mkDoor) then
+    if Mover.Brush.Entity = E then
     begin
-      { idDoor::Event_Activate: unlock, else open / close }
-      if Mover.Locked then
-        Mover.Locked := False
-      else
-      if Mover.State in [dsClosed, dsClosing] then
-        Mover.Open
-      else
-        Mover.Close;
+      if Mover.Kind = mkDoor then
+      begin
+        { idDoor::Event_Activate: unlock, else open / close (the team) }
+        if Mover.Locked then
+          LockTeam(Mover, False)
+        else
+        if Mover.State in [dsClosed, dsClosing] then
+          OpenTeam(Mover)
+        else
+          CloseTeam(Mover);
+      end else
+        { idRotater: start / stop }
+        Mover.Running := not Mover.Running;
       Exit;
     end;
 
@@ -1018,16 +1066,112 @@ begin
   begin
     if (Mover.Kind = mkDoor) and not Mover.NoTouch and not PlayerDead and
        Mover.TriggerBox.Contains(PlayerEye) then
-      Mover.Open;
+      OpenTeam(Mover);
     Mover.Update(SecondsPassed);
     { a shut door closes its area portal (like idDoor) }
     if FMap.Portals <> nil then
       for P in Mover.Portals do
         FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
+  UpdateBindings;
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
+end;
+
+procedure TD3Game.OpenTeam(const Door: TD3Mover);
+var
+  M: TD3Mover;
+begin
+  if Door.Locked then
+    Exit;
+  if Door.Team = '' then
+    Door.Open
+  else
+    for M in FMovers do
+      if (M.Kind = mkDoor) and (M.Team = Door.Team) then
+        M.Open;
+end;
+
+procedure TD3Game.CloseTeam(const Door: TD3Mover);
+var
+  M: TD3Mover;
+begin
+  if Door.Team = '' then
+    Door.Close
+  else
+    for M in FMovers do
+      if (M.Kind = mkDoor) and (M.Team = Door.Team) then
+        M.Close;
+end;
+
+procedure TD3Game.LockTeam(const Door: TD3Mover; const Value: Boolean);
+var
+  M: TD3Mover;
+begin
+  if Door.Team = '' then
+    Door.Locked := Value
+  else
+    for M in FMovers do
+      if (M.Kind = mkDoor) and (M.Team = Door.Team) then
+        M.Locked := Value;
+end;
+
+procedure TD3Game.SpawnBindings;
+
+  function TransformOf(const AName: String): TCastleTransform;
+  var
+    B: TD3BrushEntity;
+    ME: TD3ModelEntity;
+  begin
+    B := FMap.FindBrush(AName);
+    if B <> nil then
+      Exit(B.Scene);
+    ME := FMap.FindModelEntity(AName);
+    if ME <> nil then
+      Exit(ME.Holder);
+    Result := nil;
+  end;
+
+var
+  E: TD3MapEntity;
+  Bnd: TD3Binding;
+begin
+  if FMap.MapFile = nil then
+    Exit;
+  for E in FMap.MapFile.Entities do
+  begin
+    if E.Value('bind') = '' then
+      Continue;
+    Bnd.Child := TransformOf(E.Name);
+    Bnd.Parent := TransformOf(E.Value('bind'));
+    if (Bnd.Child = nil) or (Bnd.Parent = nil) or (Bnd.Child = Bnd.Parent) then
+      Continue; // lights and other entities: not bound yet
+    { both are children of the map (world space): child = parent * relative }
+    Bnd.ChildInParent := Bnd.Parent.InverseTransform * Bnd.Child.Transform;
+    FBindings.Add(Bnd);
+  end;
+end;
+
+procedure TD3Game.UpdateBindings;
+var
+  Bnd: TD3Binding;
+  M: TMatrix4;
+  T, Scale: TVector3;
+  R: TVector4;
+begin
+  { in spawn order: a child bound to a bound parent follows it a frame later
+    at worst }
+  for Bnd in FBindings do
+  begin
+    M := Bnd.Parent.Transform * Bnd.ChildInParent;
+    { most parents don't move: don't touch their children's scenes }
+    if TMatrix4.Equals(M, Bnd.Child.Transform, 0.01) then
+      Continue;
+    MatrixDecompose(M, T, R, Scale);
+    Bnd.Child.Translation := T;
+    Bnd.Child.Rotation := R;
+  end;
 end;
 
 function TD3Game.Fire(const Origin, Dir: TVector3): Boolean;

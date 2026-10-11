@@ -1406,6 +1406,23 @@ begin
   Result := (AMapName <> '') and D3Fs.FileExists(MapBasePath(AMapName) + '.proc');
 end;
 
+procedure MergeEntityDef(const E: TD3MapEntity);
+var
+  Def: TStringList;
+  I: Integer;
+  Key: String;
+begin
+  Def := Decls.EntityDef(E.ClassName_);
+  if Def = nil then
+    Exit;
+  for I := 0 to Def.Count - 1 do
+  begin
+    Key := Def.Names[I];
+    if (Key <> '') and (Copy(LowerCase(Key), 1, 7) <> 'editor_') and not E.HasKey(Key) then
+      E.SetValue(Key, Def.ValueFromIndex[I]);
+  end;
+end;
+
 procedure TDoom3Map.Rebuild;
 var
   Base: String;
@@ -1429,6 +1446,11 @@ begin
   FMapFile := TD3MapFile.Create;
   if not FMapFile.LoadFromVfs(Base + '.map') then
     WritelnWarning('Doom3Level', 'No entities: cannot load "%s.map"', [Base]);
+  { like idGameLocal's spawnArgs: the entityDef's keys (with "inherit"
+    resolved) are defaults for the map's keys (func_door: speed, lip,
+    triggersize, sounds; func_rotating: start_on...) }
+  for E in FMapFile.Entities do
+    MergeEntityDef(E);
 
   FSpawnOrigin := TVector3.Zero;
   FSpawnAngle := 0;
