@@ -1,6 +1,8 @@
 # Doom 3 comparison and roadmap
 
-Status of version 0.12.0. "Done" items are tested against the bundled test level; real Doom 3 data has not been tested yet (it can't be bundled), so expect fixes when the first retail maps are loaded.
+Status of version 0.12.0 plus the unreleased changes in `docs/CHANGELOG.md`. "Done" items are tested against the bundled test level, and since the unreleased changes also against the free Doom 3 demo's three maps (item 1); the full game's maps are not tested yet.
+
+**Priority**: item 1 now depends mostly on item 5 (triggers and scripts switch the lights on and show the monsters of retail maps), then on the shader compile stalls of item 1. Items 2, 3 and 10 wait for CGE changes (A to J below), most of them proposed as pull requests.
 
 ## Done
 
@@ -22,6 +24,7 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
 - Speakers with looping and one-shot sound shaders.
 - Player movement, flashlight, pistol, health / armor, death and restart; simple melee monsters.
 - Editor component `TDoom3Map`, HUD, console, menu with the map list, autotest harness, parser unit tests, CI.
+- Retail data (unreleased): the Doom 3 demo's `demo/` directory; lights and entities in all areas their bounds touch (BSP); monsters' `hide` / `trigger` / skill flags; undefined `textures/common/entitygui*` as GUI screens; `tools/smoke_maps.ps1`; debug console commands `lightsat`, `ent`, `guidump`.
 
 ## Next steps
 
@@ -33,18 +36,18 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
     | `game/demo_mc_underground` | 58 | 125,706 | 614 | 720 | 490 | 81 | 31 | 55 s |
     | `game/demo_mars_city2` | 104 | 105,567 | 639 | 569 | 654 | 116 | 58 | 64 s |
 
-    Compared with dhewm3 on the same data and view (`game/demo_mc_underground`'s elevator), brightness is within ~5%: the light math is right. Mars City 1's start is dark because its main lights are `start_off`, switched on by the intro's scripts and triggers (and dhewm3 shows a cinematic there). Done: lights and entities belong to the areas their bounds touch through the BSP (not only their origin's area; lights sit inside their fixtures), monsters honor `hide` (hidden until triggered), `trigger` (dormant) and the skill flags (`not_easy` / `not_medium` / `not_hard`, medium by default), undefined `textures/common/entitygui*` materials are the entity's GUI screens.
+    Compared with dhewm3 on the same data and view (`game/demo_mc_underground`'s elevator), brightness is within ~5%: the light math is right. Mars City 1's start is dark because its main lights are `start_off`, switched on by the intro's scripts and triggers (and dhewm3 shows a cinematic there).
 
     To fix next:
     - **Triggers and scripts** (item 5): `start_off` lights turned on by `trigger_relay`s, hidden monsters shown, the intro's script; until then many areas are darker than in the game.
-    - **Shader compiles**: each light has its own Effect (light volume, uniform named after the light), so every set of lights on a shape is a new GLSL program: the first view of an area stalls (12 to below 1 FPS while turning in a fresh run), later runs use the driver's cache. Share the effect code between lights (uniform per light slot) or prepare shaders at load. CGE change J below is needed for correctness first.
+    - **Shader compiles**: each light has its own Effect (light volume, uniform named after the light), so every set of lights on a shape is a new GLSL program: the first view of an area stalls (12 to below 1 FPS while turning in a fresh run), later runs use the driver's cache. Share the effect between lights (needs CGE change K) or prepare shaders at load. CGE change J (PR #743) is needed for correctness first, and makes more programs.
     - **Frame rate** in steady state is GPU-bound and shadow volumes cost about half (`r_shadows 0`: 22 -> 43 FPS at Mars City's start).
     - **String tables**: GUIs show `#str_04006`: load `strings/*.lang`.
     - The elevator's back wall in `demo_mc_underground` is black (lit in dhewm3), cause not found yet (`ent func_static_4843`: built and visible; its GUI renders).
     - Load time (about a minute per map), missing sound shader `guisounds_error`.
 
     Then the full game's maps with `smoke_maps.ps1`.
-2. **Shadows from several lights** (needs CGE changes A or B below).
+2. **Shadows from several lights** (needs CGE change A, PR #740, or B below): then `UpdateShadowLight` marks the few strongest lights of the visible areas.
 3. **Exact material stages** (partly needs CGE changes D and E below): `vertexColor`, `mirrorRenderMap`, real reflections (`texgen reflect` with the cube map) and heat haze (`fragmentProgram heatHaze`) instead of the glass tint, `deform tube` / `flare` / `turbulent`, stage `if` conditions, `polygonOffset` decals.
 4. **Interactive GUIs**: the GUI script (`onTime` transitions, `onAction`, `set` / `transition` / `resetTime` / `runScript`), the cursor where the player looks, Doom 3's fonts, re-rendering when the state changes.
 5. **Gameplay**: lights switched by triggers, monsters blocked by `monsterclip` instead of `playerclip`, brush entity `.cm` models for movers, weapons with view models (`models/md5/weapons/`), ammo and items (`item_*`, `ammo_*`), triggers (`trigger_once` / `multiple`, `target` chains, `func_elevator`, `func_plat`, `func_mover` with scripts), PDAs, the real AI (`ai/*.script`, animation events, `af` ragdolls as a later step), monster `def_head` and attachments.
@@ -52,7 +55,7 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
 7. **Particles and FX** (`.prt`, `.fx`): sparks, smoke, blood, muzzle flashes.
 8. **Doom 3 BFG** binary formats (`.bimage`, `.bproc`), Resurrection of Evil (`d3xp`).
 9. **Web build** (WebAssembly), as castle-doom and castle-quake2 have.
-10. **Exact light images** (needs CGE change C below): bind the projection / falloff textures in light effects, `nodiffuse` / `nospecular`.
+10. **Exact light images** (needs CGE change C below, PRs #741 and #742 for colored images): the light shader's projection image and `lightFalloffImage` as textures of the light effect, instead of the analytic shapes; `nodiffuse` / `nospecular` (don't need CGE changes).
 11. **Classic Doom 3** (see below): the first episode of the original Doom remade in Doom 3, a mod with its own game code.
 12. **Features from dhewm3** (see below): the parts of the maintained Doom 3 source port that players expect and this port doesn't have yet.
 
@@ -68,7 +71,7 @@ Status of version 0.12.0. "Done" items are tested against the bundled test level
 - Its weapons, monsters and level logic are entity defs and Doom 3 scripts: they need the gameplay of item 5 (weapons with view models, items, triggers and movers, the script interpreter and the real AI).
 - Multiplayer parts (`cdoomDM`, player skins) are out of scope.
 
-Steps: load its maps like the retail maps (item 1), implement the entities above in `Doom3World`, add a smoke test script for people who own the game and the mod (the data can't be bundled), and check that each map can be finished.
+Steps: load its maps like the retail maps (item 1), implement the entities above in `Doom3World`, give `tools/smoke_maps.ps1` a `-Game cdoom` parameter (its map names are to be read from the mod's `maps/`, they are not known here), and check that each map can be finished (the mod's data can't be bundled either).
 
 ## Features from dhewm3
 
@@ -76,11 +79,11 @@ Steps: load its maps like the retail maps (item 1), implement the entities above
 
 | dhewm3 feature | Here |
 |---|---|
-| Game data: patched 1.3.1 data, Resurrection of Evil (`d3xp`, `fs_game_base`), the free **Doom 3 demo** data | Load all three. The demo's maps are a free way to test the retail formats without buying the game (item 1); its data can't be bundled either. |
+| Game data: patched 1.3.1 data, Resurrection of Evil (`d3xp`, `fs_game_base`), the free **Doom 3 demo** data | The demo is loaded (`demo/`, item 1); the full game with `-basepath`; Resurrection of Evil is item 8. |
 | Mods menu, `fs_game` | See Classic Doom 3 above. |
 | Widescreen and any resolution; aspect-ratio-independent GUIs (HUD and menus), 4:3 crosshair scaling | Doom 3 GUIs are 640 x 480: render them 4:3 (pillarboxed) or scale by their anchors; CGE UI scaling for our own HUD. |
 | Gamepad support (with ducking and jumping on triggers) | CGE's `Controllers` (game controllers) API. |
-| OpenAL EFX reverb (EAX-like effects from the maps' `efxs/*.efx` files) | Parse `.efx` per area; needs reverb in CGE's sound engine (OpenAL EFX), not available now. |
+| OpenAL EFX reverb (EAX-like effects from the maps' `efxs/*.efx` files) | Parse `.efx` per area; needs reverb in CGE's sound engine (CGE change L). |
 | Advanced settings menu (graphics, audio, controls, key bindings) | A CGE UI view: resolution, fullscreen, vsync, gamma / brightness, volume, bindings. |
 | Gamma and brightness applied in shaders | A CGE screen effect. |
 | Soft particles (fading where they meet geometry) | With particles (item 7), needs the depth buffer in the particle shader. |
@@ -109,8 +112,10 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 | H | Light attenuation to zero at the radius | Not started | Exact light falloff |
 | I | Light passes added in linear color space | Not started (found while doing A) | A with PBR materials |
 | J | Light effects in the shader code hash (bug) | PR [#743](https://github.com/castle-engine/castle-engine/pull/743) | Correct light volumes with many lights |
+| K | Per-light data in a shared light effect | Not started | Fewer shader programs with many lights (item 1) |
+| L | Reverb (OpenAL EFX) in the sound engine | Not started | dhewm3's EAX-like map reverb |
 
-A, B, C, D and F were checked against the CGE source; the others come from building this port.
+A, B, C, D, F and J were checked against the CGE source; the others come from building this port.
 
 **A. Shadow volumes from several lights.** `TCastleViewport` takes one main light for shadow volumes (`MainLightForShadowVolumes`, the light with `shadowVolumesMain`), and `RenderFromView3D` runs the stencil pass (`RenderShadowVolume`) once for it. Doom 3 shadows every light: one stencil clear + shadow volume pass + additive lit pass per shadow casting light that reaches the view.
 
@@ -145,6 +150,10 @@ Follow-up, colored light images: `PLUG_light_scale` multiplies the light by a fl
 
 **H. Light attenuation to zero at the radius.** CGE cuts a light off hard at its `radius` and its attenuation never reaches zero, so a Doom 3 light box needs a radius twice its size and a low attenuation to hide the edge (`BuildLights`). Needed: an optional smooth falloff to zero at the radius (as glTF `KHR_lights_punctual` range).
 
+**I. Light passes added in linear color space.** The additive passes of A blend in the color buffer after the shader has applied gamma correction or tone mapping, and gamma(a) + gamma(b) > gamma(a + b): shapes rendered with gamma correction (`ColorSpace = csLinear`, or the default `csLinearWhenPhysicalMaterial` with PBR materials) come out too bright where several lights overlap. Needed: render the shadowed passes to a linear framebuffer (sRGB framebuffer with `GL_FRAMEBUFFER_SRGB`, or a floating point one) and convert once at the end. This port uses Phong materials without gamma correction, so A is exact here.
+
 **J. Light effects in the shader code hash (a CGE bug).** Effects on materials, groups and textures are added to the shader program's hash by node reference (`TShaderCodeHash.AddEffects`), because effects with the same code can have different uniform values, set when the program is linked. Effects on lights are not (`TLightShader.Prepare`): shapes lit by different lights of the same type share one program, with the first shape's light effects and their uniforms. With this port's per-light volume effects, most shapes of a retail map used other lights' volumes. The fix adds `Hash.AddEffects(Node.FdEffects)` in `TLightShader.Prepare`: [castle-engine/castle-engine#743](https://github.com/castle-engine/castle-engine/pull/743), with a test that fails without it and the example `examples/shaders/shader_effects_on_several_lights` (three lamps, same effect code, different uniforms; before the fix two tiles show the first lamp's rings); with it Mars City 1's start gets a little brighter (mean luma 11.4 -> 13.7). It means more shader programs (one per set of light effects), so the shader compile item above matters more.
 
-**I. Light passes added in linear color space.** The additive passes of A blend in the color buffer after the shader has applied gamma correction or tone mapping, and gamma(a) + gamma(b) > gamma(a + b): shapes rendered with gamma correction (`ColorSpace = csLinear`, or the default `csLinearWhenPhysicalMaterial` with PBR materials) come out too bright where several lights overlap. Needed: render the shadowed passes to a linear framebuffer (sRGB framebuffer with `GL_FRAMEBUFFER_SRGB`, or a floating point one) and convert once at the end. This port uses Phong materials without gamma correction, so A is exact here.
+**K. Per-light data in a shared light effect.** A light effect's uniforms are fields of its `Effect` node, so lights that need different values (every Doom 3 light has its own volume matrix) need their own `Effect` nodes, and since J every set of light effect nodes on a shape is its own shader program. Doom 3 levels have hundreds of lights: hundreds of programs, compiled when an area first comes into view. Needed: a way for one `Effect` node to be shared by many lights while reading values per light, for example custom fields on the light node passed as `<Light>`-indexed uniforms (`castle_LightSource<Light>...` like the built-in ones), with the light number substituted in the effect code. Workaround: none yet (the driver's shader cache hides the stalls after the first run).
+
+**L. Reverb in the sound engine.** The full game has `efxs/*.efx` files with EAX reverb settings for its maps (not in the demo data, so their format is not checked here), which dhewm3 plays with OpenAL EFX. CGE's sound engine has no reverb or effect slots. Needed: OpenAL EFX auxiliary effect slots (reverb parameters) on the sound engine, chosen per listener position. Workaround: none (no reverb).
