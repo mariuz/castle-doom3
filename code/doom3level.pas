@@ -1446,6 +1446,7 @@ var
   Decl: TD3ModelDecl;
   Md5: TD3Md5Model;
   SkinName, ModelName: String;
+  I: Integer;
 begin
   if (HeadDefName = '') or (JointName = '') then
     Exit;
@@ -1474,6 +1475,13 @@ begin
     ME.HeadInstance.FrameCommands := Decl.FrameCommands;
   end else
     ME.HeadInstance := TD3Md5Instance.Create(Md5, nil, SkinName);
+  { copy_joint <body joint> = <head joint>: the head's neck follows the
+    body's (its animation and head looks); copy_joint_world (the eyes)
+    isn't done }
+  for I := 0 to ME.Entity.Pairs.Count - 1 do
+    if SameText(Copy(ME.Entity.Pairs.Names[I], 1, 11), 'copy_joint ') then
+      ME.HeadInstance.AddCopyJoint(ME.Instance, Trim(Copy(ME.Entity.Pairs.Names[I], 12, MaxInt)),
+        Trim(ME.Entity.Pairs.ValueFromIndex[I]));
   ME.HeadInstance.Scene.Collides := False;
   ME.HeadInstance.Scene.Pickable := False;
   if Decl <> nil then

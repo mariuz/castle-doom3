@@ -1278,6 +1278,9 @@ entityDef char_test_walker {
 	"def_head"				"test_blob_head"
 	"head_joint"			"head"
 	"snd_talk_primary"		"test_door"
+	"look_joint head"		"1 1 0"
+	"look_min"				"-45 -90 0"
+	"look_max"				"30 90 0"
 }
 
 entityDef damage_test_melee {
@@ -1740,6 +1743,7 @@ scriptEvent float   enemyRange();
 scriptEvent float   canHitEnemyFromAnim( string anim );
 scriptEvent void    setTalkState( float state );
 scriptEvent void    setTalkTarget( entity target );
+scriptEvent void    lookAt( entity focusEntity, float duration );
 
 #endif
 """
@@ -1832,7 +1836,9 @@ void character::state_Done() {
     setTalkState( TALK_OK );
     eachFrame {
         if ( AI_TALK ) {
-            // the head's lip sync anim says the line (its sound_voice frame command)
+            // it looks at the player while the head's lip sync anim says
+            // the line (its sound_voice frame command)
+            lookAt( $player1, 2.5 );
             playAnim( ANIMCHANNEL_HEAD, "talk_primary" );
             waitUntil( animDone( ANIMCHANNEL_HEAD, 0 ) );
             walker_talks++;

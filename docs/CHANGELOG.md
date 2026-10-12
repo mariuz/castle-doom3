@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Heads look at things** (roadmap 5d, sixth part): characters look at whoever they talk to and monsters at their enemy (`lookAt`, `lookAtEnemy`): the `look_joint` joints turn by their share of the look angles, within `look_min` / `look_max`; heads that are separate models follow the body's neck (`copy_joint`). Console `actors` shows yaw and look angles.
+- Test level: `test_walker_1` looks at the player while it talks; 470 checks.
 - **Splash damage** (roadmap 5d, fifth part): projectiles with a `def_splash_damage` hurt the player near their explosion (less further away, not through walls); `detonate_on_fuse`. Bernie zombies run their script (all the demo's scripted monsters now do).
 - Fixed: monsters could not see the player through playerclip brushes or nonsolid surfaces (Bernie stood behind a heat haze sprite); sight is now a trace on opaque geometry. Brush entities of only nonsolid surfaces no longer collide.
 - Test level: `projectile_test` has splash damage; 457 checks.

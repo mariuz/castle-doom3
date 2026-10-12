@@ -226,6 +226,18 @@ type
     { setTalkState (TALK_OK = 2: the player can talk to it) and the one it
       talks to (setTalkTarget; AI_TALK while there's one) }
     TalkState, TalkTarget: Integer;
+    { head looks (idAI::UpdateAnimationControllers): lookAt / lookAtEnemy
+      focus on an entity until FocusUntil; LookAngles (pitch down, yaw
+      left, from its facing) ease towards it within LookMin / LookMax and
+      turn the look_joint joints by their share }
+    FocusTarget: Integer;
+    FocusUntil: Single;
+    LookAngles, LookMin, LookMax: TVector2;
+    LookJoints: array of record
+      Joint: Integer;
+      Scale: TVector2; { pitch, yaw }
+    end;
+    HeadFocusRate: Single;
     { the body animation applied last (channel:name:start time) }
     BodyKey: String;
     { movement, Doom 3 coordinates }
@@ -356,6 +368,7 @@ type
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     procedure UpdateActors(const SecondsPassed: Single);
     procedure ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
+    procedure UpdateLook(const A: TD3Actor; const SecondsPassed: Single);
     procedure LaunchProjectiles(const A: TD3Actor; const JointName: String);
     procedure UpdateProjectiles(const SecondsPassed: Single);
     { splash damage of a projectile exploding at P.Position }
@@ -1594,7 +1607,8 @@ var
   E: TD3MapEntity;
   T, Character: TD3ScriptType;
   A: TD3Actor;
-  C, MonsterCount: Integer;
+  C, MonsterCount, I, J: Integer;
+  LookScale: TVector3;
   IsMonster, Supported: Boolean;
   SName: String;
   Mon, M: TD3Monster;
@@ -1631,6 +1645,23 @@ begin
     A.Obj := TD3ScriptObject.Create(T);
     A.Thinking := True;
     A.MeleeRange := E.FloatValue('melee_range', 64);
+    { look_joint <joint> = pitch yaw roll shares of the look angles }
+    for I := 0 to E.Pairs.Count - 1 do
+      if SameText(Copy(E.Pairs.Names[I], 1, 11), 'look_joint ') then
+      begin
+        J := ME.Instance.Model.JointIndex(Trim(Copy(E.Pairs.Names[I], 12, MaxInt)));
+        if J < 0 then
+          Continue;
+        LookScale := ParseVector3(E.Pairs.ValueFromIndex[I], TVector3.Zero);
+        SetLength(A.LookJoints, Length(A.LookJoints) + 1);
+        A.LookJoints[High(A.LookJoints)].Joint := J;
+        A.LookJoints[High(A.LookJoints)].Scale := Vector2(LookScale.X, LookScale.Y);
+      end;
+    LookScale := ParseVector3(E.Value('look_min'), Vector3(-80, -180, 0));
+    A.LookMin := Vector2(LookScale.X, LookScale.Y);
+    LookScale := ParseVector3(E.Value('look_max'), Vector3(80, 180, 0));
+    A.LookMax := Vector2(LookScale.X, LookScale.Y);
+    A.HeadFocusRate := E.FloatValue('head_focus_rate', 0.1);
     ME.Instance.OnFrameCommand := @ActorFrameCommand;
     if ME.HeadInstance <> nil then
       ME.HeadInstance.OnFrameCommand := @ActorFrameCommand;
@@ -1910,6 +1941,20 @@ begin
       else
         EventResult := D3EntityValue(0);
     'setTalkState': A.TalkState := Round(ArgF(0));
+    'lookAt', 'lookAtEntity':
+      begin
+        { idAI::Event_LookAtEntity: $null_entity or no time stops looking }
+        A.FocusTarget := Args[0].E;
+        A.FocusUntil := FTime + ArgF(1);
+        if (A.FocusTarget = 0) or (ArgF(1) <= 0) then
+          A.FocusUntil := 0;
+      end;
+    'lookAtEnemy':
+      if A.HasEnemy then
+      begin
+        A.FocusTarget := PlayerHandle;
+        A.FocusUntil := FTime + ArgF(0);
+      end;
     'setTalkTarget':
       begin
         A.TalkTarget := Args[0].E;
@@ -1984,8 +2029,8 @@ begin
       end;
     { what the game doesn't do (yet): nothing happens }
     'setBoneMod', 'setNeverDormant', 'allowMovement',
-    'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain', 'setMoveType', 'lookAt',
-    'lookAtEnemy', 'lookAtEntity', 'animTurn', 'becomeSolid', 'becomeNonSolid',
+    'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain', 'setMoveType',
+    'animTurn', 'becomeSolid', 'becomeNonSolid',
     'kickObstacles', 'preventPain', 'overrideAnim',
     'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'wakeOnFlashlight',
     'setSmokeVisibility', 'attackBegin', 'attackEnd', 'clearBurn', 'markUsed':
@@ -1995,6 +2040,77 @@ begin
     else
       Result := False;
   end;
+end;
+
+procedure TD3Game.UpdateLook(const A: TD3Actor; const SecondsPassed: Single);
+var
+  Origin, Eye, Focus, Dir: TVector3;
+  Target, Ease: TVector2;
+  Other: TD3MapEntity;
+  Other2: TD3Actor;
+  HasFocus: Boolean;
+  I: Integer;
+begin
+  if Length(A.LookJoints) = 0 then
+    Exit;
+  if (A.Monster <> nil) and (A.Monster.State = msDead) then
+  begin
+    A.Model.Instance.ClearJointMods;
+    Exit;
+  end;
+  { where it looks: its focus while it lasts, else straight ahead }
+  Origin := CgeToD3(A.Model.Holder.Translation);
+  Eye := Origin + Vector3(0, 0, 64);
+  { scripts renew short looks (lookAt( talkTo, 0.1 )) every frame: one
+    lasts through the frame it ends in, also when frames are long }
+  HasFocus := (A.FocusTarget <> 0) and (FTime < A.FocusUntil + SecondsPassed);
+  if HasFocus then
+  begin
+    if A.FocusTarget = PlayerHandle then
+      { a little under the player's eyes (eye_verticle_offset) }
+      Focus := CgeToD3(FPlayerEye) - Vector3(0, 0, 5)
+    else
+    begin
+      Other2 := nil;
+      for I := 0 to FActors.Count - 1 do
+        if FActors[I].Handle = A.FocusTarget then
+          Other2 := FActors[I];
+      if Other2 <> nil then
+        Focus := CgeToD3(Other2.Model.Holder.Translation) + Vector3(0, 0, 64)
+      else
+      begin
+        Other := HandleEntity(A.FocusTarget);
+        if Other <> nil then
+          Focus := Other.Origin
+        else
+          HasFocus := False;
+      end;
+    end;
+  end;
+  if HasFocus then
+  begin
+    { yaw from the origin, pitch from the eyes }
+    Dir := Focus - Origin;
+    Target.Y := RadToDeg(ArcTan2(Dir.Y, Dir.X)) - A.Yaw;
+    Target.Y := Target.Y - 360 * Floor((Target.Y + 180) / 360);
+    Dir := Focus - Eye;
+    Target.X := -RadToDeg(ArcTan2(Dir.Z, Sqrt(Sqr(Dir.X) + Sqr(Dir.Y))));
+    Target.X := EnsureRange(Target.X, A.LookMin.X, A.LookMax.X);
+    Target.Y := EnsureRange(Target.Y, A.LookMin.Y, A.LookMax.Y);
+  end else
+    Target := TVector2.Zero;
+  { head_focus_rate is per game frame (60 a second) }
+  Ease := Vector2(1, 1) * (1 - Power(1 - EnsureRange(A.HeadFocusRate, 0, 1), SecondsPassed * 60));
+  A.LookAngles := A.LookAngles + (Target - A.LookAngles) * Ease.X;
+  if (Abs(A.LookAngles.X) < 0.05) and (Abs(A.LookAngles.Y) < 0.05) and not HasFocus then
+  begin
+    A.LookAngles := TVector2.Zero;
+    A.Model.Instance.ClearJointMods;
+    Exit;
+  end;
+  for I := 0 to High(A.LookJoints) do
+    A.Model.Instance.SetJointMod(A.LookJoints[I].Joint, QuatFromAngles(
+      A.LookAngles.X * A.LookJoints[I].Scale.X, A.LookAngles.Y * A.LookJoints[I].Scale.Y, 0));
 end;
 
 procedure TD3Game.UpdateActors(const SecondsPassed: Single);
@@ -2137,6 +2253,7 @@ begin
     A.SetFlag('AI_ONGROUND', 1);
     A.SetFlag('AI_DEST_UNREACHABLE', 0);
     A.SetFlag('AI_TALK', Ord(A.TalkTarget <> 0));
+    UpdateLook(A, SecondsPassed);
   end;
 end;
 
@@ -2913,9 +3030,15 @@ var
 begin
   Result := '';
   for A in FActors do
+  begin
     Result := Result + Format('%s: %s, legs %s (%s), at %s%s', [A.Model.Entity.Name, A.StateName,
       A.Channels[2].StateName, A.Channels[2].AnimName, CgeToD3(A.Model.Holder.Translation).ToString,
-      BoolToStr(A.Moving, ', moving', '')]) + LineEnding;
+      BoolToStr(A.Moving, ', moving', '')]);
+    if not A.LookAngles.IsZero then
+      Result := Result + Format(', yaw %.0f, looks %.0f %.0f (focus %d for %.2f s)',
+        [A.Yaw, A.LookAngles.X, A.LookAngles.Y, A.FocusTarget, A.FocusUntil - FTime]);
+    Result := Result + LineEnding;
+  end;
 end;
 
 function TD3Game.ScriptStatus: String;

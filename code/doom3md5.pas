@@ -93,13 +93,29 @@ type
   TD3Md5Instance = class;
   TD3FrameCommandEvent = procedure (const Sender: TD3Md5Instance; const Command: String) of object;
 
+  { A joint of another instance (the body) whose local rotation a joint of
+    this one (the head) takes (idActor's copy_joint, JOINTMOD_LOCAL_OVERRIDE). }
+  TD3CopyJoint = record
+    Source: TD3Md5Instance;
+    FromJoint, ToJoint: Integer;
+  end;
+
   TD3Md5Instance = class
   strict private
     FModel: TD3Md5Model;
     FScene: TCastleScene;
     FCoords: array of TCoordinateNode;
     FPositions: array of array of TVector3;
-    FPose: TD3JointArray;
+    { the animation's pose, and the one shown (FPose with the joint mods
+      and copied joints) }
+    FPose, FFinalPose: TD3JointArray;
+    { JOINTMOD_WORLD rotations (model space) by joint, FHasMod when set }
+    FJointMods: array of TQuaternion;
+    FHasMod: array of Boolean;
+    FModCount: Integer;
+    { mods were cleared: show the plain pose again }
+    FModsCleared: Boolean;
+    FCopyJoints: array of TD3CopyJoint;
     FAnim: TD3Md5Anim;
     FAnimTime: Single;
     FLoop: Boolean;
@@ -108,6 +124,7 @@ type
     FHullJoints: array of Integer;
     FHullTransforms: array of TMatrixTransformNode;
     procedure ApplyPose;
+    procedure FinishPose;
     procedure LockPoseOrigin;
     procedure FireFrameCommands(const FromTime, ToTime: Single);
     procedure BuildShadowHulls(const Root: TX3DRootNode);
@@ -157,6 +174,18 @@ type
     function JointTransform(const JointName: String; out M: TMatrix4): Boolean;
     { Where a joint is now, in the scene's coordinates (CGE). }
     function JointPosition(const JointName: String; out P: TVector3): Boolean;
+    { Turn a joint and everything under it by Q (Doom 3 model space, about
+      the joint) after the animation, like idAnimator::SetJointAxis with
+      JOINTMOD_WORLD (heads looking at something). Shown at the next
+      Update. }
+    procedure SetJointMod(const Joint: Integer; const Q: TQuaternion);
+    procedure ClearJointMods;
+    { Each Update, joint ToName (of this model) takes the local rotation of
+      Source's joint FromName (copy_joint: a head following the body's
+      neck). False if a joint is missing. }
+    function AddCopyJoint(const Source: TD3Md5Instance; const FromName, ToName: String): Boolean;
+    { The shown pose (with joint mods and copied joints). }
+    function Pose: TD3JointArray;
     property Scene: TCastleScene read FScene;
     property Model: TD3Md5Model read FModel;
   end;
@@ -170,6 +199,11 @@ function QuatRotate(const Q: TQuaternion; const V: TVector3): TVector3;
 function QuatFromXYZ(const V: TVector3): TQuaternion;
 { Normalized linear interpolation along the shortest arc. }
 function QuatNlerp(const A, B: TQuaternion; const T: Single): TQuaternion;
+{ The rotation of Doom 3 angles (degrees; pitch down, yaw left, roll) like
+  idAngles::ToMat3: roll, then pitch about Y, then yaw about Z. }
+function QuatFromAngles(const Pitch, Yaw, Roll: Single): TQuaternion;
+function QuatMultiply(const A, B: TQuaternion): TQuaternion;
+function QuatConjugate(const Q: TQuaternion): TQuaternion;
 
 { The transformation of a joint's space, in CGE coordinates. }
 function JointMatrix(const Joint: TD3Joint): TMatrix4;
@@ -221,6 +255,25 @@ begin
   Result.Data.Real := A.Data.Real * B.Data.Real - TVector3.DotProduct(A.Data.Vector, B.Data.Vector);
   Result.Data.Vector := B.Data.Vector * A.Data.Real + A.Data.Vector * B.Data.Real +
     TVector3.CrossProduct(A.Data.Vector, B.Data.Vector);
+end;
+
+function QuatConjugate(const Q: TQuaternion): TQuaternion;
+begin
+  Result.Data.Real := Q.Data.Real;
+  Result.Data.Vector := -Q.Data.Vector;
+end;
+
+function QuatFromAngles(const Pitch, Yaw, Roll: Single): TQuaternion;
+
+  function AxisQuat(const Axis: TVector3; const Degrees: Single): TQuaternion;
+  begin
+    Result.Data.Real := Cos(DegToRad(Degrees) / 2);
+    Result.Data.Vector := Axis * Sin(DegToRad(Degrees) / 2);
+  end;
+
+begin
+  Result := QuatMultiply(AxisQuat(Vector3(0, 0, 1), Yaw),
+    QuatMultiply(AxisQuat(Vector3(0, 1, 0), Pitch), AxisQuat(Vector3(1, 0, 0), Roll)));
 end;
 
 function QuatNormalize(const Q: TQuaternion): TQuaternion;
@@ -769,14 +822,124 @@ procedure TD3Md5Instance.ApplyPose;
 var
   I: Integer;
 begin
+  FinishPose;
   for I := 0 to High(FCoords) do
     if FCoords[I] <> nil then
     begin
-      FModel.SkinMesh(I, FPose, FPositions[I]);
+      FModel.SkinMesh(I, FFinalPose, FPositions[I]);
       FCoords[I].SetPoint(FPositions[I]);
     end;
   for I := 0 to High(FHullTransforms) do
-    FHullTransforms[I].Matrix := JointMatrix(FPose[FHullJoints[I]]);
+    FHullTransforms[I].Matrix := JointMatrix(FFinalPose[FHullJoints[I]]);
+end;
+
+procedure TD3Md5Instance.FinishPose;
+var
+  Under: array of Boolean;
+
+  { turn joint J and the joints under it by R about J }
+  procedure TurnSubtree(const J: Integer; const R: TQuaternion);
+  var
+    I: Integer;
+    Pivot: TVector3;
+  begin
+    if Length(Under) <> Length(FFinalPose) then
+      SetLength(Under, Length(FFinalPose));
+    Pivot := FFinalPose[J].Position;
+    for I := 0 to High(FFinalPose) do
+    begin
+      { parents come first }
+      Under[I] := (I = J) or ((I > J) and (FFinalPose[I].Parent >= 0) and Under[FFinalPose[I].Parent]);
+      if not Under[I] then
+        Continue;
+      FFinalPose[I].Position := Pivot + QuatRotate(R, FFinalPose[I].Position - Pivot);
+      FFinalPose[I].Orientation := QuatNormalize(QuatMultiply(R, FFinalPose[I].Orientation));
+    end;
+  end;
+
+var
+  I, J, P: Integer;
+  Local, ParentO: TQuaternion;
+  Src: TD3JointArray;
+begin
+  FModsCleared := False;
+  FFinalPose := Copy(FPose);
+  if FModCount > 0 then
+    for J := 0 to High(FFinalPose) do
+      if FHasMod[J] then
+        TurnSubtree(J, FJointMods[J]);
+  for I := 0 to High(FCopyJoints) do
+  begin
+    { the source's local rotation (relative to its parent), set as this
+      joint's local rotation }
+    Src := FCopyJoints[I].Source.FFinalPose;
+    if Length(Src) = 0 then
+      Src := FCopyJoints[I].Source.FPose;
+    J := FCopyJoints[I].FromJoint;
+    if J > High(Src) then
+      Continue;
+    P := Src[J].Parent;
+    if P >= 0 then
+      Local := QuatMultiply(QuatConjugate(Src[P].Orientation), Src[J].Orientation)
+    else
+      Local := Src[J].Orientation;
+    J := FCopyJoints[I].ToJoint;
+    P := FFinalPose[J].Parent;
+    if P >= 0 then
+      ParentO := FFinalPose[P].Orientation
+    else
+      ParentO := Quaternion(Vector4(0, 0, 0, 1));
+    TurnSubtree(J, QuatNormalize(QuatMultiply(QuatMultiply(ParentO, Local),
+      QuatConjugate(FFinalPose[J].Orientation))));
+  end;
+end;
+
+function TD3Md5Instance.Pose: TD3JointArray;
+begin
+  if Length(FFinalPose) = Length(FPose) then
+    Result := FFinalPose
+  else
+    Result := FPose;
+end;
+
+procedure TD3Md5Instance.SetJointMod(const Joint: Integer; const Q: TQuaternion);
+begin
+  if (Joint < 0) or (Joint > High(FModel.Joints)) then
+    Exit;
+  if Length(FHasMod) <> Length(FModel.Joints) then
+  begin
+    SetLength(FHasMod, Length(FModel.Joints));
+    SetLength(FJointMods, Length(FModel.Joints));
+  end;
+  if not FHasMod[Joint] then
+    Inc(FModCount);
+  FHasMod[Joint] := True;
+  FJointMods[Joint] := Q;
+end;
+
+procedure TD3Md5Instance.ClearJointMods;
+var
+  I: Integer;
+begin
+  if FModCount > 0 then
+    FModsCleared := True;
+  for I := 0 to High(FHasMod) do
+    FHasMod[I] := False;
+  FModCount := 0;
+end;
+
+function TD3Md5Instance.AddCopyJoint(const Source: TD3Md5Instance; const FromName, ToName: String): Boolean;
+var
+  C: TD3CopyJoint;
+begin
+  C.Source := Source;
+  C.FromJoint := Source.Model.JointIndex(FromName);
+  C.ToJoint := FModel.JointIndex(ToName);
+  Result := (C.FromJoint >= 0) and (C.ToJoint >= 0);
+  if not Result then
+    Exit;
+  SetLength(FCopyJoints, Length(FCopyJoints) + 1);
+  FCopyJoints[High(FCopyJoints)] := C;
 end;
 
 function TD3Md5Instance.ShadowHullCount: Integer;
@@ -986,7 +1149,7 @@ begin
   I := FModel.JointIndex(JointName);
   Result := I >= 0;
   if Result then
-    P := D3ToCge(FPose[I].Position)
+    P := D3ToCge(Pose[I].Position)
   else
     P := TVector3.Zero;
 end;
@@ -1006,7 +1169,7 @@ begin
   { current joint * inverse of the bind pose rotation (a transpose) }
   Bind := JointMatrix(FModel.Joints[I]);
   Bind.Columns[3] := Vector4(0, 0, 0, 1);
-  M := JointMatrix(FPose[I]) * Bind.Transpose;
+  M := JointMatrix(Pose[I]) * Bind.Transpose;
 end;
 
 procedure TD3Md5Instance.FireFrameCommands(const FromTime, ToTime: Single);
@@ -1050,7 +1213,12 @@ var
   OldTime: Single;
 begin
   if (FAnim = nil) or Paused then
+  begin
+    { a held pose still turns with its joint mods and copied joints }
+    if (FModCount > 0) or FModsCleared or (Length(FCopyJoints) > 0) or (Length(FFinalPose) <> Length(FPose)) then
+      ApplyPose;
     Exit;
+  end;
   OldTime := FAnimTime;
   FAnimTime := FAnimTime + SecondsPassed;
   if Assigned(OnFrameCommand) and (FrameCommands <> nil) then

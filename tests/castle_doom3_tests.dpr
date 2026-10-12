@@ -51,6 +51,12 @@ begin
   Check(Abs(Expected - Actual) <= Eps, Format('%s: expected %.4f, got %.4f', [What, Expected, Actual]));
 end;
 
+procedure CheckVectorNear(const Expected, Actual: TVector3; const What: String; const Eps: Single = 0.01);
+begin
+  Check(TVector3.Equals(Expected, Actual, Eps), Format('%s: expected %s, got %s',
+    [What, Expected.ToString, Actual.ToString]));
+end;
+
 procedure TestLexer;
 var
   L: TDoom3Lexer;
@@ -378,6 +384,47 @@ begin
     CheckEquals(0, Instance.ShadowHullCount, 'small meshes cast themselves');
   finally
     Instance.Free;
+  end;
+end;
+
+procedure TestJointMods;
+var
+  Model: TD3Md5Model;
+  Body, Head: TD3Md5Instance;
+  P: TVector3;
+begin
+  { Doom 3 angles: yaw turns forward (+x) left (+y), pitch looks down }
+  CheckVectorNear(Vector3(0, 1, 0), QuatRotate(QuatFromAngles(0, 90, 0), Vector3(1, 0, 0)), 'yaw 90 turns +x to +y');
+  CheckVectorNear(Vector3(Cos(DegToRad(30)), 0, -Sin(DegToRad(30))),
+    QuatRotate(QuatFromAngles(30, 0, 0), Vector3(1, 0, 0)), 'pitch 30 looks down');
+  Model := Md5Cache.Model('models/md5/test/blob.md5mesh');
+  if Model = nil then
+    Exit;
+  Body := TD3Md5Instance.Create(Model, nil);
+  Head := TD3Md5Instance.Create(Model, nil);
+  try
+    { JOINTMOD_WORLD on "body": the subtree turns about the joint }
+    Body.SetJointMod(Model.JointIndex('body'), QuatFromAngles(0, 90, 0));
+    Body.Update(0);
+    Check(Body.JointPosition('arm_l', P), 'arm_l joint');
+    { arm_l is (0, 22, 20) from body (0, 0, 40): turned to (-22, 0, 20) }
+    CheckVectorNear(D3ToCge(Vector3(-22, 0, 60)), P, 'a joint mod turns the joints under it');
+    Check(Body.JointPosition('body', P), 'body joint');
+    CheckVectorNear(D3ToCge(Vector3(0, 0, 40)), P, 'the turned joint stays in place');
+    { copy_joint: the head's "body" takes the body's local rotation }
+    Check(Head.AddCopyJoint(Body, 'body', 'body'), 'add a copy joint');
+    Check(not Head.AddCopyJoint(Body, 'body', 'no_such_joint'), 'a missing joint is refused');
+    Head.Update(0);
+    CheckVectorNear(Vector3(0, 1, 0), QuatRotate(Head.Pose[Model.JointIndex('body')].Orientation, Vector3(1, 0, 0)),
+      'the copied joint turned like the body''s');
+    Body.ClearJointMods;
+    Body.Update(0);
+    Head.Update(0);
+    CheckVectorNear(Vector3(1, 0, 0), QuatRotate(Head.Pose[Model.JointIndex('body')].Orientation, Vector3(1, 0, 0)),
+      'cleared mods: back to the animation');
+  finally
+    Head.Free;
+    Body.Free;
   end;
 end;
 
@@ -1614,6 +1661,7 @@ var
   Away, Pos: TVector3;
   SawWalk: Boolean;
   RemoveMe: TRemoveType;
+  HeadM: TMatrix4;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -1658,8 +1706,21 @@ begin
     Pos := CgeToD3(A.Model.Holder.Translation);
     Game.Use(D3ToCge(Pos + Vector3(0, 60, 0)) + Vector3(0, 48, 0), D3ToCge(Vector3(0, -1, 0)));
     CheckEquals(PlayerHandle, A.TalkTarget, 'Use made the player its talk target (AI_TALK)');
+    { it looks at the player (lookAt): the player steps to its right
+      (north-east of it, 45 degrees right of its facing north) }
+    Away := D3ToCge(Pos + Vector3(60, 60, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 10 do
+    begin
+      Game.Update(0.1, Away);
+      RemoveMe := rtNone;
+      Map.Update(0.1, RemoveMe);
+    end;
+    CheckNear(-45, A.LookAngles.Y, 'lookAt( $player1 ) turned its head right', 3);
+    Check(A.Model.Instance.JointTransform('head', HeadM), 'head joint');
+    Pos := CgeToD3(HeadM.MultDirection(D3ToCge(Vector3(1, 0, 0))));
+    CheckNear(-45, RadToDeg(ArcTan2(Pos.Y, Pos.X)), 'the head joint (the head on it) turned', 3);
     { the head's talk_primary lasts 2 s }
-    for I := 1 to 30 do
+    for I := 1 to 20 do
     begin
       Game.Update(0.1, Away);
       RemoveMe := rtNone;
@@ -1954,6 +2015,7 @@ begin
   TestProc;
   TestMapFile;
   TestMd5;
+  TestJointMods;
   TestStaticModels;
   TestEntityRotation;
   TestCollisionModel;
