@@ -387,6 +387,25 @@ begin
   end;
 end;
 
+procedure TestTrianglesClosed;
+const
+  { a tetrahedron, faces counter-clockwise from outside }
+  Tetra: array [0..11] of Int32 = (0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3);
+var
+  P: array [0..3] of TVector3;
+begin
+  P[0] := Vector3(0, 0, 0);
+  P[1] := Vector3(10, 0, 0);
+  P[2] := Vector3(0, 10, 0);
+  P[3] := Vector3(0, 0, 10);
+  Check(TrianglesClosed(P, Tetra), 'a tetrahedron is closed');
+  Check(not TrianglesClosed(P, Slice(Tetra, 9)), 'three of its faces are open');
+  { degenerate triangles are left out, like CGE's shadow casters: the two
+    faces left are one triangle seen from both sides, closed }
+  P[3] := Vector3(0, 0, 0);
+  Check(TrianglesClosed(P, Tetra), 'degenerate faces are left out');
+end;
+
 procedure TestJointMods;
 var
   Model: TD3Md5Model;
@@ -907,8 +926,10 @@ end;
 
 function PixelAt(const Img: TCastleImage; const X, Y: Integer): TVector4;
 begin
-  { GUI coordinates: y goes down }
-  Result := Img.Colors[X, Img.Height - 1 - Y, 0];
+  { GUI coordinates (640 x 480, y goes down) on the GuiImageWidth x
+    GuiImageHeight image }
+  Result := Img.Colors[Trunc((X + 0.5) * Img.Width / GuiWidth),
+    Img.Height - 1 - Trunc((Y + 0.5) * Img.Height / GuiHeight), 0];
 end;
 
 function BrightPixels(const Img: TCastleImage; const X0, Y0, X1, Y1: Integer): Integer;
@@ -963,7 +984,7 @@ begin
     State.Values['gui_parm2'] := 'Hello';
     Img := RenderGui(Gui, State);
     try
-      CheckEquals(GuiWidth, Img.Width, 'GUI image width');
+      CheckEquals(GuiImageWidth, Img.Width, 'GUI image width (a power of two)');
       C := PixelAt(Img, 5, 5);
       Check((C.X > 0.4) and (C.Y < 0.2), Format('header is red, got %s', [C.ToString]));
       Check(BrightPixels(Img, 200, 10, 440, 100) > 50, 'header text drawn (gui::gui_parm1)');
@@ -2016,6 +2037,7 @@ begin
   TestMapFile;
   TestMd5;
   TestJointMods;
+  TestTrianglesClosed;
   TestStaticModels;
   TestEntityRotation;
   TestCollisionModel;

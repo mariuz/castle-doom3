@@ -58,9 +58,14 @@ type
 const
   GuiWidth = 640;
   GuiHeight = 480;
+  { The size GUIs are drawn at: a power of two, so CGE uses the texture as
+    it is (it would resize 640 x 480 for every GUI, slowly). }
+  GuiImageWidth = 512;
+  GuiImageHeight = 512;
 
-{ Draw a GUI into a new image (caller frees). State answers gui:: variables
-  (Names=Values, e.g. the entity's keys). }
+{ Draw a GUI into a new GuiImageWidth x GuiImageHeight image (caller
+  frees), the 640 x 480 virtual screen stretched over it. State answers
+  gui:: variables (Names=Values, e.g. the entity's keys). }
 function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage;
 
 { The texture URL of a GUI drawn with some state, '' when the GUI file is
@@ -310,13 +315,44 @@ end;
 
 { Rendering ------------------------------------------------------------------ }
 
+var
+  { GUI background images (files) as RGBA, loaded once }
+  GuiSources: specialize TObjectDictionary<String, TRGBAlphaImage>;
+
+function GuiSourceImage(const FileName: String): TRGBAlphaImage;
+var
+  Loaded: TCastleImage;
+begin
+  if GuiSources.TryGetValue(FileName, Result) then
+    Exit;
+  Loaded := LoadImage(D3FsUrl(FileName));
+  try
+    if Loaded is TRGBAlphaImage then
+    begin
+      Result := TRGBAlphaImage(Loaded);
+      Loaded := nil;
+    end else
+    begin
+      Result := TRGBAlphaImage.Create;
+      Result.Assign(Loaded);
+    end;
+  finally
+    Loaded.Free;
+  end;
+  GuiSources.Add(FileName, Result);
+end;
+
 type
   TGuiPainter = class
     Image: TRGBAlphaImage;
     State: TStrings;
     Font: TTextureFontData;
-    { blend a color onto a pixel (GUI coordinates: y down) }
-    procedure Blend(const X, Y: Integer; const C: TVector4);
+    { pixels per GUI unit }
+    ScaleX, ScaleY: Single;
+    { blend 0..255 color bytes with alpha 0..255 }
+    procedure BlendBytes(const X, Y: Integer; const R, G, B, A: Integer); inline;
+    { the pixels a GUI rectangle covers (y down), end exclusive }
+    procedure PixelBox(const R: TFloatRectangle; out X0, Y0, X1, Y1: Integer);
     procedure FillRect(const R: TFloatRectangle; const C: TVector4);
     procedure DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4);
     procedure DrawText(const R: TFloatRectangle; const W: TD3GuiWindow; const S: String);
@@ -324,54 +360,95 @@ type
     function ResolveText(const S: String): String;
   end;
 
-procedure TGuiPainter.Blend(const X, Y: Integer; const C: TVector4);
+procedure TGuiPainter.BlendBytes(const X, Y: Integer; const R, G, B, A: Integer);
 var
   P: PVector4Byte;
-  A: Single;
 begin
-  if (X < 0) or (Y < 0) or (X >= Image.Width) or (Y >= Image.Height) or (C.W <= 0) then
+  if (A <= 0) or (X < 0) or (Y < 0) or (X >= Integer(Image.Width)) or (Y >= Integer(Image.Height)) then
     Exit;
   { CGE images are bottom-to-top }
   P := Image.PixelPtr(X, Image.Height - 1 - Y);
-  A := Min(1, C.W);
-  P^.X := Round(P^.X * (1 - A) + Min(1, Max(0, C.X)) * 255 * A);
-  P^.Y := Round(P^.Y * (1 - A) + Min(1, Max(0, C.Y)) * 255 * A);
-  P^.Z := Round(P^.Z * (1 - A) + Min(1, Max(0, C.Z)) * 255 * A);
-  P^.W := Round(Min(255, P^.W + (255 - P^.W) * A));
+  if A >= 255 then
+  begin
+    P^.X := R;
+    P^.Y := G;
+    P^.Z := B;
+    P^.W := 255;
+    Exit;
+  end;
+  P^.X := (P^.X * (255 - A) + R * A + 127) div 255;
+  P^.Y := (P^.Y * (255 - A) + G * A + 127) div 255;
+  P^.Z := (P^.Z * (255 - A) + B * A + 127) div 255;
+  P^.W := P^.W + ((255 - P^.W) * A + 127) div 255;
+end;
+
+procedure TGuiPainter.PixelBox(const R: TFloatRectangle; out X0, Y0, X1, Y1: Integer);
+begin
+  X0 := Round(R.Left * ScaleX);
+  Y0 := Round(R.Bottom * ScaleY);
+  X1 := Round((R.Left + R.Width) * ScaleX);
+  Y1 := Round((R.Bottom + R.Height) * ScaleY);
+end;
+
+{ 0..255 of a 0..1 color component }
+function ColorByte(const F: Single): Integer;
+begin
+  if F <= 0 then
+    Result := 0
+  else
+  if F >= 1 then
+    Result := 255
+  else
+    Result := Round(F * 255);
 end;
 
 procedure TGuiPainter.FillRect(const R: TFloatRectangle; const C: TVector4);
 var
-  X, Y: Integer;
+  X, Y, X0, Y0, X1, Y1, CR, CG, CB, CA: Integer;
 begin
   if C.W <= 0 then
     Exit;
-  for Y := Round(R.Bottom) to Round(R.Bottom + R.Height) - 1 do
-    for X := Round(R.Left) to Round(R.Left + R.Width) - 1 do
-      Blend(X, Y, C);
+  PixelBox(R, X0, Y0, X1, Y1);
+  CR := ColorByte(C.X);
+  CG := ColorByte(C.Y);
+  CB := ColorByte(C.Z);
+  CA := ColorByte(C.W);
+  for Y := Max(0, Y0) to Min(Integer(Image.Height), Y1) - 1 do
+    for X := Max(0, X0) to Min(Integer(Image.Width), X1) - 1 do
+      BlendBytes(X, Y, CR, CG, CB, CA);
 end;
 
 procedure TGuiPainter.DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4);
 var
-  X, Y, X0, Y0, X1, Y1: Integer;
-  U, V: Single;
-  C: TVector4;
+  X, Y, X0, Y0, X1, Y1, SY, TR, TG, TB, TA: Integer;
+  Columns: array of Integer;
+  Row, P: PVector4Byte;
+  Rgba: TRGBAlphaImage;
 begin
-  X0 := Round(R.Left);
-  Y0 := Round(R.Bottom);
-  X1 := Round(R.Left + R.Width);
-  Y1 := Round(R.Bottom + R.Height);
-  if (X1 <= X0) or (Y1 <= Y0) then
+  PixelBox(R, X0, Y0, X1, Y1);
+  if (X1 <= X0) or (Y1 <= Y0) or not (Src is TRGBAlphaImage) then
     Exit;
-  for Y := Y0 to Y1 - 1 do
-    for X := X0 to X1 - 1 do
+  Rgba := TRGBAlphaImage(Src);
+  TR := ColorByte(Tint.X);
+  TG := ColorByte(Tint.Y);
+  TB := ColorByte(Tint.Z);
+  TA := ColorByte(Tint.W);
+  { the source column of each pixel column }
+  SetLength(Columns, X1 - X0);
+  for X := X0 to X1 - 1 do
+    Columns[X - X0] := Min(Rgba.Width - 1, Trunc((X - X0 + 0.5) / (X1 - X0) * Rgba.Width));
+  for Y := Max(0, Y0) to Min(Integer(Image.Height), Y1) - 1 do
+  begin
+    { GUI y goes down, the source image's rows go up }
+    SY := Min(Rgba.Height - 1, Trunc((1 - (Y - Y0 + 0.5) / (Y1 - Y0)) * Rgba.Height));
+    Row := Rgba.PixelPtr(0, SY);
+    for X := Max(0, X0) to Min(Integer(Image.Width), X1) - 1 do
     begin
-      U := (X - X0 + 0.5) / (X1 - X0);
-      { GUI y goes down, the source image's rows go up }
-      V := 1 - (Y - Y0 + 0.5) / (Y1 - Y0);
-      C := Src.Colors[Min(Src.Width - 1, Trunc(U * Src.Width)), Min(Src.Height - 1, Trunc(V * Src.Height)), 0];
-      Blend(X, Y, Vector4(C.X * Tint.X, C.Y * Tint.Y, C.Z * Tint.Z, C.W * Tint.W));
+      P := Row;
+      Inc(P, Columns[X - X0]);
+      BlendBytes(X, Y, P^.X * TR div 255, P^.Y * TG div 255, P^.Z * TB div 255, P^.W * TA div 255);
     end;
+  end;
 end;
 
 function TGuiPainter.ResolveText(const S: String): String;
@@ -404,8 +481,8 @@ var
   I, J, GX, GY, SX, SY, DstX0, DstY0, DstW, DstH: Integer;
   G: TTextureFontData.TGlyph;
   Rect: TRectangle;
-  Alpha: Single;
   Baseline: Single;
+  GlyphAlpha, ForeR, ForeG, ForeB, ForeA: Integer;
 
   function StringWidth(const T: String): Single;
   begin
@@ -415,6 +492,10 @@ var
 begin
   if S = '' then
     Exit;
+  ForeR := ColorByte(W.ForeColor.X);
+  ForeG := ColorByte(W.ForeColor.Y);
+  ForeB := ColorByte(W.ForeColor.Z);
+  ForeA := ColorByte(W.ForeColor.W);
   { Doom 3's fonts are 48 pixels at textscale 1 }
   Scale := 48 * W.TextScale / Max(1, Font.Size);
   LineHeight := Font.Size * Scale * 1.15;
@@ -465,20 +546,19 @@ begin
         begin
           { the glyph's box in GUI coordinates (y down); CGE draws a glyph
             at (pen x - G.X, baseline - G.Y) with y up }
-          DstX0 := Round(PenX - G.X * Scale);
-          DstY0 := Round(Baseline + G.Y * Scale - Integer(Rect.Height) * Scale);
-          DstW := Max(1, Round(Rect.Width * Scale));
-          DstH := Max(1, Round(Rect.Height * Scale));
+          DstX0 := Round((PenX - G.X * Scale) * ScaleX);
+          DstY0 := Round((Baseline + G.Y * Scale - Integer(Rect.Height) * Scale) * ScaleY);
+          DstW := Max(1, Round(Rect.Width * Scale * ScaleX));
+          DstH := Max(1, Round(Rect.Height * Scale * ScaleY));
           for GY := 0 to DstH - 1 do
             for GX := 0 to DstW - 1 do
             begin
               SX := Rect.Left + Min(Rect.Width - 1, Trunc((GX + 0.5) / DstW * Rect.Width));
               { atlas rows go up, GUI rows go down }
               SY := Rect.Bottom + Rect.Height - 1 - Min(Rect.Height - 1, Trunc((GY + 0.5) / DstH * Rect.Height));
-              Alpha := PByte(Font.Image.PixelPtr(SX, SY))^ / 255;
-              if Alpha > 0 then
-                Blend(DstX0 + GX, DstY0 + GY, Vector4(W.ForeColor.X, W.ForeColor.Y, W.ForeColor.Z,
-                  W.ForeColor.W * Alpha));
+              GlyphAlpha := PByte(Font.Image.PixelPtr(SX, SY))^;
+              if GlyphAlpha > 0 then
+                BlendBytes(DstX0 + GX, DstY0 + GY, ForeR, ForeG, ForeB, ForeA * GlyphAlpha div 255);
             end;
         end;
         PenX := PenX + G.AdvanceX * Scale;
@@ -515,12 +595,7 @@ begin
     F := FindImageFile(ImageName, False);
     if F <> '' then
     try
-      Src := LoadImage(D3FsUrl(F));
-      try
-        DrawImage(R, Src, W.MatColor);
-      finally
-        Src.Free;
-      end;
+      DrawImage(R, GuiSourceImage(F), W.MatColor);
     except
       on E: Exception do
         WritelnWarning('Doom3Gui', 'Cannot draw "%s": %s', [F, E.Message]);
@@ -543,13 +618,15 @@ function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage;
 var
   Painter: TGuiPainter;
 begin
-  Result := TRGBAlphaImage.Create(GuiWidth, GuiHeight);
+  Result := TRGBAlphaImage.Create(GuiImageWidth, GuiImageHeight);
   Result.Clear(Vector4Byte(0, 0, 0, 255));
   if (Gui = nil) or (Gui.Desktop = nil) then
     Exit;
   Painter := TGuiPainter.Create;
   try
     Painter.Image := Result;
+    Painter.ScaleX := GuiImageWidth / GuiWidth;
+    Painter.ScaleY := GuiImageHeight / GuiHeight;
     Painter.State := State;
     Painter.Font := Font_DefaultUi;
     Painter.DrawWindow(Gui.Desktop, 0, 0);
@@ -681,6 +758,7 @@ end;
 procedure ClearGuiCache;
 begin
   GuiImages.Clear;
+  GuiSources.Clear;
   GuiKeys.Clear;
 end;
 
@@ -691,6 +769,7 @@ end;
 
 initialization
   GuiImages := specialize TObjectDictionary<String, TRGBAlphaImage>.Create([doOwnsValues]);
+  GuiSources := specialize TObjectDictionary<String, TRGBAlphaImage>.Create([doOwnsValues]);
   GuiKeys := TStringList.Create;
   GuiProtocol := TGuiProtocol.Create;
 finalization
@@ -698,5 +777,6 @@ finalization
     UnregisterUrlProtocol('d3gui');
   FreeAndNil(GuiProtocol);
   FreeAndNil(GuiImages);
+  FreeAndNil(GuiSources);
   FreeAndNil(GuiKeys);
 end.

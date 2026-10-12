@@ -51,6 +51,13 @@ type
     function BrushCastsShadows(const I: Integer): Boolean;
   end;
 
+{ Whether triangles (Indexes into Positions, 3 per triangle) form closed
+  surfaces: every edge has a counterpart going the other way, matching
+  positions exactly (degenerate triangles left out), like CGE's shadow
+  volume edges. CGE doesn't cast shadows from a shape with open edges, and
+  finding its edges is quadratic in them: open models shouldn't cast. }
+function TrianglesClosed(const Positions: array of TVector3; const Indexes: array of Int32): Boolean;
+
 { The closed convex polyhedron of a brush (Doom 3 coordinates), shrunk by
   Inset: every face polygon counter-clockwise seen from outside, vertexes
   shared between faces welded to exactly equal coordinates (CGE matches
@@ -239,6 +246,54 @@ begin
       Indexes.Add(Base + J);
       Indexes.Add(Base + J + 1);
     end;
+  end;
+end;
+
+type
+  TEdgeKey = record
+    A, B: TVector3;
+  end;
+
+function TrianglesClosed(const Positions: array of TVector3; const Indexes: array of Int32): Boolean;
+var
+  Edges: specialize TDictionary<TEdgeKey, Integer>;
+  T, K, Count: Integer;
+  P: array [0..2] of TVector3;
+  Key, Back: TEdgeKey;
+  Pair: specialize TPair<TEdgeKey, Integer>;
+begin
+  Result := Length(Indexes) >= 3;
+  if not Result then
+    Exit;
+  Edges := specialize TDictionary<TEdgeKey, Integer>.Create;
+  try
+    for T := 0 to Length(Indexes) div 3 - 1 do
+    begin
+      for K := 0 to 2 do
+        P[K] := Positions[Indexes[T * 3 + K]];
+      if TVector3.PerfectlyEquals(P[0], P[1]) or TVector3.PerfectlyEquals(P[1], P[2]) or
+         TVector3.PerfectlyEquals(P[2], P[0]) or
+         TVector3.CrossProduct(P[1] - P[0], P[2] - P[0]).IsZero then
+        Continue;
+      for K := 0 to 2 do
+      begin
+        Key.A := P[K];
+        Key.B := P[(K + 1) mod 3];
+        if Edges.TryGetValue(Key, Count) then
+          Edges[Key] := Count + 1
+        else
+          Edges.Add(Key, 1);
+      end;
+    end;
+    for Pair in Edges do
+    begin
+      Back.A := Pair.Key.B;
+      Back.B := Pair.Key.A;
+      if not Edges.TryGetValue(Back, Count) or (Count <> Pair.Value) then
+        Exit(False);
+    end;
+  finally
+    Edges.Free;
   end;
 end;
 

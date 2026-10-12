@@ -12,7 +12,7 @@ implementation
 uses
   SysUtils, Classes,
   CastleWindow, CastleLog, CastleUIControls, CastleApplicationProperties, CastleParameters,
-  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine,
+  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils,
   Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level
   {$region 'Castle Initialization Uses'}
   // The content here may be automatically updated by CGE editor.
@@ -87,6 +87,9 @@ begin
 
     { Data: the bundled test level first, then a Doom 3 install (later
       sources override earlier ones, like idFileSystem's search path). }
+    LoadProfileStart;
+    { CD3_CGE_PROFILE: CGE's profiler too (loading images, preparing scenes) }
+    Profiler.Enabled := GetEnvironmentVariable('CD3_CGE_PROFILE') <> '';
     if UriFileExists(DefaultTestPk4) then
       D3Fs.AddPk4(DefaultTestPk4);
     LoadedGame := False;
@@ -114,7 +117,10 @@ begin
     if not LoadedGame then
       WritelnLog('GameInitialize', 'No Doom 3 data found, using the bundled test level. ' +
         'Pass -basepath "<Doom 3 dir>" (with base/pak000.pk4 ...) to play Doom 3 maps.');
+    LoadProfileStep('pk4s');
     Decls.LoadAll;
+    LoadProfileStep('decls');
+    LoadProfileLog('Data');
   finally
     Pk4s.Free;
   end;

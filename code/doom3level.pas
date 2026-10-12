@@ -24,7 +24,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
-  CastleCameras,
+  CastleCameras, Doom3Scene,
   Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions,
   Doom3LightEffects;
 
@@ -858,7 +858,7 @@ begin
     AddLightLibrary(Root);
     AddLightLibrary(RootNonSolid);
 
-    FAreaScenes[Area] := TCastleScene.Create(nil);
+    FAreaScenes[Area] := TD3Scene.Create(nil);
     FAreaScenes[Area].SetTransient;
     FAreaScenes[Area].Name := 'Area' + IntToStr(Area);
     FAreaScenes[Area].Load(Root, True);
@@ -868,7 +868,7 @@ begin
     FAreaScenes[Area].CastShadows := False;
     Add(FAreaScenes[Area]);
 
-    FAreaNonSolid[Area] := TCastleScene.Create(nil);
+    FAreaNonSolid[Area] := TD3Scene.Create(nil);
     FAreaNonSolid[Area].SetTransient;
     FAreaNonSolid[Area].Name := 'AreaNonSolid' + IntToStr(Area);
     FAreaNonSolid[Area].Load(RootNonSolid, True);
@@ -883,7 +883,7 @@ begin
 
   LightRoot := TX3DRootNode.Create;
   BuildLights(LightRoot);
-  FLightScene := TCastleScene.Create(nil);
+  FLightScene := TD3Scene.Create(nil);
   FLightScene.SetTransient;
   FLightScene.Name := 'Lights';
   FLightScene.Load(LightRoot, True);
@@ -1162,7 +1162,7 @@ begin
     Exit;
   end;
   WorldModel := FCollision.World;
-  FWorldCollision := TCastleScene.Create(nil);
+  FWorldCollision := TD3Scene.Create(nil);
   FWorldCollision.SetTransient;
   FWorldCollision.Name := 'WorldCollision';
   FWorldCollision.Load(WorldModel.BuildCollisionNode, True);
@@ -1212,7 +1212,7 @@ begin
   begin
     if Length(Groups[G]) = 0 then
       Continue;
-    Scene := TCastleScene.Create(nil);
+    Scene := TD3Scene.Create(nil);
     Scene.SetTransient;
     Scene.Name := 'ShadowCasters' + IntToStr(G);
     Scene.Load(BuildShadowCasterNode(Groups[G], 1), True);
@@ -1235,7 +1235,8 @@ var
   I, Sprites: Integer;
   Rot: TMatrix3;
   ModelName: String;
-  Solid: Boolean;
+  Solid, Closed: Boolean;
+  Positions: array of TVector3;
 begin
   for E in FMapFile.Entities do
   begin
@@ -1270,7 +1271,7 @@ begin
     Sprites := SpriteCount;
     BuildProcModel(Model, Root, Root, E);
     AddLightLibrary(Root);
-    B.Scene := TCastleScene.Create(nil);
+    B.Scene := TD3Scene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     B.Scene.Load(Root, True);
@@ -1278,10 +1279,21 @@ begin
     { a model of only nonsolid surfaces (heat haze sprites, decals...)
       neither collides nor blocks sight and shots }
     Solid := False;
+    Closed := False;
     for Surf in Model.Surfaces do
+    begin
       if not (Decls.Material(Surf.Material).NonSolid or Decls.Material(Surf.Material).ClearsSolid) then
         Solid := True;
+      if not Closed then
+      begin
+        SetLength(Positions, Length(Surf.Vertexes));
+        for I := 0 to High(Surf.Vertexes) do
+          Positions[I] := Surf.Vertexes[I].Position;
+        Closed := TrianglesClosed(Positions, Surf.Indexes);
+      end;
+    end;
     B.Scene.PreciseCollisions := E.BoolValue('solid', True) and Solid;
+    B.Scene.CastShadows := Closed;
     B.Scene.Collides := B.Scene.PreciseCollisions;
     B.Scene.Pickable := B.Scene.PreciseCollisions;
     B.Scene.Translation := D3ToCge(E.Origin);
@@ -1343,7 +1355,7 @@ begin
     B.Entity := E;
     B.LocalMin := Model.BoundsMin;
     B.LocalMax := Model.BoundsMax;
-    B.Scene := TCastleScene.Create(nil);
+    B.Scene := TD3Scene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     B.Scene.Load(Model.BuildNode(SkinName, E.Pairs), True);
@@ -1352,6 +1364,9 @@ begin
     Cls := LowerCase(E.ClassName_);
     B.Scene.PreciseCollisions := (Copy(Cls, 1, 5) = 'func_') and
       not E.BoolValue('noclipmodel') and E.BoolValue('solid', True);
+    { open models never cast (CGE skips open shapes), and finding their
+      edges takes long }
+    B.Scene.CastShadows := Model.HasClosedSurface;
     B.Scene.Collides := B.Scene.PreciseCollisions;
     B.Scene.Pickable := B.Scene.PreciseCollisions;
     B.Scene.Translation := D3ToCge(E.Origin);
@@ -1549,6 +1564,7 @@ begin
   EnsureData;
   Base := MapBasePath(FMapName);
 
+  LoadProfileStep('clear');
   FProc := TD3ProcFile.Create;
   if not FProc.LoadFromVfs(Base + '.proc') then
   begin
@@ -1559,6 +1575,7 @@ begin
   FMapFile := TD3MapFile.Create;
   if not FMapFile.LoadFromVfs(Base + '.map') then
     WritelnWarning('Doom3Level', 'No entities: cannot load "%s.map"', [Base]);
+  LoadProfileStep('proc+map');
   { like idGameLocal's spawnArgs: the entityDef's keys (with "inherit"
     resolved) are defaults for the map's keys (func_door: speed, lip,
     triggersize, sounds; func_rotating: start_on...) }
@@ -1579,15 +1596,20 @@ begin
   Sprites := SpriteCount;
   Glass := GlassCount;
   BuildWorld;
+  LoadProfileStep('world');
   BuildCollision(Base);
+  LoadProfileStep('collision');
   BuildBrushEntities;
+  LoadProfileStep('brushes');
   WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
     [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
   BuildStaticModelEntities;
+  LoadProfileStep('static models');
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
   if FSpawnModels then
     BuildModelEntities;
+  LoadProfileStep('md5 models');
   WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models (%d with heads)',
     [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count - FStaticModelCount,
      FStaticModelCount, FModels.Count, FHeadCount]);
@@ -1781,9 +1803,13 @@ begin
   { animate md5 models (also in the editor, it's nice to see them move) }
   for ME in FModels do
   begin
+    { skinning is the slow part: only for models that can be seen (portal
+      visibility hides the others) }
+    ME.Instance.Shown := ME.Holder.Visible and ME.Holder.Exists;
     ME.Instance.Update(SecondsPassed);
     if ME.HeadInstance <> nil then
     begin
+      ME.HeadInstance.Shown := ME.Instance.Shown;
       ME.HeadInstance.Update(SecondsPassed);
       ME.UpdateHead;
     end;

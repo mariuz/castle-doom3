@@ -47,7 +47,7 @@ implementation
 
 uses
   Math,
-  CastleDownload, CastleLog, CastleUriUtils,
+  CastleDownload, CastleLog, CastleUriUtils, CastleTimeUtils,
   Doom3Files, Doom3Lexer, Doom3Decls;
 
 var
@@ -198,34 +198,31 @@ end;
 
 procedure StoreNormal(const P: PByte; const NX, NY, NZ: Single);
 var
-  L: Single;
+  L2, K: Single;
 begin
-  L := Sqrt(NX * NX + NY * NY + NZ * NZ);
-  if L < 1e-6 then
+  L2 := NX * NX + NY * NY + NZ * NZ;
+  if L2 < 1e-12 then
   begin
     P[0] := 128; P[1] := 128; P[2] := 255;
     Exit;
   end;
-  P[0] := Round((NX / L * 0.5 + 0.5) * 255);
-  P[1] := Round((NY / L * 0.5 + 0.5) * 255);
-  P[2] := Round((NZ / L * 0.5 + 0.5) * 255);
+  { (n / |n| * 0.5 + 0.5) * 255, rounded: Trunc(x + 0.5) for x >= 0 is
+    much faster than Round }
+  K := 127.5 / Sqrt(L2);
+  P[0] := Trunc(NX * K + 128.0);
+  P[1] := Trunc(NY * K + 128.0);
+  P[2] := Trunc(NZ * K + 128.0);
 end;
 
 { heightmap(): like R_HeightmapToNormalMap, from the image's luminance. }
 function HeightToNormal(const Src: TRGBImage; const Scale: Single): TRGBImage;
 var
-  W, H, X, Y: Integer;
-  Heights: array of Single;
+  W, H, X, Y, XL, XR: Integer;
+  { heights * 3 (the sum of the channels), wrapping around the edges }
+  Heights: array of Integer;
+  Row, Down, Up: PInteger;
   P: PByte;
   S: Single;
-
-  function Hgt(XX, YY: Integer): Single; inline;
-  begin
-    XX := (XX + W) mod W;
-    YY := (YY + H) mod H;
-    Result := Heights[YY * W + XX];
-  end;
-
 begin
   W := Src.Width;
   H := Src.Height;
@@ -233,19 +230,26 @@ begin
   P := Src.RawPixels;
   for X := 0 to W * H - 1 do
   begin
-    Heights[X] := (P[0] + P[1] + P[2]) / 3;
+    Heights[X] := P[0] + P[1] + P[2];
     Inc(P, 3);
   end;
-  S := Scale / 256;
+  S := Scale / 256 / 3;
   Result := TRGBImage.Create(W, H);
   P := Result.RawPixels;
   for Y := 0 to H - 1 do
+  begin
+    Row := @Heights[Y * W];
+    Down := @Heights[((Y + H - 1) mod H) * W];
+    Up := @Heights[((Y + 1) mod H) * W];
     for X := 0 to W - 1 do
     begin
+      if X = 0 then XL := W - 1 else XL := X - 1;
+      if X = W - 1 then XR := 0 else XR := X + 1;
       { CGE images are bottom-to-top, so Y + 1 is up the image }
-      StoreNormal(P, (Hgt(X - 1, Y) - Hgt(X + 1, Y)) * S, (Hgt(X, Y - 1) - Hgt(X, Y + 1)) * S, 1);
+      StoreNormal(P, (Row[XL] - Row[XR]) * S, (Down[X] - Up[X]) * S, 1);
       Inc(P, 3);
     end;
+  end;
 end;
 
 { addnormals(): sums the slopes of two normal maps. }
@@ -263,8 +267,8 @@ begin
   D := Result.RawPixels;
   for I := 0 to A.Width * A.Height - 1 do
   begin
-    AX := PA[0] / 127.5 - 1; AY := PA[1] / 127.5 - 1; AZ := PA[2] / 127.5 - 1;
-    BX := PB[0] / 127.5 - 1; BY := PB[1] / 127.5 - 1; BZ := PB[2] / 127.5 - 1;
+    AX := PA[0] * (1 / 127.5) - 1; AY := PA[1] * (1 / 127.5) - 1; AZ := PA[2] * (1 / 127.5) - 1;
+    BX := PB[0] * (1 / 127.5) - 1; BY := PB[1] * (1 / 127.5) - 1; BZ := PB[2] * (1 / 127.5) - 1;
     StoreNormal(D, AX + BX, AY + BY, AZ * BZ);
     Inc(PA, 3); Inc(PB, 3); Inc(D, 3);
   end;
@@ -428,7 +432,10 @@ var
   Path, Prog: String;
   Kind: TD3ImageKind;
   Img: TCastleImage;
+  Start: TTimerResult;
 begin
+  Start := Timer;
+  Inc(ProfileImageCount);
   Path := RawUriDecode(UriDeleteProtocol(Url));
   while (Path <> '') and (Path[1] = '/') do
     Delete(Path, 1, 1);
@@ -452,6 +459,7 @@ begin
     Img.Free;
   end;
   MimeType := 'image/x-tga';
+  ProfileImageSeconds := ProfileImageSeconds + TimerSeconds(Timer, Start);
 end;
 
 procedure RegisterImageProtocol;

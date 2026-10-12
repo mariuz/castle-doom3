@@ -28,12 +28,21 @@ type
   end;
 
   TDoom3Source = class
+  strict private
+    FMapping: PtrUInt;
+  public
     Name: String;
     IsDirectory: Boolean;
     { PK4: the open archive file. }
     Stream: TStream;
+    { PK4: the whole archive in memory (a memory mapped file, or the memory
+      stream's memory), nil if it couldn't be mapped. }
+    Data: PByte;
+    DataSize: Int64;
     { Loose directory: its path with a trailing delimiter. }
     Directory: String;
+    { Map the archive into memory (Data). }
+    procedure MapData;
     destructor Destroy; override;
   end;
 
@@ -82,13 +91,58 @@ function NormalizeD3Path(const S: String): String;
 { URL of a file inside the virtual file system. }
 function D3FsUrl(const APath: String): String;
 
+{ Load profiling: LoadProfileStart, then LoadProfileStep after each phase
+  (it adds "name seconds" to LoadProfile); LoadProfileLog writes them. }
+procedure LoadProfileStart;
+procedure LoadProfileStep(const Name: String);
+procedure LoadProfileLog(const Title: String);
+
 var
   D3Fs: TDoom3FileSystem;
+  LoadProfile: String;
+  { time spent (and calls) reading files, evaluating image programs (with
+    their reads); LoadProfileLog writes and resets them }
+  ProfileReadSeconds, ProfileImageSeconds: Double;
+  ProfileReadCount, ProfileImageCount: Integer;
 
 implementation
 
 uses
-  ZStream, CastleFilesUtils, CastleFindFiles, CastleStringUtils;
+  ZStream, CastleFilesUtils, CastleFindFiles, CastleStringUtils, CastleTimeUtils, CastleInternalZLib
+  {$ifdef MSWINDOWS}, Windows{$endif}
+  {$ifdef UNIX}, BaseUnix{$endif};
+
+var
+  LoadProfileTime, LoadProfileStartTime: TTimerResult;
+
+procedure LoadProfileStart;
+begin
+  LoadProfile := '';
+  LoadProfileTime := Timer;
+  LoadProfileStartTime := LoadProfileTime;
+end;
+
+procedure LoadProfileStep(const Name: String);
+var
+  Now: TTimerResult;
+begin
+  Now := Timer;
+  if LoadProfile <> '' then
+    LoadProfile := LoadProfile + ', ';
+  LoadProfile := LoadProfile + Format('%s %.2f', [Name, TimerSeconds(Now, LoadProfileTime)]);
+  LoadProfileTime := Now;
+end;
+
+procedure LoadProfileLog(const Title: String);
+begin
+  WritelnLog('Profile', '%s: %.2f s (%s; %d file reads %.2f s, %d image programs %.2f s)',
+    [Title, TimerSeconds(Timer, LoadProfileStartTime), LoadProfile,
+     ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds]);
+  ProfileReadSeconds := 0;
+  ProfileImageSeconds := 0;
+  ProfileReadCount := 0;
+  ProfileImageCount := 0;
+end;
 
 function NormalizeD3Path(const S: String): String;
 var
@@ -115,10 +169,143 @@ end;
 
 { TDoom3Source }
 
+procedure TDoom3Source.MapData;
+begin
+  Data := nil;
+  DataSize := 0;
+  if Stream is TCustomMemoryStream then
+  begin
+    Data := TCustomMemoryStream(Stream).Memory;
+    DataSize := Stream.Size;
+    Exit;
+  end;
+  if not (Stream is THandleStream) or (Stream.Size = 0) then
+    Exit;
+  {$ifdef MSWINDOWS}
+  FMapping := CreateFileMapping(THandleStream(Stream).Handle, nil, PAGE_READONLY, 0, 0, nil);
+  if FMapping = 0 then
+    Exit;
+  Data := MapViewOfFile(FMapping, FILE_MAP_READ, 0, 0, 0);
+  if Data = nil then
+  begin
+    CloseHandle(FMapping);
+    FMapping := 0;
+    Exit;
+  end;
+  DataSize := Stream.Size;
+  {$endif}
+  {$ifdef UNIX}
+  Data := Fpmmap(nil, Stream.Size, PROT_READ, MAP_SHARED, THandleStream(Stream).Handle, 0);
+  if (Data = nil) or (Data = MAP_FAILED) then
+  begin
+    Data := nil;
+    Exit;
+  end;
+  DataSize := Stream.Size;
+  {$endif}
+end;
+
 destructor TDoom3Source.Destroy;
 begin
+  if (Data <> nil) and not (Stream is TCustomMemoryStream) then
+  begin
+    {$ifdef MSWINDOWS}
+    UnmapViewOfFile(Data);
+    CloseHandle(FMapping);
+    {$endif}
+    {$ifdef UNIX}
+    Fpmunmap(Data, DataSize);
+    {$endif}
+  end;
+  Data := nil;
   FreeAndNil(Stream);
   inherited Destroy;
+end;
+
+type
+  { A read-only stream over memory it doesn't own. }
+  TPointerStream = class(TCustomMemoryStream)
+  public
+    constructor Create(const P: Pointer; const ASize: PtrInt);
+  end;
+
+constructor TPointerStream.Create(const P: Pointer; const ASize: PtrInt);
+begin
+  inherited Create;
+  SetPointer(P, ASize);
+end;
+
+{$ifdef MSWINDOWS}
+type
+  { C's z_stream on Win64 is 88 bytes: CGE's TZStream (84) misses the
+    trailing padding, and zlib refuses a stream of the wrong size. }
+  TPaddedZStream = record
+    Z: TZStream;
+    Pad: LongWord;
+  end;
+
+var
+  { the C zlib can't be used (no library, or it refused our stream) }
+  CZLibFailed: Boolean;
+
+{ Inflate with the C zlib; False when it can't be used. }
+function InflateRawC(const Src: PByte; const SrcSize: PtrInt; const Dest: PByte; const DestSize: PtrInt): Boolean;
+var
+  S: TPaddedZStream;
+  Res: Integer;
+begin
+  Result := False;
+  if CZLibFailed or not CastleZLibInitialized then
+    Exit;
+  FillChar(S, SizeOf(S), 0);
+  S.Z.next_in := Src;
+  S.Z.avail_in := SrcSize;
+  S.Z.next_out := Dest;
+  S.Z.avail_out := DestSize;
+  { negative window bits: raw deflate }
+  if inflateInit2_(S.Z, -15, ZLIB_VERSION, SizeOf(S)) <> Z_OK then
+  begin
+    CZLibFailed := True;
+    WritelnLog('Doom3Files', 'The C zlib refused the stream, inflating with FPC''s');
+    Exit;
+  end;
+  try
+    Res := inflate(S.Z, Z_FINISH);
+    if (Res <> Z_STREAM_END) and not ((Res = Z_BUF_ERROR) and (S.Z.avail_out = 0)) then
+      raise Exception.CreateFmt('zlib inflate failed (%d)', [Res]);
+  finally
+    inflateEnd(S.Z);
+  end;
+  Result := True;
+end;
+{$endif}
+
+{ Inflate raw deflate data (no zlib header) into Dest (DestSize bytes, the
+  known uncompressed size): with the C zlib CGE loaded on Windows (several
+  times faster), else FPC's. }
+procedure InflateRaw(const Src: PByte; const SrcSize: PtrInt; const Dest: PByte; const DestSize: PtrInt);
+var
+  SrcStream: TPointerStream;
+  Inflater: TDecompressionStream;
+begin
+  if DestSize = 0 then
+    Exit;
+  {$ifdef MSWINDOWS}
+  if InflateRawC(Src, SrcSize, Dest, DestSize) then
+    Exit;
+  {$endif}
+  SrcStream := TPointerStream.Create(Src, SrcSize);
+  try
+    { True: raw deflate data, without a zlib header }
+    Inflater := TDecompressionStream.Create(SrcStream, True);
+    try
+      Inflater.ReadBuffer(Dest^, DestSize);
+    finally
+      Inflater.Free;
+    end;
+  finally
+    SrcStream.Free;
+  end;
 end;
 
 { TDoom3FileSystem }
@@ -241,6 +428,7 @@ begin
     Source := TDoom3Source.Create;
     Source.Name := AUrlOrFilename;
     Source.Stream := Stream;
+    Source.MapData;
     SourceIndex := FSources.Add(Source);
     Stream := nil; { owned by Source now }
 
@@ -301,7 +489,7 @@ begin
       end;
     until FindNext(Info) <> 0;
   finally
-    FindClose(Info);
+    SysUtils.FindClose(Info);
   end;
 end;
 
@@ -339,7 +527,7 @@ begin
         Names.Add(Info.Name);
       until FindNext(Info) <> 0;
     finally
-      FindClose(Info);
+      SysUtils.FindClose(Info);
     end;
     Names.Sort; { pak000 < pak001 < ... < zpak_mod, like idFileSystem }
     for Name in Names do
@@ -372,9 +560,38 @@ var
   Source: TDoom3Source;
   Local: TZipLocalHeader;
   PackedData: TMemoryStream;
-  Inflater: TDecompressionStream;
+  DataStart: Int64;
 begin
   Source := FSources[Entry.SourceIndex];
+  if Source.Data <> nil then
+  begin
+    { the mapped archive: no copies of the packed data }
+    if Entry.HeaderOffset + SizeOf(Local) > Source.DataSize then
+      raise Exception.CreateFmt('Bad ZIP offset for "%s"', [Entry.Path]);
+    Move(Source.Data[Entry.HeaderOffset], Local, SizeOf(Local));
+    if Local.Signature <> $04034b50 then
+      raise Exception.CreateFmt('Bad ZIP local header for "%s"', [Entry.Path]);
+    DataStart := Entry.HeaderOffset + SizeOf(Local) + Local.NameLength + Local.ExtraLength;
+    if DataStart + Entry.CompressedSize > Source.DataSize then
+      raise Exception.CreateFmt('Truncated ZIP data for "%s"', [Entry.Path]);
+    Result := TMemoryStream.Create;
+    try
+      Result.Size := Entry.Size;
+      case Entry.Method of
+        0: if Entry.Size > 0 then
+             Move(Source.Data[DataStart], Result.Memory^, Entry.Size);
+        8: InflateRaw(@Source.Data[DataStart], Entry.CompressedSize, Result.Memory, Entry.Size);
+        else
+          raise Exception.CreateFmt('Unsupported ZIP compression method %d for "%s"',
+            [Entry.Method, Entry.Path]);
+      end;
+      Result.Position := 0;
+    except
+      FreeAndNil(Result);
+      raise;
+    end;
+    Exit;
+  end;
   Source.Stream.Position := Entry.HeaderOffset;
   Source.Stream.ReadBuffer(Local, SizeOf(Local));
   if Local.Signature <> $04034b50 then
@@ -393,16 +610,8 @@ begin
           try
             if Entry.CompressedSize > 0 then
               PackedData.CopyFrom(Source.Stream, Entry.CompressedSize);
-            PackedData.Position := 0;
-            { True: raw deflate data, without a zlib header }
-            Inflater := TDecompressionStream.Create(PackedData, True);
-            try
-              Result.Size := Entry.Size;
-              if Entry.Size > 0 then
-                Inflater.ReadBuffer(Result.Memory^, Entry.Size);
-            finally
-              Inflater.Free;
-            end;
+            Result.Size := Entry.Size;
+            InflateRaw(PackedData.Memory, PackedData.Size, Result.Memory, Entry.Size);
           finally
             PackedData.Free;
           end;
@@ -423,10 +632,13 @@ var
   Entry: TDoom3FileEntry;
   Source: TDoom3Source;
   Mem: TMemoryStream;
+  Start: TTimerResult;
 begin
   Result := nil;
   if not FindEntry(APath, Entry) then
     Exit;
+  Start := Timer;
+  Inc(ProfileReadCount);
   Source := FSources[Entry.SourceIndex];
   try
     if Source.IsDirectory then
@@ -448,6 +660,7 @@ begin
       Result := nil;
     end;
   end;
+  ProfileReadSeconds := ProfileReadSeconds + TimerSeconds(Timer, Start);
 end;
 
 function TDoom3FileSystem.ReadText(const APath: String): String;

@@ -959,8 +959,11 @@ begin
         SpawnTrigger(E);
     end;
   SpawnBindings;
+  LoadProfileStep('spawn');
   StartScripts;
+  LoadProfileStep('scripts');
   SpawnActors;
+  LoadProfileStep('actors');
   Hidden := 0;
   Dormant := 0;
   for ME in FMap.Models do

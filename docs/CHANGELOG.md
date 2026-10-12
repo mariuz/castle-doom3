@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Faster loading and playing**: the demo maps load in 22-26 s instead of 36-46 s (start to first frames), and Mars City Underground plays at the vsync rate instead of ~40 FPS. Scenes that don't cast shadows no longer compute shadow volume edges (quadratic in CGE), open models don't cast; GUIs are painted at 512 x 512 with integer blending and cached background images; PK4 entries are inflated from memory mapped files with the C zlib; md5 models are skinned only when visible, with joint matrices, straight into their coordinate lists; faster image programs.
+- Profiling: every map load logs its phases and first frames (`Profile:` lines); a sampling profiler (`CD3_SAMPLE=1`, console `sample start` / `sample stop`, `tools/resolve_samples.py`, `tools/sample_callers.py`).
 - **Heads look at things** (roadmap 5d, sixth part): characters look at whoever they talk to and monsters at their enemy (`lookAt`, `lookAtEnemy`): the `look_joint` joints turn by their share of the look angles, within `look_min` / `look_max`; heads that are separate models follow the body's neck (`copy_joint`). Console `actors` shows yaw and look angles.
 - Test level: `test_walker_1` looks at the player while it talks; 470 checks.
 - **Splash damage** (roadmap 5d, fifth part): projectiles with a `def_splash_damage` hurt the player near their explosion (less further away, not through walls); `detonate_on_fuse`. Bernie zombies run their script (all the demo's scripted monsters now do).

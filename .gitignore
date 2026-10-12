@@ -20,6 +20,8 @@ castle-auto-generated-resources.res
 test_output/
 smoke_output/
 castle-doom3-*.png
+# the sampling profiler's output (CD3_SAMPLE, console "sample")
+samples.txt
 
 # A Doom 3 install linked next to the executable (never commit id's data)
 /base/

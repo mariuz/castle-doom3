@@ -43,6 +43,8 @@ type
     FPlayerEye, FPlayerDir: TVector3;
     FPlayerFov: Single;
     FPlayerFovAxis: TFieldOfViewAxis;
+    { after loading a map: the first frames (textures, shaders) are profiled }
+    FProfileFrames: Integer;
     procedure UpdateCinematic;
     procedure LoadLevel(const AMapName: String);
     procedure SetupSky;
@@ -74,7 +76,8 @@ implementation
 
 uses
   Math,
-  CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
+  CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
+  Doom3Sampler,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
@@ -180,6 +183,9 @@ end;
 procedure TViewPlay.LoadLevel(const AMapName: String);
 begin
   WritelnLog('GameViewPlay', 'Loading map "%s"', [AMapName]);
+  LoadProfileStart;
+  if SamplerWanted then
+    SamplerStart;
   { keep the current level when the new one doesn't exist }
   if not TDoom3Map.MapExists(AMapName) then
   begin
@@ -208,6 +214,8 @@ begin
   PlaceCamera(Map.SpawnOrigin, Map.SpawnAngle);
   SetupSky;
   Hud.ShowMessage(AMapName, 4);
+  LoadProfileStep('sky');
+  FProfileFrames := 1;
 end;
 
 procedure TViewPlay.SetupSky;
@@ -368,6 +376,8 @@ begin
       begin
         GuiImage := RenderGui(Gui, nil);
         try
+          { back to the GUI's 640 x 480 shape }
+          GuiImage.Resize(GuiWidth, GuiHeight, riBilinear);
           S := Iff(AutoTestPrefix <> '', AutoTestPrefix, 'castle-doom3') + '_gui.png';
           SaveImage(GuiImage, S);
           Console.Print('Saved ' + S);
@@ -425,6 +435,20 @@ begin
   if Cmd = 'skipcinematic' then
     FGame.SkipCinematic
   else
+  if Cmd = 'sample' then
+  begin
+    { the sampling profiler (Doom3Sampler): "sample start", "sample stop"
+      writes samples.txt next to the exe (tools/resolve_samples.py) }
+    if Args = 'start' then
+    begin
+      SamplerStart;
+      Console.Print('Sampling');
+    end else
+    begin
+      SamplerStopAndReport('Sample of ' + MapName);
+      Console.Print('Samples written (samples.txt)');
+    end;
+  end else
   if Cmd = 'scripts' then
   begin
     S := FGame.ScriptStatus;
@@ -675,6 +699,20 @@ begin
   inherited Update(SecondsPassed, HandleInput);
   if FGame = nil then
     Exit;
+  if FProfileFrames > 0 then
+  begin
+    { the time since the last step: the previous frame (its render) }
+    LoadProfileStep('frame ' + IntToStr(FProfileFrames));
+    Inc(FProfileFrames);
+    if FProfileFrames > 5 then
+    begin
+      FProfileFrames := 0;
+      LoadProfileLog(Format('Map "%s"', [MapName]));
+      if Profiler.Enabled then
+        WritelnLogMultiline('Time Profile', Profiler.Summary);
+      SamplerStopAndReport(Format('Map "%s"', [MapName]));
+    end;
+  end;
   LabelFps.Caption := 'FPS: ' + Container.Fps.ToString;
 
   WalkNavigation.Exists := not Console.IsOpen and not FGame.PlayerDead and not FInCinematic;

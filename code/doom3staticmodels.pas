@@ -38,6 +38,7 @@ type
 
   TD3StaticModel = class
   strict private
+    FClosedKnown, FClosed: Boolean;
     function SurfaceFor(const Material: String): TD3StaticSurface;
   public
     Name: String;
@@ -52,6 +53,8 @@ type
     { X3D shapes for the model (fresh nodes on every call). A skin remaps
       materials. }
     function BuildNode(const SkinName: String = ''; const EntityKeys: TStrings = nil): TX3DRootNode;
+    { Some surface is closed (TrianglesClosed): worth casting shadows. }
+    function HasClosedSurface: Boolean;
   end;
 
   TD3StaticModelCache = class
@@ -79,7 +82,8 @@ implementation
 uses
   Math,
   CastleLog,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects, Doom3Gui;
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects, Doom3Gui,
+  Doom3Collision;
 
 function IsStaticModelPath(const Path: String): Boolean;
 var
@@ -708,6 +712,24 @@ begin
     L.Free;
     Materials.Free;
   end;
+end;
+
+function TD3StaticModel.HasClosedSurface: Boolean;
+var
+  S: TD3StaticSurface;
+begin
+  if not FClosedKnown then
+  begin
+    FClosedKnown := True;
+    FClosed := False;
+    for S in Surfaces do
+      if TrianglesClosed(S.Positions, S.Indexes) then
+      begin
+        FClosed := True;
+        Break;
+      end;
+  end;
+  Result := FClosed;
 end;
 
 function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings): TX3DRootNode;

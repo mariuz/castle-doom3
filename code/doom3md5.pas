@@ -13,7 +13,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleQuaternions, CastleTransform, CastleScene, X3DNodes,
-  Doom3Lexer;
+  Doom3Lexer, Doom3Scene;
 
 type
   TD3Joint = record
@@ -23,6 +23,13 @@ type
     Orientation: TQuaternion;
   end;
   TD3JointArray = array of TD3Joint;
+
+  { A joint's transformation as rows of a 3 x 4 matrix (rotation and
+    position), for skinning many vertexes. }
+  TD3JointMatrix = record
+    Rows: array [0..2] of TVector4;
+  end;
+  TD3JointMatrixArray = array of TD3JointMatrix;
 
   TD3Md5Vert = record
     ST: TVector2;
@@ -51,6 +58,11 @@ type
     function LoadFromText(const Text: String): Boolean;
     function JointIndex(const AName: String): Integer;
     { Skin a mesh with absolute joints into Doom 3 coordinates. }
+    { The joints of a pose as matrices (for SkinMeshTo). }
+    class procedure PoseMatrices(const Pose: TD3JointArray; var Matrices: TD3JointMatrixArray); static;
+    { Skin a mesh with PoseMatrices into Dest (CGE coordinates, one per
+      vertex). }
+    procedure SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3);
     procedure SkinMesh(const MeshIndex: Integer; const Pose: TD3JointArray;
       var Positions: array of TVector3);
   end;
@@ -105,7 +117,9 @@ type
     FModel: TD3Md5Model;
     FScene: TCastleScene;
     FCoords: array of TCoordinateNode;
-    FPositions: array of array of TVector3;
+    FMatrices: TD3JointMatrixArray;
+    { the pose changed since the meshes were last skinned }
+    FSkinPending, FShown: Boolean;
     { the animation's pose, and the one shown (FPose with the joint mods
       and copied joints) }
     FPose, FFinalPose: TD3JointArray;
@@ -123,6 +137,7 @@ type
     { shadow casting boxes, one per joint, for meshes too big to cast }
     FHullJoints: array of Integer;
     FHullTransforms: array of TMatrixTransformNode;
+    procedure SetShown(const Value: Boolean);
     procedure ApplyPose;
     procedure FinishPose;
     procedure LockPoseOrigin;
@@ -186,6 +201,10 @@ type
     function AddCopyJoint(const Source: TD3Md5Instance; const FromName, ToName: String): Boolean;
     { The shown pose (with joint mods and copied joints). }
     function Pose: TD3JointArray;
+    { Whether it can be seen (the map's portal visibility): only then are
+      its meshes skinned (the slow part); its animation, frame commands and
+      joints go on anyway. True at first. }
+    property Shown: Boolean read FShown write SetShown;
     property Scene: TCastleScene read FScene;
     property Model: TD3Md5Model read FModel;
   end;
@@ -442,6 +461,63 @@ begin
             QuatRotate(Pose[Weight.Joint].Orientation, Weight.Position)) * Weight.Bias;
       end;
     Positions[I] := D3ToCge(P);
+  end;
+end;
+
+class procedure TD3Md5Model.PoseMatrices(const Pose: TD3JointArray; var Matrices: TD3JointMatrixArray);
+var
+  I: Integer;
+  X, Y, Z, W: Single;
+begin
+  if Length(Matrices) <> Length(Pose) then
+    SetLength(Matrices, Length(Pose));
+  for I := 0 to High(Pose) do
+  begin
+    { the rotation matrix of a unit quaternion (QuatRotate's) }
+    X := Pose[I].Orientation.Data.Vector.X;
+    Y := Pose[I].Orientation.Data.Vector.Y;
+    Z := Pose[I].Orientation.Data.Vector.Z;
+    W := Pose[I].Orientation.Data.Real;
+    Matrices[I].Rows[0] := Vector4(1 - 2 * (Y * Y + Z * Z), 2 * (X * Y - Z * W), 2 * (X * Z + Y * W), Pose[I].Position.X);
+    Matrices[I].Rows[1] := Vector4(2 * (X * Y + Z * W), 1 - 2 * (X * X + Z * Z), 2 * (Y * Z - X * W), Pose[I].Position.Y);
+    Matrices[I].Rows[2] := Vector4(2 * (X * Z - Y * W), 2 * (Y * Z + X * W), 1 - 2 * (X * X + Y * Y), Pose[I].Position.Z);
+  end;
+end;
+
+procedure TD3Md5Model.SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3);
+var
+  Mesh: TD3Md5Mesh;
+  I, W, WEnd: Integer;
+  PX, PY, PZ, B: Single;
+  Weight: ^TD3Md5Weight;
+  M: ^TD3JointMatrix;
+  D: PVector3;
+begin
+  Mesh := Meshes[MeshIndex];
+  D := Dest;
+  for I := 0 to High(Mesh.Verts) do
+  begin
+    PX := 0;
+    PY := 0;
+    PZ := 0;
+    WEnd := Min(Mesh.Verts[I].StartWeight + Mesh.Verts[I].WeightCount, Length(Mesh.Weights)) - 1;
+    for W := Mesh.Verts[I].StartWeight to WEnd do
+    begin
+      Weight := @Mesh.Weights[W];
+      if Weight^.Joint > High(Matrices) then
+        Continue;
+      M := @Matrices[Weight^.Joint];
+      B := Weight^.Bias;
+      PX := PX + (M^.Rows[0].X * Weight^.Position.X + M^.Rows[0].Y * Weight^.Position.Y +
+        M^.Rows[0].Z * Weight^.Position.Z + M^.Rows[0].W) * B;
+      PY := PY + (M^.Rows[1].X * Weight^.Position.X + M^.Rows[1].Y * Weight^.Position.Y +
+        M^.Rows[1].Z * Weight^.Position.Z + M^.Rows[1].W) * B;
+      PZ := PZ + (M^.Rows[2].X * Weight^.Position.X + M^.Rows[2].Y * Weight^.Position.Y +
+        M^.Rows[2].Z * Weight^.Position.Z + M^.Rows[2].W) * B;
+    end;
+    { D3ToCge }
+    D^ := Vector3(PX, PZ, -PY);
+    Inc(D);
   end;
 end;
 
@@ -752,6 +828,7 @@ var
   MaterialName: String;
 begin
   inherited Create;
+  FShown := True;
   FModel := AModel;
   FAnims := TStringList.Create;
   if AAnims <> nil then
@@ -763,7 +840,6 @@ begin
   FPose := Copy(FModel.Joints);
   Root := TX3DRootNode.Create;
   SetLength(FCoords, FModel.Meshes.Count);
-  SetLength(FPositions, FModel.Meshes.Count);
   for I := 0 to FModel.Meshes.Count - 1 do
   begin
     Mesh := FModel.Meshes[I];
@@ -772,7 +848,6 @@ begin
       MaterialName := SkinDecl.Remap(MaterialName);
     if Decls.Material(MaterialName).IsInvisible or (Length(Mesh.Tris) = 0) then
       Continue;
-    SetLength(FPositions[I], Length(Mesh.Verts));
     FCoords[I] := TCoordinateNode.Create;
     SetLength(UVs, Length(Mesh.Verts));
     for J := 0 to High(Mesh.Verts) do
@@ -800,7 +875,7 @@ begin
     BuildShadowHulls(Root);
 
   AddLightLibrary(Root);
-  FScene := TCastleScene.Create(nil);
+  FScene := TD3Scene.Create(nil);
   FScene.Load(Root, True);
   FScene.CastShadows := (TriangleCount <= MaxShadowCastingTriangles) or (ShadowHullCount > 0);
   ApplyPose;
@@ -823,11 +898,22 @@ var
   I: Integer;
 begin
   FinishPose;
+  { out of sight: skin it when it shows again }
+  if not FShown then
+  begin
+    FSkinPending := True;
+    Exit;
+  end;
+  FSkinPending := False;
+  TD3Md5Model.PoseMatrices(FFinalPose, FMatrices);
   for I := 0 to High(FCoords) do
     if FCoords[I] <> nil then
     begin
-      FModel.SkinMesh(I, FFinalPose, FPositions[I]);
-      FCoords[I].SetPoint(FPositions[I]);
+      { straight into the coordinate node's list: no copies }
+      FCoords[I].FdPoint.Items.Count := Length(FModel.Meshes[I].Verts);
+      if FCoords[I].FdPoint.Items.Count > 0 then
+        FModel.SkinMeshTo(I, FMatrices, PVector3(FCoords[I].FdPoint.Items.L));
+      FCoords[I].FdPoint.Changed;
     end;
   for I := 0 to High(FHullTransforms) do
     FHullTransforms[I].Matrix := JointMatrix(FFinalPose[FHullJoints[I]]);
@@ -892,6 +978,15 @@ begin
     TurnSubtree(J, QuatNormalize(QuatMultiply(QuatMultiply(ParentO, Local),
       QuatConjugate(FFinalPose[J].Orientation))));
   end;
+end;
+
+procedure TD3Md5Instance.SetShown(const Value: Boolean);
+begin
+  if FShown = Value then
+    Exit;
+  FShown := Value;
+  if FShown and FSkinPending then
+    ApplyPose;
 end;
 
 function TD3Md5Instance.Pose: TD3JointArray;

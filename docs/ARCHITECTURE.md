@@ -23,7 +23,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 
 | Unit | Role |
 |---|---|
-| `Doom3Files` | Virtual file system. Reads each PK4's ZIP central directory once, indexes paths (lowercase, `/`), inflates entries on demand from a `TFileStream`, so 300 MB+ paks are never loaded whole. Loose directories override PK4s. Registers `d3fs:`. |
+| `Doom3Files` | Virtual file system. Reads each PK4's ZIP central directory once, indexes paths (lowercase, `/`), memory maps the PK4 files and inflates entries on demand straight from the mapping (the C zlib CGE loads on Windows, FPC's inflate elsewhere), so 300 MB+ paks are never read whole. Loose directories override PK4s. Registers `d3fs:`. Also the load profiler (`LoadProfileStart` / `LoadProfileStep` / `LoadProfileLog`). |
 | `Doom3Lexer` | idLexer subset shared by all text formats: quoted strings, punctuation, `//` and `/* */` comments, paths as single tokens, locale-independent numbers, `SkipBracedSection`. |
 | `Doom3Decls` | Scans `materials/*.mtr`, `def/*.def`, `skins/*.skin`, `sound/*.sndshd` and indexes every declaration body by type and name (first definition wins, like Doom 3). Bodies are parsed on demand into `TD3Material`, `TD3ModelDecl`, `TD3Skin`, `TD3SoundShader` and merged entityDef dictionaries (`inherit`). Undeclared materials become implicit ones named after their image. |
 | `Doom3Images` | Finds image files (`.tga`, `.png`, `.jpg`, `dds/*.dds`) and evaluates image programs. Normal maps are served as `d3img:/normal/<program>`: plain Doom 3 normal maps get their green channel flipped, `heightmap(img, scale)` becomes a normal map, `addnormals(a, b)` adds slopes. Output is uncompressed TGA. |
@@ -38,6 +38,8 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 | `Doom3Portals` | `TD3PortalVisibility`: the portals in CGE coordinates, per area portal lists, `Compute` (portal flow with polygon clipping and per-portal narrowing, closed portals), `AreasWithinRadius` (areas a light reaches), `PortalsInBox` (portals a door closes), `ClipPolygon`. |
 | `Doom3Gui` | `.gui` files: `TD3Gui` / `TD3GuiWindow` (windowDef, editDef, choiceDef... trees; properties as comma-separated tokens; events and variable declarations skipped), `RenderGui` (software rendering), `GuiImageUrl` (cache per path and state, `d3gui:` protocol), `GuiSurfaceUrl` / `GuiSurfPath` (guisurf keywords). |
 | `Doom3Camera` | `.md5camera` camera anims: `TD3CameraAnim` (frames, cuts, `Sample` at a time). |
+| `Doom3Scene` | `TD3Scene`, the `TCastleScene` of all map geometry and models: it prepares shadow volume edges only when it casts shadows (see "Performance"). |
+| `Doom3Sampler` | A sampling profiler (Windows x86_64): records the main thread's stack every millisecond into `samples.txt`; `tools/resolve_samples.py` and `tools/sample_callers.py` read it with the linker map. |
 | `Doom3Script` | Doom 3 scripts: `TD3ScriptVM` compiles the whole program (preprocessor, idCompiler's grammar and operator priorities, objects) to a stack machine and runs its threads; events other than the threads' own go to a `TD3ScriptHost`. |
 | `Doom3Level` | `TDoom3Map` (`TCastleTransform`, registered for the editor): builds the area scenes, lights, brush entities and md5 entities of a map. |
 | `Doom3World` | `TD3Game`: movers (`func_door`, `func_rotating`), speakers, monsters, triggers and entity activation, player health / armor, pistol, use. |
@@ -175,6 +177,22 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Lights are `Global` in the `Lights` scene with `CastGlobalLights`, so they light every area, brush entity and md5 model.
 - Brush entity, static model and md5 scenes are children of `TDoom3Map`. Static model entities are `TD3BrushEntity` items too, so `func_door` / `func_rotating` with LWO models move like brush ones; md5 scenes don't collide and aren't pickable (shots test monsters as cylinders).
 - Textures are referenced by URL (`d3fs:/...`, `d3img:/...`), so CGE's texture cache shares them between shapes and scenes. X3D nodes are never shared between scenes.
+
+## Performance
+
+How to measure:
+
+- Every map load logs `Profile: Map "...": <seconds> (<phase> <seconds>, ...; N file reads, N image programs)`: the build phases (`proc+map`, `world`, `collision`, `brushes`, `static models`, `md5 models`, `spawn`, `scripts`...) and the first five frames (`frame 2` is CGE preparing every scene: textures, shaders, VBOs). `Profile: Data` is the startup (PK4 indexes, decls).
+- The sampling profiler: build with the linker map (`castle-engine compile --mode=release --compiler-option=-Xm`), run with the environment variable `CD3_SAMPLE=1` (samples the map load and its first frames) or use the console `sample start` / `sample stop` (e.g. `O:sample start,W:8,O:sample stop` in a demo script), then `python tools/resolve_samples.py` (exclusive and inclusive functions) and `python tools/sample_callers.py <name part>` (the stacks above a function). Stacks stop at system DLLs (no frame pointers there): `[ntdll.dll]` is mostly waiting (vsync, the driver).
+- `CD3_CGE_PROFILE=1` turns on CGE's `Profiler` (image loads, scene preparation) and logs its summary after the first frames.
+
+What was slow and how it's avoided (Mars City Underground went from 46 s to 25 s from start to the first frames, gameplay from ~40 FPS to vsync):
+
+- CGE prepares shadow volume edges for every scene when the viewport uses shadow volumes, even scenes that don't cast, by comparing each edge with every open edge so far (quadratic): seconds for the big open area meshes. `TD3Scene` drops `prShadowVolume` when `CastShadows` is off, and brush entities / static models whose surfaces are all open (`TrianglesClosed`) don't cast at all (CGE skips open shapes when casting anyway).
+- GUIs are painted at 512 x 512 (a power of two; CGE resized every 640 x 480 GUI texture, bilinearly) with integer blending and pointer access, and GUI background images are loaded once (`GuiSourceImage`).
+- PK4 entries are inflated from the memory mapped file, with the C zlib on Windows (CGE's `TZStream` is 4 bytes short on Win64, so `TPaddedZStream` pads it).
+- md5 models are skinned only when portal visibility shows them (`TD3Md5Instance.Shown`; animations, frame commands and joints go on), with one 3 x 4 matrix per joint, straight into the coordinate node's list.
+- Image programs (`heightmap`, `addnormals`) use integer heights, row pointers and no per-pixel `mod` or `Round`. Don't make `StoreNormal` `inline`: FPC 3.2.2 miscompiled it (speckled normal maps).
 
 ## The test level
 
