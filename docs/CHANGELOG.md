@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Console `soundinfo`: the OpenAL device, and whether EFX reverb works (an EAX reverb effect in an auxiliary effect slot).
 - **AAS navigation** (roadmap 5d, seventh part): maps' `.aas48` files route monsters around walls and through doorways to the player and their path corners (a Dijkstra search over the AAS areas' walk reachabilities); monsters open doors. Console `aas [entity]`.
 - Test level: `maps/testmap.aas48` (generated); `blob_scripted_1` chases the player from the balcony into room A; 499 checks; CI checks the route.
 - **Faster loading and playing**: the demo maps load in 22-26 s instead of 36-46 s (start to first frames), and Mars City Underground plays at the vsync rate instead of ~40 FPS. Scenes that don't cast shadows no longer compute shadow volume edges (quadratic in CGE), open models don't cast; GUIs are painted at 512 x 512 with integer blending and cached background images; PK4 entries are inflated from memory mapped files with the C zlib; md5 models are skinned only when visible, with joint matrices, straight into their coordinate lists; faster image programs.

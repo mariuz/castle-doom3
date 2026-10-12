@@ -77,6 +77,7 @@ implementation
 uses
   Math,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
+  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
   Doom3Sampler,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, GameViewMenu;
 
@@ -257,6 +258,54 @@ begin
   WalkNavigation.CheckCollisions := not Value;
 end;
 
+{ The sound engine's information, and whether OpenAL can do reverb: the
+  EFX extension (ALC_EXT_EFX), its version and auxiliary sends, and a test
+  that an EAX reverb effect and an auxiliary effect slot can be made. }
+function SoundInfo: String;
+var
+  Device: PALCdevice;
+  Major, Minor, Sends: TALint;
+  Effect, Slot: TALuint;
+  Err: TALenum;
+begin
+  Result := Format('Sound: %s', [SoundEngine.InformationSummary]);
+  if not SoundEngine.IsContextOpenSuccess or (alcGetCurrentContext() = nil) then
+    Exit(Result + LineEnding + 'No OpenAL context');
+  Device := alcGetContextsDevice(alcGetCurrentContext());
+  Result := Result + LineEnding + Format('OpenAL device "%s", vendor "%s", renderer "%s", version "%s"', [
+    alcGetString(Device, ALC_DEVICE_SPECIFIER), alGetString(AL_VENDOR),
+    alGetString(AL_RENDERER), alGetString(AL_VERSION)]);
+  if not Load_EFX(Device) then
+    Exit(Result + LineEnding + 'EFX (ALC_EXT_EFX): not available');
+  alcGetIntegerv(Device, ALC_EFX_MAJOR_VERSION, 1, @Major);
+  alcGetIntegerv(Device, ALC_EFX_MINOR_VERSION, 1, @Minor);
+  alcGetIntegerv(Device, ALC_MAX_AUXILIARY_SENDS, 1, @Sends);
+  Result := Result + LineEnding + Format('EFX (ALC_EXT_EFX): version %d.%d, %d auxiliary sends per source', [
+    Major, Minor, Sends]);
+  { make an EAX reverb (what Doom 3's .efx files describe), falling back
+    to the standard reverb, in an auxiliary effect slot }
+  alGetError();
+  alGenEffects(1, @Effect);
+  alEffecti(Effect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
+  Err := alGetError();
+  if Err = AL_NO_ERROR then
+    Result := Result + LineEnding + 'EAX reverb effect: OK'
+  else
+  begin
+    alEffecti(Effect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+    Err := alGetError();
+    Result := Result + LineEnding + Format('EAX reverb effect: not supported, standard reverb: %s', [
+      Iff(Err = AL_NO_ERROR, 'OK', 'error ' + IntToStr(Err))]);
+  end;
+  alGenAuxiliaryEffectSlots(1, @Slot);
+  alAuxiliaryEffectSloti(Slot, AL_EFFECTSLOT_EFFECT, Effect);
+  Err := alGetError();
+  Result := Result + LineEnding + Format('Auxiliary effect slot with the reverb: %s', [
+    Iff(Err = AL_NO_ERROR, 'OK', 'error ' + IntToStr(Err))]);
+  alDeleteAuxiliaryEffectSlots(1, @Slot);
+  alDeleteEffects(1, @Effect);
+end;
+
 procedure TViewPlay.HandleConsoleCommand(const Cmd, Args: String);
 var
   Maps: TStringList;
@@ -435,6 +484,12 @@ begin
   if Cmd = 'skipcinematic' then
     FGame.SkipCinematic
   else
+  if Cmd = 'soundinfo' then
+  begin
+    S := SoundInfo;
+    Console.Print(S);
+    WritelnLog('SoundInfo', S);
+  end else
   if Cmd = 'aas' then
   begin
     { the player's AAS area; with an entity, its route to the player }
