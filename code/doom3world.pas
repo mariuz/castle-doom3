@@ -52,9 +52,17 @@ uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions,
-  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5;
+  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas;
 
 type
+  { A monster's route through the AAS (the path between the areas it was
+    computed for). }
+  TD3Route = record
+    FromArea, ToArea: Integer;
+    Found: Boolean;
+    Path: TD3AasPath;
+  end;
+
   TD3MessageEvent = procedure (const Msg: String) of object;
 
   TD3MoverKind = (mkDoor, mkRotating);
@@ -101,6 +109,7 @@ type
     { "trigger" "1": doesn't wake up on sight, only when triggered (no
       triggers yet) or hurt }
     Dormant: Boolean;
+    Route: TD3Route;
     function Position: TVector3;
     function Center: TVector3;
   end;
@@ -245,6 +254,8 @@ type
     Goal, SavedGoal: TVector3;
     SavedMoving: Boolean;
     Yaw, IdealYaw, TurnRate: Single;
+    { its way to Goal through the AAS }
+    Route: TD3Route;
     constructor Create;
     destructor Destroy; override;
     procedure SetFlag(const AName: String; const Value: Single);
@@ -322,6 +333,9 @@ type
     FAnimated: specialize TObjectList<TD3Animated>;
     FActors: specialize TObjectList<TD3Actor>;
     FProjectiles: specialize TObjectList<TD3Projectile>;
+    { the map's AAS for monsters of the player's size (maps/<map>.aas48),
+      nil when the map has none: then monsters walk straight }
+    FAas: TD3AasFile;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -472,6 +486,13 @@ type
     property Animated: specialize TObjectList<TD3Animated> read FAnimated;
     property Actors: specialize TObjectList<TD3Actor> read FActors;
     property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
+    property Aas: TD3AasFile read FAas;
+    { Where a monster at Pos (feet, Doom 3 coordinates) heads for to get to
+      Goal: the next reachability of its AAS route (idAI::PathToGoal), or
+      Goal itself (same area, no AAS, no route). }
+    function RouteWaypoint(var Route: TD3Route; const Pos, Goal: TVector3): TVector3;
+    { The AAS route from an entity to the player, for the console "aas". }
+    function RouteStatus(const EntityName: String): String;
     { A projectile of an entityDef (idProjectile: def_damage,
       def_splash_damage, fuse...) flying from From (CGE coordinates) with
       Velocity; nil if there's no such def. }
@@ -717,6 +738,7 @@ end;
 
 procedure TD3Game.Clear;
 begin
+  FreeAndNil(FAas);
   FMovers.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
@@ -882,6 +904,76 @@ begin
   FSpeakers.Add(S);
 end;
 
+function TD3Game.RouteWaypoint(var Route: TD3Route; const Pos, Goal: TVector3): TVector3;
+const
+  { a reachability point this close (horizontally) is passed }
+  Reached = 12;
+var
+  FromArea, ToArea, I: Integer;
+  P: TVector3;
+begin
+  Result := Goal;
+  if FAas = nil then
+    Exit;
+  FromArea := FAas.OriginAreaNum(Pos);
+  ToArea := FAas.OriginAreaNum(Goal);
+  if (FromArea = 0) or (ToArea = 0) or (FromArea = ToArea) then
+    Exit;
+  if (Route.FromArea <> FromArea) or (Route.ToArea <> ToArea) then
+  begin
+    Route.FromArea := FromArea;
+    Route.ToArea := ToArea;
+    Route.Found := FAas.FindPath(FromArea, ToArea, WalkingTravelFlags, Route.Path);
+  end;
+  if not Route.Found then
+    Exit;
+  { the first reachability end not reached yet (an origin on an area's
+    edge can still be in the area it's leaving) }
+  for I := 0 to High(Route.Path) do
+  begin
+    P := FAas.Areas[Route.Path[I].Area].Reach[Route.Path[I].Reach].Stop;
+    if Sqr(P.X - Pos.X) + Sqr(P.Y - Pos.Y) > Sqr(Reached) then
+      Exit(P);
+  end;
+end;
+
+function TD3Game.RouteStatus(const EntityName: String): String;
+var
+  E: TD3MapEntity;
+  Route: TD3Route;
+  Feet, Pos: TVector3;
+  I: Integer;
+  R: TD3AasReach;
+begin
+  if FAas = nil then
+    Exit('No AAS for this map');
+  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  Result := Format('AAS "%s": the player is in area %d', [FAas.Name, FAas.OriginAreaNum(Feet)]);
+  if EntityName = '' then
+    Exit;
+  E := FindEntity(EntityName);
+  if E = nil then
+    Exit(Result + ', no entity ' + EntityName);
+  Pos := E.Origin;
+  for I := 0 to FActors.Count - 1 do
+    if FActors[I].Model.Entity = E then
+      Pos := CgeToD3(FActors[I].Model.Holder.Translation);
+  FillChar(Route, SizeOf(Route), 0);
+  Result := Result + Format(', %s in area %d', [EntityName, FAas.OriginAreaNum(Pos)]);
+  if FAas.OriginAreaNum(Pos) = FAas.OriginAreaNum(Feet) then
+    Exit(Result + ', the same area');
+  RouteWaypoint(Route, Pos, Feet);
+  if not Route.Found then
+    Exit(Result + ', no route');
+  Result := Result + Format(', route of %d steps:', [Length(Route.Path)]);
+  for I := 0 to High(Route.Path) do
+  begin
+    R := FAas.Areas[Route.Path[I].Area].Reach[Route.Path[I].Reach];
+    Result := Result + Format(' %d->%d (type %d) at %s;', [Route.Path[I].Area, R.ToArea, R.TravelType,
+      R.Stop.ToString]);
+  end;
+end;
+
 function TD3Game.StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
 var
   NewPos, Center, FloorStart: TVector3;
@@ -932,6 +1024,12 @@ var
 begin
   Clear;
   FDeadTime := 0;
+  if FMap.MapName <> '' then
+  begin
+    FAas := TD3AasFile.Create;
+    if not FAas.LoadFromVfs(TDoom3Map.MapBasePath(FMap.MapName) + '.aas48') then
+      FreeAndNil(FAas);
+  end;
   for B in FMap.Brushes do
     SpawnMover(B);
   for ME in FMap.Models do
@@ -1434,7 +1532,7 @@ end;
 procedure TD3Game.UpdateMonster(const M: TD3Monster; const SecondsPassed: Single;
   const PlayerPos: TVector3);
 var
-  ToPlayer, Step, NewPos, Eye, FloorStart: TVector3;
+  ToPlayer, Step, NewPos, Eye, FloorStart, Waypoint: TVector3;
   Dist, FloorDist: Single;
   Hit: TCastleTransform;
 begin
@@ -1484,7 +1582,15 @@ begin
           M.Model.Instance.PlayAnim('idle');
           Exit;
         end;
-        Step := ToPlayer.Normalize * (MonsterWalkSpeed * SecondsPassed);
+        { around walls: towards the next point of the AAS route }
+        Waypoint := D3ToCge(RouteWaypoint(M.Route, CgeToD3(M.Position), CgeToD3(PlayerPos)));
+        Step := Waypoint - M.Position;
+        Step.Y := 0;
+        if Step.Length < 0.5 then
+          Step := ToPlayer;
+        Step := Step.Normalize * (MonsterWalkSpeed * SecondsPassed);
+        if not Step.IsZero then
+          SetMonsterYaw(M, RadToDeg(ArcTan2(-Step.Z, Step.X)));
         M.Model.Holder.Translation := StepTowards(M.Position, Step, M.Radius, M.Height);
       end;
     msAttack:
@@ -1533,6 +1639,16 @@ begin
     if (Mover.Kind = mkDoor) and not Mover.NoTouch and not PlayerDead and
        Mover.TriggerBox.Contains(PlayerEye) then
       OpenTeam(Mover);
+    { monsters open doors too (idDoor's trigger touched by an actor): the
+      AAS routes them through doorways }
+    if (Mover.Kind = mkDoor) and not Mover.NoTouch and (Mover.State <> dsOpen) then
+      for Mon in FMonsters do
+        if (Mon.State <> msDead) and Mon.Model.Holder.Exists and
+           Mover.TriggerBox.Contains(Mon.Center) then
+        begin
+          OpenTeam(Mover);
+          Break;
+        end;
     Mover.Update(SecondsPassed);
     { a shut door closes its area portal (like idDoor) }
     if FMap.Portals <> nil then
@@ -2121,7 +2237,7 @@ var
   A: TD3Actor;
   Ch: Integer;
   C, Torso, Legs, Body: TD3ActorChannel;
-  Pos, Dir: TVector3;
+  Pos, Dir, Waypoint, SteerDir: TVector3;
   Dist, Step, Speed, Delta, Turn, Arrive: Single;
   BodyKey: String;
 begin
@@ -2201,6 +2317,11 @@ begin
     begin
       Dir := Vector3(A.Goal.X - Pos.X, A.Goal.Y - Pos.Y, 0);
       Dist := Dir.Length;
+      { around walls: towards the next point of the AAS route }
+      Waypoint := RouteWaypoint(A.Route, Pos, A.Goal);
+      SteerDir := Vector3(Waypoint.X - Pos.X, Waypoint.Y - Pos.Y, 0);
+      if SteerDir.Length < 0.5 then
+        SteerDir := Dir;
       Speed := A.Model.Instance.AnimSpeed;
       if Speed < 10 then
         Speed := 80;
@@ -2217,13 +2338,14 @@ begin
         A.ChaseEnemy := False;
       end else
       begin
-        A.IdealYaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
+        A.IdealYaw := RadToDeg(ArcTan2(SteerDir.Y, SteerDir.X));
+        SteerDir := SteerDir.Normalize;
         if A.Monster <> nil then
           { monsters collide with the world }
           Pos := CgeToD3(StepTowards(A.Model.Holder.Translation,
-            D3ToCge(Dir * (Step / Dist)), A.Monster.Radius, A.Monster.Height))
+            D3ToCge(SteerDir * Step), A.Monster.Radius, A.Monster.Height))
         else
-          Pos := Pos + Dir * (Step / Dist);
+          Pos := Pos + SteerDir * Min(Step, Dist);
       end;
       A.Model.Holder.Translation := D3ToCge(Pos);
     end;

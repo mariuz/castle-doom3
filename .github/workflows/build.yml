@@ -147,11 +147,13 @@ jobs:
           run_test monster testmap "W:1,O:god,G:740 300 96,A:0,W:4,O:actors,S,Q"
           run_test projectile testmap "W:1,O:god,G:560 300 0,A:0,W:3,S,Q"
           grep -q "Projectile of blob_scripted_1 hits the player" test_output/projectile.log || { echo "::error::the scripted monster's range anim should throw a projectile that hits the player"; exit 1; }
+          run_test route testmap "W:1,O:god,G:760 300 96,A:0,W:1.5,G:-100 -200 0,A:45,W:18,O:aas blob_scripted_1,S,Q"
+          grep -q "blob_scripted_1 in area 1" test_output/route.log || { echo "::error::blob_scripted_1 should follow the AAS route from the balcony through the doorway into room A"; exit 1; }
           run_test talk testmap "W:1,O:notarget,O:activate test_walker_1,W:6,G:-80 130 0,A:-90,W:0.3,U,W:1,S,W:2,Q"
           grep -q "Talking to test_walker_1" test_output/talk.log || { echo "::error::the use key in front of test_walker_1 should talk to it"; exit 1; }
           grep -q "blob_scripted_1 hits the player" test_output/monster.log || { echo "::error::the scripted monster should chase and hit the player (AI script, melee frame command)"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 26
+          test "$(ls test_output/*.png | wc -l)" -ge 27
 
       - name: Upload screenshots and logs
         if: always()

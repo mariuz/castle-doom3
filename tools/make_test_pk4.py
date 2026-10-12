@@ -827,6 +827,112 @@ def cm_text():
 # --------------------------------------------------------------------------
 # Entities (.map)
 
+# AAS areas of the test map for a 48 unit wide monster (the walls inset by
+# 24): (area, mins, maxs), Doom 3 coordinates; the pillars are left out
+AAS_AREAS = [
+    (1, (-232, -232, 0), (232, 232, 192)),     # room A
+    (2, (232, -24, 0), (296, 24, 112)),        # the doorway
+    (3, (296, -360, 0), (696, 360, 288)),      # room B's floor and stairs
+    (4, (696, -360, 80), (888, 360, 288)),     # the balcony
+]
+# reachabilities: (from area, travel type, to area, start, end, travel time)
+AAS_REACH = [
+    (1, 2, 2, (232, 0, 0), (232.5, 0, 0), 10),
+    (2, 2, 1, (232, 0, 0), (231.5, 0, 0), 10),
+    (2, 2, 3, (296, 0, 0), (296.5, 0, 0), 10),
+    (3, 2, 2, (296, 0, 0), (295.5, 0, 0), 10),
+    (3, 2, 4, (696, 0, 96), (696.5, 0, 96), 30),   # up the stairs
+    (4, 2, 3, (696, 0, 96), (695.5, 0, 96), 30),   # down the stairs
+    (4, 4, 3, (696, 250, 96), (695.5, 250, 0), 40),  # off the balcony's edge
+]
+
+
+def aas_text():
+    """An AAS file ("DewmAAS", like dmap writes for monsters 48 units wide)
+    of the test map: box areas, a BSP of axis planes splitting them, and
+    the reachabilities between them. The geometry sections are empty."""
+    planes = []
+    plane_index = {}
+    nodes = [(0, 0, 0)]
+
+    def plane(axis, v):
+        if (axis, v) not in plane_index:
+            plane_index[(axis, v)] = len(planes)
+            planes.append((axis, v))
+        return plane_index[(axis, v)]
+
+    def build(rmin, rmax, items):
+        # items: (area, mins, maxs) inside the region rmin..rmax
+        if not items:
+            return 0
+        if len(items) == 1 and items[0][1] == rmin and items[0][2] == rmax:
+            return -items[0][0]
+        for area, mn, mx in items:
+            for axis in range(3):
+                for v in (mn[axis], mx[axis]):
+                    if rmin[axis] < v < rmax[axis]:
+                        index = len(nodes)
+                        nodes.append(None)
+                        front, back = [], []
+                        for a2, mn2, mx2 in items:
+                            if mx2[axis] > v:
+                                lo = list(mn2)
+                                lo[axis] = max(lo[axis], v)
+                                front.append((a2, tuple(lo), mx2))
+                            if mn2[axis] < v:
+                                hi = list(mx2)
+                                hi[axis] = min(hi[axis], v)
+                                back.append((a2, mn2, tuple(hi)))
+                        fmin = list(rmin)
+                        fmin[axis] = v
+                        bmax = list(rmax)
+                        bmax[axis] = v
+                        f = build(tuple(fmin), rmax, front)
+                        b = build(rmin, tuple(bmax), back)
+                        # children[0]: in front (a point's distance >= 0)
+                        nodes[index] = (plane(axis, v), f, b)
+                        return index
+        raise ValueError('cannot split the AAS boxes')
+
+    root = build((-4096, -4096, -4096), (4096, 4096, 4096),
+                 [(a, tuple(map(float, mn)), tuple(map(float, mx))) for a, mn, mx in AAS_AREAS])
+    assert root == 1
+
+    def num(v):
+        return ('%g' % v)
+
+    out = ['DewmAAS "1.07"', '', '1234567890', '', 'settings', '{', '	bboxes', '	{',
+           '		(-24 -24 0)-(24 24 82)', '	}', '	fileExtension = "aas48"', '}']
+    out.append('planes %d {' % len(planes))
+    for i, (axis, v) in enumerate(planes):
+        n = [0, 0, 0]
+        n[axis] = 1
+        out.append('	%d ( %d %d %d %s )' % (i, n[0], n[1], n[2], num(v)))
+    out.append('}')
+    for section in ('vertices', 'edges', 'edgeIndex', 'faces', 'faceIndex'):
+        out.append('%s 0 {' % section)
+        out.append('}')
+    out.append('areas %d {' % (len(AAS_AREAS) + 1))
+    out.append('	0 ( 0 0 0 0 0 0 ) 0 {')
+    out.append('	}')
+    for area, mn, mx in AAS_AREAS:
+        reach = [r for r in AAS_REACH if r[0] == area]
+        out.append('	%d ( 193 0 0 0 1 %d ) %d {' % (area, area, len(reach)))
+        for _, ttype, to, start, end, ttime in reach:
+            out.append('		%d %d (%s) (%s) 0 %d' % (ttype, to, ' '.join(num(c) for c in start),
+                                                   ' '.join(num(c) for c in end), ttime))
+        out.append('	}')
+    out.append('}')
+    out.append('nodes %d {' % len(nodes))
+    for i, (pl, f, b) in enumerate(nodes):
+        out.append('	%d ( %d %d %d )' % (i, pl, f, b))
+    out.append('}')
+    for section in ('portals', 'portalIndex', 'clusters'):
+        out.append('%s 0 {' % section)
+        out.append('}')
+    return '\n'.join(out) + '\n'
+
+
 def map_text():
     ents = [
         {'classname': 'worldspawn'},
@@ -2057,6 +2163,7 @@ def main():
     add('maps/testmap.proc', proc_text())
     add('maps/testmap.map', map_text())
     add('maps/testmap.cm', cm_text())
+    add('maps/testmap.aas48', aas_text())
     add('materials/test.mtr', MATERIALS)
     add('def/test.def', DEFS)
     add('sound/test.sndshd', SOUNDS)

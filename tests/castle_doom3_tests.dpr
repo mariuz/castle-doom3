@@ -12,7 +12,7 @@ uses
   SysUtils, Classes, Math,
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
-  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Expressions, Doom3LightEffects, Doom3Gui,
+  Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(51, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(52, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -1826,6 +1826,109 @@ begin
 end;
 
 { A scripted monster throwing projectiles (launch_missile frame command). }
+procedure TestAas;
+var
+  Aas: TD3AasFile;
+  Path: TD3AasPath;
+begin
+  Aas := TD3AasFile.Create;
+  try
+    Check(Aas.LoadFromVfs('maps/testmap.aas48'), 'load testmap.aas48');
+    CheckEquals(5, Length(Aas.Areas), 'AAS areas (with the dummy 0)');
+    CheckEquals(7, Aas.ReachCount, 'AAS reachabilities');
+    CheckEquals(1, Aas.PointAreaNum(Vector3(0, 0, 10)), 'room A is area 1');
+    CheckEquals(2, Aas.PointAreaNum(Vector3(264, 0, 10)), 'the doorway is area 2');
+    CheckEquals(3, Aas.PointAreaNum(Vector3(400, 0, 10)), 'room B is area 3');
+    CheckEquals(4, Aas.PointAreaNum(Vector3(800, 0, 100)), 'the balcony is area 4');
+    CheckEquals(0, Aas.PointAreaNum(Vector3(800, 0, 10)), 'under the balcony is solid');
+    CheckEquals(0, Aas.PointAreaNum(Vector3(264, 100, 10)), 'the wall beside the doorway is solid');
+    CheckEquals(4, Aas.OriginAreaNum(Vector3(840, 300, 96)), 'blob_scripted_1 stands in area 4');
+    Check(Aas.FindPath(4, 1, WalkingTravelFlags, Path), 'a path from the balcony to room A');
+    CheckEquals(3, Length(Path), 'balcony -> room B -> doorway -> room A');
+    if Length(Path) = 3 then
+    begin
+      CheckEquals(4, Path[0].Area, 'the path starts on the balcony');
+      CheckEquals(2, Aas.Areas[Path[1].Area].Reach[Path[1].Reach].ToArea, 'then to the doorway');
+      CheckEquals(1, Aas.Areas[Path[2].Area].Reach[Path[2].Reach].ToArea, 'then into room A');
+    end;
+    Check(not Aas.FindPath(3, 4, TFL_WALKOFFLEDGE, Path), 'no way up with walk off ledge only');
+    Check(Aas.FindPath(2, 2, WalkingTravelFlags, Path) and (Length(Path) = 0), 'the same area: an empty path');
+  finally
+    Aas.Free;
+  end;
+end;
+
+procedure TestAasChase;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  M: TD3Monster;
+  A: TD3Actor;
+  I: Integer;
+  Eye, Pos, WP: TVector3;
+  Route: TD3Route;
+  RemoveMe: TRemoveType;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for AAS routes');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Check(Game.Aas <> nil, 'the game loads maps/testmap.aas48');
+    if Game.Aas = nil then
+      Exit;
+    { the waypoints: down the stairs, then through the doorway }
+    FillChar(Route, SizeOf(Route), 0);
+    WP := Game.RouteWaypoint(Route, Vector3(840, 300, 96), Vector3(-100, -200, 0));
+    CheckNear(695.5, WP.X, 'from the balcony: the stairs first');
+    FillChar(Route, SizeOf(Route), 0);
+    WP := Game.RouteWaypoint(Route, Vector3(400, 300, 0), Vector3(-100, -200, 0));
+    CheckNear(295.5, WP.X, 'from room B: to the doorway');
+    CheckNear(0, WP.Y, 'the doorway''s middle');
+    FillChar(Route, SizeOf(Route), 0);
+    WP := Game.RouteWaypoint(Route, Vector3(-100, 100, 0), Vector3(-100, -200, 0));
+    CheckNear(-200, WP.Y, 'the same area: straight to the goal');
+
+    { blob_scripted_1 sees the player in room B, then chases it into room
+      A, out of line with the doorway: only the route gets it there }
+    A := nil;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True
+      else
+      if M.Model.Entity.Name = 'blob_scripted_1' then
+        A := M.Actor;
+    Check(A <> nil, 'blob_scripted_1 runs its script');
+    if A = nil then
+      Exit;
+    Game.God := True;
+    Eye := D3ToCge(Vector3(760, 300, 96)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 10 do
+    begin
+      Game.Update(0.1, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.1, RemoveMe);
+    end;
+    Check(A.HasEnemy, 'it saw the player');
+    Eye := D3ToCge(Vector3(-100, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 300 do
+    begin
+      Game.Update(0.1, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.1, RemoveMe);
+    end;
+    Pos := CgeToD3(A.Model.Holder.Translation);
+    Check(Pos.X < 232, Format('it went through the doorway into room A (at %s)', [Pos.ToString]));
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestProjectiles;
 var
   World: TCastleRootTransform;
@@ -2056,6 +2159,8 @@ begin
   TestScriptedMonster;
   TestProjectiles;
   TestSplashDamage;
+  TestAas;
+  TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

@@ -435,6 +435,13 @@ begin
   if Cmd = 'skipcinematic' then
     FGame.SkipCinematic
   else
+  if Cmd = 'aas' then
+  begin
+    { the player's AAS area; with an entity, its route to the player }
+    S := FGame.RouteStatus(Args);
+    Console.Print(S);
+    WritelnLog('AAS', S);
+  end else
   if Cmd = 'sample' then
   begin
     { the sampling profiler (Doom3Sampler): "sample start", "sample stop"

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **AAS navigation** (roadmap 5d, seventh part): maps' `.aas48` files route monsters around walls and through doorways to the player and their path corners (a Dijkstra search over the AAS areas' walk reachabilities); monsters open doors. Console `aas [entity]`.
+- Test level: `maps/testmap.aas48` (generated); `blob_scripted_1` chases the player from the balcony into room A; 499 checks; CI checks the route.
 - **Faster loading and playing**: the demo maps load in 22-26 s instead of 36-46 s (start to first frames), and Mars City Underground plays at the vsync rate instead of ~40 FPS. Scenes that don't cast shadows no longer compute shadow volume edges (quadratic in CGE), open models don't cast; GUIs are painted at 512 x 512 with integer blending and cached background images; PK4 entries are inflated from memory mapped files with the C zlib; md5 models are skinned only when visible, with joint matrices, straight into their coordinate lists; faster image programs.
 - Profiling: every map load logs its phases and first frames (`Profile:` lines); a sampling profiler (`CD3_SAMPLE=1`, console `sample start` / `sample stop`, `tools/resolve_samples.py`, `tools/sample_callers.py`).
 - **Heads look at things** (roadmap 5d, sixth part): characters look at whoever they talk to and monsters at their enemy (`lookAt`, `lookAtEnemy`): the `look_joint` joints turn by their share of the look angles, within `look_min` / `look_max`; heads that are separate models follow the body's neck (`copy_joint`). Console `actors` shows yaw and look angles.
