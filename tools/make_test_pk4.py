@@ -1253,6 +1253,9 @@ entityDef info_player_teleport {
 model test_blob_head {
 	mesh					models/md5/test/blob.md5mesh
 	anim idle				models/md5/test/blob_idle.md5anim
+	anim talk_primary		models/md5/test/blob_walk.md5anim {
+		frame 1				sound_voice snd_talk_primary
+	}
 }
 
 entityDef test_animated_blob {
@@ -1272,6 +1275,9 @@ entityDef char_test_walker {
 	"scriptobject"			"character"
 	"model"					"test_blob"
 	"turn_rate"				"180"
+	"def_head"				"test_blob_head"
+	"head_joint"			"head"
+	"snd_talk_primary"		"test_door"
 }
 
 entityDef damage_test_melee {
@@ -1677,6 +1683,8 @@ DOOM_MAIN_SCRIPT = """// Castle Doom 3 test level: the events and defines testma
 #define ANIMCHANNEL_LEGS    2
 #define ANIMCHANNEL_HEAD    3
 
+#define TALK_OK             2
+
 #define eachFrame       for( 0; 1; waitFrame() )
 #define waitUntil( x )  while( !( x ) ) { waitFrame(); }
 
@@ -1724,6 +1732,8 @@ scriptEvent void    stopMove();
 scriptEvent void    stopThinking();
 scriptEvent float   enemyRange();
 scriptEvent float   canHitEnemyFromAnim( string anim );
+scriptEvent void    setTalkState( float state );
+scriptEvent void    setTalkTarget( entity target );
 
 #endif
 """
@@ -1772,8 +1782,10 @@ void test_trigger_called() {
 // A character's AI, in the way of Doom 3's script/ai_character.script:
 // a state machine in the main thread, an animation state for the legs.
 float walker_done;
+float walker_talks;
 
 object character {
+    boolean AI_TALK;
     boolean AI_FORWARD;
     boolean AI_MOVE_DONE;
     boolean AI_ACTIVATED;
@@ -1810,7 +1822,16 @@ void character::state_Walk() {
 
 void character::state_Done() {
     walker_done = 1;
+    // the player can talk to it now (the use key)
+    setTalkState( TALK_OK );
     eachFrame {
+        if ( AI_TALK ) {
+            // the head's lip sync anim says the line (its sound_voice frame command)
+            playAnim( ANIMCHANNEL_HEAD, "talk_primary" );
+            waitUntil( animDone( ANIMCHANNEL_HEAD, 0 ) );
+            walker_talks++;
+            setTalkTarget( $null_entity );
+        }
     }
 }
 

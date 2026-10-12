@@ -223,6 +223,9 @@ type
     MeleeRange: Single;
     { frames left before AI_PAIN goes back to false }
     PainFrames: Integer;
+    { setTalkState (TALK_OK = 2: the player can talk to it) and the one it
+      talks to (setTalkTarget; AI_TALK while there's one) }
+    TalkState, TalkTarget: Integer;
     { the body animation applied last (channel:name:start time) }
     BodyKey: String;
     { movement, Doom 3 coordinates }
@@ -402,7 +405,8 @@ type
     procedure Update(const SecondsPassed: Single; const PlayerEye: TVector3);
     { Fire the pistol. True if a shot was fired. }
     function Fire(const Origin, Dir: TVector3): Boolean;
-    { Use: open a door in front of the player. }
+    { Use: open a door in front of the player, or talk to a character
+      (idAI::TalkTo) there. }
     procedure Use(const Origin, Dir: TVector3);
     procedure DamagePlayer(const Amount: Integer);
     function PlayerDead: Boolean;
@@ -1608,6 +1612,8 @@ begin
     A.Thinking := True;
     A.MeleeRange := E.FloatValue('melee_range', 64);
     ME.Instance.OnFrameCommand := @ActorFrameCommand;
+    if ME.HeadInstance <> nil then
+      ME.HeadInstance.OnFrameCommand := @ActorFrameCommand;
     if IsMonster then
     begin
       { health and shots: the game's monster, its simple AI off }
@@ -1876,7 +1882,22 @@ begin
     'getHealth':
       if A.Monster <> nil then
         EventResult := D3FloatValue(A.Monster.Health);
-    'getHead', 'heardSound', 'getObstacle', 'getTalkTarget', 'closestEnemyToPoint':
+    'getHead':
+      { its head is no entity here: the actor stands for it (the head
+        channel plays on the head model) }
+      if A.Model.HeadInstance <> nil then
+        EventResult := D3EntityValue(A.Handle)
+      else
+        EventResult := D3EntityValue(0);
+    'setTalkState': A.TalkState := Round(ArgF(0));
+    'setTalkTarget':
+      begin
+        A.TalkTarget := Args[0].E;
+        { the script sees it at once (it tests AI_TALK right after) }
+        A.SetFlag('AI_TALK', Ord(A.TalkTarget <> 0));
+      end;
+    'getTalkTarget': EventResult := D3EntityValue(A.TalkTarget);
+    'heardSound', 'getObstacle', 'closestEnemyToPoint':
       EventResult := D3EntityValue(0);
     'canBecomeSolid': EventResult := D3FloatValue(1);
     'getTurnDelta': EventResult := D3FloatValue(NormalizeYaw(A.IdealYaw - A.Yaw));
@@ -1892,12 +1913,15 @@ begin
     'turnToEntity', 'faceEntity':
       begin
         Other := HandleEntity(Args[0].E);
+        if Args[0].E = PlayerHandle then
+          Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation)
+        else
         if Other <> nil then
-        begin
-          Pos := Other.Origin - CgeToD3(A.Model.Holder.Translation);
-          if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
-            A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
-        end;
+          Pos := Other.Origin - CgeToD3(A.Model.Holder.Translation)
+        else
+          Pos := TVector3.Zero;
+        if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
+          A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
       end;
     'moveToEntity':
       begin
@@ -1928,6 +1952,10 @@ begin
     'distanceTo':
       begin
         Other := HandleEntity(Args[0].E);
+        if Args[0].E = PlayerHandle then
+          EventResult := D3FloatValue((CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)) -
+            CgeToD3(A.Model.Holder.Translation)).Length)
+        else
         if Other <> nil then
         begin
           D := (Other.Origin - CgeToD3(A.Model.Holder.Translation)).Length;
@@ -1935,7 +1963,7 @@ begin
         end;
       end;
     { what the game doesn't do (yet): nothing happens }
-    'setBoneMod', 'setNeverDormant', 'setTalkState', 'setTalkTarget', 'allowMovement',
+    'setBoneMod', 'setNeverDormant', 'allowMovement',
     'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain', 'setMoveType', 'lookAt',
     'lookAtEnemy', 'lookAtEntity', 'animTurn', 'becomeSolid', 'becomeNonSolid',
     'kickObstacles', 'preventPain', 'overrideAnim',
@@ -2088,6 +2116,7 @@ begin
     A.SetFlag('AI_MOVE_DONE', Ord(not A.Moving));
     A.SetFlag('AI_ONGROUND', 1);
     A.SetFlag('AI_DEST_UNREACHABLE', 0);
+    A.SetFlag('AI_TALK', Ord(A.TalkTarget <> 0));
   end;
 end;
 
@@ -2338,7 +2367,7 @@ var
 begin
   Found := nil;
   for A in FActors do
-    if A.Model.Instance = Sender then
+    if (A.Model.Instance = Sender) or (A.Model.HeadInstance = Sender) then
       Found := A;
   if (Found = nil) or not Found.Thinking then
     Exit;
@@ -3154,6 +3183,8 @@ end;
 
 function TD3Game.ScriptFindEntity(const AName: String): Integer;
 begin
+  if SameText(AName, 'player1') then
+    Exit(PlayerHandle);
   if not FHandles.TryGetValue(LowerCase(AName), Result) then
     Result := 0;
 end;
@@ -3856,10 +3887,38 @@ begin
 end;
 
 procedure TD3Game.Use(const Origin, Dir: TVector3);
+const
+  TalkDistance = 128;
 var
   Mover: TD3Mover;
   Ray: TBox3D;
+  A, Best: TD3Actor;
+  ToActor: TVector3;
+  T, BestT: Single;
 begin
+  { a character in front of the player, within reach, ready to talk }
+  Best := nil;
+  BestT := TalkDistance;
+  for A in FActors do
+  begin
+    if (A.Monster <> nil) or not A.Thinking or not A.Model.Holder.Exists or (A.TalkState <> 2) then
+      Continue;
+    ToActor := A.Model.Holder.Translation + Vector3(0, 48, 0) - Origin;
+    T := TVector3.DotProduct(ToActor, Dir.Normalize);
+    if (T > 0) and (T < BestT) and ((ToActor - Dir.Normalize * T).Length < 32) then
+    begin
+      Best := A;
+      BestT := T;
+    end;
+  end;
+  if Best <> nil then
+  begin
+    { idAI::TalkTo: its script sees AI_TALK }
+    Best.TalkTarget := PlayerHandle;
+    Best.SetFlag('AI_TALK', 1);
+    WritelnLog('Doom3World', 'Talking to %s', [Best.Model.Entity.Name]);
+    Exit;
+  end;
   Ray := TBox3D.Empty;
   Ray.Include(Origin);
   Ray.Include(Origin + Dir.Normalize * 96);

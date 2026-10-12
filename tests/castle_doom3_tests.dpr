@@ -1613,6 +1613,7 @@ var
   I: Integer;
   Away, Pos: TVector3;
   SawWalk: Boolean;
+  RemoveMe: TRemoveType;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -1652,6 +1653,20 @@ begin
     CheckNear(60, Pos.Y, 'the character walked to path_corner_1 y', 1);
     CheckNear(90, A.Yaw, 'turnTo( 90 ) turned it north');
     CheckEquals('Legs_Idle', A.Channels[2].StateName, 'the legs are idle again');
+    { talking: the use key in front of it (TALK_OK since state_Done) }
+    Check(A.Model.HeadInstance <> nil, 'it has a head (def_head)');
+    Pos := CgeToD3(A.Model.Holder.Translation);
+    Game.Use(D3ToCge(Pos + Vector3(0, 60, 0)) + Vector3(0, 48, 0), D3ToCge(Vector3(0, -1, 0)));
+    CheckEquals(PlayerHandle, A.TalkTarget, 'Use made the player its talk target (AI_TALK)');
+    { the head's talk_primary lasts 2 s }
+    for I := 1 to 30 do
+    begin
+      Game.Update(0.1, Away);
+      RemoveMe := rtNone;
+      Map.Update(0.1, RemoveMe);
+    end;
+    CheckNear(1, Game.Script.GlobalValue('walker_talks').F, 'it said its line (head talk_primary) once');
+    CheckEquals(0, A.TalkTarget, 'setTalkTarget( $null_entity ) ended the talk');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);

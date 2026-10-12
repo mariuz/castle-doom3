@@ -1459,8 +1459,11 @@ begin
   if (SkinName = '') and (Decl <> nil) then
     SkinName := Decl.Skin;
   if Decl <> nil then
-    ME.HeadInstance := TD3Md5Instance.Create(Md5, Decl.Anims, SkinName)
-  else
+  begin
+    ME.HeadInstance := TD3Md5Instance.Create(Md5, Decl.Anims, SkinName);
+    { lip sync anims say their lines: sound_voice frame commands }
+    ME.HeadInstance.FrameCommands := Decl.FrameCommands;
+  end else
     ME.HeadInstance := TD3Md5Instance.Create(Md5, nil, SkinName);
   ME.HeadInstance.Scene.Collides := False;
   ME.HeadInstance.Scene.Pickable := False;
