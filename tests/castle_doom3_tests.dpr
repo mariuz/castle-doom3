@@ -114,7 +114,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(11, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(12, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -1786,6 +1786,61 @@ begin
   end;
 end;
 
+procedure TestSplashDamage;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  M: TD3Monster;
+  P: TD3Projectile;
+  I: Integer;
+  Eye: TVector3;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for splash damage');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    { down onto the floor 40 units east of the player: 24 from its box }
+    P := Game.SpawnProjectile('projectile_test', 'test', D3ToCge(Vector3(-120, -160, 40)),
+      D3ToCge(Vector3(0, 0, -500)));
+    Check(P <> nil, 'spawn projectile_test');
+    if P = nil then
+      Exit;
+    CheckEquals(6, P.SplashDamage, 'def_splash_damage damage');
+    CheckNear(80, P.SplashRadius, 'def_splash_damage radius');
+    Check(not P.DetonateOnFuse, 'detonate_on_fuse is off by default');
+    for I := 1 to 5 do
+      Game.Update(0.05, Eye);
+    CheckEquals(0, Game.Projectiles.Count, 'it exploded on the floor');
+    { 6 * (1 - 24 / 80) }
+    CheckEquals(96, Game.Health, 'the splash hurt the player by distance');
+    { a direct hit: only def_damage (RadiusDamage ignores the one hit) }
+    Game.SpawnProjectile('projectile_test', 'test', D3ToCge(Vector3(-60, -160, 40)),
+      D3ToCge(Vector3(-500, 0, 0)));
+    for I := 1 to 8 do
+      Game.Update(0.05, Eye);
+    CheckEquals(91, Game.Health, 'a direct hit takes def_damage only');
+    { out of the radius: no splash }
+    Game.SpawnProjectile('projectile_test', 'test', D3ToCge(Vector3(-40, -160, 40)),
+      D3ToCge(Vector3(0, 0, -500)));
+    for I := 1 to 5 do
+      Game.Update(0.05, Eye);
+    CheckEquals(91, Game.Health, 'no splash 104 units away');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestMovers;
 var
   World: TCastleRootTransform;
@@ -1916,6 +1971,7 @@ begin
   TestActors;
   TestScriptedMonster;
   TestProjectiles;
+  TestSplashDamage;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

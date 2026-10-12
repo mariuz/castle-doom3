@@ -1235,6 +1235,7 @@ var
   I, Sprites: Integer;
   Rot: TMatrix3;
   ModelName: String;
+  Solid: Boolean;
 begin
   for E in FMapFile.Entities do
   begin
@@ -1274,7 +1275,15 @@ begin
     B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     B.Scene.Load(Root, True);
     B.Scene.ProcessEvents := SpriteCount <> Sprites;
-    B.Scene.PreciseCollisions := E.BoolValue('solid', True);
+    { a model of only nonsolid surfaces (heat haze sprites, decals...)
+      neither collides nor blocks sight and shots }
+    Solid := False;
+    for Surf in Model.Surfaces do
+      if not (Decls.Material(Surf.Material).NonSolid or Decls.Material(Surf.Material).ClearsSolid) then
+        Solid := True;
+    B.Scene.PreciseCollisions := E.BoolValue('solid', True) and Solid;
+    B.Scene.Collides := B.Scene.PreciseCollisions;
+    B.Scene.Pickable := B.Scene.PreciseCollisions;
     B.Scene.Translation := D3ToCge(E.Origin);
     Rot := E.Rotation;
     SetD3Rotation(B.Scene, Rot);

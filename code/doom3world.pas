@@ -247,6 +247,12 @@ type
     Gravity: Single;
     Fuse, Radius: Single;
     Damage: Integer;
+    { def_splash_damage (idGameLocal::RadiusDamage): damage at the
+      explosion, falling to 0 at SplashRadius }
+    SplashDamage: Integer;
+    SplashRadius: Single;
+    { detonate_on_fuse: explode when the fuse ends, else just vanish }
+    DetonateOnFuse: Boolean;
     Owner: String;
     ExplodeSound: String;
     { a glowing ball (fireballs), nil for bullets }
@@ -352,6 +358,8 @@ type
     procedure ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
     procedure LaunchProjectiles(const A: TD3Actor; const JointName: String);
     procedure UpdateProjectiles(const SecondsPassed: Single);
+    { splash damage of a projectile exploding at P.Position }
+    procedure SplashDamage(const P: TD3Projectile);
     procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
     procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
@@ -451,6 +459,10 @@ type
     property Animated: specialize TObjectList<TD3Animated> read FAnimated;
     property Actors: specialize TObjectList<TD3Actor> read FActors;
     property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
+    { A projectile of an entityDef (idProjectile: def_damage,
+      def_splash_damage, fuse...) flying from From (CGE coordinates) with
+      Velocity; nil if there's no such def. }
+    function SpawnProjectile(const DefName, Owner: String; const From, Velocity: TVector3): TD3Projectile;
     { Game time (seconds since Spawn). }
     property Time: Single read FTime;
     property Map: TDoom3Map read FMap;
@@ -1391,8 +1403,16 @@ begin
 end;
 
 function TD3Game.CanSee(const A, B: TVector3): Boolean;
+var
+  Dist, HitDist: Single;
 begin
-  Result := not FMap.World.WorldSegmentCollision(A, B);
+  { sight is a trace against opaque geometry (MASK_OPAQUE): the pickable
+    render geometry and brush entities, not the playerclip / monsterclip
+    brushes of the collision model }
+  Dist := (B - A).Length;
+  if Dist < 1 then
+    Exit(True);
+  Result := (FMap.World.WorldRayCast(A, (B - A) / Dist, HitDist) = nil) or (HitDist >= Dist);
 end;
 
 procedure TD3Game.UpdateMonster(const M: TD3Monster; const SecondsPassed: Single;
@@ -2152,13 +2172,11 @@ end;
 procedure TD3Game.LaunchProjectiles(const A: TD3Actor; const JointName: String);
 var
   E: TD3MapEntity;
-  Def, DamageDef: TStringList;
+  Def: TStringList;
   From, Target, Dir, Side, Up2, Vel: TVector3;
   M: TMatrix4;
   Speed, Gravity, Accuracy, Spread, Dist, H, V2, Root, Angle: Single;
-  Count, I, Damage: Integer;
-  P: TD3Projectile;
-  Ball: TCastleSphere;
+  Count, I: Integer;
 
   { a direction turned randomly within Degrees of Dir }
   function Jitter(const D: TVector3; const Degrees: Single): TVector3;
@@ -2211,41 +2229,99 @@ begin
   Accuracy := E.FloatValue('attack_accuracy', 0);
   Spread := E.FloatValue('projectile_spread', 0);
   Count := Max(1, E.IntValue('num_projectiles', 1));
-  Damage := 10;
-  DamageDef := Decls.EntityDef(Def.Values['def_damage']);
-  if DamageDef <> nil then
-    Damage := StrToIntDef(DamageDef.Values['damage'], Damage);
   { the whole volley aims together, each pellet spreads }
   Dir := Jitter(Dir, Accuracy);
   for I := 1 to Count do
   begin
-    P := TD3Projectile.Create;
-    P.Position := From;
     Vel := Jitter(Dir, Spread);
-    P.Velocity := Vel * Speed;
-    P.Gravity := Gravity;
-    P.Fuse := StrToFloatDef(Def.Values['fuse'], 4, DefaultFormatSettings);
-    P.Radius := Max(2, ParseVector3(Def.Values['maxs'], Vector3(1, 1, 1)).X);
-    P.Damage := Damage;
-    P.Owner := E.Name;
-    P.ExplodeSound := Def.Values['snd_explode'];
-    if StrToFloatDef(Def.Values['light_radius'], 0, DefaultFormatSettings) > 0 then
-    begin
-      { a glowing ball in the light's color (the particles are item 7) }
-      Ball := TCastleSphere.Create(nil);
-      Ball.Radius := P.Radius * 1.5;
-      Ball.Material := pmUnlit;
-      Ball.Color := Vector4(ParseVector3(Def.Values['light_color'], Vector3(1, 0.7, 0.2)), 1);
-      Ball.Collides := False;
-      Ball.Pickable := False;
-      Ball.CastShadows := False;
-      Ball.Translation := From;
-      FMap.Add(Ball);
-      P.Visual := Ball;
-    end;
-    FProjectiles.Add(P);
-    Inc(ProjectilesLaunched);
+    if SpawnProjectile(E.Value('def_projectile'), E.Name, From, Vel * Speed) <> nil then
+      Inc(ProjectilesLaunched);
   end;
+end;
+
+function TD3Game.SpawnProjectile(const DefName, Owner: String; const From, Velocity: TVector3): TD3Projectile;
+var
+  Def, DamageDef: TStringList;
+  Ball: TCastleSphere;
+begin
+  Result := nil;
+  Def := Decls.EntityDef(DefName);
+  if Def = nil then
+    Exit;
+  Result := TD3Projectile.Create;
+  Result.Position := From;
+  Result.Velocity := Velocity;
+  Result.Gravity := StrToFloatDef(Def.Values['gravity'], 0, DefaultFormatSettings);
+  Result.Fuse := StrToFloatDef(Def.Values['fuse'], 4, DefaultFormatSettings);
+  { idProjectile reads it as a bool: a missing key is false }
+  Result.DetonateOnFuse := StrToIntDef(Def.Values['detonate_on_fuse'], 0) <> 0;
+  Result.Radius := Max(2, ParseVector3(Def.Values['maxs'], Vector3(1, 1, 1)).X);
+  Result.Damage := 10;
+  DamageDef := Decls.EntityDef(Def.Values['def_damage']);
+  if DamageDef <> nil then
+    Result.Damage := StrToIntDef(DamageDef.Values['damage'], Result.Damage);
+  DamageDef := Decls.EntityDef(Def.Values['def_splash_damage']);
+  if DamageDef <> nil then
+  begin
+    Result.SplashDamage := StrToIntDef(DamageDef.Values['damage'], 0);
+    Result.SplashRadius := StrToFloatDef(DamageDef.Values['radius'], 0, DefaultFormatSettings);
+  end;
+  Result.Owner := Owner;
+  Result.ExplodeSound := Def.Values['snd_explode'];
+  if StrToFloatDef(Def.Values['light_radius'], 0, DefaultFormatSettings) > 0 then
+  begin
+    { a glowing ball in the light's color (the particles are item 7) }
+    Ball := TCastleSphere.Create(nil);
+    Ball.Radius := Result.Radius * 1.5;
+    Ball.Material := pmUnlit;
+    Ball.Color := Vector4(ParseVector3(Def.Values['light_color'], Vector3(1, 0.7, 0.2)), 1);
+    Ball.Collides := False;
+    Ball.Pickable := False;
+    Ball.CastShadows := False;
+    Ball.Translation := From;
+    FMap.Add(Ball);
+    Result.Visual := Ball;
+  end;
+  FProjectiles.Add(Result);
+end;
+
+procedure TD3Game.SplashDamage(const P: TD3Projectile);
+const
+  { the player's box (idPlayer's bounds: 32 wide, 74 high on its feet) }
+  PlayerHalfWidth = 16;
+  PlayerHeight = 74;
+var
+  Feet, Closest, Center, Back, ToPlayer: TVector3;
+  Dist, HitDist: Single;
+  Damage: Integer;
+begin
+  if (P.SplashDamage <= 0) or (P.SplashRadius <= 0) or PlayerDead then
+    Exit;
+  { the distance to the player's box (zero inside it) }
+  Feet := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  Closest := Vector3(
+    EnsureRange(P.Position.X, Feet.X - PlayerHalfWidth, Feet.X + PlayerHalfWidth),
+    EnsureRange(P.Position.Y, Feet.Y, Feet.Y + PlayerHeight),
+    EnsureRange(P.Position.Z, Feet.Z - PlayerHalfWidth, Feet.Z + PlayerHalfWidth));
+  Dist := (Closest - P.Position).Length;
+  if Dist >= P.SplashRadius then
+    Exit;
+  { idEntity::CanDamage: nothing solid in between (from just off the
+    surface it hit, to the player's center) }
+  Center := Feet + Vector3(0, PlayerHeight / 2, 0);
+  Back := P.Position;
+  if not P.Velocity.IsZero then
+    Back := Back - P.Velocity.Normalize * 2;
+  ToPlayer := Center - Back;
+  if (ToPlayer.Length > 1) and
+    (FMap.World.WorldRayCast(Back, ToPlayer.Normalize, HitDist) <> nil) and
+    (HitDist < ToPlayer.Length - PlayerHalfWidth) then
+    Exit;
+  Damage := Round(P.SplashDamage * (1 - Dist / P.SplashRadius));
+  if Damage <= 0 then
+    Exit;
+  DamagePlayer(Damage);
+  WritelnLog('Doom3World', 'Splash of %s hits the player (%d)', [P.Owner, Damage]);
 end;
 
 procedure TD3Game.UpdateProjectiles(const SecondsPassed: Single);
@@ -2255,7 +2331,7 @@ var
   NewPos, Step, Feet, Closest: TVector3;
   Len, HitDist, T: Single;
   Hit: TCastleTransform;
-  Detonate: Boolean;
+  Detonate, HitPlayer: Boolean;
 
   { the point of segment A..B closest to the player's axis (feet to eye) }
   function DistanceToPlayer(const A, B: TVector3): Single;
@@ -2282,13 +2358,26 @@ begin
     Step := P.Velocity * SecondsPassed;
     NewPos := P.Position + Step;
     Len := Step.Length;
-    Detonate := P.Fuse <= 0;
+    if P.Fuse <= 0 then
+    begin
+      if P.DetonateOnFuse then
+      begin
+        if P.ExplodeSound <> '' then
+          PlaySoundAt(P.ExplodeSound, P.Position);
+        SplashDamage(P);
+      end;
+      FProjectiles.Delete(I);
+      Continue;
+    end;
+    Detonate := False;
+    HitPlayer := False;
     { the player }
-    if not Detonate and not PlayerDead and (DistanceToPlayer(P.Position, NewPos) <= P.Radius + PlayerRadius) then
+    if not PlayerDead and (DistanceToPlayer(P.Position, NewPos) <= P.Radius + PlayerRadius) then
     begin
       DamagePlayer(P.Damage);
       WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
       Detonate := True;
+      HitPlayer := True;
     end;
     { the world }
     if not Detonate and (Len > 0) then
@@ -2308,6 +2397,9 @@ begin
     begin
       if P.ExplodeSound <> '' then
         PlaySoundAt(P.ExplodeSound, P.Position);
+      { RadiusDamage ignores the one hit directly }
+      if not HitPlayer then
+        SplashDamage(P);
       FProjectiles.Delete(I);
     end;
   end;
@@ -3956,6 +4048,6 @@ begin
 end;
 
 initialization
-  ScriptedMonsterObjects := ['monster_zombie', 'monster_zombie_security_pistol', 'monster_demon_imp',
-    'monster_test'];
+  ScriptedMonsterObjects := ['monster_zombie', 'monster_zombie_bernie', 'monster_zombie_security_pistol',
+    'monster_demon_imp', 'monster_test'];
 end.

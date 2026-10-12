@@ -1288,6 +1288,11 @@ entityDef damage_test_projectile {
 	"damage"				"5"
 }
 
+entityDef damage_test_splash {
+	"damage"				"6"
+	"radius"				"80"
+}
+
 entityDef projectile_test {
 	"editor_usage"			"A glowing ball thrown by blob_scripted_1."
 	"spawnclass"			"idProjectile"
@@ -1297,6 +1302,7 @@ entityDef projectile_test {
 	"gravity"				"0"
 	"fuse"					"4"
 	"def_damage"			"damage_test_projectile"
+	"def_splash_damage"		"damage_test_splash"
 	"light_color"			"0.2 0.8 1"
 	"light_radius"			"100"
 }

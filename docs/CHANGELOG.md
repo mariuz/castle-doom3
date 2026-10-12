@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Splash damage** (roadmap 5d, fifth part): projectiles with a `def_splash_damage` hurt the player near their explosion (less further away, not through walls); `detonate_on_fuse`. Bernie zombies run their script (all the demo's scripted monsters now do).
+- Fixed: monsters could not see the player through playerclip brushes or nonsolid surfaces (Bernie stood behind a heat haze sprite); sight is now a trace on opaque geometry. Brush entities of only nonsolid surfaces no longer collide.
+- Test level: `projectile_test` has splash damage; 457 checks.
 - **Talking to characters** (roadmap 5d, fourth part): the use key in front of a character ready to talk sets its `AI_TALK`; its script plays the head's lip sync anims, whose `sound_voice` frame commands speak. `$player1`, `getHead`, `setTalkState`, `setTalkTarget`, `getTalkTarget`; `turnToEntity` and `distanceTo` work on the player.
 - Test level: `test_walker_1` has a head and talks once it reached its path corner; 448 checks; CI checks a talk.
 - **Imps' and security zombies' AI scripts, projectiles** (roadmap 5d, third part): imps throw fireballs (on an arc) and claw, pistol / shotgun / machine gun zombies shoot, all through their own scripts; projectiles come from the animations' `launch_missile` frame commands and the monsters' `def_projectile`. Frame commands `call` and `trigger`. Console `near <entity> [distance]`, `activate <entity>`.
