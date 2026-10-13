@@ -1,5 +1,7 @@
 # Native builds (Windows x86_64, Linux x86_64) using the Castle Game Engine
-# Docker image, which bundles FPC with cross-compilers and the CGE build tool.
+# Docker image with FPC and cross-compilers, but no engine ("cge-none"):
+# tools/ci_cge_master.sh gets Castle Game Engine master and builds its build tool,
+# so CI builds use the latest engine (like the local E:\Work\cge-master worktree).
 #
 # - On every push / pull request: parser unit tests, autotest screenshots of
 #   the bundled test level, and packages kept as workflow artifacts.
@@ -24,9 +26,12 @@ jobs:
     name: Package Windows and Linux
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    container: kambi/castle-engine-cloud-builds-tools:cge-unstable
+    container: kambi/castle-engine-cloud-builds-tools:cge-none
     steps:
       - uses: actions/checkout@v4
+
+      - name: Get Castle Game Engine master
+        run: bash tools/ci_cge_master.sh
 
       - name: Show versions
         run: |
@@ -57,9 +62,12 @@ jobs:
     name: Tests and autotest (Linux, Mesa software OpenGL)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    container: kambi/castle-engine-cloud-builds-tools:cge-unstable
+    container: kambi/castle-engine-cloud-builds-tools:cge-none
     steps:
       - uses: actions/checkout@v4
+
+      - name: Get Castle Game Engine master
+        run: bash tools/ci_cge_master.sh
 
       - name: Check the test PK4 is up to date with its generator
         run: |

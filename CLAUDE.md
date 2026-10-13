@@ -25,6 +25,13 @@ castle-engine compile --mode=release      # or --mode=debug
 .\castle-doom3.exe
 ```
 
+CI (`.github/workflows/build.yml`) builds with CGE **master**: the `cge-none` Docker image plus `tools/ci_cge_master.sh` (clones master, builds its build tool). To build locally like CI, use the master worktree `E:\Work\cge-master` (keep it; refresh with `git fetch upstream` in `E:\Work\castle-engine`, then `git -C E:\Work\cge-master checkout --detach upstream/master` and rebuild its tool with `castle-engine compile` in `tools/build-tool` under `CASTLE_ENGINE_PATH=E:\Work\cge-master`):
+
+```powershell
+$env:CASTLE_ENGINE_PATH = 'E:\Work\cge-master'
+E:\Work\cge-master\tools\build-tool\castle-engine.exe compile --mode=release
+```
+
 Keep the project at a short path (`E:\Work\castle-doom3`): long paths break FPC builds. Audio needs `OpenAL32.dll` next to the exe (gitignored). The log goes to `%LOCALAPPDATA%\castle-doom3\castle-doom3.log`.
 
 ## Testing without watching the window
@@ -59,7 +66,7 @@ Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (499 che
 - Don't `git checkout -- <file>` to undo a scripted edit while other uncommitted work is in that file; keep `.bak` copies.
 - FPC objfpc: inside a parameterless function, its bare name means its **result variable**; call it recursively as `ParseTerm()`.
 - FPC 3.2.2 miscompiled an `inline` per-pixel helper (`StoreNormal` in `Doom3Images`: speckled normal maps); after making hot code `inline`, compare screenshots (a character's face in Mars City 1 shows it).
-- CGE's `TZStream` binding is 84 bytes on Win64 (C's `z_stream` is 88): `Doom3Files` pads it; don't use `inflateInit2` with it directly.
+- CGE's `TZStream` binding is 84 bytes on Win64 (C's `z_stream` is 88; CGE PR 744 fixes it): `Doom3Files` pads it and passes `CZStreamSize` (works with both layouts); don't use `inflateInit2` with it directly.
 - There is no single world scene: areas are `AreaScene(i)` / `AreaNonSolidScene(i)`, lights are `LightScene`. For world queries use the root, `Map.World.WorldRayCast` / `WorldSegmentCollision` (`TCastleTransform.World`).
 - With a `.cm`, the area scenes don't collide (`WorldCollision` does) but stay pickable: shots / ray casts use `Pickable`, player and segment collisions use `Collides`.
 - Portal visibility hides scenes with `Visible := False` (they still collide). `TViewPlay.Update` calls `Map.UpdateVisibility(Camera)`; the editor never does, so it draws everything.

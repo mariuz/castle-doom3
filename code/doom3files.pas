@@ -238,11 +238,16 @@ end;
 {$ifdef MSWINDOWS}
 type
   { C's z_stream on Win64 is 88 bytes: CGE's TZStream (84) misses the
-    trailing padding, and zlib refuses a stream of the wrong size. }
+    trailing padding, and zlib refuses a stream of the wrong size.
+    CGE PR 744 fixes TZStream (88), so the size passed to zlib
+    is TZStream's rounded up to the pointer size (CZStreamSize). }
   TPaddedZStream = record
     Z: TZStream;
     Pad: LongWord;
   end;
+
+const
+  CZStreamSize = (SizeOf(TZStream) + SizeOf(Pointer) - 1) and not (SizeOf(Pointer) - 1);
 
 var
   { the C zlib can't be used (no library, or it refused our stream) }
@@ -263,7 +268,7 @@ begin
   S.Z.next_out := Dest;
   S.Z.avail_out := DestSize;
   { negative window bits: raw deflate }
-  if inflateInit2_(S.Z, -15, ZLIB_VERSION, SizeOf(S)) <> Z_OK then
+  if inflateInit2_(S.Z, -15, ZLIB_VERSION, CZStreamSize) <> Z_OK then
   begin
     CZLibFailed := True;
     WritelnLog('Doom3Files', 'The C zlib refused the stream, inflating with FPC''s');
