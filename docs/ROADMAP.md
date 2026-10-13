@@ -60,7 +60,7 @@ Status of version 0.12.0 plus the unreleased changes in `docs/CHANGELOG.md`. "Do
     - **5g. Damage and death**: `def_damage` decls, pain / gib effects, the MD5 "shrivel" death effect, `trigger_hurt` kinds.
 6. **Sound**: `.ogg` music, `s_shader` choice of random files, shakes, occlusion through portals, `sound_body` / `sound_voice` frame commands.
 7. **Particles and FX** (`.prt`, `.fx`): sparks, smoke, blood, muzzle flashes.
-8. **Doom 3 BFG** binary formats (`.bimage`, `.bproc`), Resurrection of Evil (`d3xp`).
+8. **Doom 3 BFG** binary formats (`.bimage`, `.bproc`), Resurrection of Evil (`d3xp`). Fabien Sanglard's [Doom 3 BFG Source Code Review](https://fabiensanglard.net/doom3_bfg/index.php) describes the BFG edition's engine (threading, renderer, classic Doom integration).
 9. **Web build** (WebAssembly), as castle-doom and castle-quake2 have.
 10. **Exact light images** (needs CGE change C below, PRs #741 and #742 for colored images): the light shader's projection image and `lightFalloffImage` as textures of the light effect, instead of the analytic shapes; `nodiffuse` / `nospecular` (don't need CGE changes).
 11. **Classic Doom 3** (see below): the first episode of the original Doom remade in Doom 3, a mod with its own game code.

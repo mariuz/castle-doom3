@@ -144,6 +144,12 @@ castle-engine compile
 python tools/make_test_pk4.py   # writes data/base/castle_doom3_test.pk4
 ```
 
+## References
+
+- [Doom 3 BFG Source Code Review](https://fabiensanglard.net/doom3_bfg/index.php) by Fabien Sanglard: the BFG edition's code, in four parts ([introduction](https://fabiensanglard.net/doom3_bfg/index.php), [multi-threading](https://fabiensanglard.net/doom3_bfg/threading.php), [renderer](https://fabiensanglard.net/doom3_bfg/renderer.php), [classic Doom integration](https://fabiensanglard.net/doom3_bfg/DooM_Classic.php)).
+- [dhewm3](https://github.com/dhewm/dhewm3): the maintained Doom 3 GPL source port, used for reference renders (see `docs/ROADMAP.md`, "Features from dhewm3").
+- [RBDOOM-3-BFG](https://github.com/RobertBeckebans/RBDOOM-3-BFG): the modernized Doom 3 BFG (see `docs/ROADMAP.md`, "Modern rendering and features from RBDOOM-3-BFG").
+
 ---
 
 ## License
