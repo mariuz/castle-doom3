@@ -1,7 +1,8 @@
 # Native builds (Windows x86_64, Linux x86_64) using the Castle Game Engine
 # Docker image with FPC and cross-compilers, but no engine ("cge-none"):
-# tools/ci_cge_master.sh gets Castle Game Engine master and builds its build tool,
-# so CI builds use the latest engine (like the local E:\Work\cge-master worktree).
+# tools/ci_cge.sh gets Castle Game Engine and builds its build tool: the
+# doom3-port branch of mariuz/castle-engine (CGE master with the pull requests
+# this port needs merged in; CGE_REPO / CGE_BRANCH choose another engine).
 #
 # - On every push / pull request: parser unit tests, autotest screenshots of
 #   the bundled test level, and packages kept as workflow artifacts.
@@ -30,8 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get Castle Game Engine master
-        run: bash tools/ci_cge_master.sh
+      - name: Get Castle Game Engine (doom3-port branch)
+        run: bash tools/ci_cge.sh
 
       - name: Show versions
         run: |
@@ -66,8 +67,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get Castle Game Engine master
-        run: bash tools/ci_cge_master.sh
+      - name: Get Castle Game Engine (doom3-port branch)
+        run: bash tools/ci_cge.sh
 
       - name: Check the test PK4 is up to date with its generator
         run: |

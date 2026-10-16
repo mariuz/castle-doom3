@@ -40,7 +40,7 @@ Status of version 0.12.0 plus the unreleased changes in `docs/CHANGELOG.md`. "Do
 
     To fix next:
     - **Triggers and scripts** (item 5): `start_off` lights turned on by `trigger_relay`s, hidden monsters shown, the intro's script; until then many areas are darker than in the game.
-    - **Shader compiles**: each light has its own Effect (light volume, uniform named after the light), so every set of lights on a shape is a new GLSL program: the first view of an area stalls (12 to below 1 FPS while turning in a fresh run), later runs use the driver's cache. Share the effect between lights (needs CGE change K) or prepare shaders at load. CGE change J (PR #743, merged into CGE master, which CI builds with) is needed for correctness, and makes more programs.
+    - **Shader compiles**: each light has its own Effect (light volume, uniform named after the light), so every set of lights on a shape is a new GLSL program: the first view of an area stalls (12 to below 1 FPS while turning in a fresh run), later runs use the driver's cache. Share the effect between lights (needs CGE change K) or prepare shaders at load. CGE change J (PR #743, merged into CGE master) is needed for correctness, and makes more programs.
     - **Frame rate** in steady state is GPU-bound and shadow volumes cost about half (`r_shadows 0`: 22 -> 43 FPS at Mars City's start).
     - **String tables**: GUIs show `#str_04006`: load `strings/*.lang`.
     - The elevator's back wall in `demo_mc_underground` is black (lit in dhewm3), cause not found yet (`ent func_static_4843`: built and visible; its GUI renders).
@@ -129,7 +129,7 @@ Order: PBR materials (keywords and `_rmao`), then a fallback environment probe a
 
 ## Changes needed in Castle Game Engine
 
-Things this port works around because Castle Game Engine (7.0-alpha.3) can't do them yet. Each is a change to propose upstream (https://github.com/castle-engine/castle-engine); the workaround stays until it is merged into CGE master (CI builds against CGE master, see CLAUDE.md).
+Things this port works around because Castle Game Engine (7.0-alpha.3) can't do them yet. Each is a change to propose upstream (https://github.com/castle-engine/castle-engine); CI builds against the `doom3-port` branch of [mariuz/castle-engine](https://github.com/mariuz/castle-engine/tree/doom3-port): CGE master with the open pull requests below merged in (A, C, L, M, N, O), so the port can use them before they land upstream; the workarounds can go once the port uses each change.
 
 | | Change | Status | Unblocks |
 |---|---|---|---|

@@ -25,10 +25,10 @@ castle-engine compile --mode=release      # or --mode=debug
 .\castle-doom3.exe
 ```
 
-CI (`.github/workflows/build.yml`) builds with CGE **master**: the `cge-none` Docker image plus `tools/ci_cge_master.sh` (clones master, builds its build tool). To build locally like CI, use the master worktree `E:\Work\cge-master` (keep it; refresh with `git fetch upstream` in `E:\Work\castle-engine`, then `git -C E:\Work\cge-master checkout --detach upstream/master` and rebuild its tool with `castle-engine compile` in `tools/build-tool` under `CASTLE_ENGINE_PATH=E:\Work\cge-master`):
+CI (`.github/workflows/build.yml`) builds with the **`doom3-port`** branch of https://github.com/mariuz/castle-engine: CGE master with our open CGE pull requests merged in (roadmap changes A, C, L, M, N, O). It uses the `cge-none` Docker image plus `tools/ci_cge.sh` (clones the branch, builds its build tool; `CGE_REPO` / `CGE_BRANCH` override it). Locally that branch is checked out in the fork `E:\Work\castle-engine`; when a PR branch gets new commits, merge it into `doom3-port` again (don't rebase, it's pushed), and merge `upstream/master` when PRs land. The master worktree `E:\Work\cge-master` (keep it; refresh with `git fetch upstream` in `E:\Work\castle-engine`, then `git -C E:\Work\cge-master checkout --detach upstream/master` and rebuild its tool with `castle-engine compile` in `tools/build-tool` under `CASTLE_ENGINE_PATH=E:\Work\cge-master`) has a build tool from master, also for `generate-program`. To build locally like CI:
 
 ```powershell
-$env:CASTLE_ENGINE_PATH = 'E:\Work\cge-master'
+$env:CASTLE_ENGINE_PATH = 'E:\Work\castle-engine'   # with doom3-port checked out
 E:\Work\cge-master\tools\build-tool\castle-engine.exe compile --mode=release
 ```
 
