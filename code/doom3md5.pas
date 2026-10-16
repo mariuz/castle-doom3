@@ -1142,6 +1142,9 @@ begin
     Shape := TShapeNode.Create;
     Shape.Geometry := Geometry;
     Shape.Material := Unlit;
+    { a shadow-only caster: not rendered (it would show where the body is
+      thinner than the box), CGE still casts its shadow volumes }
+    Shape.Visible := False;
     Transform := TMatrixTransformNode.Create;
     Transform.AddChildren(Shape);
     Root.AddChildren(Transform);

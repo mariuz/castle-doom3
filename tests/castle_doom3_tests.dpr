@@ -1092,6 +1092,7 @@ var
   W: TD3CollisionModel;
   I, Solid: Integer;
   AllClosed: Boolean;
+  CasterRoot: TX3DRootNode;
   N: TVector3;
   App: TAppearanceNode;
 begin
@@ -1138,6 +1139,14 @@ begin
       end;
     CheckEquals(20, Solid, 'solid brushes cast shadows, the playerclip brush not');
     Check(AllClosed, 'every test level brush makes a closed caster');
+    { the casters are shadow-only: invisible shapes }
+    CasterRoot := BuildShadowCasterNode(W.Brushes, 1);
+    try
+      Check(CasterRoot.FdChildren.Count > 0, 'shadow caster shapes built');
+      Check(not (CasterRoot.FdChildren[0] as TShapeNode).Visible, 'shadow casters are not rendered');
+    finally
+      CasterRoot.Free;
+    end;
   finally
     Cm.Free;
   end;

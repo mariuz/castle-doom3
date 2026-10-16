@@ -209,6 +209,9 @@ begin
       Shape := TShapeNode.Create;
       Shape.Geometry := Geometry;
       Shape.Appearance := Appearance;
+      { a shadow-only caster: not rendered, CGE still casts its shadow
+        volumes (with caps, mariuz/castle-engine#5) }
+      Shape.Visible := False;
       Result.AddChildren(Shape);
     finally
       Coords.Free;

@@ -43,7 +43,7 @@ Keep the project at a short path (`E:\Work\castle-doom3`): long paths break FPC 
 
 Pass the whole `--demo` value as one argument (from PowerShell `Start-Process`, quote it inside `-ArgumentList`, or the spaces in `G:x y z` split it). Script commands are listed in the README; grep the log for `Warning|Exception|Screenshot|Message|Shot:`. Screenshot log lines show the FPS, eye position (Doom 3 coordinates), yaw, area and visible areas (portal visibility: 1 in room A with the door shut, 2 at (200, 0) yaw 0 once the door opened, 1 from there at yaw 180). Useful test map spots: start (-160, -160) yaw 45; LWO barrels at (-60, 190) and (-12, 206); ASE terminals at (200, 200) (`noclipmodel`, faces yaw -135) and on the balcony (820, -280, 96) (see its screen from (740, -200, 96) yaw -45); in front of the door (200, 0) yaw 0 (it opens within ~1 s); the invisible playerclip wall is y = 0 for x < -120 (from (-200, -100) yaw 90, `GO:1 0 1.5` stops at y = -20.7); the monster clip strip at x = -40 lets the player through; climbing to the balcony: `G:560 0 0,A:0,GO:1 0 2.5` ends with eye z 163.5; room B (420, -250); creatures are monsters 0 and 1 (`N:0`). `blob_1` has 80 health, the pistol does 14 per shot every 0.35 s (6 hits kill it).
 
-Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (514 checks; run from `tests/`). When the generator changes, update the expected counts there.
+Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (516 checks; run from `tests/`). When the generator changes, update the expected counts there.
 
 ## CGE editor integration
 
