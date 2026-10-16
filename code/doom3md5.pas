@@ -50,6 +50,10 @@ type
   end;
 
   TD3Md5Model = class
+  strict private
+    { per mesh: 0 not checked yet, 1 closed, 2 open }
+    FMeshClosed: array of Byte;
+  public
     Name: String;
     Joints: TD3JointArray;
     Meshes: specialize TObjectList<TD3Md5Mesh>;
@@ -65,6 +69,10 @@ type
     procedure SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3);
     procedure SkinMesh(const MeshIndex: Integer; const Pose: TD3JointArray;
       var Positions: array of TVector3);
+    { Is the mesh closed (2-manifold) in the bind pose: every edge between
+      two triangles going opposite ways? Only closed meshes cast shadow
+      volumes in CGE. Cached. }
+    function MeshClosed(const MeshIndex: Integer): Boolean;
   end;
 
   TD3Md5Anim = class
@@ -233,8 +241,15 @@ function BoxTriangles(const Corners: array of TVector3): TD3IndexArray;
 var
   Md5Cache: TD3Md5Cache;
   { md5 models with more triangles cast shadow volumes from a box per joint
-    instead of their mesh }
+    instead of their mesh, unless their meshes are closed and
+    ClosedMeshesCastShadows (console r_md5ShadowTris) }
   MaxShadowCastingTriangles: Integer = 1500;
+  { Closed md5 meshes cast shadow volumes with their own triangles,
+    whatever their size (console r_md5ShadowClosed). Animated casters are
+    cheap since CGE moves the same triangles when only the coordinates
+    change (mariuz/castle-engine#4); meshes that aren't closed don't cast
+    at all in CGE, so the joint boxes stay for them. }
+  ClosedMeshesCastShadows: Boolean = True;
   { Size of the joint boxes relative to the box of the joint's vertexes:
     smaller than the mesh, so they stay inside it. }
   ShadowHullScale: Single = 0.6;
@@ -244,7 +259,8 @@ implementation
 uses
   Math,
   CastleLog,
-  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects;
+  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects,
+  Doom3Collision;
 
 { Doom 3 stores unit quaternions as x y z, w = -sqrt(1 - x2 - y2 - z2). }
 function QuatFromXYZ(const V: TVector3): TQuaternion;
@@ -438,6 +454,24 @@ begin
     if SameText(Joints[I].Name, AName) then
       Exit(I);
   Result := -1;
+end;
+
+function TD3Md5Model.MeshClosed(const MeshIndex: Integer): Boolean;
+var
+  Positions: array of TVector3;
+begin
+  if Length(FMeshClosed) <> Meshes.Count then
+    SetLength(FMeshClosed, Meshes.Count);
+  if FMeshClosed[MeshIndex] = 0 then
+  begin
+    SetLength(Positions, Length(Meshes[MeshIndex].Verts));
+    SkinMesh(MeshIndex, Joints, Positions);
+    if TrianglesClosed(Positions, Meshes[MeshIndex].Tris) then
+      FMeshClosed[MeshIndex] := 1
+    else
+      FMeshClosed[MeshIndex] := 2;
+  end;
+  Result := FMeshClosed[MeshIndex] = 1;
 end;
 
 procedure TD3Md5Model.SkinMesh(const MeshIndex: Integer; const Pose: TD3JointArray;
@@ -826,10 +860,14 @@ var
   Shape: TShapeNode;
   SkinDecl: TD3Skin;
   MaterialName: String;
+  AllClosed, UseHulls: Boolean;
+  MeshShapes: array of TShapeNode;
 begin
   inherited Create;
   FShown := True;
   FModel := AModel;
+  AllClosed := True;
+  MeshShapes := nil;
   FAnims := TStringList.Create;
   if AAnims <> nil then
     FAnims.Assign(AAnims);
@@ -864,20 +902,29 @@ begin
     Shape := TShapeNode.Create;
     Shape.Geometry := Geometry;
     Shape.Appearance := MaterialAppearance(MaterialName);
-    { CGE finds shadow volume silhouettes by comparing every edge with
-      every other edge, again whenever the mesh animates: big meshes cast
-      with joint boxes instead }
-    if TriangleCount > MaxShadowCastingTriangles then
-      Shape.Appearance.ShadowCaster := False;
+    MeshShapes := Concat(MeshShapes, [Shape]);
+    if not FModel.MeshClosed(I) then
+      AllClosed := False;
     Root.AddChildren(Shape);
   end;
-  if TriangleCount > MaxShadowCastingTriangles then
+  { big meshes that aren't closed cast with joint boxes: the open shapes
+    wouldn't cast at all (CGE skips them) }
+  UseHulls := (TriangleCount > MaxShadowCastingTriangles) and
+    not (ClosedMeshesCastShadows and AllClosed);
+  if UseHulls then
+  begin
+    for Shape in MeshShapes do
+      Shape.Appearance.ShadowCaster := False;
     BuildShadowHulls(Root);
+  end else
+  if TriangleCount > MaxShadowCastingTriangles then
+    WritelnLog('Doom3Md5', 'Shadows: "%s" has %d triangles, closed: casts with its triangles',
+      [FModel.Name, TriangleCount]);
 
   AddLightLibrary(Root);
   FScene := TD3Scene.Create(nil);
   FScene.Load(Root, True);
-  FScene.CastShadows := (TriangleCount <= MaxShadowCastingTriangles) or (ShadowHullCount > 0);
+  FScene.CastShadows := (not UseHulls) or (ShadowHullCount > 0);
   ApplyPose;
   { prefer an idle animation, as the game does }
   if not PlayAnim('idle') then

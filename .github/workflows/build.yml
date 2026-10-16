@@ -136,8 +136,10 @@ jobs:
           grep -q 'Rendered "guis/test_panel.gui" (5 windows)' test_output/guis.log || { echo "::error::the panel GUI should be rendered"; exit 1; }
           grep -q 'Rendered "guis/test_status.gui" (6 windows)' test_output/guis.log || { echo "::error::the status GUI should be rendered"; exit 1; }
           grep -q "Shadow casters: 20 brushes" test_output/shadows.log || { echo "::error::the .cm brushes should cast shadows"; exit 1; }
-          run_test hulls testmap "W:0.5,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"
+          run_test hulls testmap "W:0.5,O:r_md5ShadowClosed 0,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"
           grep -q "casts with 6 joint boxes" test_output/hulls.log || { echo "::error::big md5 meshes should cast with joint boxes"; exit 1; }
+          run_test closedcast testmap "W:0.5,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"
+          grep -q 'Shadows: "models/md5/test/blob.md5mesh" has 72 triangles, closed: casts with its triangles' test_output/closedcast.log || { echo "::error::closed md5 meshes should cast with their own triangles"; exit 1; }
           run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,W:0.7,O:lights,Q"
           test "$(grep 'Lights: light_4 ' test_output/lights.log | sort -u | wc -l)" -ge 2 || { echo "::error::the pulsing light should change color"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }

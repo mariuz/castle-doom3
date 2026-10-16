@@ -368,15 +368,26 @@ begin
   end;
   Check(Closed, 'hull box is closed');
   Check(Outward, 'hull box faces outward');
-  { a mesh over the limit casts with joint boxes }
+  { a closed mesh over the limit casts with its own triangles }
+  Check(Model.MeshClosed(0), 'the blob mesh is closed');
   SavedMax := MaxShadowCastingTriangles;
   MaxShadowCastingTriangles := 10;
+  Instance := TD3Md5Instance.Create(Model, nil);
+  try
+    CheckEquals(0, Instance.ShadowHullCount, 'closed blob over the limit: no joint boxes');
+    Check(Instance.Scene.CastShadows, 'the closed mesh casts');
+  finally
+    Instance.Free;
+  end;
+  { without r_md5ShadowClosed, a mesh over the limit casts with joint boxes }
+  ClosedMeshesCastShadows := False;
   Instance := TD3Md5Instance.Create(Model, nil);
   try
     CheckEquals(6, Instance.ShadowHullCount, 'joint boxes of the blob (not the root)');
     Check(Instance.Scene.CastShadows, 'the boxes cast');
   finally
     Instance.Free;
+    ClosedMeshesCastShadows := True;
     MaxShadowCastingTriangles := SavedMax;
   end;
   Instance := TD3Md5Instance.Create(Model, nil);

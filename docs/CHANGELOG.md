@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- md5 models whose meshes are closed cast shadow volumes with their own triangles whatever their size, instead of joint boxes (console `r_md5ShadowClosed`): CGE now moves the same shadow caster triangles when only an animated mesh's coordinates change (roadmap CGE change F). Most of the demo's monsters aren't closed and keep the joint boxes.
 - **Glass with heat haze and reflections** (roadmap item 3, CGE change E): glass whose stage runs Doom 3's `heatHaze*` programs shows the screen behind it distorted by the stage's normal map (scrolling, masked, weaker with the distance, like the programs), through CGE's new `ScreenTexture`; `cubeMap` stages with `texgen reflect` reflect their cube map, on glass and as an overlay on lit and plain surfaces (12 to 33 per demo map). Other glass (mirrors, videos) keeps the faint tint.
 - Material stages are drawn on the same triangles as their surface, with CGE's new `DepthMode` "lequal" depth test, instead of copies 0.25 units in front.
 - CI builds with the `doom3-port` branch of mariuz/castle-engine: CGE master with this port's CGE pull requests merged in.
