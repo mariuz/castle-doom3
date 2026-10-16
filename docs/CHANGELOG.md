@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Glass with heat haze and reflections** (roadmap item 3, CGE change E): glass whose stage runs Doom 3's `heatHaze*` programs shows the screen behind it distorted by the stage's normal map (scrolling, masked, weaker with the distance, like the programs), through CGE's new `ScreenTexture`; `cubeMap` stages with `texgen reflect` reflect their cube map, on glass and as an overlay on lit and plain surfaces (12 to 33 per demo map). Other glass (mirrors, videos) keeps the faint tint.
+- Material stages are drawn on the same triangles as their surface, with CGE's new `DepthMode` "lequal" depth test, instead of copies 0.25 units in front.
+- CI builds with the `doom3-port` branch of mariuz/castle-engine: CGE master with this port's CGE pull requests merged in.
+- Test level: a heat haze pane in room B, the glass pane reflects a cube map (`env/testenv`), room A's pillar is shiny metal; 511 checks; CI checks them.
 - Console `soundinfo`: the OpenAL device, and whether EFX reverb works (an EAX reverb effect in an auxiliary effect slot).
 - **AAS navigation** (roadmap 5d, seventh part): maps' `.aas48` files route monsters around walls and through doorways to the player and their path corners (a Dijkstra search over the AAS areas' walk reachabilities); monsters open doors. Console `aas [entity]`.
 - Test level: `maps/testmap.aas48` (generated); `blob_scripted_1` chases the player from the balcony into room A; 499 checks; CI checks the route.

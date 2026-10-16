@@ -281,6 +281,9 @@ var
   SpriteCount: Integer;
   { Overlay stage shapes and glass stand-ins built (for the log). }
   OverlayShapeCount, GlassCount: Integer;
+  { Glass surfaces with heat haze, reflection overlays and glass
+    reflections built (for the log). }
+  HazeCount, ReflectionCount: Integer;
 
 procedure SetD3Rotation(const T: TCastleTransform; const M: TMatrix3);
 
@@ -522,6 +525,8 @@ var
   Group: TAbstractGroupingNode;
   GuiUrl: String;
   App: TAppearanceNode;
+  Kind: TD3SpecialShape;
+  Shape: TShapeNode;
 begin
   for Surf in Model.Surfaces do
   begin
@@ -561,17 +566,25 @@ begin
       { CGE images are bottom-to-top, Doom 3 t goes down the image }
       UVs[I] := Vector2(Surf.Vertexes[I].ST.X, 1 - Surf.Vertexes[I].ST.Y);
     end;
+    Kind := ssNone;
     if GuiUrl <> '' then
       App := GuiAppearance(GuiUrl)
     else
     if M.DrawAsGlass then
     begin
-      App := GlassAppearance;
+      App := GlassAppearance(Surf.Material, Kind);
       Inc(GlassCount);
+      if Kind = ssHaze then
+        Inc(HazeCount)
+      else
+      if Kind = ssReflection then
+        Inc(ReflectionCount);
     end
     else
       App := MaterialAppearance(Surf.Material);
-    Group.AddChildren(ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App));
+    Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
+    SetupSpecialShape(Shape, Kind);
+    Group.AddChildren(Shape);
 
     { more stages: the same triangles, with a "lequal" depth test
       (OverlayAppearance) }
@@ -582,6 +595,19 @@ begin
           not M.TwoSided, OverlayAppearance(Surf.Material, J)));
         Inc(OverlayShapeCount);
       end;
+
+    { a cube map reflection stage over a lit or plain surface }
+    if (GuiUrl = '') and not M.DrawAsGlass and (M.ReflectCubeMap <> '') then
+    begin
+      App := ReflectionAppearance(Surf.Material);
+      if App <> nil then
+      begin
+        Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
+        SetupSpecialShape(Shape, ssReflection);
+        Group.AddChildren(Shape);
+        Inc(ReflectionCount);
+      end;
+    end;
   end;
 end;
 
@@ -1554,7 +1580,7 @@ var
   Base: String;
   E: TD3MapEntity;
   B: TD3BrushEntity;
-  Overlays, Sprites, Glass: Integer;
+  Overlays, Sprites, Glass, Haze, Reflections: Integer;
 begin
   ClearMap;
   if FMapName = '' then
@@ -1593,6 +1619,8 @@ begin
   Overlays := OverlayShapeCount;
   Sprites := SpriteCount;
   Glass := GlassCount;
+  Haze := HazeCount;
+  Reflections := ReflectionCount;
   BuildWorld;
   LoadProfileStep('world');
   BuildCollision(Base);
@@ -1601,6 +1629,8 @@ begin
   LoadProfileStep('brushes');
   WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
     [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
+  WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections',
+    [HazeCount - Haze, ReflectionCount - Reflections]);
   BuildStaticModelEntities;
   LoadProfileStep('static models');
   for B in FBrushes do

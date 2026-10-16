@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(52, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(59, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -119,7 +119,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(25, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(12, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
@@ -904,6 +904,20 @@ begin
   M := Decls.Material('textures/test/glass');
   Check(M.DrawAsGlass, 'glass: only a reflection stage');
   CheckEquals('', M.SkyCubeMap, 'a reflected cube map is not a sky');
+  CheckEquals('env/testenv', M.ReflectCubeMap, 'glass reflects a cube map');
+  CheckEquals('', M.HazeNormalMap, 'glass: no heat haze');
+  M := Decls.Material('textures/test/hazeglass');
+  Check(M.DrawAsGlass, 'heat haze: only a program stage');
+  CheckEquals('textures/test/haze_local.tga', M.HazeNormalMap, 'heat haze normal map (fragmentMap 1)');
+  CheckEquals('', M.HazeMask, 'heatHaze.vfp has no mask');
+  Check((M.HazeScroll[0] <> nil) and M.HazeScroll[0].UsesTime, 'heat haze scroll (vertexParm 0) uses time');
+  Check(Abs(M.HazeMagnitude - 1.5) < 0.001, 'heat haze magnitude (vertexParm 1)');
+  CheckEquals('', M.ReflectCubeMap, 'heat haze: no reflection');
+  M := Decls.Material('textures/test/shinymetal');
+  Check(not M.DrawAsGlass, 'shiny metal is lit');
+  CheckEquals('textures/test/metal_d.tga', M.DiffuseImage, 'shiny metal diffuse map');
+  CheckEquals('env/testenv', M.ReflectCubeMap, 'shiny metal reflects a cube map');
+  Check(M.ReflectColorExpr[0] <> nil, 'reflection color (rgb)');
   M := Decls.Material('textures/test/flare');
   CheckEquals('sprite', M.Deform, 'deform sprite');
   Check(not M.DrawAsGlass, 'flare is drawn normally');

@@ -76,6 +76,20 @@ type
     SkyCameraCubeMap: Boolean;
     { Plain stages after the first one (glows over lit walls...) }
     ExtraStages: array of TD3ExtraStage;
+    { The first heat haze stage (program heatHaze*.vfp, reading
+      _currentRender): the distortion normal map (fragmentMap 1, '' when
+      there is no such stage), the mask (fragmentMap 2 of the WithMask
+      programs, or ''), the scroll (vertexParm 0, nil means 0; owned)
+      and the distortion magnitude (vertexParm 1). }
+    HazeNormalMap, HazeMask: String;
+    HazeScroll: array [0..1] of TD3Expr;
+    HazeMagnitude: Single;
+    { The first stage reflecting a cube map ("cubeMap ...", "texgen reflect"):
+      the cube map name ('' when there is no such stage), its blend mode
+      and color registers (nil means 1; owned). }
+    ReflectCubeMap: String;
+    ReflectBlend: TD3BlendMode;
+    ReflectColorExpr: array [0..3] of TD3Expr;
     { "deform sprite", "deform tube"...: the deform kind, lowercase }
     Deform: String;
     { Only stages we can't draw (reflections, heat haze, mirrors, videos):
@@ -259,7 +273,12 @@ begin
     FreeTexOps(ExtraStages[I].TexOps);
   end;
   for I := 0 to 3 do
+  begin
     FreeAndNil(StageColorExpr[I]);
+    FreeAndNil(ReflectColorExpr[I]);
+  end;
+  for I := 0 to 1 do
+    FreeAndNil(HazeScroll[I]);
   FreeTexOps(DiffuseTexOps);
   FreeTexOps(StageTexOps);
   inherited Destroy;
@@ -645,6 +664,15 @@ begin
   Result := Concat(Result, [Trim(Copy(S, Start, MaxInt))]);
 end;
 
+{ Image options that may precede the image of a stage's fragmentMap. }
+function IsFragmentMapOption(const S: String): Boolean;
+begin
+  Result := (S = 'cubemap') or (S = 'cameracubemap') or (S = 'nearest') or
+    (S = 'linear') or (S = 'clamp') or (S = 'noclamp') or (S = 'zeroclamp') or
+    (S = 'alphazeroclamp') or (S = 'forcehighquality') or (S = 'highquality') or
+    (S = 'uncompressed') or (S = 'nopicmip');
+end;
+
 function TD3DeclManager.ParseMaterial(const Name, Body: String): TD3Material;
 var
   Lexer: TDoom3Lexer;
@@ -652,7 +680,10 @@ var
   StageBlendMode: TD3BlendMode;
   StageSpecial, HasBlend, HasStageColor, StageSkyTexGen: Boolean;
   StageCubeMap: String;
-  StageCameraCubeMap: Boolean;
+  StageCameraCubeMap, StageReflectTexGen: Boolean;
+  StageProgram: String;
+  StageFragmentMaps: array [0..2] of String;
+  StageVertexParms: array [0..1] of String;
   StageAlphaTest: Single;
   Regs: array [0..3] of TD3Expr;
   Parts: TStringArray;
@@ -711,6 +742,12 @@ begin
         StageCubeMap := '';
         StageCameraCubeMap := False;
         StageSkyTexGen := False;
+        StageReflectTexGen := False;
+        StageProgram := '';
+        for I := 0 to High(StageFragmentMaps) do
+          StageFragmentMaps[I] := '';
+        for I := 0 to High(StageVertexParms) do
+          StageVertexParms[I] := '';
         HasBlend := False;
         StageAlphaTest := -1;
         for I := 0 to 3 do
@@ -746,8 +783,33 @@ begin
             L := LowerCase(Lexer.NextStr);
             if (L = 'skybox') or (L = 'wobblesky') then
               StageSkyTexGen := True;
+            if L = 'reflect' then
+              StageReflectTexGen := True;
             Lexer.SkipLine;
             StageSpecial := True;
+          end else
+          if (L = 'program') or (L = 'fragmentprogram') or (L = 'vertexprogram') then
+          begin
+            { the vertex and fragment programs have the same name }
+            StageProgram := LowerCase(Lexer.NextStr);
+            StageSpecial := True;
+          end else
+          if L = 'vertexparm' then
+          begin
+            I := Lexer.ReadInt;
+            Line := Lexer.RestOfLine;
+            if (I >= 0) and (I <= High(StageVertexParms)) then
+              StageVertexParms[I] := Line;
+          end else
+          if L = 'fragmentmap' then
+          begin
+            I := Lexer.ReadInt;
+            { options before the image }
+            while IsFragmentMapOption(LowerCase(Lexer.Peek)) do
+              Lexer.NextStr;
+            Line := ReadImageProgram(Lexer);
+            if (I >= 0) and (I <= High(StageFragmentMaps)) then
+              StageFragmentMaps[I] := Line;
           end else
           if (L = 'red') or (L = 'green') or (L = 'blue') or (L = 'alpha') then
           begin
@@ -790,11 +852,37 @@ begin
           else
           if (L = 'cubemap') or (L = 'cameracubemap') or (L = 'videomap') or
              (L = 'soundmap') or (L = 'remoterendermap') or (L = 'mirrorrendermap') or
-             (L = 'fragmentprogram') or (L = 'program') or (L = 'texgen') then
+             (L = 'texgen') then
             StageSpecial := True
           else
           if Tok = '{' then
             Lexer.SkipBracedSection;
+        end;
+        { heat haze: the first stage with a heatHaze* program }
+        if (Copy(StageProgram, 1, Length('heathaze')) = 'heathaze') and
+           (Result.HazeNormalMap = '') and (StageFragmentMaps[1] <> '') then
+        begin
+          Result.HazeNormalMap := StageFragmentMaps[1];
+          if Pos('withmask', StageProgram) > 0 then
+            Result.HazeMask := StageFragmentMaps[2];
+          Parts := SplitTopLevel(StageVertexParms[0]);
+          for I := 0 to Min(1, High(Parts)) do
+            Result.HazeScroll[I] := ParseD3ExpressionString(Parts[I], @Table);
+          Result.HazeMagnitude := D3StrToFloat(Trim(StageVertexParms[1]), 1);
+        end;
+        { reflection: the first cube map stage with "texgen reflect" }
+        if (StageCubeMap <> '') and StageReflectTexGen and (Result.ReflectCubeMap = '') then
+        begin
+          Result.ReflectCubeMap := StageCubeMap;
+          if HasBlend then
+            Result.ReflectBlend := StageBlendMode
+          else
+            Result.ReflectBlend := bmOpaque;
+          for I := 0 to 3 do
+          begin
+            Result.ReflectColorExpr[I] := Regs[I];
+            Regs[I] := nil;
+          end;
         end;
         { a cube map is a sky only with "texgen skybox" (glass reflects one) }
         if (StageCubeMap <> '') and (StageSkyTexGen or StageCameraCubeMap) and

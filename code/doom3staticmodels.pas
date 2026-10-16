@@ -747,6 +747,8 @@ var
   MaterialName: String;
   M: TD3Material;
   GuiUrl: String;
+  Kind: TD3SpecialShape;
+  App: TAppearanceNode;
 begin
   Result := TX3DRootNode.Create;
   SkinDecl := nil;
@@ -792,8 +794,10 @@ begin
       Shape.Appearance := GuiAppearance(GuiUrl)
     else
     if M.DrawAsGlass then
-      Shape.Appearance := GlassAppearance
-    else
+    begin
+      Shape.Appearance := GlassAppearance(MaterialName, Kind);
+      SetupSpecialShape(Shape, Kind);
+    end else
       Shape.Appearance := MaterialAppearance(MaterialName);
     Result.AddChildren(Shape);
 
@@ -814,6 +818,26 @@ begin
         Shape.Appearance := OverlayAppearance(MaterialName, J);
         Result.AddChildren(Shape);
       end;
+
+    { a cube map reflection stage over a lit or plain surface }
+    if (GuiUrl = '') and not M.DrawAsGlass and (M.ReflectCubeMap <> '') then
+    begin
+      App := ReflectionAppearance(MaterialName);
+      if App <> nil then
+      begin
+        Geometry := TIndexedTriangleSetNode.Create;
+        Geometry.Coord := Coord;
+        Geometry.Normal := NormalNode;
+        Geometry.SetIndex(S.Indexes);
+        Geometry.Ccw := True;
+        Geometry.Solid := not M.TwoSided;
+        Shape := TShapeNode.Create;
+        Shape.Geometry := Geometry;
+        Shape.Appearance := App;
+        SetupSpecialShape(Shape, ssReflection);
+        Result.AddChildren(Shape);
+      end;
+    end;
   end;
   AddLightLibrary(Result);
 end;

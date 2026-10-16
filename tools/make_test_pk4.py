@@ -209,6 +209,10 @@ def metal_textures():
     add('textures/test/metal_d.tga', tga(N, N, diff))
     add('textures/test/metal_local.tga', tga(N, N, normal_from_height(height, 3.0)))
     add('textures/test/metal_s.tga', tga(N, N, spec))
+    # waves for the heat haze pane's distortion
+    haze = [[0.5 + 0.5 * math.sin(x * 2 * math.pi / 32) * math.sin(y * 2 * math.pi / 21)
+             for x in range(N)] for y in range(N)]
+    add('textures/test/haze_local.tga', tga(N, N, normal_from_height(haze, 8.0)))
 
 
 def ceiling_and_glow_textures():
@@ -287,6 +291,16 @@ def sky_and_screen_images():
                 row.append((r, g, b))
             rows.append(row)
         add('env/testsky_%s.tga' % name, tga(n, n, rows))
+    # an environment cube map for reflections (Doom 3 cubeMap names):
+    # a color per direction, with a lighter band, so the reflection shows
+    env = {'px': (0.9, 0.5, 0.2), 'nx': (0.2, 0.4, 0.9), 'py': (0.3, 0.8, 0.3),
+           'ny': (0.7, 0.3, 0.8), 'pz': (0.9, 0.9, 0.9), 'nz': (0.15, 0.15, 0.15)}
+    for name, (r, g, b) in env.items():
+        rows = []
+        for y in range(n):
+            k = 1.0 if 24 <= y < 40 else 0.6
+            rows.append([(r * k, g * k, b * k)] * n)
+        add('env/testenv_%s.tga' % name, tga(n, n, rows))
     rows = []
     for y in range(n):
         row = []
@@ -549,6 +563,8 @@ GLOW = 'textures/test/lightpanel'
 TRIGONCE = 'textures/common/trigonce'
 DOOR = 'textures/test/door'
 GLASS = 'textures/test/glass'
+HAZE = 'textures/test/hazeglass'
+SHINY = 'textures/test/shinymetal'
 FLARE = 'textures/test/flare'
 
 # Room A: x -256..256, y -256..256, z 0..192
@@ -569,7 +585,7 @@ wall_rect(area0, WALL, 'x', 256, -1, -48, 48, 112, 192)
 for (cx, cy) in ((-128, -128), (128, 128), (-128, 128), (128, -128)):
     wall_rect(area0, GLOW, 'z', 191, -1, cx - 24, cx + 24, cy - 24, cy + 24)
 # pillars
-box(area0, METAL, (-176, 136, 0), (-136, 176, 192))
+box(area0, SHINY, (-176, 136, 0), (-136, 176, 192))
 # a free standing glass pane (two sided, not in the .cm)
 wall_rect(area0, GLASS, 'y', -220, 1, -40, 60, 16, 144)
 # a flare (deform sprite) under light_1
@@ -597,6 +613,8 @@ wall_rect(area1, 'textures/test/sky', 'z', 352, -1, 560, 720, -96, 96)
 wall_rect(area1, WALL, 'x', 272, 1, -384, -48, 0, 288)
 wall_rect(area1, WALL, 'x', 272, 1, 48, 384, 0, 288)
 wall_rect(area1, WALL, 'x', 272, 1, -48, 48, 112, 288)
+# a free standing heat haze pane (two sided, not in the .cm)
+wall_rect(area1, HAZE, 'y', -300, 1, 330, 450, 8, 136)
 for (cx, cy) in ((448, -192), (448, 192), (640, 250)):
     wall_rect(area1, GLOW, 'z', 287, -1, cx - 32, cx + 32, cy - 32, cy + 32)
 # a status screen on the north wall of room B (y = 384, facing -Y: right is +X)
@@ -1108,7 +1126,7 @@ textures/test/door
 	}
 }
 
-/* only a stage we can't draw: drawn as faint glass */
+/* only a reflection stage: drawn as the reflection (glass) */
 textures/test/glass
 {
 	qer_editorimage textures/test/metal_d.tga
@@ -1118,8 +1136,41 @@ textures/test/glass
 	twosided
 	{
 		blend add
-		cubeMap env/testsky
+		cubeMap env/testenv
 		texgen reflect
+		rgb 0.3
+	}
+}
+
+/* glass distorting what is behind it (Doom 3's heatHaze program) */
+textures/test/hazeglass
+{
+	qer_editorimage textures/test/haze_local.tga
+	noshadows
+	nonsolid
+	translucent
+	twosided
+	{
+		program heatHaze.vfp
+		vertexParm 0 time * 0.1 , time * 0.05
+		vertexParm 1 1.5
+		fragmentMap 0 _currentRender
+		fragmentMap 1 textures/test/haze_local.tga
+	}
+}
+
+/* lit metal reflecting a cube map */
+textures/test/shinymetal
+{
+	qer_editorimage textures/test/metal_d.tga
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	specularmap	textures/test/metal_s.tga
+	{
+		blend add
+		cubeMap env/testenv
+		texgen reflect
+		rgb 0.2
 	}
 }
 
