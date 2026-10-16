@@ -735,7 +735,7 @@ end;
 function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings): TX3DRootNode;
 var
   S: TD3StaticSurface;
-  Coords, OverlayCoords: array of TVector3;
+  Coords: array of TVector3;
   I, J: Integer;
   Coord: TCoordinateNode;
   NormalNode: TNormalNode;
@@ -797,16 +797,11 @@ begin
       Shape.Appearance := MaterialAppearance(MaterialName);
     Result.AddChildren(Shape);
 
-    { more stages: copies a little in front, sharing normals and texture
-      coordinates }
+    { more stages: the same triangles (sharing coordinates, normals and
+      texture coordinates), with a "lequal" depth test (OverlayAppearance) }
     if (GuiUrl = '') and not M.DrawAsGlass then
       for J := 0 to M.OverlayCount - 1 do
       begin
-        SetLength(OverlayCoords, Length(Coords));
-        for I := 0 to High(Coords) do
-          OverlayCoords[I] := Coords[I] + NormalNode.FdVector.Items[I] * (OverlayOffset * (J + 1));
-        Coord := TCoordinateNode.Create;
-        Coord.SetPoint(OverlayCoords);
         Geometry := TIndexedTriangleSetNode.Create;
         Geometry.Coord := Coord;
         Geometry.TexCoord := TexCoord;

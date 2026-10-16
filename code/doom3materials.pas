@@ -50,9 +50,6 @@ var
   DefaultSpecular: Single = 0.08;
   { Brightness of the glass stand-in. }
   GlassTint: Single = 0.06;
-  { Distance of overlay stages (glows...) in front of their surface: CGE's
-    depth test is "less", coplanar copies would be hidden. }
-  OverlayOffset: Single = 0.25;
 
 implementation
 
@@ -240,6 +237,22 @@ begin
   end;
 end;
 
+{ Doom 3 draws the next stages of a material on the same triangles
+  with the depth test "less or equal". Blended stages are rendered after
+  all opaque shapes, so "lequal" is enough; opaque (alpha-tested) stages
+  may be rendered before their surface, so they are also moved towards
+  the camera in the depth buffer (polygon offset), one step per stage. }
+procedure StageDepthMode(const App: TAppearanceNode; const Index: Integer);
+var
+  DepthMode: TDepthModeNode;
+begin
+  DepthMode := TDepthModeNode.Create;
+  DepthMode.DepthFunc := dmfLessEqual;
+  if App.AlphaMode <> amBlend then
+    DepthMode.PolygonOffset := Vector2(-1, -(Index + 1));
+  App.DepthMode := DepthMode;
+end;
+
 function OverlayAppearance(const MaterialName: String; const Index: Integer): TAppearanceNode;
 var
   M: TD3Material;
@@ -254,6 +267,7 @@ begin
     if I = 0 then
     begin
       StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest);
+      StageDepthMode(Result, Index);
       Exit;
     end;
     Dec(I);
@@ -261,6 +275,7 @@ begin
   if (I >= 0) and (I <= High(M.ExtraStages)) then
     StageInto(Result, M.ExtraStages[I].Image, M.ExtraStages[I].Blend, M.ExtraStages[I].ColorExpr,
       M.ExtraStages[I].TexOps, M.ExtraStages[I].AlphaTest);
+  StageDepthMode(Result, Index);
 end;
 
 function GlassAppearance: TAppearanceNode;

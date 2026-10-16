@@ -516,7 +516,7 @@ class procedure TDoom3Map.BuildProcModel(const Model: TD3ProcModel;
 var
   Surf: TD3ProcSurface;
   M: TD3Material;
-  Coords, Normals, OverlayCoords: array of TVector3;
+  Coords, Normals: array of TVector3;
   UVs: array of TVector2;
   I, J: Integer;
   Group: TAbstractGroupingNode;
@@ -573,14 +573,12 @@ begin
       App := MaterialAppearance(Surf.Material);
     Group.AddChildren(ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App));
 
-    { more stages: copies slightly in front (the depth test is "less") }
+    { more stages: the same triangles, with a "lequal" depth test
+      (OverlayAppearance) }
     if (GuiUrl = '') and not M.DrawAsGlass then
       for J := 0 to M.OverlayCount - 1 do
       begin
-        SetLength(OverlayCoords, Length(Coords));
-        for I := 0 to High(Coords) do
-          OverlayCoords[I] := Coords[I] + Normals[I] * (OverlayOffset * (J + 1));
-        Group.AddChildren(ProcShape(OverlayCoords, Normals, UVs, Surf.Indexes,
+        Group.AddChildren(ProcShape(Coords, Normals, UVs, Surf.Indexes,
           not M.TwoSided, OverlayAppearance(Surf.Material, J)));
         Inc(OverlayShapeCount);
       end;
