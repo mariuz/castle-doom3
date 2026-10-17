@@ -20,6 +20,7 @@ Contents (all made here, MIT licensed like the rest of the project):
   efxs/testmap.efx         reverb (EAX) settings: room B by area number, room A
                            by location name, a default
   blob_ranged_1            a monster throwing homing balls when activated
+  blob_flyer_1             a flying monster charging when activated
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1126,6 +1127,10 @@ def map_text():
         # launch_missile frame commands and the attackMissile event)
         {'classname': 'monster_test_ranged', 'name': 'blob_ranged_1', 'origin': '500 -150 0',
          'angle': '90'},
+        # flies once activated (MOVETYPE_FLY): up to the player's eyes,
+        # chasing, charging like a lost soul
+        {'classname': 'monster_test_flyer', 'name': 'blob_flyer_1', 'origin': '620 -100 0',
+         'angle': '180'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1602,6 +1607,15 @@ entityDef monster_test_ranged {
 	"attack_cone"			"70"
 }
 
+entityDef monster_test_flyer {
+	"inherit"				"monster_test_scripted"
+	"editor_usage"			"A flying test creature charging at the player once activated (script object monster_test_flyer)."
+	"scriptobject"			"monster_test_flyer"
+	"fly_speed"				"150"
+	"fly_offset"			"10"
+	"melee_range"			"40"
+}
+
 entityDef monster_test_blob {
 	"inherit"				"monster_default"
 	"editor_usage"			"A test creature for Castle Doom 3."
@@ -1976,6 +1990,9 @@ DOOM_MAIN_SCRIPT = """// Castle Doom 3 test level: the events and defines testma
 
 #define TALK_OK             2
 
+#define MOVETYPE_ANIM       1
+#define MOVETYPE_FLY        3
+
 #define eachFrame       for( 0; 1; waitFrame() )
 #define waitUntil( x )  while( !( x ) ) { waitFrame(); }
 
@@ -2024,6 +2041,9 @@ scriptEvent void    stopThinking();
 scriptEvent float   enemyRange();
 scriptEvent float   canHitEnemyFromAnim( string anim );
 scriptEvent void    locateEnemy();
+scriptEvent void    setMoveType( float movetype );
+scriptEvent void    chargeAttack( string damageDef );
+scriptEvent void    waitMove();
 scriptEvent float   canHitEnemyFromJoint( string jointname );
 scriptEvent entity  attackMissile( string jointname );
 scriptEvent void    setTalkState( float state );
@@ -2298,6 +2318,45 @@ void monster_test_ranged::Torso_Throw() {
     waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
     finishAction( "throw" );
     animState( ANIMCHANNEL_TORSO, "Torso_Idle", 4 );
+}
+
+// A flying monster (like the cacodemon and the lost soul): it flies once
+// activated, up to the player's eyes (plus fly_offset), chases it and,
+// near it, charges (chargeAttack: straight on, hurting once on touch)
+// every 2 seconds.
+float next_charge;
+
+object monster_test_flyer : monster_test {
+    void    init();
+    void    state_Begin();
+    void    state_Combat();
+};
+
+void monster_test_flyer::init() {
+    setMoveType( MOVETYPE_FLY );
+    setState( "state_Begin" );
+}
+
+void monster_test_flyer::state_Begin() {
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    while( !AI_ACTIVATED ) {
+        waitFrame();
+    }
+    locateEnemy();
+    setState( "state_Combat" );
+}
+
+void monster_test_flyer::state_Combat() {
+    eachFrame {
+        if ( ( sys.getTime() > next_charge ) && ( enemyRange() < 160 ) ) {
+            chargeAttack( "damage_test_charge" );
+            next_charge = sys.getTime() + 2;
+            waitMove();
+        } else {
+            moveToEnemy();
+        }
+    }
 }
 
 void main() {

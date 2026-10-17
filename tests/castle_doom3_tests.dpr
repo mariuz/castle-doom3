@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(17, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(18, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(44, MapFile.Entities.Count, 'entity count');
+    CheckEquals(45, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1653,7 +1653,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(21, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(24, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1828,7 +1828,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for actors');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(3, Game.Actors.Count, 'three actors (blob_scripted_1, test_walker_1, blob_ranged_1)');
+    CheckEquals(4, Game.Actors.Count, 'four actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1)');
     A := nil;
     for I := 0 to Game.Actors.Count - 1 do
       if Game.Actors[I].Model.Entity.Name = 'test_walker_1' then
@@ -2270,6 +2270,113 @@ begin
   end;
 end;
 
+procedure TestFlying;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A, Flyer: TD3Actor;
+  M: TD3Monster;
+  I, Health: Integer;
+  Eye, Start, Pos: TVector3;
+  SawCharge, Leaned: Boolean;
+  RemoveMe: TRemoveType;
+  MaxSpeed: Single;
+
+  procedure Step(const Seconds: Single);
+  begin
+    Game.Update(Seconds, Eye);
+    RemoveMe := rtNone;
+    Map.Update(Seconds, RemoveMe);
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for flying');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Flyer := nil;
+    for A in Game.Actors do
+      if A.Model.Entity.Name = 'blob_flyer_1' then
+        Flyer := A
+      else
+        A.Thinking := False;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    Check(Flyer <> nil, 'blob_flyer_1 runs its script');
+    if Flyer = nil then
+      Exit;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Start := CgeToD3(Flyer.Model.Holder.Translation);
+    for I := 1 to 5 do
+      Step(0.1);
+    CheckEquals(MoveTypeFly, Flyer.MoveType, 'init: setMoveType( MOVETYPE_FLY )');
+    Pos := CgeToD3(Flyer.Model.Holder.Translation);
+    Check((Pos - Start).Length < 20, Format('it hovers (bobbing) where it is until activated (%.1f away)',
+      [(Pos - Start).Length]));
+
+    { activated: it rises to the player's eyes plus fly_offset (68 + 10)
+      and flies at it, leaning into its turns }
+    Game.Activate(Game.FindEntity('blob_flyer_1'));
+    MaxSpeed := 0;
+    Leaned := False;
+    for I := 1 to 15 do
+    begin
+      Step(0.1);
+      MaxSpeed := Max(MaxSpeed, Flyer.Velocity.Length);
+      if (Abs(Flyer.FlyRoll) > 0.5) or (Abs(Flyer.FlyPitch) > 0.5) then
+        Leaned := True;
+    end;
+    Pos := CgeToD3(Flyer.Model.Holder.Translation);
+    Check(Pos.Z > Start.Z + 40, Format('it flew up (z %.1f)', [Pos.Z]));
+    Check(Sqrt(Sqr(Pos.X - 420) + Sqr(Pos.Y + 250)) < Sqrt(Sqr(Start.X - 420) + Sqr(Start.Y + 250)) - 50,
+      'it flew towards the player');
+    Check(MaxSpeed <= 150.5, Format('no faster than fly_speed (%.1f)', [MaxSpeed]));
+    Check(Leaned, 'it leans (fly_pitch / fly_roll)');
+
+    { near the player it charges: straight on, hurting once }
+    Health := Game.Health;
+    SawCharge := False;
+    for I := 1 to 60 do
+    begin
+      Step(0.05);
+      if Flyer.MoveDirect then
+        SawCharge := True;
+    end;
+    Check(SawCharge, 'chargeAttack flies straight on (MoveDirect)');
+    Check(Game.Health < Health, Format('the charge hurt the player (%d -> %d)', [Health, Game.Health]));
+    Check((Health - Game.Health) mod 9 = 0, 'by damage_test_charge (9 per charge)');
+
+    { hovering with an enemy (no move): it keeps to the player's eyes plus
+      fly_offset (idAI::AdjustFlyHeight) }
+    Flyer.MoveDirect := False;
+    for I := 1 to 120 do
+    begin
+      Flyer.Moving := False;
+      Flyer.Main.State := tsDone;
+      Step(0.05);
+    end;
+    Pos := CgeToD3(Flyer.Model.Holder.Translation);
+    CheckNear(PlayerEyeHeight + 10, Pos.Z, 'hovering at the player''s eyes plus fly_offset', 12);
+
+    { killed in the air, it falls to the floor }
+    Game.KillActor(Flyer);
+    for I := 1 to 20 do
+      Step(0.05);
+    CheckEquals(MoveTypeDead, Flyer.MoveType, 'dead: MOVETYPE_DEAD');
+    Check(not Flyer.Monster.Falling, 'it landed');
+    CheckNear(0, CgeToD3(Flyer.Model.Holder.Translation).Z, 'on room B''s floor', 1);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2460,6 +2567,7 @@ begin
   TestProjectiles;
   TestSplashDamage;
   TestRangedAttacks;
+  TestFlying;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

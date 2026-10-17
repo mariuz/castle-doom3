@@ -167,6 +167,8 @@ jobs:
           grep -q "blob_scripted_1 hits the player" test_output/monster.log || { echo "::error::the scripted monster should chase and hit the player (AI script, melee frame command)"; exit 1; }
           run_test ranged testmap "W:1,O:god,G:420 -250 0,A:30,O:activate blob_ranged_1,W:0.4,S,W:4,O:actors,Q"
           grep -q "Projectile of blob_ranged_1 hits the player" test_output/ranged.log || { echo "::error::blob_ranged_1's homing balls (create_missile / launch_missile, attackMissile) should hit the player"; exit 1; }
+          run_test flyer testmap "W:1,O:god,G:420 -250 0,A:60,O:activate blob_flyer_1,W:1.5,S,W:4,O:actors,Q"
+          grep -q "blob_flyer_1 hits the player (damage_test_charge, 9)" test_output/flyer.log || { echo "::error::the flying blob_flyer_1 should charge into the player (MOVETYPE_FLY, chargeAttack)"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }

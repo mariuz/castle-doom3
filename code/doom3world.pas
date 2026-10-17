@@ -113,6 +113,10 @@ type
       triggers yet) or hurt }
     Dormant: Boolean;
     Route: TD3Route;
+    { a flying monster killed in the air falls (FallSpeed, units per
+      second, CGE down) before it sinks }
+    Falling: Boolean;
+    FallSpeed: Single;
     function Position: TVector3;
     function Center: TVector3;
   end;
@@ -266,6 +270,19 @@ type
       chargeAttack): while set, touching the player hurts it once
       (idAI::DirectDamage ends the attack); '' when none }
     Attack: String;
+    { idAI's move.moveType (setMoveType): MoveTypeAnim walks,
+      MoveTypeFly flies (FlyMove), MoveTypeStatic stays, MoveTypeDead }
+    MoveType: Integer;
+    { flying: the velocity (Doom 3 coordinates); MoveDirect flies
+      straight on with it (MOVE_TO_POSITION_DIRECT: charges) }
+    Velocity: TVector3;
+    MoveDirect: Boolean;
+    { waitMove: its thread waits until the move is done }
+    WaitMove: Boolean;
+    { fly_speed, fly_offset (above the enemy's eyes), fly_bob_*,
+      fly_seek_scale, fly_roll_* / fly_pitch_* (leaning into turns) }
+    FlySpeed, FlyOffset, FlyBobStrength, FlyBobHorz, FlyBobVert, FlySeekScale: Single;
+    FlyRollScale, FlyRollMax, FlyPitchScale, FlyPitchMax, FlyRoll, FlyPitch: Single;
     constructor Create;
     destructor Destroy; override;
     procedure SetFlag(const AName: String; const Value: Single);
@@ -444,6 +461,13 @@ type
     procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
     function StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
+    { a flying move (no floor following): each axis of Step that isn't
+      blocked; Blocked when one was. CGE coordinates, From is the feet. }
+    function FlyStep(const From, Step: TVector3; const Radius, Height: Single;
+      out Blocked: Boolean): TVector3;
+    { idAI::FlyMove: seek the goal, bob, keep above the enemy's eyes,
+      damp and approach fly_speed, collide, lean into turns }
+    procedure UpdateFlying(const A: TD3Actor; const SecondsPassed: Single);
     procedure SpawnAnimated(const ME: TD3ModelEntity);
     function FindAnimated(const E: TD3MapEntity): TD3Animated;
     procedure ActivateAnimated(const A: TD3Animated);
@@ -557,6 +581,8 @@ type
       def_splash_damage, fuse...) flying from From (CGE coordinates) with
       Velocity; nil if there's no such def. }
     function SpawnProjectile(const DefName, Owner: String; const From, Velocity: TVector3): TD3Projectile;
+    { the script's kill: dies like from a shot (not counted as a kill) }
+    procedure KillActor(const A: TD3Actor);
     { idAI::CreateProjectile: the monster's def_projectile, held at the
       joint until launched (nil without a def_projectile) }
     function CreateMissile(const A: TD3Actor; const JointName: String): TD3Projectile;
@@ -583,6 +609,12 @@ const
   PlayerRadius = 16;
   { the player's entity handle for scripts (it's not a map entity) }
   PlayerHandle = $7FFFFF00;
+  { idAI's moveType_t }
+  MoveTypeDead = 0;
+  MoveTypeAnim = 1;
+  MoveTypeSlide = 2;
+  MoveTypeFly = 3;
+  MoveTypeStatic = 4;
 
 var
   { Script objects of monsters that run their AI script (the others use the
@@ -1232,6 +1264,177 @@ begin
   Result := NewPos;
 end;
 
+function TD3Game.FlyStep(const From, Step: TVector3; const Radius, Height: Single;
+  out Blocked: Boolean): TVector3;
+var
+  Axis: Integer;
+  S, Center, Reach: TVector3;
+begin
+  { CGE coordinates: From is the feet; each axis slides on its own }
+  Blocked := False;
+  Result := From;
+  for Axis := 0 to 2 do
+  begin
+    if Step.Data[Axis] = 0 then
+      Continue;
+    S := TVector3.Zero;
+    S.Data[Axis] := Step.Data[Axis];
+    Center := Result + Vector3(0, Height / 2, 0);
+    { the side it moves to: its radius, or half its height up and down }
+    Reach := TVector3.Zero;
+    if Axis = 1 then
+      Reach.Data[Axis] := Sign(S.Data[Axis]) * Height / 2
+    else
+      Reach.Data[Axis] := Sign(S.Data[Axis]) * Radius;
+    if FMap.World.WorldSegmentCollision(Center, Center + S + Reach) then
+      Blocked := True
+    else
+      Result := Result + S;
+  end;
+end;
+
+procedure TD3Game.UpdateFlying(const A: TD3Actor; const SecondsPassed: Single);
+const
+  { idAI: AI_SEEK_PREDICTION, AI_FLY_DAMPENING }
+  SeekPrediction = 0.3;
+  FlyDampening = 0.15;
+var
+  Pos, Feet, Goal, Vel, Dir, Target, Left, Up, Center: TVector3;
+  Radius, Height, Speed, S, T, Roll, Pitch, HitDist: Single;
+  Reached, Blocked: Boolean;
+  Axis: TMatrix3;
+
+  { idAI's Seek: towards Goal, from where it will be soon }
+  function Seek(const Goal: TVector3): TVector3;
+  begin
+    Result := (Goal - (Pos + Vel * SeekPrediction)) * SecondsPassed;
+  end;
+
+  procedure Stop;
+  begin
+    A.Moving := False;
+    A.ChaseEnemy := False;
+    A.MoveDirect := False;
+  end;
+
+begin
+  Pos := CgeToD3(A.Model.Holder.Translation);
+  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  if A.Monster <> nil then
+  begin
+    Radius := A.Monster.Radius;
+    Height := A.Monster.Height;
+  end else
+  begin
+    Radius := 16;
+    Height := 72;
+  end;
+  { idAI::ReachedPos }
+  if A.Moving then
+  begin
+    if A.ChaseEnemy then
+      Reached := not A.HasEnemy or
+        (Sqrt(Sqr(Feet.X - Pos.X) + Sqr(Feet.Y - Pos.Y)) <= A.MeleeRange)
+    else
+      Reached := (Sqrt(Sqr(A.Goal.X - Pos.X) + Sqr(A.Goal.Y - Pos.Y)) <= 16) and
+        (A.Goal.Z >= Pos.Z - 16) and (A.Goal.Z <= Pos.Z + Height);
+    if Reached then
+      Stop;
+  end;
+  if A.Moving then
+    Speed := A.FlySpeed
+  else
+    Speed := 0;
+  Vel := A.Velocity;
+  Axis := AnglesMatrix(Vector3(0, A.Yaw, 0));
+  Left := Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);
+  Up := Vector3(0, 0, 1);
+  if not A.MoveDirect then
+  begin
+    if A.Moving and A.ChaseEnemy then
+      Goal := Feet
+    else
+    if A.Moving then
+      Goal := A.Goal
+    else
+      Goal := Pos;
+    if Speed > 0 then
+      Vel := Vel + Seek(Goal) * A.FlySeekScale;
+    { idAI::AddFlyBob }
+    if A.FlyBobStrength <> 0 then
+    begin
+      T := FTime + A.Handle * 0.497;
+      Vel := Vel + (Left * Sin(T * A.FlyBobHorz) + Up * Sin(T * A.FlyBobVert)) *
+        (A.FlyBobStrength * SecondsPassed);
+    end;
+    { idAI::AdjustFlyHeight: up to the enemy's eyes plus fly_offset (not
+      when flying to a position), as far as the ceiling lets it }
+    if A.HasEnemy and not (A.Moving and not A.ChaseEnemy) then
+    begin
+      Target := Vector3(Pos.X, Pos.Y, Feet.Z + PlayerEyeHeight + A.FlyOffset);
+      Center := D3ToCge(Pos) + Vector3(0, Height / 2, 0);
+      S := Target.Z - Pos.Z;
+      if (Abs(S) > 0.01) and
+         (FMap.World.WorldRayCast(Center, Vector3(0, Sign(S), 0), HitDist) <> nil) and
+         (HitDist < Abs(S) + Height / 2) then
+        Target.Z := Pos.Z + Sign(S) * Max(0, HitDist - Height / 2);
+      Vel := Vel + Seek(Target);
+    end;
+    { idAI::AdjustFlySpeed: damp, then ease towards the move's speed }
+    Vel := Vel - Vel * (FlyDampening * SecondsPassed);
+    S := Vel.Length;
+    if S > 0.0001 then
+      Dir := Vel / S
+    else
+      Dir := TVector3.Zero;
+    S := S + (Speed - S) * SecondsPassed;
+    if S < 0 then
+      S := 0
+    else
+    if (Speed > 0) and (S > Speed) then
+      S := Speed;
+    Vel := Dir * S;
+  end;
+  { idAI::FlyTurn: moving, it faces where it flies }
+  if A.Moving and not A.MoveDirect and (Sqr(Vel.X) + Sqr(Vel.Y) > 0.1) then
+    A.IdealYaw := RadToDeg(ArcTan2(Vel.Y, Vel.X));
+  A.Model.Holder.Translation := FlyStep(A.Model.Holder.Translation, D3ToCge(Vel * SecondsPassed),
+    Radius, Height, Blocked);
+  if Blocked and A.MoveDirect then
+  begin
+    { a charge stops at the wall }
+    Stop;
+    Vel := TVector3.Zero;
+  end;
+  A.Velocity := Vel;
+  { idAI::AdjustFlyingAngles: lean into turns }
+  if Vel.Length < 5 then
+  begin
+    Roll := 0;
+    Pitch := 0;
+  end else
+  begin
+    Roll := EnsureRange(TVector3.DotProduct(Vel, Left) * -A.FlyRollScale / Max(1, A.FlySpeed),
+      -A.FlyRollMax, A.FlyRollMax);
+    Pitch := EnsureRange(TVector3.DotProduct(Vel, Up) * -A.FlyPitchScale / Max(1, A.FlySpeed),
+      -A.FlyPitchMax, A.FlyPitchMax);
+  end;
+  { idAI eases them by 5% a tick (60 a second) }
+  T := 1 - Power(0.95, SecondsPassed * 60);
+  A.FlyRoll := A.FlyRoll + (Roll - A.FlyRoll) * T;
+  A.FlyPitch := A.FlyPitch + (Pitch - A.FlyPitch) * T;
+end;
+
+procedure TD3Game.KillActor(const A: TD3Actor);
+begin
+  if (A.Monster = nil) or (A.Monster.State = msDead) then
+    Exit;
+  A.Monster.Health := 0;
+  A.Monster.State := msDead;
+  A.Monster.StateTime := 0;
+  ActorDamaged(A, True);
+end;
+
 procedure TD3Game.SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
 begin
   M.Yaw := YawDeg;
@@ -1767,6 +1970,25 @@ begin
     Exit;
   if M.State = msDead then
   begin
+    { a flying one falls to the floor first (Doom 3's gravity, 1066) }
+    if M.Falling then
+    begin
+      M.StateTime := 0;
+      M.FallSpeed := M.FallSpeed + 1066 * SecondsPassed;
+      FloorStart := M.Model.Holder.Translation + Vector3(0, 1, 0);
+      Hit := FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist);
+      if Hit = nil then
+        { nothing below: stays }
+        M.Falling := False
+      else
+      if FloorDist - 1 <= M.FallSpeed * SecondsPassed then
+      begin
+        M.Model.Holder.Translation := FloorStart - Vector3(0, FloorDist, 0);
+        M.Falling := False;
+      end else
+        M.Model.Holder.Translation := M.Model.Holder.Translation - Vector3(0, M.FallSpeed * SecondsPassed, 0);
+      Exit;
+    end;
     { sink into the floor, then disappear }
     if M.StateTime > 1.5 then
       M.Model.Holder.Translation := M.Model.Holder.Translation - Vector3(0, 30 * SecondsPassed, 0);
@@ -1990,6 +2212,19 @@ begin
     A.Obj := TD3ScriptObject.Create(T);
     A.Thinking := True;
     A.MeleeRange := E.FloatValue('melee_range', 64);
+    { idAI::Spawn's flying settings (it reads fly_bob_vert into the
+      horizontal bob and fly_bob_horz into the vertical one) }
+    A.MoveType := MoveTypeAnim;
+    A.FlySpeed := E.FloatValue('fly_speed', 100);
+    A.FlyOffset := E.FloatValue('fly_offset', 0);
+    A.FlyBobStrength := E.FloatValue('fly_bob_strength', 50);
+    A.FlyBobHorz := E.FloatValue('fly_bob_vert', 2);
+    A.FlyBobVert := E.FloatValue('fly_bob_horz', 2.7);
+    A.FlySeekScale := E.FloatValue('fly_seek_scale', 4);
+    A.FlyRollScale := E.FloatValue('fly_roll_scale', 90);
+    A.FlyRollMax := E.FloatValue('fly_roll_max', 60);
+    A.FlyPitchScale := E.FloatValue('fly_pitch_scale', 45);
+    A.FlyPitchMax := E.FloatValue('fly_pitch_max', 30);
     { look_joint <joint> = pitch yaw roll shares of the look angles }
     for I := 0 to E.Pairs.Count - 1 do
       if SameText(Copy(E.Pairs.Names[I], 1, 11), 'look_joint ') then
@@ -2090,6 +2325,8 @@ var
   Pos: TVector3;
   S: String;
   DamageDef: TStringList;
+  I: Integer;
+  Targets: array of Integer;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -2106,6 +2343,7 @@ var
     A.Goal := P;
     A.Moving := True;
     A.ChaseEnemy := False;
+    A.MoveDirect := False;
     { the script sees the move started at once (idAI::MoveToPosition) }
     A.SetFlag('AI_MOVE_DONE', 0);
     A.SetFlag('AI_FORWARD', 1);
@@ -2115,6 +2353,7 @@ var
   begin
     A.Moving := False;
     A.ChaseEnemy := False;
+    A.MoveDirect := False;
     A.SetFlag('AI_MOVE_DONE', 1);
     A.SetFlag('AI_FORWARD', 0);
   end;
@@ -2225,6 +2464,7 @@ begin
         begin
           A.ChaseEnemy := True;
           A.Moving := True;
+          A.MoveDirect := False;
           A.SetFlag('AI_MOVE_DONE', 0);
           A.SetFlag('AI_FORWARD', 1);
         end;
@@ -2376,7 +2616,7 @@ begin
       end;
     { what the game doesn't do (yet): nothing happens }
     'setBoneMod', 'setNeverDormant', 'allowMovement',
-    'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain', 'setMoveType',
+    'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain',
     'animTurn', 'becomeSolid', 'becomeNonSolid',
     'kickObstacles', 'preventPain', 'overrideAnim',
     'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'wakeOnFlashlight',
@@ -2438,7 +2678,16 @@ begin
         { idAI::Event_ChargeAttack: straight at the player, hurting it once
           on touch }
         A.Attack := D3ValueToString(Args[0]);
-        MoveTo(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+        if A.MoveType = MoveTypeFly then
+        begin
+          { straight at the enemy's eyes plus fly_offset, at fly_speed
+            (DirectMoveToPosition: no steering) }
+          Pos := CgeToD3(FPlayerEye) + Vector3(0, 0, A.FlyOffset);
+          MoveTo(Pos);
+          A.MoveDirect := True;
+          A.Velocity := (Pos - CgeToD3(A.Model.Holder.Translation)).Normalize * A.FlySpeed;
+        end else
+          MoveTo(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
         Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
         if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
           A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
@@ -2452,7 +2701,142 @@ begin
         EventResult := D3FloatValue(0);
     'canHitEnemyFromJoint':
       EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
-    'getMoveType', 'getBlendFrames': EventResult := D3FloatValue(0);
+    'getBlendFrames': EventResult := D3FloatValue(0);
+    { movement types and flying (idAI) }
+    'setMoveType':
+      begin
+        A.MoveType := Round(ArgF(0));
+        A.Velocity := TVector3.Zero;
+        A.MoveDirect := False;
+      end;
+    'getMoveType': EventResult := D3FloatValue(A.MoveType);
+    'setFlySpeed': A.FlySpeed := ArgF(0);
+    'setFlyOffset': A.FlyOffset := ArgF(0);
+    'clearFlyOffset': A.FlyOffset := A.Model.Entity.FloatValue('fly_offset', 0);
+    'moveToEnemyHeight':
+      { flying: up or down to the enemy's eyes plus fly_offset, here }
+      if (A.MoveType = MoveTypeFly) and A.HasEnemy then
+        MoveTo(Vector3(CgeToD3(A.Model.Holder.Translation).X, CgeToD3(A.Model.Holder.Translation).Y,
+          CgeToD3(FPlayerEye).Z + A.FlyOffset))
+      else
+        MoveDone;
+    'waitMove':
+      if A.Moving then
+      begin
+        A.WaitMove := True;
+        A.WaitAction := '<move>';
+        Thread.WaitFor(A.Handle);
+      end;
+    'slideTo': MoveTo(Args[0].V);
+    'wander', 'moveToAttackPosition': MoveDone;
+    'moveOutOfRange':
+      begin
+        { away from the entity until Range away }
+        Other := HandleEntity(Args[0].E);
+        if Args[0].E = PlayerHandle then
+          Pos := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))
+        else
+        if Other <> nil then
+          Pos := Other.Origin
+        else
+          Pos := CgeToD3(A.Model.Holder.Translation);
+        Pos := CgeToD3(A.Model.Holder.Translation) - Pos;
+        Pos.Z := 0;
+        D := Pos.Length;
+        if (D < ArgF(1)) and (D > 0.01) then
+          MoveTo(CgeToD3(A.Model.Holder.Translation) + Pos / D * (ArgF(1) - D))
+        else
+          MoveDone;
+      end;
+    'getEnemyPos': EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+    'getEnemyEyePos': EventResult := D3VectorValue(CgeToD3(FPlayerEye));
+    'enemyPositionValid': EventResult := D3FloatValue(Ord(A.HasEnemy));
+    'findEnemyAI', 'closestReachableEnemyOfEntity':
+      if not NoTarget and not PlayerDead and ActorCanSeePlayer(A, False) then
+        EventResult := D3EntityValue(PlayerHandle)
+      else
+        EventResult := D3EntityValue(0);
+    'testMoveToPosition', 'canReachPosition', 'canReachEntity': EventResult := D3FloatValue(1);
+    'testAnimAttack': EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
+    'pushPointIntoAAS': EventResult := D3VectorValue(Args[0].V);
+    'getReachableEntityPosition':
+      if Args[0].E = PlayerHandle then
+        EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)))
+      else
+      if HandleEntity(Args[0].E) <> nil then
+        EventResult := D3VectorValue(HandleEntity(Args[0].E).Origin);
+    'travelDistanceToPoint':
+      EventResult := D3FloatValue((Args[0].V - CgeToD3(A.Model.Holder.Translation)).Length);
+    'travelDistanceToEntity', 'travelDistanceBetweenEntities', 'travelDistanceBetweenPoints':
+      begin
+        { straight distances (no AAS travel times) }
+        if N = 'travelDistanceBetweenPoints' then
+          D := (Args[1].V - Args[0].V).Length
+        else
+        begin
+          if N = 'travelDistanceToEntity' then
+            Pos := CgeToD3(A.Model.Holder.Translation)
+          else
+          if Args[0].E = PlayerHandle then
+            Pos := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))
+          else
+          if HandleEntity(Args[0].E) <> nil then
+            Pos := HandleEntity(Args[0].E).Origin
+          else
+            Pos := TVector3.Zero;
+          if N = 'travelDistanceToEntity' then
+            I := 0
+          else
+            I := 1;
+          if Args[I].E = PlayerHandle then
+            D := (CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)) - Pos).Length
+          else
+          if HandleEntity(Args[I].E) <> nil then
+            D := (HandleEntity(Args[I].E).Origin - Pos).Length
+          else
+            D := 0;
+        end;
+        EventResult := D3FloatValue(D);
+      end;
+    'getTurnRate': EventResult := D3FloatValue(A.TurnRate);
+    'setTurnRate': A.TurnRate := ArgF(0);
+    'setHealth':
+      if A.Monster <> nil then
+        A.Monster.Health := Round(ArgF(0));
+    'kill': KillActor(A);
+    'findActorsInBounds':
+      begin
+        { the player, when its feet are in the box (Doom 3 coordinates) }
+        Pos := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+        if not PlayerDead and (Pos.X >= Args[0].V.X) and (Pos.Y >= Args[0].V.Y) and (Pos.Z >= Args[0].V.Z) and
+           (Pos.X <= Args[1].V.X) and (Pos.Y <= Args[1].V.Y) and (Pos.Z <= Args[1].V.Z) then
+          EventResult := D3EntityValue(PlayerHandle)
+        else
+          EventResult := D3EntityValue(0);
+      end;
+    'getRandomTarget':
+      begin
+        { one of its targets of that class, at random }
+        Targets := nil;
+        for I := 0 to A.Model.Entity.Pairs.Count - 1 do
+          if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
+          begin
+            Other := FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]);
+            if (Other <> nil) and SameText(Other.ClassName_, D3ValueToString(Args[0])) then
+              Targets := Concat(Targets, [EntityHandle(Other)]);
+          end;
+        if Length(Targets) > 0 then
+          EventResult := D3EntityValue(Targets[Random(Length(Targets))])
+        else
+          EventResult := D3EntityValue(0);
+      end;
+    { no physics objects or ragdolls: nothing to throw }
+    'throwMoveable', 'throwAF', 'becomeRagdoll': EventResult := D3EntityValue(0);
+    'numSmokeEmitters': EventResult := D3FloatValue(0);
+    'enableClip', 'disableClip', 'enableGravity', 'disableGravity', 'enableAFPush',
+    'disableAFPush', 'allowHiddenMovement', 'triggerParticles', 'shrivel', 'burn', 'preBurn',
+    'stopRagdoll':
+      ;
     'getSize': EventResult := D3VectorValue(Vector3(32, 32, 72));
     else
       Result := False;
@@ -2608,9 +2992,18 @@ begin
     end;
 
     { walking to the goal at the speed of the walk animation (its origin
-      joint stays put: the entity moves instead) }
+      joint stays put: the entity moves instead); flying (idAI::FlyMove);
+      static and dead ones stay }
     Pos := CgeToD3(A.Model.Holder.Translation);
-    A.Model.Instance.LockOrigin := A.Moving;
+    A.Model.Instance.LockOrigin := A.Moving or (A.MoveType = MoveTypeFly);
+    if A.MoveType = MoveTypeFly then
+      UpdateFlying(A, SecondsPassed)
+    else
+    if A.MoveType in [MoveTypeDead, MoveTypeStatic] then
+    begin
+      A.Moving := False;
+      A.ChaseEnemy := False;
+    end else
     if A.Moving then
     begin
       Dir := Vector3(A.Goal.X - Pos.X, A.Goal.Y - Pos.Y, 0);
@@ -2668,7 +3061,17 @@ begin
       A.Yaw := A.IdealYaw
     else
       A.Yaw := A.Yaw + Sign(Delta) * Turn;
-    SetD3Rotation(A.Model.Holder, YawMatrix(A.Yaw));
+    if A.MoveType = MoveTypeFly then
+      SetD3Rotation(A.Model.Holder, AnglesMatrix(Vector3(A.FlyPitch, A.Yaw, A.FlyRoll)))
+    else
+      SetD3Rotation(A.Model.Holder, YawMatrix(A.Yaw));
+    { waitMove ends with the move }
+    if A.WaitMove and not A.Moving then
+    begin
+      A.WaitMove := False;
+      if A.WaitAction = '<move>' then
+        A.WaitAction := '';
+    end;
 
     { the flags idAI keeps for the script }
     A.SetFlag('AI_FORWARD', Ord(A.Moving));
@@ -2865,16 +3268,20 @@ end;
 function TD3Game.ActorTestMelee(const A: TD3Actor): Boolean;
 var
   Pos, Feet: TVector3;
+  Height: Single;
 begin
   Result := False;
   if not A.HasEnemy or PlayerDead or (A.MeleeRange <= 0) then
     Exit;
   { its box grown by melee_range touches the player's box }
+  Height := 72;
+  if A.Monster <> nil then
+    Height := A.Monster.Height;
   Pos := CgeToD3(A.Model.Holder.Translation);
   Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
   if (Abs(Feet.X - Pos.X) > A.MeleeRange + PlayerRadius) or
      (Abs(Feet.Y - Pos.Y) > A.MeleeRange + PlayerRadius) or
-     (Feet.Z > Pos.Z + 76) or (Feet.Z + 74 < Pos.Z - 4) then
+     (Feet.Z > Pos.Z + Height + 4) or (Feet.Z + 74 < Pos.Z - 4) then
     Exit;
   Result := ActorCanSeePlayer(A, False);
 end;
@@ -3245,6 +3652,15 @@ begin
     A.SetFlag('AI_DEAD', 1);
     A.Moving := False;
     A.ChaseEnemy := False;
+    A.MoveDirect := False;
+    { idAI::Killed: MOVETYPE_DEAD; one that flew falls }
+    if (A.MoveType = MoveTypeFly) and (A.Monster <> nil) then
+    begin
+      A.Monster.Falling := True;
+      A.Monster.FallSpeed := 0;
+    end;
+    A.MoveType := MoveTypeDead;
+    A.Velocity := TVector3.Zero;
     A.IdealFunction := A.Obj.Typ.FindMethodToRun('state_Killed');
     A.IdealName := 'state_Killed';
     A.HasIdeal := True;
@@ -4873,10 +5289,14 @@ initialization
     'monster_demon_imp', 'monster_test',
     { the full game's walking monsters (not in the demo, so not checked
       against their scripts): their projectiles, held missiles, charges
-      and melee events are done; flying monsters and bosses keep the
-      simple AI }
+      and melee events are done }
     'monster_demon_hellknight', 'monster_demon_mancubus', 'monster_demon_revenant',
     'monster_demon_maggot', 'monster_demon_pinky', 'monster_demon_trite', 'monster_demon_tick',
     'monster_demon_cherub', 'monster_demon_wraith', 'monster_demon_archvile',
-    'monster_zombie_commando', 'monster_zombie_commando_cgun'];
+    'monster_zombie_commando', 'monster_zombie_commando_cgun',
+    { flying monsters (setMoveType( MOVETYPE_FLY ) in their scripts) and
+      bosses, unchecked too }
+    'monster_flying_cacodemon', 'monster_flying_lostsoul',
+    'monster_boss_cyberdemon', 'monster_boss_guardian', 'monster_boss_guardian_seeker',
+    'monster_boss_sabaoth', 'monster_boss_vagary'];
 end.
