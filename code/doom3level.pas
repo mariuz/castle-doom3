@@ -765,17 +765,20 @@ begin
       Spot.CutOffAngle := Min(Pi / 2 - 0.01,
         ArcTan2(Max(UpVec.Length, RightVec.Length), Max(1, TargetVec.Length)) * 1.2);
       Spot.BeamWidth := Spot.CutOffAngle * 0.7;
-      Spot.Radius := TargetVec.Length * 1.5;
-      Spot.Attenuation := Vector3(1, 0, 4 / Sqr(Max(1, Spot.Radius)));
+      { fading to zero at the end of the frustum (CGE's radiusFalloff) }
+      Spot.Radius := Max(1, TargetVec.Length * 1.2);
+      Spot.RadiusFalloff := True;
+      Spot.Attenuation := Vector3(1, 0, 2 / Sqr(Spot.Radius));
       Node := Spot;
     end else
     begin
       Point := TPointLightNode.Create;
       Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
-      { spheres: the radius is twice the box and the quadratic attenuation
-        is 1/3 at the box and 1/33 where CGE cuts the light off }
-      Point.Radius := 2 * R;
-      Point.Attenuation := Vector3(1, 0, 8 / Sqr(Max(1, R)));
+      { spheres fading to zero at the box's size (CGE's radiusFalloff):
+        0.59 of the center's light at half of it, like Doom 3's round falloff }
+      Point.Radius := Max(1, R);
+      Point.RadiusFalloff := True;
+      Point.Attenuation := Vector3(1, 0, 2 / Sqr(Point.Radius));
       Node := Point;
     end;
     Node.Global := True;
