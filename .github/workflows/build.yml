@@ -136,6 +136,7 @@ jobs:
           grep -q 'Rendered "guis/test_panel.gui" (5 windows)' test_output/guis.log || { echo "::error::the panel GUI should be rendered"; exit 1; }
           grep -q 'Rendered "guis/test_status.gui" (6 windows)' test_output/guis.log || { echo "::error::the status GUI should be rendered"; exit 1; }
           grep -q "Shadow casters: 20 brushes" test_output/shadows.log || { echo "::error::the .cm brushes should cast shadows"; exit 1; }
+          grep -q 'Prelight shadow volume "_prelight_light_1": 20 triangles' test_output/shadows.log || { echo "::error::the precomputed shadow volume of light_1 should cast"; exit 1; }
           run_test hulls testmap "W:0.5,O:r_md5ShadowClosed 0,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"
           grep -q "casts with 6 joint boxes" test_output/hulls.log || { echo "::error::big md5 meshes should cast with joint boxes"; exit 1; }
           run_test closedcast testmap "W:0.5,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"

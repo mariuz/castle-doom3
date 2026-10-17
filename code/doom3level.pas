@@ -112,11 +112,17 @@ type
       outside all areas }
     FCasterScenes: array of TCastleScene;
     FCasterBrushCount: Integer;
+    { Per light: the scene casting its precomputed shadow volume
+      (shadowModel "_prelight_<light>"), built when the light first casts;
+      FPrelightState 0 = not looked up yet, 1 = built, 2 = none. }
+    FPrelightScenes: array of TCastleScene;
+    FPrelightState: array of Byte;
     FPortals: TD3PortalVisibility;
     FPortalCulling: Boolean;
     FTime: Single;
     FShadows: Boolean;
     FShadowLight: Integer;
+    FPrelightShadows: Boolean;
     FSkyMaterial: String;
     FCollision: TD3CollisionFile;
     FUseCollisionModel: Boolean;
@@ -132,6 +138,7 @@ type
     procedure SetShadowLight(const I: Integer);
     procedure ApplyLightColor(const I: Integer; const C: TVector3);
     function LightShaderColor(const I: Integer): TVector3;
+    function PrelightScene(const I: Integer): TCastleScene;
     procedure SetMapName(const Value: String);
     procedure SetSpawnModels(const Value: Boolean);
     function GetAreaCount: Integer;
@@ -254,6 +261,10 @@ type
       stencil shadow volumes for one light; the viewport's ShadowVolumes
       must be on too). }
     property Shadows: Boolean read FShadows write FShadows default True;
+    { Lights with a precomputed shadow volume in the .proc file
+      (shadowModel "_prelight_<light>") also cast it, with the other casters.
+      Console r_prelightShadows. }
+    property PrelightShadows: Boolean read FPrelightShadows write FPrelightShadows default True;
     { Draw only what is visible through the portals (UpdateVisibility). }
     property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
@@ -373,6 +384,7 @@ begin
   FUseCollisionModel := True;
   FPortalCulling := True;
   FShadows := True;
+  FPrelightShadows := True;
   FShadowLight := -1;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
@@ -430,6 +442,10 @@ begin
   for I := 0 to High(FCasterScenes) do
     FreeAndNil(FCasterScenes[I]);
   FCasterScenes := nil;
+  for I := 0 to High(FPrelightScenes) do
+    FreeAndNil(FPrelightScenes[I]);
+  FPrelightScenes := nil;
+  FPrelightState := nil;
   FCasterBrushCount := 0;
   FreeAndNil(FLightScene);
   FreeAndNil(FPortals);
@@ -1108,6 +1124,8 @@ begin
 end;
 
 procedure TDoom3Map.SetShadowLight(const I: Integer);
+var
+  Prelight: TCastleScene;
 begin
   if I = FShadowLight then
     Exit;
@@ -1115,13 +1133,107 @@ begin
   begin
     FLights[FShadowLight].Node.ShadowVolumes := False;
     FLights[FShadowLight].Node.ShadowVolumesMain := False;
+    if (FShadowLight <= High(FPrelightScenes)) and (FPrelightScenes[FShadowLight] <> nil) then
+      FPrelightScenes[FShadowLight].Exists := False;
   end;
   FShadowLight := I;
   if I >= 0 then
   begin
     FLights[I].Node.ShadowVolumes := True;
     FLights[I].Node.ShadowVolumesMain := True;
+    { its precomputed shadow volume casts only for it }
+    if FPrelightShadows then
+    begin
+      Prelight := PrelightScene(I);
+      if Prelight <> nil then
+        Prelight.Exists := True;
+    end;
   end;
+end;
+
+function TDoom3Map.PrelightScene(const I: Integer): TCastleScene;
+
+  { Signed volume of a closed mesh (positive when its triangles are
+    counter-clockwise seen from outside). }
+  function SignedVolume(const Positions: array of TVector3; const Indexes: array of Int32): Single;
+  var
+    T: Integer;
+  begin
+    Result := 0;
+    T := 0;
+    while T + 2 <= High(Indexes) do
+    begin
+      Result := Result + TVector3.DotProduct(Positions[Indexes[T]],
+        TVector3.CrossProduct(Positions[Indexes[T + 1]], Positions[Indexes[T + 2]]));
+      Inc(T, 3);
+    end;
+    Result := Result / 6;
+  end;
+
+var
+  Model: TD3ShadowModel;
+  Positions: array of TVector3;
+  J: Integer;
+  Coord: TCoordinateNode;
+  Geometry: TIndexedTriangleSetNode;
+  Shape: TShapeNode;
+  Root: TX3DRootNode;
+  Scene: TD3Scene;
+begin
+  Result := nil;
+  if (FProc = nil) or (I < 0) or (I > High(FLights)) or (FLights[I].Entity = nil) then
+    Exit;
+  if Length(FPrelightScenes) <> Length(FLights) then
+  begin
+    SetLength(FPrelightScenes, Length(FLights));
+    SetLength(FPrelightState, Length(FLights));
+  end;
+  if FPrelightState[I] = 0 then
+  begin
+    FPrelightState[I] := 2;
+    Model := FProc.FindShadowModel('_prelight_' + FLights[I].Entity.Name);
+    if (Model = nil) or (Length(Model.Indexes) < 3) then
+      Exit;
+    SetLength(Positions, Length(Model.Positions));
+    for J := 0 to High(Positions) do
+      Positions[J] := D3ToCge(Model.Positions[J]);
+    Coord := TCoordinateNode.Create;
+    Coord.SetPoint(Positions);
+    Geometry := TIndexedTriangleSetNode.Create;
+    Geometry.Coord := Coord;
+    Geometry.SetIndex(Model.Indexes);
+    { the light cap must face the light: outward triangles }
+    Geometry.Ccw := SignedVolume(Positions, Model.Indexes) > 0;
+    Geometry.Solid := True;
+    Shape := TShapeNode.Create;
+    Shape.Geometry := Geometry;
+    { a shadow-only caster (CGE renders the shadow volumes of invisible
+      shapes with caps). The precomputed volume, extruded again from its
+      light, covers the same space within the light's bounds. }
+    Shape.Visible := False;
+    Root := TX3DRootNode.Create;
+    Root.AddChildren(Shape);
+    Scene := TD3Scene.Create(nil);
+    Scene.SetTransient;
+    Scene.Name := 'Prelight' + IntToStr(I);
+    Scene.Load(Root, True);
+    { Most precomputed volumes have T-junctions (edges split on one side
+      only, from clipping), so CGE wouldn't find them closed and would skip
+      them. They are closed in space: WholeSceneManifold renders the quads
+      of the unpaired edges too, and at a T-junction the quads of both sides
+      cover the same strip in opposite directions. }
+    Scene.RenderOptions.WholeSceneManifold := True;
+    Scene.Collides := False;
+    Scene.Pickable := False;
+    Scene.CastShadows := True;
+    Scene.Exists := False;
+    Add(Scene);
+    FPrelightScenes[I] := Scene;
+    FPrelightState[I] := 1;
+    WritelnLog('Doom3Level', 'Prelight shadow volume "%s": %d triangles',
+      [Model.Name, Length(Model.Indexes) div 3]);
+  end;
+  Result := FPrelightScenes[I];
 end;
 
 procedure TDoom3Map.UpdateShadowLight(const P: TVector3);

@@ -38,6 +38,18 @@ type
     function TriangleCount: Integer;
   end;
 
+  { A "shadowModel" of the .proc file: the shadow volume that dmap
+    precomputed for a static light ("_prelight_<light name>"), from the
+    surfaces the light reaches, clipped to the light's bounds. Closed:
+    the sides, then the far caps (from NoCaps), then the near caps
+    (from NoFrontCaps). }
+  TD3ShadowModel = class
+    Name: String;
+    Positions: array of TVector3; { Doom 3 coordinates (Z up) }
+    Indexes: array of Int32;
+    NoCaps, NoFrontCaps: Integer;
+  end;
+
   TD3Portal = record
     Points: array of TVector3;
     PositiveArea, NegativeArea: Integer;
@@ -55,7 +67,10 @@ type
   strict private
     FModels: specialize TObjectList<TD3ProcModel>;
     FModelIndex: specialize TDictionary<String, TD3ProcModel>;
+    FShadowModels: specialize TObjectList<TD3ShadowModel>;
+    FShadowModelIndex: specialize TDictionary<String, TD3ShadowModel>;
     procedure ParseModel(const Lexer: TDoom3Lexer);
+    procedure ParseShadowModel(const Lexer: TDoom3Lexer);
     procedure ParsePortals(const Lexer: TDoom3Lexer);
     procedure ParseNodes(const Lexer: TDoom3Lexer);
   public
@@ -70,6 +85,10 @@ type
     function ModelCount: Integer;
     function Model(const I: Integer): TD3ProcModel;
     function FindModel(const Name: String): TD3ProcModel;
+    function ShadowModelCount: Integer;
+    { A shadow model by name (case-insensitive, like
+      "_prelight_light_5625"), nil if none. }
+    function FindShadowModel(const Name: String): TD3ShadowModel;
     { Area containing a point (Doom 3 coordinates), -1 in the void. }
     function PointInArea(const P: TVector3): Integer;
     { Areas touched by a box (Doom 3 coordinates), sorted: the box pushed
@@ -122,10 +141,14 @@ begin
   inherited Create;
   FModels := specialize TObjectList<TD3ProcModel>.Create(True);
   FModelIndex := specialize TDictionary<String, TD3ProcModel>.Create;
+  FShadowModels := specialize TObjectList<TD3ShadowModel>.Create(True);
+  FShadowModelIndex := specialize TDictionary<String, TD3ShadowModel>.Create;
 end;
 
 destructor TD3ProcFile.Destroy;
 begin
+  FShadowModelIndex.Free;
+  FShadowModels.Free;
   FModelIndex.Free;
   FModels.Free;
   inherited Destroy;
@@ -167,6 +190,41 @@ begin
     Lexer.Expect('}');
   end;
   Lexer.Expect('}');
+end;
+
+procedure TD3ProcFile.ParseShadowModel(const Lexer: TDoom3Lexer);
+var
+  M: TD3ShadowModel;
+  NumVerts, NumIndexes, I: Integer;
+begin
+  Lexer.Expect('{');
+  M := TD3ShadowModel.Create;
+  M.Name := Lexer.NextStr;
+  FShadowModels.Add(M);
+  FShadowModelIndex.AddOrSetValue(LowerCase(M.Name), M);
+  NumVerts := Lexer.ReadInt;
+  M.NoCaps := Lexer.ReadInt;
+  M.NoFrontCaps := Lexer.ReadInt;
+  NumIndexes := Lexer.ReadInt;
+  Lexer.ReadInt; { planeBits }
+  SetLength(M.Positions, NumVerts);
+  for I := 0 to NumVerts - 1 do
+    Lexer.ReadVector(@M.Positions[I].X, 3);
+  SetLength(M.Indexes, NumIndexes);
+  for I := 0 to NumIndexes - 1 do
+    M.Indexes[I] := Lexer.ReadInt;
+  Lexer.Expect('}');
+end;
+
+function TD3ProcFile.ShadowModelCount: Integer;
+begin
+  Result := FShadowModels.Count;
+end;
+
+function TD3ProcFile.FindShadowModel(const Name: String): TD3ShadowModel;
+begin
+  if not FShadowModelIndex.TryGetValue(LowerCase(Name), Result) then
+    Result := nil;
 end;
 
 procedure TD3ProcFile.ParsePortals(const Lexer: TDoom3Lexer);
@@ -229,8 +287,11 @@ begin
       if SameText(Tok, 'nodes') then
         ParseNodes(Lexer)
       else
+      if SameText(Tok, 'shadowModel') then
+        ParseShadowModel(Lexer)
+      else
       if Lexer.Check('{') then
-        Lexer.SkipBracedSection { shadowModel and anything else }
+        Lexer.SkipBracedSection { anything else }
       else
       if Tok = '{' then
         Lexer.SkipBracedSection;

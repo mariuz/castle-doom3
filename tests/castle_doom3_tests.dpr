@@ -221,6 +221,7 @@ procedure TestProc;
 var
   Proc: TD3ProcFile;
   M: TD3ProcModel;
+  SM: TD3ShadowModel;
 begin
   Proc := TD3ProcFile.Create;
   try
@@ -241,6 +242,16 @@ begin
     CheckEquals(0, Proc.PointInArea(Vector3(0, 0, 50)), 'point in room A');
     CheckEquals(1, Proc.PointInArea(Vector3(500, 0, 50)), 'point in room B');
     CheckEquals(1, Proc.Portals[0].PositiveArea, 'portal positive side');
+    CheckEquals(1, Proc.ShadowModelCount, 'proc shadow models');
+    SM := Proc.FindShadowModel('_PRELIGHT_LIGHT_1');
+    Check(SM <> nil, 'find shadowModel _prelight_light_1');
+    if SM <> nil then
+    begin
+      CheckEquals(16, Length(SM.Positions), 'prelight volume vertexes');
+      CheckEquals(60, Length(SM.Indexes), 'prelight volume indexes');
+      CheckEquals(36, SM.NoCaps, 'prelight volume sides (noCaps)');
+      CheckEquals(48, SM.NoFrontCaps, 'prelight volume noFrontCaps');
+    end;
   finally
     Proc.Free;
   end;

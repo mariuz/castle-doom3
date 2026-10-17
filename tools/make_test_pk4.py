@@ -663,6 +663,50 @@ def fmt(v):
     return s if s not in ('-0', '') else '0'
 
 
+def box_shadow_volume(mn, mx, light, scale=4.0):
+    """The closed shadow volume of a box from a point light, like dmap's
+    prelight shadow models: the lit faces (near caps), the same faces moved
+    away from the light (far caps), and quads on their outline edges.
+    Triangles clockwise seen from outside (Doom 3 front faces).
+    Returns (vertexes, indexes, noCaps, noFrontCaps)."""
+    x0, y0, z0 = mn
+    x1, y1, z1 = mx
+    corner = lambda i: (x1 if i & 1 else x0, y1 if i & 2 else y0, z1 if i & 4 else z0)
+    # faces counter-clockwise from outside, with their outward normal
+    faces = [((0, 2, 6, 4), (-1, 0, 0)), ((1, 5, 7, 3), (1, 0, 0)),
+             ((0, 4, 5, 1), (0, -1, 0)), ((2, 3, 7, 6), (0, 1, 0)),
+             ((0, 1, 3, 2), (0, 0, -1)), ((4, 6, 7, 5), (0, 0, 1))]
+    def lit(face):
+        quad, n = face
+        p = corner(quad[0])
+        return sum(n[k] * (light[k] - p[k]) for k in range(3)) > 0
+    far = lambda p: tuple(p[k] + (p[k] - light[k]) * scale for k in range(3))
+    verts = [corner(i) for i in range(8)] + [far(corner(i)) for i in range(8)]
+    sides, back, front = [], [], []
+    lit_faces = [f for f in faces if lit(f)]
+    for quad, n in lit_faces:
+        a, b, c, d = quad
+        # near cap (outward = towards the light) and far cap (reversed)
+        front += [a, b, c, a, c, d]
+        back += [8 + a, 8 + c, 8 + b, 8 + a, 8 + d, 8 + c]
+    # outline edges: edges of lit faces not shared with another lit face
+    edges = {}
+    for quad, n in lit_faces:
+        for k in range(4):
+            e = (quad[k], quad[(k + 1) % 4])
+            edges[e] = edges.get(e, 0) + 1
+    for (a, b) in list(edges):
+        if (b, a) in edges:
+            continue
+        sides += [b, a, 8 + a, b, 8 + a, 8 + b]
+    ccw = sides + back + front
+    # Doom 3 front faces are clockwise: reverse every triangle
+    cw = []
+    for i in range(0, len(ccw), 3):
+        cw += [ccw[i], ccw[i + 2], ccw[i + 1]]
+    return verts, cw, len(sides), len(sides) + len(back)
+
+
 def proc_text():
     out = ['mapProcFile003', '']
     for m in (area0, area1, door, crate, crate2, spinner, panel, door2, doorlight, lift, bar):
@@ -688,6 +732,16 @@ def proc_text():
             out.append('')
         out.append('}')
         out.append('')
+    # light_1's precomputed shadow volume of the room A pillar
+    verts, idx, no_caps, no_front_caps = box_shadow_volume((-176, 136, 0), (-136, 176, 192), (0, 0, 160))
+    out.append('shadowModel { /* name = */ "_prelight_light_1"')
+    out.append('')
+    out.append('/* numVerts = */ %d /* noCaps = */ %d /* noFrontCaps = */ %d /* numIndexes = */ %d /* planeBits = */ 0'
+               % (len(verts), no_caps, no_front_caps, len(idx)))
+    out.append(' '.join('( %s %s %s )' % tuple(fmt(c) for c in v) for v in verts))
+    out.append(' '.join(str(i) for i in idx) + ' ')
+    out.append('}')
+    out.append('')
     # one portal: the doorway at x = 256 between area 0 (-x side) and area 1
     out.append('interAreaPortals { /* numAreas = */ 2 /* numIAP = */ 1')
     out.append('')
