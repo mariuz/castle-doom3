@@ -165,6 +165,8 @@ jobs:
           run_test talk testmap "W:1,O:notarget,O:activate test_walker_1,W:6,G:-80 130 0,A:-90,W:0.3,U,W:1,S,W:2,Q"
           grep -q "Talking to test_walker_1" test_output/talk.log || { echo "::error::the use key in front of test_walker_1 should talk to it"; exit 1; }
           grep -q "blob_scripted_1 hits the player" test_output/monster.log || { echo "::error::the scripted monster should chase and hit the player (AI script, melee frame command)"; exit 1; }
+          run_test ranged testmap "W:1,O:god,G:420 -250 0,A:30,O:activate blob_ranged_1,W:0.4,S,W:4,O:actors,Q"
+          grep -q "Projectile of blob_ranged_1 hits the player" test_output/ranged.log || { echo "::error::blob_ranged_1's homing balls (create_missile / launch_missile, attackMissile) should hit the player"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }

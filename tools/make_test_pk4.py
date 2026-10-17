@@ -19,6 +19,7 @@ Contents (all made here, MIT licensed like the rest of the project):
   models/md5/cameras/test_flyby.md5camera  a camera anim (two shots) for a cinematic
   efxs/testmap.efx         reverb (EAX) settings: room B by area number, room A
                            by location name, a default
+  blob_ranged_1            a monster throwing homing balls when activated
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1121,6 +1122,10 @@ def map_text():
          'target': 'light_trig', 'delay': '0.5'},
         {'classname': 'light', 'name': 'light_trig', 'origin': '840 300 180',
          'light_radius': '180 180 160', '_color': '1 0.2 0.2', 'start_off': '1'},
+        # waits until activated, then throws homing balls (create_missile /
+        # launch_missile frame commands and the attackMissile event)
+        {'classname': 'monster_test_ranged', 'name': 'blob_ranged_1', 'origin': '500 -150 0',
+         'angle': '90'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1440,6 +1445,10 @@ model test_blob {
 	anim range				models/md5/test/blob_walk.md5anim {
 		frame 3				launch_missile body
 	}
+	anim throw				models/md5/test/blob_walk.md5anim {
+		frame 1				create_missile body
+		frame 6				launch_missile body
+	}
 }
 
 entityDef monster_default {
@@ -1529,8 +1538,47 @@ entityDef projectile_test {
 	"fuse"					"4"
 	"def_damage"			"damage_test_projectile"
 	"def_splash_damage"		"damage_test_splash"
+	"detonate_on_world"		"1"
+	"detonate_on_actor"		"1"
 	"light_color"			"0.2 0.8 1"
 	"light_radius"			"100"
+}
+
+entityDef projectile_test_guided {
+	"editor_usage"			"A homing ball (like the revenant's rockets) thrown by blob_ranged_1."
+	"spawnclass"			"idGuidedProjectile"
+	"mins"					"-3 -3 -3"
+	"maxs"					"3 3 3"
+	"velocity"				"300 0 0"
+	"gravity"				"0"
+	"fuse"					"5"
+	"turn_max"				"240"
+	"clamp_dist"			"256"
+	"random"				"0 0 0"
+	"def_damage"			"damage_test_projectile"
+	"detonate_on_world"		"1"
+	"detonate_on_actor"		"1"
+	"light_color"			"1 0.5 0.1"
+	"light_radius"			"100"
+}
+
+entityDef projectile_test_grenade {
+	"editor_usage"			"A bouncing grenade that explodes when its fuse ends (unit tests)."
+	"spawnclass"			"idProjectile"
+	"mins"					"-2 -2 -2"
+	"maxs"					"2 2 2"
+	"velocity"				"400 0 0"
+	"gravity"				"800"
+	"bounce"				"0.5"
+	"fuse"					"1.5"
+	"detonate_on_fuse"		"1"
+	"detonate_on_world"		"0"
+	"detonate_on_actor"		"0"
+	"def_splash_damage"		"damage_test_splash"
+}
+
+entityDef damage_test_charge {
+	"damage"				"9"
 }
 
 entityDef monster_test_scripted {
@@ -1539,9 +1587,19 @@ entityDef monster_test_scripted {
 	"model"					"test_blob"
 	"scriptobject"			"monster_test"
 	"def_projectile"		"projectile_test"
+	"attack_accuracy"		"0"
 	"health"				"40"
 	"melee_range"			"40"
 	"turn_rate"				"360"
+}
+
+entityDef monster_test_ranged {
+	"inherit"				"monster_test_scripted"
+	"editor_usage"			"A test creature throwing homing balls once activated (script object monster_test_ranged)."
+	"scriptobject"			"monster_test_ranged"
+	"def_projectile"		"projectile_test_guided"
+	"attack_accuracy"		"0"
+	"attack_cone"			"70"
 }
 
 entityDef monster_test_blob {
@@ -1965,6 +2023,9 @@ scriptEvent void    stopMove();
 scriptEvent void    stopThinking();
 scriptEvent float   enemyRange();
 scriptEvent float   canHitEnemyFromAnim( string anim );
+scriptEvent void    locateEnemy();
+scriptEvent float   canHitEnemyFromJoint( string jointname );
+scriptEvent entity  attackMissile( string jointname );
 scriptEvent void    setTalkState( float state );
 scriptEvent void    setTalkTarget( entity target );
 scriptEvent void    lookAt( entity focusEntity, float duration );
@@ -2191,6 +2252,52 @@ void monster_test::Legs_Walk() {
         waitFrame();
     }
     animState( ANIMCHANNEL_LEGS, "Legs_Idle", 4 );
+}
+
+// A monster with ranged attacks, waiting until it is activated: every
+// second it throws a homing ball (projectile_test_guided), the first time
+// with its "throw" anim (create_missile puts the ball in its hand,
+// launch_missile throws it), the second time with attackMissile.
+float ranged_shots;
+float next_ranged_shot;
+
+object monster_test_ranged : monster_test {
+    void    state_Begin();
+    void    state_Combat();
+    void    Torso_Throw();
+};
+
+void monster_test_ranged::state_Begin() {
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    while( !AI_ACTIVATED ) {
+        waitFrame();
+    }
+    locateEnemy();
+    setState( "state_Combat" );
+}
+
+void monster_test_ranged::state_Combat() {
+    eachFrame {
+        faceEnemy();
+        if ( ( sys.getTime() > next_ranged_shot ) && canHitEnemyFromJoint( "body" ) ) {
+            if ( ranged_shots == 1 ) {
+                attackMissile( "body" );
+            } else {
+                animState( ANIMCHANNEL_TORSO, "Torso_Throw", 4 );
+                waitAction( "throw" );
+            }
+            ranged_shots = ranged_shots + 1;
+            next_ranged_shot = sys.getTime() + 1;
+        }
+    }
+}
+
+void monster_test_ranged::Torso_Throw() {
+    playAnim( ANIMCHANNEL_TORSO, "throw" );
+    waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
+    finishAction( "throw" );
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 4 );
 }
 
 void main() {

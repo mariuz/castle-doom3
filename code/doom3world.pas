@@ -37,8 +37,10 @@
   (ScriptedMonsterObjects: zombies) run theirs too, with the player as
   their enemy: checkForEnemy, moveToEnemy, testMeleeAttack and the melee
   frame commands of their animations; shots set AI_PAIN, death starts
-  state_Killed. launch_missile frame commands fire projectiles
-  (TD3Projectile: the monster's def_projectile) at the player.
+  state_Killed. launch_missile frame commands and attackMissile fire
+  projectiles (TD3Projectile: the monster's def_projectile, homing for
+  idGuidedProjectile, bouncing without detonate_on_world) at the player;
+  create_missile holds one in the hand until then.
 
   Everything here is in CGE coordinates (Y up); Doom 3 units are kept
   (1 unit = 1 inch), so speeds and sizes are Doom 3's numbers. }
@@ -96,6 +98,7 @@ type
   TD3MonsterState = (msIdle, msChase, msAttack, msDead);
 
   TD3Actor = class;
+  TD3Projectile = class;
 
   TD3Monster = class
     Model: TD3ModelEntity;
@@ -256,16 +259,48 @@ type
     Yaw, IdealYaw, TurnRate: Single;
     { its way to Goal through the AAS }
     Route: TD3Route;
+    { the projectile it holds (create_missile / createMissile) until it
+      launches it, nil when none }
+    Missile: TD3Projectile;
+    { a multiframe melee attack (attack_begin <damage def>,
+      chargeAttack): while set, touching the player hurts it once
+      (idAI::DirectDamage ends the attack); '' when none }
+    Attack: String;
     constructor Create;
     destructor Destroy; override;
     procedure SetFlag(const AName: String; const Value: Single);
   end;
 
-  { A projectile in flight (idProjectile): fired by a monster's
-    launch_missile frame command, it hurts the player it reaches and
-    detonates on the world. CGE coordinates. }
+  { A projectile (idProjectile): fired by a monster (launch_missile and
+    the other missile frame commands and script events), it hurts the
+    player it reaches and detonates on the world, or bounces. CGE
+    coordinates. }
   TD3Projectile = class
     Position, Velocity: TVector3;
+    { created (create_missile, createMissile) and not launched yet: it
+      stays at HeldJoint of HeldBy, harmless }
+    HeldBy: TD3Actor;
+    HeldJoint: String;
+    { detonate_on_world / detonate_on_actor (idProjectile reads them as
+      bools, missing = false): without them it bounces off (Bounce is the
+      speed kept) instead of exploding }
+    DetonateOnWorld, DetonateOnActor: Boolean;
+    Bounce: Single;
+    { idGuidedProjectile (revenant rockets): turns towards the player's
+      eyes (when its owner had the player as enemy) by up to TurnMax
+      degrees a second, wobbling by RandomScale (pitch, yaw) degrees that
+      fade within ClampDist; burstMode stops guiding within BurstDist and
+      speeds up by BurstVelocity }
+    Guided, SeeksPlayer, BurstMode, UnGuided: Boolean;
+    Speed, TurnMax, ClampDist, BurstDist, BurstVelocity: Single;
+    { Doom 3 pitch (down), yaw of the flight }
+    Pitch, Yaw: Single;
+    RandomScale, RandomAngles: TVector2;
+    RandomTime: Single;
+    { the speed it launches at (its def's velocity) }
+    LaunchSpeed: Single;
+    { a bouncing one lying on a floor }
+    Resting: Boolean;
     { downwards, units per second per second }
     Gravity: Single;
     Fuse, Radius: Single;
@@ -387,10 +422,24 @@ type
     procedure UpdateActors(const SecondsPassed: Single);
     procedure ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
     procedure UpdateLook(const A: TD3Actor; const SecondsPassed: Single);
-    procedure LaunchProjectiles(const A: TD3Actor; const JointName: String);
+    { where a monster's joint is (CGE), its chest when it has no such joint }
+    function MuzzlePosition(const A: TD3Actor; const JointName: String): TVector3;
+    procedure LaunchProjectile(const P: TD3Projectile; const From, Dir: TVector3);
+    { idAI::TestMelee: the player within melee_range of its box }
+    function ActorTestMelee(const A: TD3Actor): Boolean;
+    { idAI::DirectDamage: hurt the player by the damage def; ends a
+      multiframe attack }
+    procedure ActorDirectDamage(const A: TD3Actor; const DamageDefName: String);
+    { idAI::AttackMelee: hit the player in reach, True when hit }
+    function ActorAttackMelee(const A: TD3Actor; const DamageDefName: String): Boolean;
     procedure UpdateProjectiles(const SecondsPassed: Single);
     { splash damage of a projectile exploding at P.Position }
     procedure SplashDamage(const P: TD3Projectile);
+    { idGameLocal::RadiusDamage on the player: Damage at Position, falling
+      to 0 at Radius, if nothing solid is between (rays start at Back,
+      just off the surface) }
+    procedure RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
+      const Radius: Single; const Owner: String);
     procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
     procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
@@ -508,6 +557,20 @@ type
       def_splash_damage, fuse...) flying from From (CGE coordinates) with
       Velocity; nil if there's no such def. }
     function SpawnProjectile(const DefName, Owner: String; const From, Velocity: TVector3): TD3Projectile;
+    { idAI::CreateProjectile: the monster's def_projectile, held at the
+      joint until launched (nil without a def_projectile) }
+    function CreateMissile(const A: TD3Actor; const JointName: String): TD3Projectile;
+    { idAI::LaunchProjectile: num_projectiles of its def_projectile from
+      the joint (the held one first) at the target (the player's chest
+      when AtPlayer, else TargetPos when HasTarget, else straight ahead),
+      wobbling by attack_accuracy, the yaw kept within attack_cone of its
+      facing when ClampToCone, each spread by projectile_spread }
+    function LaunchMissile(const A: TD3Actor; const JointName: String;
+      const AtPlayer, HasTarget: Boolean; const TargetPos: TVector3;
+      const ClampToCone: Boolean): TD3Projectile;
+    { idAI::Event_LaunchMissile: one projectile from Origin along Angles
+      (Doom 3 coordinates and pitch, yaw, roll) }
+    function LaunchMissileFrom(const A: TD3Actor; const Origin, Angles: TVector3): TD3Projectile;
     { Game time (seconds since Spawn). }
     property Time: Single read FTime;
     property Map: TDoom3Map read FMap;
@@ -544,6 +607,48 @@ const
   PistolDelay = 0.35;
 
 { TD3Mover }
+
+{ Doom 3 angles (pitch down, yaw) of a direction in Doom 3 coordinates,
+  and back (idVec3::ToAngles, idAngles::ToForward). }
+function D3DirPitch(const D: TVector3): Single;
+begin
+  Result := -RadToDeg(ArcTan2(D.Z, Sqrt(Sqr(D.X) + Sqr(D.Y))));
+end;
+
+function D3DirYaw(const D: TVector3): Single;
+begin
+  Result := RadToDeg(ArcTan2(D.Y, D.X));
+end;
+
+function D3Forward(const Pitch, Yaw: Single): TVector3;
+var
+  SP, CP, SY, CY: Single;
+begin
+  SinCos(DegToRad(Pitch), SP, CP);
+  SinCos(DegToRad(Yaw), SY, CY);
+  Result := Vector3(CP * CY, CP * SY, -SP);
+end;
+
+function Normalize180(const A: Single): Single;
+begin
+  Result := A - 360 * Floor((A + 180) / 360);
+end;
+
+{ The distance from segment A..B to the player's axis (Feet to Eye),
+  sampled at 9 points; CGE coordinates. }
+function SegmentToPlayerDistance(const A, B, Feet, Eye: TVector3): Single;
+var
+  K: Integer;
+  Q, Closest: TVector3;
+begin
+  Result := MaxSingle;
+  for K := 0 to 8 do
+  begin
+    Q := A + (B - A) * (K / 8);
+    Closest := Vector3(Eye.X, EnsureRange(Q.Y, Feet.Y, Eye.Y), Eye.Z);
+    Result := Min(Result, (Q - Closest).Length);
+  end;
+end;
 
 procedure TD3Mover.Open;
 begin
@@ -1983,6 +2088,8 @@ var
   Other: TD3MapEntity;
   D: Single;
   Pos: TVector3;
+  S: String;
+  DamageDef: TStringList;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -2273,8 +2380,78 @@ begin
     'animTurn', 'becomeSolid', 'becomeNonSolid',
     'kickObstacles', 'preventPain', 'overrideAnim',
     'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'wakeOnFlashlight',
-    'setSmokeVisibility', 'attackBegin', 'attackEnd', 'clearBurn', 'markUsed':
+    'setSmokeVisibility', 'clearBurn', 'markUsed', 'muzzleFlash':
       ;
+    { attacks (idAI's events); projectiles are no entities here: the
+      missile events return $null_entity }
+    'attackMissile':
+      LaunchMissile(A, D3ValueToString(Args[0]), True, False, TVector3.Zero, True);
+    'createMissile':
+      CreateMissile(A, D3ValueToString(Args[0]));
+    'launchMissile':
+      LaunchMissileFrom(A, Args[0].V, Args[1].V);
+    'fireMissileAtTarget':
+      begin
+        S := D3ValueToString(Args[1]);
+        Other := FindEntity(S);
+        if SameText(S, 'player1') then
+          LaunchMissile(A, D3ValueToString(Args[0]), False, True, FPlayerEye - Vector3(0, 20, 0), False)
+        else
+        if Other <> nil then
+          LaunchMissile(A, D3ValueToString(Args[0]), False, True, D3ToCge(Other.Origin), False)
+        else
+          LaunchMissile(A, D3ValueToString(Args[0]), False, False, TVector3.Zero, False);
+      end;
+    'attackMelee':
+      EventResult := D3FloatValue(Ord(ActorAttackMelee(A, D3ValueToString(Args[0]))));
+    'directDamage':
+      if Args[0].E = PlayerHandle then
+        ActorDirectDamage(A, D3ValueToString(Args[1]));
+    'meleeAttackToJoint':
+      begin
+        { idAI::Event_MeleeAttackToJoint: a trace from its eyes to the
+          joint hits the player }
+        Pos := MuzzlePosition(A, D3ValueToString(Args[0]));
+        if A.HasEnemy and not PlayerDead and
+           (SegmentToPlayerDistance(A.Model.Holder.Translation + Vector3(0, 64, 0), Pos,
+              FPlayerEye - Vector3(0, PlayerEyeHeight, 0), FPlayerEye) <= PlayerRadius) then
+          ActorDirectDamage(A, D3ValueToString(Args[1]));
+      end;
+    'radiusDamageFromJoint':
+      begin
+        DamageDef := Decls.EntityDef(D3ValueToString(Args[1]));
+        if DamageDef <> nil then
+        begin
+          if D3ValueToString(Args[0]) = '' then
+            Pos := A.Model.Holder.Translation
+          else
+            Pos := MuzzlePosition(A, D3ValueToString(Args[0]));
+          RadiusDamage(Pos, Pos, StrToIntDef(DamageDef.Values['damage'], 0),
+            StrToFloatDef(DamageDef.Values['radius'], 0, DefaultFormatSettings), A.Model.Entity.Name);
+        end;
+      end;
+    'attackBegin': A.Attack := D3ValueToString(Args[0]);
+    'attackEnd': A.Attack := '';
+    'chargeAttack':
+      if A.HasEnemy then
+      begin
+        { idAI::Event_ChargeAttack: straight at the player, hurting it once
+          on touch }
+        A.Attack := D3ValueToString(Args[0]);
+        MoveTo(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
+          A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
+      end;
+    'testChargeAttack':
+      { the distance to charge, 0 when it can't (idAI: a clear path) }
+      if A.HasEnemy and not PlayerDead and ActorCanSeePlayer(A, False) then
+        EventResult := D3FloatValue((CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)) -
+          CgeToD3(A.Model.Holder.Translation)).Length)
+      else
+        EventResult := D3FloatValue(0);
+    'canHitEnemyFromJoint':
+      EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
     'getMoveType', 'getBlendFrames': EventResult := D3FloatValue(0);
     'getSize': EventResult := D3VectorValue(Vector3(32, 32, 72));
     else
@@ -2499,6 +2676,9 @@ begin
     A.SetFlag('AI_ONGROUND', 1);
     A.SetFlag('AI_DEST_UNREACHABLE', 0);
     A.SetFlag('AI_TALK', Ord(A.TalkTarget <> 0));
+    { a multiframe attack (attack_begin, chargeAttack) hurts on touch }
+    if (A.Attack <> '') and ActorTestMelee(A) then
+      ActorDirectDamage(A, A.Attack);
     UpdateLook(A, SecondsPassed);
   end;
 end;
@@ -2532,80 +2712,220 @@ begin
   Source.Play(Playing);
 end;
 
-procedure TD3Game.LaunchProjectiles(const A: TD3Actor; const JointName: String);
+function TD3Game.MuzzlePosition(const A: TD3Actor; const JointName: String): TVector3;
+begin
+  { from the joint (the gun, the hand), else the chest }
+  if (JointName <> '') and A.Model.Instance.JointPosition(JointName, Result) then
+    Result := A.Model.Instance.Scene.LocalToWorld(Result)
+  else
+    Result := A.Model.Holder.Translation + Vector3(0, 48, 0);
+end;
+
+function TD3Game.CreateMissile(const A: TD3Actor; const JointName: String): TD3Projectile;
+begin
+  { idAI::CreateProjectile keeps the one it holds }
+  if A.Missile <> nil then
+  begin
+    A.Missile.HeldJoint := JointName;
+    Exit(A.Missile);
+  end;
+  Result := SpawnProjectile(A.Model.Entity.Value('def_projectile'), A.Model.Entity.Name,
+    MuzzlePosition(A, JointName), TVector3.Zero);
+  if Result = nil then
+    Exit;
+  Result.HeldBy := A;
+  Result.HeldJoint := JointName;
+  A.Missile := Result;
+end;
+
+procedure TD3Game.LaunchProjectile(const P: TD3Projectile; const From, Dir: TVector3);
+var
+  D: TVector3;
+begin
+  P.HeldBy := nil;
+  P.Position := From;
+  P.Speed := P.LaunchSpeed;
+  P.Velocity := Dir.Normalize * P.Speed;
+  D := CgeToD3(Dir);
+  P.Pitch := D3DirPitch(D);
+  P.Yaw := D3DirYaw(D);
+  if P.Visual <> nil then
+    P.Visual.Translation := From;
+  Inc(ProjectilesLaunched);
+end;
+
+function TD3Game.LaunchMissile(const A: TD3Actor; const JointName: String;
+  const AtPlayer, HasTarget: Boolean; const TargetPos: TVector3;
+  const ClampToCone: Boolean): TD3Projectile;
 var
   E: TD3MapEntity;
   Def: TStringList;
-  From, Target, Dir, Side, Up2, Vel: TVector3;
-  M: TMatrix4;
-  Speed, Gravity, Accuracy, Spread, Dist, H, V2, Root, Angle: Single;
+  DefName: String;
+  From, Target, Dir, Fwd, Right, Up, D: TVector3;
+  Speed, Gravity, Accuracy, Cone, SpreadRad, Dist, H, V2, Root, Angle, Pitch, Yaw, T, Spin: Single;
   Count, I: Integer;
-
-  { a direction turned randomly within Degrees of Dir }
-  function Jitter(const D: TVector3; const Degrees: Single): TVector3;
-  var
-    R1, R2: Single;
-  begin
-    if Degrees <= 0 then
-      Exit(D);
-    R1 := DegToRad(Degrees) * (Random * 2 - 1);
-    R2 := DegToRad(Degrees) * (Random * 2 - 1);
-    Result := (D + Side * Tan(R1) + Up2 * Tan(R2)).Normalize;
-  end;
-
+  Aim: Boolean;
 begin
+  Result := nil;
   E := A.Model.Entity;
-  Def := Decls.EntityDef(E.Value('def_projectile'));
-  if (Def = nil) or not A.HasEnemy then
+  DefName := E.Value('def_projectile');
+  Def := Decls.EntityDef(DefName);
+  if Def = nil then
     Exit;
-  { from the joint (the gun, the hand), else the chest }
-  if A.Model.Instance.JointPosition(JointName, From) then
-    From := A.Model.Instance.Scene.LocalToWorld(From)
+  From := MuzzlePosition(A, JointName);
+  Aim := True;
+  if AtPlayer and A.HasEnemy and not PlayerDead then
+    Target := FPlayerEye - Vector3(0, 20, 0)
   else
-    From := A.Model.Holder.Translation + Vector3(0, 48, 0);
-  Target := FPlayerEye - Vector3(0, 20, 0);
-  { idProjectile's velocity: x is the speed along the launch direction }
-  Speed := ParseVector3(Def.Values['velocity'], Vector3(500, 0, 0)).X;
+  if HasTarget then
+    Target := TargetPos
+  else
+    Aim := False;
+  { idProjectile's speed is the length of its velocity }
+  Speed := ParseVector3(Def.Values['velocity'], Vector3(500, 0, 0)).Length;
   if Speed <= 0 then
     Speed := 500;
   Gravity := StrToFloatDef(Def.Values['gravity'], 0, DefaultFormatSettings);
-  Dir := (Target - From).Normalize;
-  if Gravity > 0 then
+  if Aim then
   begin
-    { the lower arc that reaches the target, if there's one }
-    Dist := Sqrt(Sqr(Target.X - From.X) + Sqr(Target.Z - From.Z));
-    H := Target.Y - From.Y;
-    V2 := Sqr(Speed);
-    Root := Sqr(V2) - Gravity * (Gravity * Sqr(Dist) + 2 * H * V2);
-    if (Root >= 0) and (Dist > 1) then
+    Dir := (Target - From).Normalize;
+    if Gravity > 0 then
     begin
-      Angle := ArcTan((V2 - Sqrt(Root)) / (Gravity * Dist));
-      Dir := Vector3(Target.X - From.X, 0, Target.Z - From.Z).Normalize * Cos(Angle) +
-        Vector3(0, Sin(Angle), 0);
+      { the lower arc that reaches the target, if there's one }
+      Dist := Sqrt(Sqr(Target.X - From.X) + Sqr(Target.Z - From.Z));
+      H := Target.Y - From.Y;
+      V2 := Sqr(Speed);
+      Root := Sqr(V2) - Gravity * (Gravity * Sqr(Dist) + 2 * H * V2);
+      if (Root >= 0) and (Dist > 1) then
+      begin
+        Angle := ArcTan((V2 - Sqrt(Root)) / (Gravity * Dist));
+        Dir := Vector3(Target.X - From.X, 0, Target.Z - From.Z).Normalize * Cos(Angle) +
+          Vector3(0, Sin(Angle), 0);
+      end;
     end;
+    D := CgeToD3(Dir);
+    Pitch := D3DirPitch(D);
+    Yaw := D3DirYaw(D);
+  end else
+  begin
+    Pitch := 0;
+    Yaw := A.Yaw;
   end;
-  Side := TVector3.CrossProduct(Dir, Vector3(0, 1, 0));
-  if Side.IsZero then
-    Side := Vector3(1, 0, 0);
-  Side := Side.Normalize;
-  Up2 := TVector3.CrossProduct(Side, Dir).Normalize;
-  Accuracy := E.FloatValue('attack_accuracy', 0);
-  Spread := E.FloatValue('projectile_spread', 0);
+  { idAI::LaunchProjectile: the aim wobbles (sine based, so tracers look
+    less random), the yaw kept within attack_cone of its facing }
+  Accuracy := E.FloatValue('attack_accuracy', 7);
+  T := FTime + A.Handle * 0.497;
+  Pitch := Pitch + Sin(T * 5.1) * Accuracy;
+  Yaw := Yaw + Sin(T * 6.7) * Accuracy;
+  if ClampToCone then
+  begin
+    Cone := E.FloatValue('attack_cone', 70);
+    Yaw := A.Yaw + EnsureRange(Normalize180(Yaw - A.Yaw), -Cone, Cone);
+  end;
+  Fwd := D3Forward(Pitch, Yaw);
+  Right := D3Forward(0, Yaw - 90);
+  Up := TVector3.CrossProduct(Right, Fwd).Normalize;
+  SpreadRad := DegToRad(E.FloatValue('projectile_spread', 0));
   Count := Max(1, E.IntValue('num_projectiles', 1));
-  { the whole volley aims together, each pellet spreads }
-  Dir := Jitter(Dir, Accuracy);
   for I := 1 to Count do
   begin
-    Vel := Jitter(Dir, Spread);
-    if SpawnProjectile(E.Value('def_projectile'), E.Name, From, Vel * Speed) <> nil then
-      Inc(ProjectilesLaunched);
+    { each one spread within projectile_spread degrees }
+    Angle := Sin(SpreadRad * Random);
+    Spin := 2 * Pi * Random;
+    D := (Fwd + Up * (Angle * Sin(Spin)) - Right * (Angle * Cos(Spin))).Normalize;
+    { the one it holds goes first }
+    if A.Missile <> nil then
+    begin
+      Result := A.Missile;
+      A.Missile := nil;
+    end else
+      Result := SpawnProjectile(DefName, E.Name, From, TVector3.Zero);
+    if Result = nil then
+      Exit;
+    Result.SeeksPlayer := A.HasEnemy;
+    LaunchProjectile(Result, From, D3ToCge(D));
   end;
+end;
+
+function TD3Game.LaunchMissileFrom(const A: TD3Actor; const Origin, Angles: TVector3): TD3Projectile;
+begin
+  if A.Missile <> nil then
+  begin
+    Result := A.Missile;
+    A.Missile := nil;
+  end else
+    Result := SpawnProjectile(A.Model.Entity.Value('def_projectile'), A.Model.Entity.Name,
+      D3ToCge(Origin), TVector3.Zero);
+  if Result = nil then
+    Exit;
+  Result.SeeksPlayer := A.HasEnemy;
+  LaunchProjectile(Result, D3ToCge(Origin), D3ToCge(D3Forward(Angles.X, Angles.Y)));
+end;
+
+function TD3Game.ActorTestMelee(const A: TD3Actor): Boolean;
+var
+  Pos, Feet: TVector3;
+begin
+  Result := False;
+  if not A.HasEnemy or PlayerDead or (A.MeleeRange <= 0) then
+    Exit;
+  { its box grown by melee_range touches the player's box }
+  Pos := CgeToD3(A.Model.Holder.Translation);
+  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  if (Abs(Feet.X - Pos.X) > A.MeleeRange + PlayerRadius) or
+     (Abs(Feet.Y - Pos.Y) > A.MeleeRange + PlayerRadius) or
+     (Feet.Z > Pos.Z + 76) or (Feet.Z + 74 < Pos.Z - 4) then
+    Exit;
+  Result := ActorCanSeePlayer(A, False);
+end;
+
+procedure TD3Game.ActorDirectDamage(const A: TD3Actor; const DamageDefName: String);
+var
+  Def: TStringList;
+  Damage: Integer;
+begin
+  { idAI::DirectDamage ends a multiframe attack }
+  A.Attack := '';
+  Def := Decls.EntityDef(DamageDefName);
+  if (Def = nil) or PlayerDead then
+    Exit;
+  Damage := StrToIntDef(Def.Values['damage'], 10);
+  if Def.Values['snd_hit'] <> '' then
+    PlaySoundAt(Def.Values['snd_hit'], FPlayerEye);
+  DamagePlayer(Damage);
+  WritelnLog('Doom3World', '%s hits the player (%s, %d)', [A.Model.Entity.Name, DamageDefName, Damage]);
+end;
+
+function TD3Game.ActorAttackMelee(const A: TD3Actor; const DamageDefName: String): Boolean;
+var
+  ToPlayer: TVector3;
+begin
+  { idAI::AttackMelee: hits the player in reach (a bit more than the
+    melee range, the swing reaches) }
+  ToPlayer := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+  Result := A.HasEnemy and not PlayerDead and
+    (Sqrt(Sqr(ToPlayer.X) + Sqr(ToPlayer.Y)) <= (A.MeleeRange + PlayerRadius) * 1.5);
+  if Result then
+    ActorDirectDamage(A, DamageDefName);
 end;
 
 function TD3Game.SpawnProjectile(const DefName, Owner: String; const From, Velocity: TVector3): TD3Projectile;
 var
   Def, DamageDef: TStringList;
   Ball: TCastleSphere;
+  D, Rnd: TVector3;
+
+  function DefBool(const Key: String): Boolean;
+  begin
+    { idProjectile reads them as bools: a missing key is false }
+    Result := StrToIntDef(Def.Values[Key], 0) <> 0;
+  end;
+
+  function DefFloat(const Key: String; const Default: Single): Single;
+  begin
+    Result := StrToFloatDef(Def.Values[Key], Default, DefaultFormatSettings);
+  end;
+
 begin
   Result := nil;
   Def := Decls.EntityDef(DefName);
@@ -2614,10 +2934,26 @@ begin
   Result := TD3Projectile.Create;
   Result.Position := From;
   Result.Velocity := Velocity;
-  Result.Gravity := StrToFloatDef(Def.Values['gravity'], 0, DefaultFormatSettings);
-  Result.Fuse := StrToFloatDef(Def.Values['fuse'], 4, DefaultFormatSettings);
-  { idProjectile reads it as a bool: a missing key is false }
-  Result.DetonateOnFuse := StrToIntDef(Def.Values['detonate_on_fuse'], 0) <> 0;
+  Result.LaunchSpeed := ParseVector3(Def.Values['velocity'], Vector3(500, 0, 0)).Length;
+  Result.Speed := Velocity.Length;
+  D := CgeToD3(Velocity);
+  Result.Pitch := D3DirPitch(D);
+  Result.Yaw := D3DirYaw(D);
+  Result.Gravity := DefFloat('gravity', 0);
+  Result.Fuse := DefFloat('fuse', 4);
+  Result.DetonateOnFuse := DefBool('detonate_on_fuse');
+  Result.DetonateOnWorld := DefBool('detonate_on_world');
+  Result.DetonateOnActor := DefBool('detonate_on_actor');
+  Result.Bounce := DefFloat('bounce', 0);
+  { idGuidedProjectile::Launch }
+  Result.Guided := SameText(Def.Values['spawnclass'], 'idGuidedProjectile');
+  Result.TurnMax := DefFloat('turn_max', 180);
+  Result.ClampDist := Max(1, DefFloat('clamp_dist', 256));
+  Rnd := ParseVector3(Def.Values['random'], Vector3(15, 15, 0));
+  Result.RandomScale := Vector2(Rnd.X, Rnd.Y);
+  Result.BurstMode := DefBool('burstMode');
+  Result.BurstDist := DefFloat('burstDist', 64);
+  Result.BurstVelocity := DefFloat('burstVelocity', 1.25);
   Result.Radius := Max(2, ParseVector3(Def.Values['maxs'], Vector3(1, 1, 1)).X);
   Result.Damage := 10;
   DamageDef := Decls.EntityDef(Def.Values['def_damage']);
@@ -2631,7 +2967,7 @@ begin
   end;
   Result.Owner := Owner;
   Result.ExplodeSound := Def.Values['snd_explode'];
-  if StrToFloatDef(Def.Values['light_radius'], 0, DefaultFormatSettings) > 0 then
+  if DefFloat('light_radius', 0) > 0 then
   begin
     { a glowing ball in the light's color (the particles are item 7) }
     Ball := TCastleSphere.Create(nil);
@@ -2649,65 +2985,97 @@ begin
 end;
 
 procedure TD3Game.SplashDamage(const P: TD3Projectile);
+var
+  Back: TVector3;
+begin
+  Back := P.Position;
+  if not P.Velocity.IsZero then
+    Back := Back - P.Velocity.Normalize * 2;
+  RadiusDamage(P.Position, Back, P.SplashDamage, P.SplashRadius, P.Owner);
+end;
+
+procedure TD3Game.RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
+  const Radius: Single; const Owner: String);
 const
   { the player's box (idPlayer's bounds: 32 wide, 74 high on its feet) }
   PlayerHalfWidth = 16;
   PlayerHeight = 74;
 var
-  Feet, Closest, Center, Back, ToPlayer: TVector3;
+  Feet, Closest, Center, ToPlayer: TVector3;
   Dist, HitDist: Single;
-  Damage: Integer;
+  Amount: Integer;
 begin
-  if (P.SplashDamage <= 0) or (P.SplashRadius <= 0) or PlayerDead then
+  if (Damage <= 0) or (Radius <= 0) or PlayerDead then
     Exit;
   { the distance to the player's box (zero inside it) }
   Feet := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
   Closest := Vector3(
-    EnsureRange(P.Position.X, Feet.X - PlayerHalfWidth, Feet.X + PlayerHalfWidth),
-    EnsureRange(P.Position.Y, Feet.Y, Feet.Y + PlayerHeight),
-    EnsureRange(P.Position.Z, Feet.Z - PlayerHalfWidth, Feet.Z + PlayerHalfWidth));
-  Dist := (Closest - P.Position).Length;
-  if Dist >= P.SplashRadius then
+    EnsureRange(Position.X, Feet.X - PlayerHalfWidth, Feet.X + PlayerHalfWidth),
+    EnsureRange(Position.Y, Feet.Y, Feet.Y + PlayerHeight),
+    EnsureRange(Position.Z, Feet.Z - PlayerHalfWidth, Feet.Z + PlayerHalfWidth));
+  Dist := (Closest - Position).Length;
+  if Dist >= Radius then
     Exit;
   { idEntity::CanDamage: nothing solid in between (from just off the
     surface it hit, to the player's center) }
   Center := Feet + Vector3(0, PlayerHeight / 2, 0);
-  Back := P.Position;
-  if not P.Velocity.IsZero then
-    Back := Back - P.Velocity.Normalize * 2;
   ToPlayer := Center - Back;
   if (ToPlayer.Length > 1) and
     (FMap.World.WorldRayCast(Back, ToPlayer.Normalize, HitDist) <> nil) and
     (HitDist < ToPlayer.Length - PlayerHalfWidth) then
     Exit;
-  Damage := Round(P.SplashDamage * (1 - Dist / P.SplashRadius));
-  if Damage <= 0 then
+  Amount := Round(Damage * (1 - Dist / Radius));
+  if Amount <= 0 then
     Exit;
-  DamagePlayer(Damage);
-  WritelnLog('Doom3World', 'Splash of %s hits the player (%d)', [P.Owner, Damage]);
+  DamagePlayer(Amount);
+  WritelnLog('Doom3World', 'Splash of %s hits the player (%d)', [Owner, Amount]);
 end;
 
 procedure TD3Game.UpdateProjectiles(const SecondsPassed: Single);
 var
   I: Integer;
   P: TD3Projectile;
-  NewPos, Step, Feet, Closest: TVector3;
-  Len, HitDist, T: Single;
-  Hit: TCastleTransform;
-  Detonate, HitPlayer: Boolean;
+  NewPos, Step, Feet, Normal, Pos, Seek, Nose, Dir, Vel: TVector3;
+  Len, HitDist, Dist, Frac, DPitch, DYaw, MaxTurn: Single;
+  Detonate, HitPlayer, Bounced: Boolean;
 
-  { the point of segment A..B closest to the player's axis (feet to eye) }
-  function DistanceToPlayer(const A, B: TVector3): Single;
-  var
-    K: Integer;
-    Q: TVector3;
+  procedure Remove;
   begin
-    Result := MaxSingle;
-    for K := 0 to 8 do
-    begin
-      Q := A + (B - A) * (K / 8);
-      Closest := Vector3(FPlayerEye.X, EnsureRange(Q.Y, Feet.Y, FPlayerEye.Y), FPlayerEye.Z);
-      Result := Min(Result, (Q - Closest).Length);
+    if (P.HeldBy <> nil) and (P.HeldBy.Missile = P) then
+      P.HeldBy.Missile := nil;
+    FProjectiles.Delete(I);
+  end;
+
+  { the world along the step: distance and surface normal (facing the
+    projectile) }
+  function WorldHit(const From, Dir: TVector3; const MaxDist: Single;
+    out Distance: Single; out N: TVector3): Boolean;
+  var
+    R: TRayCollision;
+    Node: TRayCollisionNode;
+  begin
+    Result := False;
+    N := -Dir;
+    R := FMap.World.WorldRay(From, Dir);
+    if R = nil then
+      Exit;
+    try
+      Distance := R.Distance;
+      Result := Distance <= MaxDist;
+      if Result and R.Info(Node) and (Node.Triangle <> nil) and (Node.Item <> nil) then
+      begin
+        N := Node.Item.LocalToWorldDirection(Node.Triangle^.SceneSpace.Normal);
+        if N.IsZero then
+          N := -Dir
+        else
+        begin
+          N := N.Normalize;
+          if TVector3.DotProduct(N, Dir) > 0 then
+            N := -N;
+        end;
+      end;
+    finally
+      R.Free;
     end;
   end;
 
@@ -2716,11 +3084,21 @@ begin
   for I := FProjectiles.Count - 1 downto 0 do
   begin
     P := FProjectiles[I];
+    { held in a monster's hand (create_missile) until launched }
+    if P.HeldBy <> nil then
+    begin
+      if not P.HeldBy.Thinking or not P.HeldBy.Model.Holder.Exists or
+         ((P.HeldBy.Monster <> nil) and (P.HeldBy.Monster.State = msDead)) then
+        Remove
+      else
+      begin
+        P.Position := MuzzlePosition(P.HeldBy, P.HeldJoint);
+        if P.Visual <> nil then
+          P.Visual.Translation := P.Position;
+      end;
+      Continue;
+    end;
     P.Fuse := P.Fuse - SecondsPassed;
-    P.Velocity.Y := P.Velocity.Y - P.Gravity * SecondsPassed;
-    Step := P.Velocity * SecondsPassed;
-    NewPos := P.Position + Step;
-    Len := Step.Length;
     if P.Fuse <= 0 then
     begin
       if P.DetonateOnFuse then
@@ -2729,28 +3107,90 @@ begin
           PlaySoundAt(P.ExplodeSound, P.Position);
         SplashDamage(P);
       end;
-      FProjectiles.Delete(I);
+      Remove;
       Continue;
     end;
+    { idGuidedProjectile::Think: turn towards the player's eyes }
+    if P.Guided and not P.UnGuided and (P.Speed > 0) then
+    begin
+      Pos := CgeToD3(P.Position);
+      if P.SeeksPlayer and not PlayerDead then
+        Seek := CgeToD3(FPlayerEye) - Vector3(0, 0, 12)
+      else
+        Seek := Pos + CgeToD3(P.Velocity) * 2;
+      if FTime >= P.RandomTime then
+      begin
+        P.RandomAngles := Vector2(P.RandomScale.X * (Random * 2 - 1), P.RandomScale.Y * (Random * 2 - 1));
+        P.RandomTime := FTime + 0.2;
+      end;
+      Nose := Pos + D3Forward(P.Pitch, P.Yaw) * 10;
+      Dir := Seek - Nose;
+      Dist := Dir.Length;
+      if Dist > 0.01 then
+      begin
+        { more accurate as it gets closer }
+        Frac := Min(1, Dist / P.ClampDist);
+        DPitch := Normalize180(D3DirPitch(Dir) - P.Pitch + P.RandomAngles.X * Frac);
+        DYaw := Normalize180(D3DirYaw(Dir) - P.Yaw + P.RandomAngles.Y * Frac);
+        { turn_max is per second (idGuidedProjectile: per 1/60 s tick) }
+        MaxTurn := P.TurnMax * SecondsPassed;
+        P.Pitch := P.Pitch + EnsureRange(DPitch, -MaxTurn, MaxTurn);
+        P.Yaw := P.Yaw + EnsureRange(DYaw, -MaxTurn, MaxTurn);
+        Vel := D3Forward(P.Pitch, P.Yaw) * P.Speed;
+        if P.BurstMode and (Dist < P.BurstDist) then
+        begin
+          P.UnGuided := True;
+          Vel := Vel * P.BurstVelocity;
+        end;
+        P.Velocity := D3ToCge(Vel);
+      end;
+    end;
+    if not P.Resting then
+      P.Velocity.Y := P.Velocity.Y - P.Gravity * SecondsPassed;
+    Step := P.Velocity * SecondsPassed;
+    NewPos := P.Position + Step;
+    Len := Step.Length;
     Detonate := False;
     HitPlayer := False;
+    Bounced := False;
     { the player }
-    if not PlayerDead and (DistanceToPlayer(P.Position, NewPos) <= P.Radius + PlayerRadius) then
+    if not PlayerDead and (Len > 0) and
+       (SegmentToPlayerDistance(P.Position, NewPos, Feet, FPlayerEye) <= P.Radius + PlayerRadius) then
     begin
-      DamagePlayer(P.Damage);
-      WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
-      Detonate := True;
-      HitPlayer := True;
+      if P.DetonateOnActor then
+      begin
+        DamagePlayer(P.Damage);
+        WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
+        Detonate := True;
+        HitPlayer := True;
+      end else
+      begin
+        { bounces off (grenades): away from the player's axis }
+        Normal := P.Position - Vector3(FPlayerEye.X, EnsureRange(P.Position.Y, Feet.Y, FPlayerEye.Y), FPlayerEye.Z);
+        if Normal.IsZero then
+          Normal := -Step;
+        Normal := Normal.Normalize;
+        if TVector3.DotProduct(P.Velocity, Normal) < 0 then
+          P.Velocity := (P.Velocity - Normal * (2 * TVector3.DotProduct(P.Velocity, Normal))) * P.Bounce;
+        NewPos := P.Position;
+        Bounced := True;
+      end;
     end;
     { the world }
-    if not Detonate and (Len > 0) then
+    if not Detonate and not Bounced and (Len > 0) and WorldHit(P.Position, Step / Len, Len, HitDist, Normal) then
     begin
-      Hit := FMap.World.WorldRayCast(P.Position, Step / Len, HitDist);
-      if (Hit <> nil) and (HitDist <= Len) then
+      NewPos := P.Position + Step * (HitDist / Len);
+      if P.DetonateOnWorld then
+        Detonate := True
+      else
       begin
-        T := HitDist / Len;
-        NewPos := P.Position + Step * T;
-        Detonate := True;
+        { idPhysics_RigidBody bounce: reflected, keeping Bounce of the speed }
+        P.Velocity := (P.Velocity - Normal * (2 * TVector3.DotProduct(P.Velocity, Normal))) * P.Bounce;
+        NewPos := NewPos + Normal * 0.5;
+        { at rest on a floor: no more falling through it }
+        P.Resting := (P.Velocity.Length < 20) and (Normal.Y > 0.7);
+        if P.Resting then
+          P.Velocity := TVector3.Zero;
       end;
     end;
     P.Position := NewPos;
@@ -2763,7 +3203,7 @@ begin
       { RadiusDamage ignores the one hit directly }
       if not HitPlayer then
         SplashDamage(P);
-      FProjectiles.Delete(I);
+      Remove;
     end;
   end;
 end;
@@ -2815,9 +3255,7 @@ procedure TD3Game.ActorFrameCommand(const Sender: TD3Md5Instance; const Command:
 var
   A, Found: TD3Actor;
   Cmd, Arg, Shader: String;
-  DamageDef: TStringList;
-  ToPlayer: TVector3;
-  Damage: Integer;
+  Target: TD3MapEntity;
   F: TD3ScriptFunction;
 begin
   Found := nil;
@@ -2838,9 +3276,37 @@ begin
       Shader := Arg;
     StartScriptSound(A.Handle, Shader, 0);
   end else
-  if Cmd = 'launch_missile' then
-    LaunchProjectiles(A, Arg)
+  if Cmd = 'create_missile' then
+    { a projectile in its hand until launch_missile (hell knights) }
+    CreateMissile(A, Arg)
   else
+  if Cmd = 'launch_missile' then
+    { idAI::Event_AttackMissile: at the enemy, within the attack cone }
+    LaunchMissile(A, Arg, True, False, TVector3.Zero, True)
+  else
+  if Cmd = 'fire_missile_at_target' then
+  begin
+    { <joint> <entity>: at that entity, not clamped to the attack cone }
+    Target := FindEntity(Trim(Copy(Arg, Pos(' ', Arg + ' ') + 1, MaxInt)));
+    Arg := Copy(Arg, 1, Pos(' ', Arg + ' ') - 1);
+    if Target <> nil then
+      LaunchMissile(A, Arg, False, True, D3ToCge(Target.Origin), False)
+    else
+      LaunchMissile(A, Arg, False, False, TVector3.Zero, False);
+  end else
+  if Cmd = 'attack_begin' then
+    { a multiframe melee attack: touching the player hurts it once }
+    A.Attack := Arg
+  else
+  if Cmd = 'attack_end' then
+    A.Attack := ''
+  else
+  if Cmd = 'direct_damage' then
+  begin
+    { the enemy, when in melee reach }
+    if ActorTestMelee(A) then
+      ActorDirectDamage(A, Arg);
+  end else
   if Cmd = 'call' then
   begin
     { a method of its script object, in a thread of its own }
@@ -2854,21 +3320,7 @@ begin
       Activate(FindEntity(Arg));
   end else
   if Cmd = 'melee' then
-  begin
-    { idAI::AttackMelee: hits the player in reach (a bit more than the
-      melee range, the swing reaches) }
-    ToPlayer := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
-    if A.HasEnemy and not PlayerDead and
-       (Sqrt(Sqr(ToPlayer.X) + Sqr(ToPlayer.Y)) <= (A.MeleeRange + PlayerRadius) * 1.5) then
-    begin
-      Damage := 10;
-      DamageDef := Decls.EntityDef(Arg);
-      if DamageDef <> nil then
-        Damage := StrToIntDef(DamageDef.Values['damage'], Damage);
-      DamagePlayer(Damage);
-      WritelnLog('Doom3World', '%s hits the player (%s, %d)', [A.Model.Entity.Name, Arg, Damage]);
-    end;
-  end;
+    ActorAttackMelee(A, Arg);
 end;
 
 procedure TD3Game.SpawnAnimated(const ME: TD3ModelEntity);
@@ -4418,5 +4870,13 @@ end;
 
 initialization
   ScriptedMonsterObjects := ['monster_zombie', 'monster_zombie_bernie', 'monster_zombie_security_pistol',
-    'monster_demon_imp', 'monster_test'];
+    'monster_demon_imp', 'monster_test',
+    { the full game's walking monsters (not in the demo, so not checked
+      against their scripts): their projectiles, held missiles, charges
+      and melee events are done; flying monsters and bosses keep the
+      simple AI }
+    'monster_demon_hellknight', 'monster_demon_mancubus', 'monster_demon_revenant',
+    'monster_demon_maggot', 'monster_demon_pinky', 'monster_demon_trite', 'monster_demon_tick',
+    'monster_demon_cherub', 'monster_demon_wraith', 'monster_demon_archvile',
+    'monster_zombie_commando', 'monster_zombie_commando_cgun'];
 end.

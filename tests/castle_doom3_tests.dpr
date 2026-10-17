@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(13, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(17, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -168,7 +168,7 @@ begin
   begin
     CheckEquals('models/md5/test/blob.md5mesh', Model.Mesh, 'model mesh');
     CheckEquals('models/md5/test/blob_walk.md5anim', Model.AnimFile('walk'), 'model anim (with frame commands)');
-    CheckEquals(4, Model.Anims.Count, 'model anim count');
+    CheckEquals(5, Model.Anims.Count, 'model anim count');
   end;
 
   Snd := Decls.SoundShader('test_hum');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(43, MapFile.Entities.Count, 'entity count');
+    CheckEquals(44, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1653,7 +1653,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(18, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(21, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1828,7 +1828,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for actors');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(2, Game.Actors.Count, 'two actors (blob_scripted_1, test_walker_1)');
+    CheckEquals(3, Game.Actors.Count, 'three actors (blob_scripted_1, test_walker_1, blob_ranged_1)');
     A := nil;
     for I := 0 to Game.Actors.Count - 1 do
       if Game.Actors[I].Model.Entity.Name = 'test_walker_1' then
@@ -2107,6 +2107,169 @@ begin
   end;
 end;
 
+procedure TestRangedAttacks;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A, Ranged: TD3Actor;
+  P: TD3Projectile;
+  M: TD3Monster;
+  I, Launched, Health: Integer;
+  Eye, ToPlayer, Dir: TVector3;
+  DotBefore: Single;
+  SawHeld, SawGuided, Bounced: Boolean;
+  RemoveMe: TRemoveType;
+  YawToPlayer, Delta: Single;
+
+  procedure Step(const Seconds: Single);
+  begin
+    Game.Update(Seconds, Eye);
+    RemoveMe := rtNone;
+    Map.Update(Seconds, RemoveMe);
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for ranged attacks');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Ranged := nil;
+    for A in Game.Actors do
+      if A.Model.Entity.Name = 'blob_ranged_1' then
+        Ranged := A
+      else
+        A.Thinking := False;
+    Check(Ranged <> nil, 'blob_ranged_1 runs its script (monster_test_ranged derives from monster_test)');
+    if Ranged = nil then
+      Exit;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    { the player in room B, in sight of it, out of melee reach }
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 10 do
+      Step(0.1);
+    CheckEquals(0, Game.ProjectilesLaunched, 'blob_ranged_1 waits until activated');
+
+    { activated: the throw anim's create_missile holds a ball in its hand,
+      launch_missile throws it; 2 s later attackMissile throws another }
+    Game.Activate(Game.FindEntity('blob_ranged_1'));
+    SawHeld := False;
+    SawGuided := False;
+    for I := 1 to 50 do
+    begin
+      Step(0.1);
+      for P in Game.Projectiles do
+      begin
+        if P.HeldBy = Ranged then
+          SawHeld := True;
+        if P.Guided and (P.HeldBy = nil) then
+          SawGuided := True;
+      end;
+    end;
+    Check(SawHeld, 'create_missile: a ball held in its hand before the throw');
+    Check(SawGuided, 'a homing ball (idGuidedProjectile) flew');
+    Check(Game.ProjectilesLaunched >= 2, Format('the anim and attackMissile both threw (%d)', [Game.ProjectilesLaunched]));
+    Check(Game.Health < 100, Format('a homing ball hit the player (health %d)', [Game.Health]));
+    Ranged.Thinking := False;
+    for I := 1 to 30 do
+      Step(0.1);
+
+    { a homing ball launched away from the player turns towards it }
+    Health := Game.Health;
+    P := Game.SpawnProjectile('projectile_test_guided', 'test', D3ToCge(Vector3(420, -100, 60)),
+      D3ToCge(Vector3(0, 300, 0)));
+    Check((P <> nil) and P.Guided, 'projectile_test_guided is guided');
+    if P <> nil then
+    begin
+      P.SeeksPlayer := True;
+      DotBefore := TVector3.DotProduct(P.Velocity.Normalize, (Eye - P.Position).Normalize);
+      Step(0.05);
+      Step(0.05);
+      Step(0.05);
+      if Game.Projectiles.IndexOf(P) >= 0 then
+      begin
+        ToPlayer := (Eye - Vector3(0, 12, 0) - P.Position).Normalize;
+        Dir := P.Velocity.Normalize;
+        Check(TVector3.DotProduct(Dir, ToPlayer) > DotBefore + 0.1, 'the homing ball turns towards the player');
+        { turn_max 240 degrees a second: 36 degrees in 0.15 s }
+        CheckNear(36, RadToDeg(ArcCos(EnsureRange(TVector3.DotProduct(Dir, D3ToCge(Vector3(0, 1, 0))), -1, 1))),
+          'the homing ball turned by turn_max', 1);
+        CheckNear(300, P.Velocity.Length, 'the homing ball keeps its speed', 0.5);
+      end;
+      for I := 1 to 40 do
+        Step(0.05);
+      Check(Game.Health < Health, 'the homing ball came back and hit the player');
+    end;
+
+    { a grenade (detonate_on_world 0) bounces off the floor and explodes
+      when its fuse ends, with its splash }
+    Health := Game.Health;
+    P := Game.SpawnProjectile('projectile_test_grenade', 'test', D3ToCge(Vector3(440, -250, 30)),
+      D3ToCge(Vector3(0, 0, -200)));
+    Check((P <> nil) and not P.DetonateOnWorld and (P.Bounce = 0.5), 'projectile_test_grenade bounces');
+    Bounced := False;
+    if P <> nil then
+      for I := 1 to 10 do
+      begin
+        Step(0.05);
+        if (Game.Projectiles.IndexOf(P) >= 0) and (P.Velocity.Y > 0) then
+          Bounced := True;
+      end;
+    Check(Bounced, 'the grenade bounced up off the floor');
+    Check((P <> nil) and (Game.Projectiles.IndexOf(P) >= 0), 'the grenade is still there after bouncing');
+    for I := 1 to 25 do
+      Step(0.05);
+    CheckEquals(0, Game.Projectiles.Count, 'the grenade exploded when its fuse ended');
+    Check(Game.Health < Health, Format('the grenade''s splash hurt the player (%d -> %d)', [Health, Game.Health]));
+
+    { launch_missile keeps the yaw within attack_cone (70) of its facing:
+      the player behind it }
+    Ranged.Yaw := 90;
+    Ranged.HasEnemy := True;
+    P := Game.LaunchMissile(Ranged, 'body', True, False, TVector3.Zero, True);
+    Check(P <> nil, 'LaunchMissile');
+    if P <> nil then
+    begin
+      Dir := CgeToD3(P.Velocity);
+      YawToPlayer := RadToDeg(ArcTan2(Dir.Y, Dir.X));
+      Delta := YawToPlayer - 90;
+      Delta := Delta - 360 * Floor((Delta + 180) / 360);
+      Check(Abs(Delta) <= 70.5, Format('a missile at the player behind it stays in the attack cone (%.1f)', [Delta]));
+    end;
+    { createMissile then launchMissile (script events): the held one goes }
+    Launched := Game.ProjectilesLaunched;
+    P := Game.CreateMissile(Ranged, 'body');
+    Check((P <> nil) and (P.HeldBy = Ranged) and (Ranged.Missile = P), 'createMissile holds a missile');
+    Check(Game.LaunchMissileFrom(Ranged, CgeToD3(Ranged.Model.Holder.Translation) + Vector3(0, 0, 40),
+      Vector3(0, 90, 0)) = P, 'launchMissile throws the held missile');
+    Check((P <> nil) and (P.HeldBy = nil) and (Ranged.Missile = nil), 'launched, it is no longer held');
+    if P <> nil then
+      CheckVec3(Vector3(0, 300, 0), CgeToD3(P.Velocity), 'launchMissile along the angles (yaw 90 = +y)');
+    CheckEquals(Launched + 1, Game.ProjectilesLaunched, 'one missile launched');
+
+    { a multiframe attack (attack_begin, chargeAttack) hurts the player it
+      touches once (idAI::DirectDamage ends it) }
+    Ranged.Thinking := True;
+    Ranged.Attack := 'damage_test_charge';
+    Eye := Ranged.Model.Holder.Translation + D3ToCge(Vector3(40, 0, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Health := Game.Health;
+    Step(0.05);
+    CheckEquals(Health - 9, Game.Health, 'the charge hit the player it touched (damage_test_charge)');
+    CheckEquals('', Ranged.Attack, 'the hit ended the attack');
+    Step(0.05);
+    CheckEquals(Health - 9, Game.Health, 'one hit per attack');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2296,6 +2459,7 @@ begin
   TestScriptedMonster;
   TestProjectiles;
   TestSplashDamage;
+  TestRangedAttacks;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
