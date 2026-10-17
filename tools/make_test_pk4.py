@@ -21,6 +21,7 @@ Contents (all made here, MIT licensed like the rest of the project):
                            by location name, a default
   blob_ranged_1            a monster throwing homing balls when activated
   blob_flyer_1             a flying monster charging when activated
+  blob_dodger_1            goes to combat_node_1 when activated, then dodges
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1131,6 +1132,12 @@ def map_text():
         # chasing, charging like a lost soul
         {'classname': 'monster_test_flyer', 'name': 'blob_flyer_1', 'origin': '620 -100 0',
          'angle': '180'},
+        # goes to its combat node once activated (the player in the node's
+        # cone), marks it used, then dodges (evade_left) every second
+        {'classname': 'monster_test_dodger', 'name': 'blob_dodger_1', 'origin': '420 200 0',
+         'angle': '-90', 'target': 'combat_node_1'},
+        {'classname': 'ai_attackcone', 'name': 'combat_node_1', 'origin': '600 200 0',
+         'angle': '180', 'max': '600', 'fov': '150', 'use_once': '1'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1450,6 +1457,7 @@ model test_blob {
 	anim range				models/md5/test/blob_walk.md5anim {
 		frame 3				launch_missile body
 	}
+	anim evade_left			models/md5/test/blob_evade.md5anim
 	anim throw				models/md5/test/blob_walk.md5anim {
 		frame 1				create_missile body
 		frame 6				launch_missile body
@@ -1616,6 +1624,22 @@ entityDef monster_test_flyer {
 	"melee_range"			"40"
 }
 
+entityDef monster_test_dodger {
+	"inherit"				"monster_test_scripted"
+	"editor_usage"			"A test creature going to its combat node, then dodging (script object monster_test_dodger)."
+	"scriptobject"			"monster_test_dodger"
+}
+
+entityDef ai_attackcone {
+	"editor_usage"			"A combat node: monsters targeting it attack from here when their enemy is in its cone."
+	"spawnclass"			"idCombatNode"
+	"min"					"0"
+	"max"					"256"
+	"fov"					"60"
+	"height"				"256"
+	"use_once"				"0"
+}
+
 entityDef monster_test_blob {
 	"inherit"				"monster_default"
 	"editor_usage"			"A test creature for Castle Doom 3."
@@ -1721,7 +1745,7 @@ def quat_xyz(axis, angle):
 
 
 def md5anim_text(kind):
-    frames, rate = 48, 24
+    frames, rate = (25 if kind == 'evade' else 48), 24
     rel = []
     for name, parent, p in JOINTS:
         pp = JOINTS[parent][2] if parent >= 0 else (0, 0, 0)
@@ -1742,6 +1766,14 @@ def md5anim_text(kind):
                 elif name in ('arm_l', 'arm_r'):
                     sign = 1 if name == 'arm_l' else -1
                     q = quat_xyz((1, 0, 0), sign * (0.25 + 0.2 * math.sin(t * 2)))
+            elif kind == 'evade':
+                # a sidestep: the origin moves 64 to the left (+y in model
+                # space), easing in and out; the body leans into it
+                u = f / (frames - 1)
+                if name == 'origin':
+                    pos[1] += 64.0 * (3 * u * u - 2 * u * u * u)
+                elif name == 'body':
+                    q = quat_xyz((1, 0, 0), -0.3 * math.sin(u * math.pi))
             else:  # walk
                 if name == 'origin':
                     pass
@@ -2044,6 +2076,9 @@ scriptEvent void    locateEnemy();
 scriptEvent void    setMoveType( float movetype );
 scriptEvent void    chargeAttack( string damageDef );
 scriptEvent void    waitMove();
+scriptEvent entity  getCombatNode();
+scriptEvent void    markUsed();
+scriptEvent float   testAnimMove( string anim );
 scriptEvent float   canHitEnemyFromJoint( string jointname );
 scriptEvent entity  attackMissile( string jointname );
 scriptEvent void    setTalkState( float state );
@@ -2359,6 +2394,56 @@ void monster_test_flyer::state_Combat() {
     }
 }
 
+// A monster using a combat node and dodging: once activated it goes to
+// the closest combat node among its targets that has the player in its
+// cone (getCombatNode), marks it used, then sidesteps (its evade_left anim
+// moves it) every second while there's room (testAnimMove).
+float dodges;
+
+object monster_test_dodger : monster_test {
+    void    state_Begin();
+    void    state_Combat();
+    void    Torso_Evade();
+};
+
+void monster_test_dodger::state_Begin() {
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    while( !AI_ACTIVATED ) {
+        waitFrame();
+    }
+    locateEnemy();
+    setState( "state_Combat" );
+}
+
+void monster_test_dodger::state_Combat() {
+    entity node;
+    node = getCombatNode();
+    if ( node ) {
+        moveToEntity( node );
+        waitMove();
+        node.markUsed();
+        sys.print( "blob_dodger_1 at its combat node\n" );
+    }
+    eachFrame {
+        faceEnemy();
+        sys.wait( 1 );
+        if ( testAnimMove( "evade_left" ) ) {
+            animState( ANIMCHANNEL_TORSO, "Torso_Evade", 0 );
+            waitAction( "evade" );
+            dodges = dodges + 1;
+            sys.print( "blob_dodger_1 dodged\n" );
+        }
+    }
+}
+
+void monster_test_dodger::Torso_Evade() {
+    playAnim( ANIMCHANNEL_TORSO, "evade_left" );
+    waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
+    finishAction( "evade" );
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+}
+
 void main() {
     sys.print( "testmap main\n" );
     thread lift_loop();
@@ -2528,6 +2613,7 @@ def main():
     add('models/mapobjects/test/terminal.ase', terminal_ase())
     add('models/md5/test/blob_idle.md5anim', md5anim_text('idle'))
     add('models/md5/test/blob_walk.md5anim', md5anim_text('walk'))
+    add('models/md5/test/blob_evade.md5anim', md5anim_text('evade'))
     sounds()
     add('readme_castle_doom3_test.txt',
         'Castle Doom 3 test data, generated by tools/make_test_pk4.py. MIT license.\n')
