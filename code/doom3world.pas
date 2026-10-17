@@ -62,6 +62,8 @@ type
   TD3Route = record
     FromArea, ToArea: Integer;
     Found: Boolean;
+    { found with the flying travel flags }
+    Fly: Boolean;
     Path: TD3AasPath;
   end;
 
@@ -350,6 +352,28 @@ type
     function PlayerInView(const Feet: TVector3): Boolean;
   end;
 
+  { A moveable (idMoveable: moveable_* entities): a brush entity or static
+    model with simple rigid body physics, no spin: it falls (Doom 3's
+    gravity), bounces (bouncyness) and comes to rest. Thrown (the vagary,
+    throwMoveable, setLinearVelocity) it hurts the player it hits
+    (def_damage, scaled by the speed between minDamageVelocity and
+    maxDamageVelocity, once a second) while its damage is on. Doom 3
+    coordinates. }
+  TD3Moveable = class
+    Brush: TD3BrushEntity;
+    Velocity: TVector3;
+    AtRest, WasBound: Boolean;
+    Bounce, MinDamageVelocity, MaxDamageVelocity: Single;
+    DamageDef: String;
+    { damage on (not with damageWhenActive until enabled); DamageUntil > 0
+      turns it off then (enableDamage: 2.5 s) }
+    CanDamage: Boolean;
+    DamageUntil, NextDamageTime: Single;
+    { half its bounds, and their center from its origin (local, unrotated) }
+    HalfSize, CenterOffset: TVector3;
+    function Origin: TVector3;
+  end;
+
   { A light fading in or out (idLight::FadeIn / FadeOut). }
   TD3LightFade = record
     Light: Integer;
@@ -407,6 +431,7 @@ type
       ('' = none), see SpreadLocations }
     FLocations: array of String;
     FCombatNodes: specialize TObjectList<TD3CombatNode>;
+    FMoveables: specialize TObjectList<TD3Moveable>;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -436,6 +461,8 @@ type
     procedure SpawnBindings;
     procedure SpreadLocations;
     procedure SpawnCombatNode(const E: TD3MapEntity);
+    procedure SpawnMoveable(const B: TD3BrushEntity);
+    procedure UpdateMoveables(const SecondsPassed: Single);
     function CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
     procedure UpdateBindings;
     function TransformOf(const AName: String): TCastleTransform;
@@ -583,6 +610,16 @@ type
     property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
     property Aas: TD3AasFile read FAas;
     property CombatNodes: specialize TObjectList<TD3CombatNode> read FCombatNodes;
+    property Moveables: specialize TObjectList<TD3Moveable> read FMoveables;
+    function MoveableOf(const E: TD3MapEntity): TD3Moveable;
+    { Throw a moveable at Velocity (Doom 3), its damage on for 2.5 s
+      (idAI_Vagary::Event_ThrowObjectAtEnemy, idMoveable::EnableDamage) }
+    procedure ThrowMoveable(const M: TD3Moveable; const Velocity: TVector3);
+    { idAI::PredictTrajectory without the collision checks: the direction
+      to launch at Speed from From to hit Target with Gravity (the lower
+      arc), False when out of reach (then straight at it). Doom 3. }
+    function BallisticDir(const From, Target: TVector3; const Speed, Gravity: Single;
+      out Dir: TVector3): Boolean;
     { The location (an info_location's "location" key, lowercase; '' when
       none) of a portal area, or of a point in CGE coordinates, like
       idGameLocal::LocationForPoint. Locations spread from their area
@@ -594,6 +631,15 @@ type
       Goal: the next reachability of its AAS route (idAI::PathToGoal), or
       Goal itself (same area, no AAS, no route). }
     function RouteWaypoint(var Route: TD3Route; const Pos, Goal: TVector3): TVector3;
+    { The point a flyer at Pos (Doom 3 coordinates) heads for to get to
+      Goal (idAASLocal::FlyPathToGoal): along its AAS route (walk, air
+      and fly reachabilities) the furthest point it can fly straight to,
+      Goal itself in the same area or without an AAS. }
+    function FlyRouteWaypoint(var Route: TD3Route; const Pos, Goal: TVector3;
+      const Radius, Height: Single): TVector3;
+    { Room for a box of that radius and height to fly straight from From to
+      Dest (Doom 3 coordinates, origins at the box's bottom) }
+    function FlyPathClear(const From, Dest: TVector3; const Radius, Height: Single): Boolean;
     { The AAS route from an entity to the player, for the console "aas". }
     function RouteStatus(const EntityName: String): String;
     { A projectile of an entityDef (idProjectile: def_damage,
@@ -863,6 +909,7 @@ begin
   FActors := specialize TObjectList<TD3Actor>.Create(True);
   FProjectiles := specialize TObjectList<TD3Projectile>.Create(True);
   FCombatNodes := specialize TObjectList<TD3CombatNode>.Create(True);
+  FMoveables := specialize TObjectList<TD3Moveable>.Create(True);
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
@@ -895,6 +942,7 @@ begin
   FActors.Free;
   FProjectiles.Free;
   FCombatNodes.Free;
+  FMoveables.Free;
   FScriptSounds.Free;
   FSoundSources.Free;
   FSoundTransforms.Free;
@@ -913,6 +961,7 @@ begin
   FreeAndNil(FAas);
   FLocations := nil;
   FCombatNodes.Clear;
+  FMoveables.Clear;
   FMovers.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
@@ -1093,10 +1142,11 @@ begin
   ToArea := FAas.OriginAreaNum(Goal);
   if (FromArea = 0) or (ToArea = 0) or (FromArea = ToArea) then
     Exit;
-  if (Route.FromArea <> FromArea) or (Route.ToArea <> ToArea) then
+  if (Route.FromArea <> FromArea) or (Route.ToArea <> ToArea) or Route.Fly then
   begin
     Route.FromArea := FromArea;
     Route.ToArea := ToArea;
+    Route.Fly := False;
     Route.Found := FAas.FindPath(FromArea, ToArea, WalkingTravelFlags, Route.Path);
   end;
   if not Route.Found then
@@ -1108,6 +1158,269 @@ begin
     P := FAas.Areas[Route.Path[I].Area].Reach[Route.Path[I].Reach].Stop;
     if Sqr(P.X - Pos.X) + Sqr(P.Y - Pos.Y) > Sqr(Reached) then
       Exit(P);
+  end;
+end;
+
+function TD3Game.FlyPathClear(const From, Dest: TVector3; const Radius, Height: Single): Boolean;
+var
+  A, B, Side: TVector3;
+begin
+  { its center line, and both sides of it (CGE coordinates) }
+  A := D3ToCge(From) + Vector3(0, Height / 2, 0);
+  B := D3ToCge(Dest) + Vector3(0, Height / 2, 0);
+  Side := TVector3.CrossProduct(B - A, Vector3(0, 1, 0));
+  if Side.IsZero then
+    Side := Vector3(1, 0, 0);
+  Side := Side.Normalize * Radius;
+  Result := not FMap.World.WorldSegmentCollision(A, B) and
+    not FMap.World.WorldSegmentCollision(A + Side, B + Side) and
+    not FMap.World.WorldSegmentCollision(A - Side, B - Side);
+end;
+
+function TD3Game.FlyRouteWaypoint(var Route: TD3Route; const Pos, Goal: TVector3;
+  const Radius, Height: Single): TVector3;
+
+  function AreaOf(const P: TVector3): Integer;
+  begin
+    { a flyer's origin is in the air: the area it's in, else the one below }
+    Result := FAas.PointAreaNum(P + Vector3(0, 0, 1));
+    if Result = 0 then
+      Result := FAas.OriginAreaNum(P);
+  end;
+
+var
+  FromArea, ToArea, I: Integer;
+  R: TD3AasReach;
+begin
+  Result := Goal;
+  if FAas = nil then
+    Exit;
+  FromArea := AreaOf(Pos);
+  ToArea := AreaOf(Goal);
+  if (FromArea = 0) or (ToArea = 0) or (FromArea = ToArea) then
+    Exit;
+  if (Route.FromArea <> FromArea) or (Route.ToArea <> ToArea) or not Route.Fly then
+  begin
+    Route.FromArea := FromArea;
+    Route.ToArea := ToArea;
+    Route.Fly := True;
+    Route.Found := FAas.FindPath(FromArea, ToArea, WalkingTravelFlags or TFL_FLY, Route.Path);
+  end;
+  if not Route.Found or (Length(Route.Path) = 0) then
+    Exit;
+  { idAASLocal::FlyPathToGoal: along the route, the furthest reachability
+    start or end it can fly straight to; the goal when it sees it }
+  Result := Pos;
+  for I := 0 to High(Route.Path) do
+  begin
+    R := FAas.Areas[Route.Path[I].Area].Reach[Route.Path[I].Reach];
+    if not FlyPathClear(Pos, R.Start, Radius, Height) then
+    begin
+      if I = 0 then
+        Result := R.Start;
+      Exit;
+    end;
+    Result := R.Start;
+    if not FlyPathClear(Pos, R.Stop, Radius, Height) then
+      Exit;
+    Result := R.Stop;
+  end;
+  if FlyPathClear(Pos, Goal, Radius, Height) then
+    Result := Goal;
+end;
+
+function TD3Moveable.Origin: TVector3;
+begin
+  Result := CgeToD3(Brush.Scene.Translation);
+end;
+
+procedure TD3Game.SpawnMoveable(const B: TD3BrushEntity);
+var
+  M: TD3Moveable;
+  E: TD3MapEntity;
+begin
+  { idMoveable::Spawn }
+  E := B.Entity;
+  M := TD3Moveable.Create;
+  M.Brush := B;
+  M.AtRest := True;
+  M.Bounce := EnsureRange(E.FloatValue('bouncyness', 0.6), 0, 1);
+  M.DamageDef := E.Value('def_damage');
+  M.CanDamage := not E.BoolValue('damageWhenActive');
+  M.MinDamageVelocity := E.FloatValue('minDamageVelocity', 100);
+  M.MaxDamageVelocity := E.FloatValue('maxDamageVelocity', 200);
+  M.HalfSize := (B.LocalMax - B.LocalMin) * 0.5;
+  M.CenterOffset := (B.LocalMax + B.LocalMin) * 0.5;
+  FMoveables.Add(M);
+end;
+
+function TD3Game.MoveableOf(const E: TD3MapEntity): TD3Moveable;
+begin
+  for Result in FMoveables do
+    if Result.Brush.Entity = E then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.ThrowMoveable(const M: TD3Moveable; const Velocity: TVector3);
+begin
+  M.Velocity := Velocity;
+  M.AtRest := False;
+  M.CanDamage := True;
+  M.DamageUntil := FTime + 2.5;
+end;
+
+function TD3Game.BallisticDir(const From, Target: TVector3; const Speed, Gravity: Single;
+  out Dir: TVector3): Boolean;
+var
+  Horiz: TVector3;
+  D, H, V2, Root, Angle: Single;
+begin
+  Dir := Target - From;
+  if Dir.IsZero then
+  begin
+    Dir := Vector3(1, 0, 0);
+    Exit(True);
+  end;
+  Dir := Dir.Normalize;
+  if Gravity <= 0 then
+    Exit(True);
+  Horiz := Vector3(Target.X - From.X, Target.Y - From.Y, 0);
+  D := Horiz.Length;
+  H := Target.Z - From.Z;
+  V2 := Sqr(Speed);
+  Root := Sqr(V2) - Gravity * (Gravity * Sqr(D) + 2 * H * V2);
+  if (Root < 0) or (D < 1) then
+    Exit(False);
+  Angle := ArcTan((V2 - Sqrt(Root)) / (Gravity * D));
+  Dir := Horiz / D * Cos(Angle) + Vector3(0, 0, Sin(Angle));
+  Result := True;
+end;
+
+procedure TD3Game.UpdateMoveables(const SecondsPassed: Single);
+const
+  Gravity = 1066;
+var
+  M: TD3Moveable;
+  Center, Step, Dir, Feet, ToPlayer: TVector3;
+  Len, Extent, HitDist, Speed, F, Radius, D, CornerDist: Single;
+  Offset: TVector3;
+  DamageDef: TStringList;
+  Damage, Axis, Corner: Integer;
+  WasPickable, OnFloor: Boolean;
+begin
+  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  for M in FMoveables do
+  begin
+    if M.Brush.Hidden or (M.Brush.Scene = nil) then
+      Continue;
+    { bound (carried): it follows its master; let go, it falls }
+    if FindBinding(M.Brush.Scene) <> nil then
+    begin
+      M.WasBound := True;
+      Continue;
+    end;
+    if M.WasBound then
+    begin
+      M.WasBound := False;
+      M.AtRest := False;
+    end;
+    if (M.DamageUntil > 0) and (FTime >= M.DamageUntil) then
+    begin
+      M.CanDamage := False;
+      M.DamageUntil := 0;
+    end;
+    if M.AtRest then
+      Continue;
+    M.Velocity.Z := M.Velocity.Z - Gravity * SecondsPassed;
+    Center := M.Origin + M.CenterOffset;
+    Step := M.Velocity * SecondsPassed;
+    Len := Step.Length;
+    if Len < 0.0001 then
+      Continue;
+    Speed := M.Velocity.Length;
+    Radius := Max(M.HalfSize.X, M.HalfSize.Y);
+    { the player, anywhere along the step (idMoveable::Collide: damage
+      scaled by the speed) }
+    ToPlayer := Vector3(Feet.X - Center.X, Feet.Y - Center.Y, 0);
+    if not PlayerDead and (TVector3.DotProduct(M.Velocity, ToPlayer) > 0) and
+       (SegmentToPlayerDistance(D3ToCge(Center), D3ToCge(Center + Step), FPlayerEye - Vector3(0, PlayerEyeHeight, 0),
+          FPlayerEye) <= Radius + PlayerRadius) then
+    begin
+      if M.CanDamage and (M.DamageDef <> '') and (Speed > M.MinDamageVelocity) and
+         (FTime >= M.NextDamageTime) then
+      begin
+        F := 1;
+        if Speed < M.MaxDamageVelocity then
+          F := Sqrt(Speed - M.MinDamageVelocity) / Sqrt(M.MaxDamageVelocity - M.MinDamageVelocity);
+        DamageDef := Decls.EntityDef(M.DamageDef);
+        if DamageDef <> nil then
+        begin
+          Damage := Max(1, Round(StrToIntDef(DamageDef.Values['damage'], 10) * F));
+          DamagePlayer(Damage);
+          WritelnLog('Doom3World', '%s hits the player (%s, %d)', [M.Brush.Entity.Name, M.DamageDef, Damage]);
+        end;
+        M.NextDamageTime := FTime + 1;
+      end;
+      { it bounces off }
+      M.Velocity := Vector3(-M.Velocity.X * M.Bounce, -M.Velocity.Y * M.Bounce, M.Velocity.Z);
+      Continue;
+    end;
+    { the world, one axis at a time (not its own scene): stopped at the
+      surface, that axis bounces (bouncyness); on a floor, friction, and
+      slow enough it rests }
+    OnFloor := False;
+    WasPickable := M.Brush.Scene.Pickable;
+    M.Brush.Scene.Pickable := False;
+    try
+      for Axis := 0 to 2 do
+      begin
+        D := Step.Data[Axis];
+        if D = 0 then
+          Continue;
+        Dir := TVector3.Zero;
+        Dir.Data[Axis] := Sign(D);
+        Extent := M.HalfSize.Data[Axis];
+        { from its center and near the corners of its side }
+        HitDist := MaxSingle;
+        for Corner := 0 to 4 do
+        begin
+          Offset := TVector3.Zero;
+          if Corner > 0 then
+          begin
+            Offset.Data[(Axis + 1) mod 3] := M.HalfSize.Data[(Axis + 1) mod 3] * 0.9 * (1 - 2 * ((Corner - 1) and 1));
+            Offset.Data[(Axis + 2) mod 3] := M.HalfSize.Data[(Axis + 2) mod 3] * 0.9 * (1 - 2 * ((Corner - 1) shr 1));
+          end;
+          if (FMap.World.WorldRayCast(D3ToCge(Center + Offset), D3ToCge(Dir), CornerDist) <> nil) and
+             (CornerDist < HitDist) then
+            HitDist := CornerDist;
+        end;
+        if HitDist <= Abs(D) + Extent then
+        begin
+          D := Sign(D) * Max(0, HitDist - Extent);
+          M.Velocity.Data[Axis] := -M.Velocity.Data[Axis] * M.Bounce;
+          if (Axis = 2) and (Dir.Z < 0) then
+            OnFloor := True;
+        end;
+        Center.Data[Axis] := Center.Data[Axis] + D;
+      end;
+    finally
+      M.Brush.Scene.Pickable := WasPickable;
+    end;
+    M.Brush.Scene.Translation := D3ToCge(Center - M.CenterOffset);
+    if OnFloor then
+    begin
+      { a bounce that is only this frame's gravity is lying on the floor }
+      if Abs(M.Velocity.Z) <= Gravity * SecondsPassed * M.Bounce + 40 then
+        M.Velocity.Z := 0;
+      M.Velocity.X := M.Velocity.X * 0.8;
+      M.Velocity.Y := M.Velocity.Y * 0.8;
+      if M.Velocity.Length < 30 then
+      begin
+        M.Velocity := TVector3.Zero;
+        M.AtRest := True;
+      end;
+    end;
   end;
 end;
 
@@ -1475,6 +1788,9 @@ begin
       Goal := A.Goal
     else
       Goal := Pos;
+    { around walls: along its AAS route }
+    if A.Moving then
+      Goal := FlyRouteWaypoint(A.Route, Pos, Goal, Radius, Height);
     if Speed > 0 then
       Vel := Vel + Seek(Goal) * A.FlySeekScale;
     { idAI::AddFlyBob }
@@ -1576,7 +1892,11 @@ begin
       FreeAndNil(FAas);
   end;
   for B in FMap.Brushes do
+  begin
     SpawnMover(B);
+    if B.Entity.Value('spawnclass') = 'idMoveable' then
+      SpawnMoveable(B);
+  end;
   for ME in FMap.Models do
   begin
     if ME.Entity.Value('spawnclass') = 'idAnimated' then
@@ -1832,6 +2152,13 @@ begin
       StopCamera
     else
       StartCamera(E);
+    Exit;
+  end;
+  if (SpawnClass = 'idMoveable') and (MoveableOf(E) <> nil) then
+  begin
+    { idMoveable::Event_Activate: starts moving at init_velocity }
+    MoveableOf(E).Velocity := E.VectorValue('init_velocity', TVector3.Zero);
+    MoveableOf(E).AtRest := False;
     Exit;
   end;
   if SpawnClass = 'idCombatNode' then
@@ -2233,6 +2560,7 @@ begin
   if not ScriptsPaused then
     UpdateScriptMovers;
   UpdateBindings;
+  UpdateMoveables(SecondsPassed);
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
@@ -2455,6 +2783,9 @@ var
   I: Integer;
   Targets: array of Integer;
   Node: TD3CombatNode;
+  Mov: TD3Moveable;
+  Eye, Other3, Dir: TVector3;
+  J: Integer;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -3016,7 +3347,66 @@ begin
           EventResult := D3EntityValue(0);
       end;
     { no physics objects or ragdolls: nothing to throw }
-    'throwMoveable', 'throwAF', 'becomeRagdoll': EventResult := D3EntityValue(0);
+    'throwMoveable':
+      { idAI::Event_ThrowMoveable: lets go of a moveable bound to it }
+      for Mov in FMoveables do
+        if (FindBinding(Mov.Brush.Scene) <> nil) and
+           (FindBinding(Mov.Brush.Scene).Parent = A.Model.Holder) then
+        begin
+          Unbind(Mov.Brush.Scene);
+          Break;
+        end;
+    'throwAF', 'becomeRagdoll': EventResult := D3EntityValue(0);
+    'chooseObjectToThrow':
+      begin
+        { idAI_Vagary::Event_ChooseObjectToThrow( mins, maxs, speed,
+          minDist, offset ): a moveable in the box around it, far enough
+          from the enemy's eyes, not behind it, that it can throw there }
+        EventResult := D3EntityValue(0);
+        if A.HasEnemy and (FMoveables.Count > 0) then
+        begin
+          Pos := CgeToD3(A.Model.Holder.Translation);
+          Eye := CgeToD3(FPlayerEye);
+          J := Random(FMoveables.Count);
+          for I := 0 to FMoveables.Count - 1 do
+          begin
+            Mov := FMoveables[(J + I) mod FMoveables.Count];
+            if Mov.Brush.Hidden then
+              Continue;
+            Other3 := Mov.Origin;
+            if (Other3.X < Pos.X + Args[0].V.X) or (Other3.Y < Pos.Y + Args[0].V.Y) or
+               (Other3.Z < Pos.Z + Args[0].V.Z) or (Other3.X > Pos.X + Args[1].V.X) or
+               (Other3.Y > Pos.Y + Args[1].V.Y) or (Other3.Z > Pos.Z + Args[1].V.Z) then
+              Continue;
+            if (Other3 - Eye).Length < ArgF(3) then
+              Continue;
+            { behind it: the throw would go through it }
+            if SegmentToPlayerDistance(D3ToCge(Other3), D3ToCge(Eye), A.Model.Holder.Translation,
+                 A.Model.Holder.Translation + Vector3(0, 72, 0)) <
+               (16 + Max(Mov.HalfSize.X, Mov.HalfSize.Y)) then
+              Continue;
+            if BallisticDir(Other3 + Vector3(0, 0, ArgF(4)), Eye, ArgF(2), 1066, Dir) then
+            begin
+              EventResult := D3EntityValue(EntityHandle(Mov.Brush.Entity));
+              Break;
+            end;
+          end;
+        end;
+      end;
+    'throwObjectAtEnemy':
+      begin
+        { idAI_Vagary::Event_ThrowObjectAtEnemy( entity, speed ) }
+        Mov := MoveableOf(HandleEntity(Args[0].E));
+        if Mov <> nil then
+        begin
+          if A.HasEnemy then
+            BallisticDir(Mov.Origin, CgeToD3(FPlayerEye), ArgF(1), 1066, Dir)
+          else
+            Dir := D3Forward(0, A.Yaw);
+          ThrowMoveable(Mov, Dir * ArgF(1));
+          WritelnLog('Doom3World', '%s throws %s', [A.Model.Entity.Name, Mov.Brush.Entity.Name]);
+        end;
+      end;
     'numSmokeEmitters': EventResult := D3FloatValue(0);
     'enableClip', 'disableClip', 'enableGravity', 'disableGravity', 'enableAFPush',
     'disableAFPush', 'allowHiddenMovement', 'triggerParticles', 'shrivel', 'burn', 'preBurn',
@@ -5051,6 +5441,33 @@ begin
     Exit(False);
   if (FindActor(Target) <> nil) and ActorEvent(FindActor(Target), Thread, N, Args, EventResult) then
     Exit(True);
+  if MoveableOf(E) <> nil then
+  begin
+    { idMoveable / idEntity physics events }
+    if N = 'setLinearVelocity' then
+    begin
+      MoveableOf(E).Velocity := Args[0].V;
+      MoveableOf(E).AtRest := MoveableOf(E).Velocity.IsZero;
+      Exit(True);
+    end;
+    if N = 'getLinearVelocity' then
+    begin
+      EventResult := D3VectorValue(MoveableOf(E).Velocity);
+      Exit(True);
+    end;
+    if N = 'enableDamage' then
+    begin
+      { idMoveable::Event_EnableDamage: on (or off) for 2.5 s }
+      MoveableOf(E).CanDamage := ArgF(0) <> 0;
+      MoveableOf(E).DamageUntil := FTime + 2.5;
+      Exit(True);
+    end;
+    if N = 'isAtRest' then
+    begin
+      EventResult := D3FloatValue(Ord(MoveableOf(E).AtRest));
+      Exit(True);
+    end;
+  end;
   if (N = 'markUsed') and (CombatNodeOf(E) <> nil) then
   begin
     { idCombatNode::Event_MarkUsed: use_once nodes turn off }

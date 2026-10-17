@@ -22,6 +22,7 @@ Contents (all made here, MIT licensed like the rest of the project):
   blob_ranged_1            a monster throwing homing balls when activated
   blob_flyer_1             a flying monster charging when activated
   blob_dodger_1            goes to combat_node_1 when activated, then dodges
+  blob_thrower_1           throws moveable_barrel_1 at the player when activated
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1138,6 +1139,11 @@ def map_text():
          'angle': '-90', 'target': 'combat_node_1'},
         {'classname': 'ai_attackcone', 'name': 'combat_node_1', 'origin': '600 200 0',
          'angle': '180', 'max': '600', 'fov': '150', 'use_once': '1'},
+        # a moveable barrel, and a monster that throws it at the player once
+        # activated (the vagary's chooseObjectToThrow / throwObjectAtEnemy)
+        {'classname': 'moveable_test_barrel', 'name': 'moveable_barrel_1', 'origin': '470 40 0'},
+        {'classname': 'monster_test_thrower', 'name': 'blob_thrower_1', 'origin': '420 80 0',
+         'angle': '-90'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1640,6 +1646,25 @@ entityDef ai_attackcone {
 	"use_once"				"0"
 }
 
+entityDef moveable_test_barrel {
+	"editor_usage"			"A barrel that falls, bounces and can be thrown (idMoveable)."
+	"spawnclass"			"idMoveable"
+	"model"					"models/mapobjects/test/barrel.lwo"
+	"bouncyness"			"0.4"
+	"def_damage"			"damage_test_moveable"
+	"damageWhenActive"		"1"
+}
+
+entityDef damage_test_moveable {
+	"damage"				"12"
+}
+
+entityDef monster_test_thrower {
+	"inherit"				"monster_test_scripted"
+	"editor_usage"			"A test creature throwing a moveable at the player once activated, like the vagary (script object monster_test_thrower)."
+	"scriptobject"			"monster_test_thrower"
+}
+
 entityDef monster_test_blob {
 	"inherit"				"monster_default"
 	"editor_usage"			"A test creature for Castle Doom 3."
@@ -2079,6 +2104,8 @@ scriptEvent void    waitMove();
 scriptEvent entity  getCombatNode();
 scriptEvent void    markUsed();
 scriptEvent float   testAnimMove( string anim );
+scriptEvent entity  chooseObjectToThrow( vector mins, vector maxs, float speed, float minDist, float offset );
+scriptEvent void    throwObjectAtEnemy( entity ent, float speed );
 scriptEvent float   canHitEnemyFromJoint( string jointname );
 scriptEvent entity  attackMissile( string jointname );
 scriptEvent void    setTalkState( float state );
@@ -2442,6 +2469,35 @@ void monster_test_dodger::Torso_Evade() {
     waitUntil( animDone( ANIMCHANNEL_TORSO, 0 ) );
     finishAction( "evade" );
     animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+}
+
+// A monster throwing things like the vagary: once activated, it picks a
+// moveable around it that it can throw at the player and throws it.
+object monster_test_thrower : monster_test {
+    void    state_Begin();
+    void    state_Combat();
+};
+
+void monster_test_thrower::state_Begin() {
+    animState( ANIMCHANNEL_TORSO, "Torso_Idle", 0 );
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    while( !AI_ACTIVATED ) {
+        waitFrame();
+    }
+    locateEnemy();
+    setState( "state_Combat" );
+}
+
+void monster_test_thrower::state_Combat() {
+    entity obj;
+    obj = chooseObjectToThrow( '-200 -200 -16', '200 200 128', 700, 64, 32 );
+    if ( obj ) {
+        sys.print( "blob_thrower_1 throws " + obj.getName() + "\n" );
+        throwObjectAtEnemy( obj, 700 );
+    }
+    eachFrame {
+        faceEnemy();
+    }
 }
 
 void main() {
