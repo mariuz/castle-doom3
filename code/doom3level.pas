@@ -1278,7 +1278,8 @@ begin
   end;
   { hysteresis: keep the current light unless another is clearly stronger }
   if (FShadowLight >= 0) and (Best <> FShadowLight) and FLights[FShadowLight].Node.IsOn and
-     ((FLights[FShadowLight].OriginArea = PlayerArea) or (FLights[Best].OriginArea <> PlayerArea)) then
+     ((FLights[FShadowLight].OriginArea = PlayerArea) or (Best < 0) or
+      (FLights[Best].OriginArea <> PlayerArea)) then
   begin
     CurrentScore := LightStrengthAt(FShadowLight, P);
     if (CurrentScore > 0.05) and (BestScore < CurrentScore * 1.2) then
