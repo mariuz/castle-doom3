@@ -1220,11 +1220,11 @@ begin
     begin
       CheckEquals(32, S.TriangleCount, 'barrel sides: 16 quads');
       { the first quad faces +X (angle 0..22.5 degrees) }
-      Check(FirstNormal(S).X > 0.9, 'barrel side faces out (counter-clockwise)');
+      Check(FirstNormal(S).X > 0.9, 'barrel side faces out (clockwise in the file)');
       { the seam quad (the 16th) uses u = 1 from VMAD at its second column }
       CheckNear(1, S.TexCoords[15 * 4 + 1].X, 'VMAD overrides the seam UV');
       CheckNear(0, S.TexCoords[15 * 4].X - 15 / 16, 'VMAP UV of the seam quad first column');
-      CheckNear(1, S.TexCoords[2].Y, 'top ring v = 1 (CGE v = LightWave v)');
+      CheckNear(1, S.TexCoords[0].Y, 'top ring v = 1 (CGE v = LightWave v)');
     end;
     S := FindSurface(M, 'textures/test/metal');
     if S <> nil then

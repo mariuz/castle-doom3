@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **LWO models were inside out**: LightWave polygons are clockwise from the front in Doom 3 space too (the `(x, z, y)` swap only relabels the axes), so the port drew the back faces of every LWO model. One-sided panels vanished: the back wall of Mars City Underground's starting elevator was a black hole (mean luma 1.3, dhewm3 25; now 27.6). The test level's generator writes LWO polygons in LightWave's order. Console `pick`: what the view's center ray hits.
 - Lights that aren't light volumes (`r_lightVolumes 0`, the flashlight, the muzzle flash) fade smoothly to zero at their radius with CGE's new `RadiusFalloff` (roadmap CGE change H), instead of a radius twice the light box and a hard edge.
 - Shadows: the level's precomputed shadow volumes (`.proc` `shadowModel "_prelight_<light>"`, from dmap) cast for their light, as invisible shadow-only casters; console `r_prelightShadows`. The `.cm` brush casters and md5 joint boxes are invisible too, instead of black geometry inside walls and bodies (roadmap CGE change G). Test level: a precomputed volume for `light_1`; 522 checks.
 - md5 models whose meshes are closed cast shadow volumes with their own triangles whatever their size, instead of joint boxes (console `r_md5ShadowClosed`): CGE now moves the same shadow caster triangles when only an animated mesh's coordinates change (roadmap CGE change F). Most of the demo's monsters aren't closed and keep the joint boxes.
