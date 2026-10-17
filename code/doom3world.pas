@@ -336,6 +336,9 @@ type
     { the map's AAS for monsters of the player's size (maps/<map>.aas48),
       nil when the map has none: then monsters walk straight }
     FAas: TD3AasFile;
+    { per portal area: the "location" of the info_location spread there
+      ('' = none), see SpreadLocations }
+    FLocations: array of String;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -363,6 +366,7 @@ type
     procedure RemoveEntity(const E: TD3MapEntity);
     procedure UpdateTriggers(const Feet: TVector3);
     procedure SpawnBindings;
+    procedure SpreadLocations;
     procedure UpdateBindings;
     function TransformOf(const AName: String): TCastleTransform;
     function FindBinding(const Child: TCastleTransform): TD3Binding;
@@ -487,6 +491,13 @@ type
     property Actors: specialize TObjectList<TD3Actor> read FActors;
     property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
     property Aas: TD3AasFile read FAas;
+    { The location (an info_location's "location" key, lowercase; '' when
+      none) of a portal area, or of a point in CGE coordinates, like
+      idGameLocal::LocationForPoint. Locations spread from their area
+      through portals, but not through closed doors or
+      info_locationSeparator portals (idGameLocal::SpreadLocations). }
+    function LocationOfArea(const Area: Integer): String;
+    function LocationAt(const P: TVector3): String;
     { Where a monster at Pos (feet, Doom 3 coordinates) heads for to get to
       Goal: the next reachability of its AAS route (idAI::PathToGoal), or
       Goal itself (same area, no AAS, no route). }
@@ -521,7 +532,7 @@ uses
   Math,
   CastleLog, CastleUtils,
   Generics.Defaults,
-  Doom3Files, Doom3Collision;
+  Doom3Files, Doom3Collision, Doom3Portals;
 
 const
   MonsterWalkSpeed = 90;
@@ -739,6 +750,7 @@ end;
 procedure TD3Game.Clear;
 begin
   FreeAndNil(FAas);
+  FLocations := nil;
   FMovers.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
@@ -937,6 +949,114 @@ begin
   end;
 end;
 
+procedure TD3Game.SpreadLocations;
+var
+  Count, I, P, A, Area, Other: Integer;
+  Blocked: array of Boolean;
+  Seen: array of Boolean;
+  Queue: array of Integer;
+  QueueHead: Integer;
+  Assigned_: array of Boolean;
+  E: TD3MapEntity;
+  Mover: TD3Mover;
+  Name: String;
+  Portals: TD3PortalVisibility;
+begin
+  FLocations := nil;
+  if (FMap.MapFile = nil) or (FMap.Portals = nil) then
+    Exit;
+  Portals := FMap.Portals;
+  Count := Portals.AreaCount;
+  SetLength(FLocations, Count);
+  SetLength(Assigned_, Count);
+  { idGameLocal::SpreadLocations runs after spawning: closed doors
+    (PS_BLOCK_ALL) and info_locationSeparator (PS_BLOCK_LOCATION) block }
+  SetLength(Blocked, Portals.PortalCount);
+  for Mover in FMovers do
+    if (Mover.Kind = mkDoor) and (Mover.State = dsClosed) then
+      for P in Mover.Portals do
+        Blocked[P] := True;
+  for E in FMap.MapFile.Entities do
+    if SameText(E.ClassName_, 'info_locationSeparator') then
+    begin
+      P := Portals.FindPortal(Box3DAroundPoint(D3ToCge(E.Origin), 32));
+      if P >= 0 then
+        Blocked[P] := True
+      else
+        WritelnWarning('Doom3World', 'LocationSeparator "%s" didn''t contact a portal', [E.Name]);
+    end;
+  for E in FMap.MapFile.Entities do
+  begin
+    if not SameText(E.ClassName_, 'info_location') then
+      Continue;
+    { idLocationEntity: "location" defaults to the entity name }
+    Name := LowerCase(E.Value('location', E.Name));
+    Area := FMap.AreaAt(D3ToCge(E.Origin));
+    if (Area < 0) or (Area >= Count) then
+    begin
+      WritelnLog('Doom3World', 'Location "%s" is not in a valid area', [E.Name]);
+      Continue;
+    end;
+    { like Doom 3: an area an earlier location reached is an overlap }
+    if Assigned_[Area] then
+    begin
+      WritelnWarning('Doom3World', 'Location "%s" overlaps "%s"', [E.Name, FLocations[Area]]);
+      Continue;
+    end;
+    Assigned_[Area] := True;
+    FLocations[Area] := Name;
+    { flood through the open portals, overwriting what earlier locations
+      reached (like Doom 3) }
+    Seen := nil;
+    SetLength(Seen, Count);
+    Seen[Area] := True;
+    Queue := [Area];
+    QueueHead := 0;
+    while QueueHead < Length(Queue) do
+    begin
+      A := Queue[QueueHead];
+      Inc(QueueHead);
+      for P := 0 to Portals.PortalCount - 1 do
+      begin
+        if Blocked[P] then
+          Continue;
+        if Portals.PortalArea(P, 0) = A then
+          Other := Portals.PortalArea(P, 1)
+        else
+        if Portals.PortalArea(P, 1) = A then
+          Other := Portals.PortalArea(P, 0)
+        else
+          Continue;
+        if (Other < 0) or (Other >= Count) or Seen[Other] then
+          Continue;
+        Seen[Other] := True;
+        Queue := Concat(Queue, [Other]);
+        Assigned_[Other] := True;
+        FLocations[Other] := Name;
+      end;
+    end;
+  end;
+  I := 0;
+  for A := 0 to Count - 1 do
+    if FLocations[A] <> '' then
+      Inc(I);
+  if I > 0 then
+    WritelnLog('Doom3World', 'Locations: %d of %d areas', [I, Count]);
+end;
+
+function TD3Game.LocationOfArea(const Area: Integer): String;
+begin
+  if (Area >= 0) and (Area < Length(FLocations)) then
+    Result := FLocations[Area]
+  else
+    Result := '';
+end;
+
+function TD3Game.LocationAt(const P: TVector3): String;
+begin
+  Result := LocationOfArea(FMap.AreaAt(P));
+end;
+
 function TD3Game.RouteStatus(const EntityName: String): String;
 var
   E: TD3MapEntity;
@@ -1056,6 +1176,7 @@ begin
       if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') then
         SpawnTrigger(E);
     end;
+  SpreadLocations;
   SpawnBindings;
   LoadProfileStep('spawn');
   StartScripts;

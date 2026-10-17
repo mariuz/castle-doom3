@@ -17,6 +17,8 @@ Contents (all made here, MIT licensed like the rest of the project):
   script/doom_main.script  the scriptEvents and defines the test script uses
   maps/testmap.script      the map script: a lift, a turning bar, a trigger call
   models/md5/cameras/test_flyby.md5camera  a camera anim (two shots) for a cinematic
+  efxs/testmap.efx         reverb (EAX) settings: room B by area number, room A
+                           by location name, a default
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1097,6 +1099,11 @@ def map_text():
          'anim': 'flyby', 'target': 'info_player_teleport_1'},
         {'classname': 'info_player_teleport', 'name': 'info_player_teleport_1',
          'origin': '500 200 0', 'angle': '180'},
+        # locations (they spread through portals, not through the closed door)
+        {'classname': 'info_location', 'name': 'info_location_1',
+         'origin': '-100 -100 64', 'location': 'Room_A'},
+        {'classname': 'info_location', 'name': 'info_location_2',
+         'origin': '448 0 64', 'location': 'room_b'},
         # a monster running its AI script, on the balcony
         {'classname': 'monster_test_scripted', 'name': 'blob_scripted_1', 'origin': '840 300 96',
          'angle': '180'},
@@ -1454,6 +1461,11 @@ entityDef trigger_fade {
 	"spawnclass"			"idTrigger_Fade"
 	"fadeColor"				"0 0 0 1"
 	"fadeTime"				"1"
+}
+
+entityDef info_location {
+	"editor_usage"			"Names the areas it spreads to (the HUD location, the reverb)."
+	"spawnclass"			"idLocationEntity"
 }
 
 entityDef info_player_teleport {
@@ -2257,6 +2269,73 @@ def md5camera_text():
     return '\n'.join(out) + '\n'
 
 
+# Reverb settings like the full game's efxs/*.efx (dhewm3's idEFXFile):
+# effects named by a portal area number, a location or "default"; gains in
+# millibels. Room B (area 1) is a big hall, room A (location room_a) small.
+EFX = '''Version 1
+
+reverb "default" {
+	"environment" 0
+	"environment size" 7.5
+	"environment diffusion" 1.0
+	"room" -1000
+	"room hf" -100
+	"room lf" 0
+	"decay time" 1.49
+	"decay hf ratio" 0.83
+	"decay lf ratio" 1.0
+	"reflections" -2602
+	"reflections delay" 0.007
+	"reflections pan" 0 0 0
+	"reverb" 200
+	"reverb delay" 0.011
+	"reverb pan" 0 0 0
+	"echo time" 0.25
+	"echo depth" 0
+	"modulation time" 0.25
+	"modulation depth" 0
+	"air absorption hf" -5
+	"hf reference" 5000
+	"lf reference" 250
+	"room rolloff factor" 0
+	"flags" 0x3f
+}
+
+reverb "room_a" {
+	"environment" 2
+	"environment size" 1.9
+	"environment diffusion" 1.0
+	"room" -1000
+	"room hf" -454
+	"decay time" 0.4
+	"decay hf ratio" 0.83
+	"reflections" -1646
+	"reflections delay" 0.002
+	"reverb" 53
+	"reverb delay" 0.003
+	"flags" 0x1f
+}
+
+reverb "1" {
+	"environment" 26
+	"environment size" 100
+	"environment diffusion" 0.5
+	"room" -1000
+	"room hf" -500
+	"decay time" 10.05
+	"decay hf ratio" 0.23
+	"reflections" -1200
+	"reflections delay" 0.02
+	"reflections pan" 0 0 -1
+	"reverb" -1000
+	"reverb delay" 0.03
+	"reverb pan" 0 1 0
+	"air absorption hf" -5
+	"flags" 0x3f
+}
+'''
+
+
 def main():
     add('script/doom_main.script', DOOM_MAIN_SCRIPT)
     add('models/md5/cameras/test_flyby.md5camera', md5camera_text())
@@ -2270,6 +2349,7 @@ def main():
     add('maps/testmap.map', map_text())
     add('maps/testmap.cm', cm_text())
     add('maps/testmap.aas48', aas_text())
+    add('efxs/testmap.efx', EFX)
     add('materials/test.mtr', MATERIALS)
     add('def/test.def', DEFS)
     add('sound/test.sndshd', SOUNDS)

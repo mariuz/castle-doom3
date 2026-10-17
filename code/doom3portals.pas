@@ -58,6 +58,9 @@ type
       const StartArea: Integer): TD3IntArray;
     { Portals whose polygon center is inside the box (for doors). }
     function PortalsInBox(const Box: TBox3D): TD3IntArray;
+    { The first portal whose bounding box touches Box, -1 when none
+      (idRenderWorld::FindPortal, for info_locationSeparator). }
+    function FindPortal(const Box: TBox3D): Integer;
     function PortalCenter(const I: Integer): TVector3;
     { The area on one side (0 positive, 1 negative) of a portal. }
     function PortalArea(const I, Side: Integer): Integer;
@@ -335,6 +338,16 @@ begin
   for I := 0 to High(FPoints) do
     if Box.Contains(PortalCenter(I)) then
       Result := Concat(Result, [I]);
+end;
+
+function TD3PortalVisibility.FindPortal(const Box: TBox3D): Integer;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FPoints) do
+    if Box.Collides(Box3D(FBoxMin[I], FBoxMax[I])) then
+      Exit(I);
+  Result := -1;
 end;
 
 end.

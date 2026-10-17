@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx;
 
 type
   TViewPlay = class(TCastleView)
@@ -45,6 +45,15 @@ type
     FPlayerFovAxis: TFieldOfViewAxis;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
+    { the map's efxs/<map>.efx (nil when missing), the effect in
+      SoundEngine.Reverb (nil = reverb off), console s_useEAXReverb }
+    FEfx: TD3EfxFile;
+    FReverbEffect: TD3ReverbEffect;
+    FUseReverb: Boolean;
+    procedure LoadReverb;
+    procedure UpdateReverb;
+    procedure SetReverbEffect(const Effect: TD3ReverbEffect; const Why: String);
+    function ReverbStatus: String;
     procedure UpdateCinematic;
     procedure LoadLevel(const AMapName: String);
     procedure SetupSky;
@@ -88,11 +97,13 @@ begin
   DesignUrl := 'castle-data:/gameviewplay.castle-user-interface';
   FDemoCommands := TStringList.Create;
   MapName := 'testmap';
+  FUseReverb := True;
 end;
 
 destructor TViewPlay.Destroy;
 begin
   FDemoCommands.Free;
+  FreeAndNil(FEfx);
   inherited Destroy;
 end;
 
@@ -119,6 +130,7 @@ end;
 procedure TViewPlay.Stop;
 begin
   ReleaseDemoKeys;
+  SetReverbEffect(nil, 'leaving the game');
   FreeAndNil(FGame);
   inherited Stop;
 end;
@@ -214,6 +226,7 @@ begin
   FGame.Armor := 0;
   FGame.Spawn;
   PlaceCamera(Map.SpawnOrigin, Map.SpawnAngle);
+  LoadReverb;
   SetupSky;
   Hud.ShowMessage(AMapName, 4);
   LoadProfileStep('sky');
@@ -307,6 +320,88 @@ begin
   alDeleteEffects(1, @Effect);
 end;
 
+procedure TViewPlay.LoadReverb;
+var
+  Path: String;
+begin
+  SetReverbEffect(nil, 'new map');
+  if FEfx = nil then
+    FEfx := TD3EfxFile.Create;
+  Path := EfxPathForMap(MapName);
+  if FEfx.LoadFromVfs(Path) then
+    WritelnLog('Reverb', 'Found %s: %d effects%s', [Path, FEfx.Effects.Count,
+      Iff(SoundEngine.ReverbSupported, '', ' (no reverb with this sound device)')])
+  else
+  begin
+    WritelnLog('Reverb', 'Missing %s', [Path]);
+    FreeAndNil(FEfx);
+  end;
+end;
+
+procedure TViewPlay.SetReverbEffect(const Effect: TD3ReverbEffect; const Why: String);
+begin
+  if Effect = FReverbEffect then
+    Exit;
+  FReverbEffect := Effect;
+  if Effect <> nil then
+  begin
+    SoundEngine.Reverb.Assign(Effect.Reverb);
+    WritelnLog('Reverb', 'Effect "%s" (%s)', [Effect.Name, Why]);
+  end else
+  begin
+    SoundEngine.Reverb.Enabled := False;
+    WritelnLog('Reverb', 'Off (%s)', [Why]);
+  end;
+end;
+
+{ Like dhewm3: the listener's (camera's) portal area names the effect,
+  else its location, else "default"; when none is in the file, the previous
+  effect stays. }
+procedure TViewPlay.UpdateReverb;
+var
+  Area: Integer;
+  Location: String;
+  Effect: TD3ReverbEffect;
+begin
+  if not FUseReverb then
+  begin
+    SetReverbEffect(nil, 's_useEAXReverb 0');
+    Exit;
+  end;
+  if (FEfx = nil) or (FGame = nil) then
+    Exit;
+  Area := Map.AreaAt(Camera.Translation);
+  Location := FGame.LocationOfArea(Area);
+  Effect := FEfx.Select(Area, Location);
+  if Effect <> nil then
+    SetReverbEffect(Effect, Format('area %d, location "%s"', [Area, Location]));
+end;
+
+function TViewPlay.ReverbStatus: String;
+var
+  Area: Integer;
+  R: TCastleSoundReverb;
+begin
+  Area := Map.AreaAt(Camera.Translation);
+  Result := Format('s_useEAXReverb %s, sound device %s, area %d, location "%s", ', [
+    BoolToStr(FUseReverb, '1', '0'),
+    Iff(SoundEngine.ReverbSupported, 'supports reverb', 'has no reverb'),
+    Area, FGame.LocationOfArea(Area)]);
+  if FEfx = nil then
+    Result := Result + 'no ' + EfxPathForMap(MapName)
+  else
+    Result := Result + Format('%d effects in %s', [FEfx.Effects.Count, EfxPathForMap(MapName)]);
+  if FReverbEffect = nil then
+    Result := Result + ', off'
+  else
+  begin
+    R := FReverbEffect.Reverb;
+    Result := Result + Format(', effect "%s": gain %.3f, decay %.2f s, reflections %.3f after %.3f s, late reverb %.3f after %.3f s, density %.2f, diffusion %.2f', [
+      FReverbEffect.Name, R.Gain, R.DecayTime, R.ReflectionsGain, R.ReflectionsDelay,
+      R.LateReverbGain, R.LateReverbDelay, R.Density, R.Diffusion]);
+  end;
+end;
+
 procedure TViewPlay.HandleConsoleCommand(const Cmd, Args: String);
 var
   Maps: TStringList;
@@ -327,7 +422,7 @@ begin
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
-    Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, quit');
+    Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -526,6 +621,18 @@ begin
   if Cmd = 'skipcinematic' then
     FGame.SkipCinematic
   else
+  if Cmd = 'reverb' then
+  begin
+    S := ReverbStatus;
+    Console.Print(S);
+    WritelnLog('Reverb', S);
+  end else
+  if Cmd = 's_useeaxreverb' then
+  begin
+    if Args <> '' then
+      FUseReverb := Args <> '0';
+    Console.Print('s_useEAXReverb ' + BoolToStr(FUseReverb, '1', '0') + ' (reverb from efxs/<map>.efx)');
+  end else
   if Cmd = 'soundinfo' then
   begin
     S := SoundInfo;
@@ -842,6 +949,7 @@ begin
     FGame.Update(SecondsPassed, Camera.Translation);
   UpdateCinematic;
   Map.UpdateVisibility(Camera);
+  UpdateReverb;
   MuzzleFlash.Exists := FGame.SinceFire < 0.07;
 
   Hud.Health := FGame.Health;

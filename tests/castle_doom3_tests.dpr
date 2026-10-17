@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera,
+  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(59, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(60, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(12, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(13, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(41, MapFile.Entities.Count, 'entity count');
+    CheckEquals(43, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1260,6 +1260,97 @@ begin
   end;
 end;
 
+procedure TestEfx;
+var
+  Efx: TD3EfxFile;
+  E: TD3ReverbEffect;
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+begin
+  CheckEquals('efxs/demo_mars_city1.efx', EfxPathForMap('game/demo_mars_city1'), 'efx path of a map in a directory');
+  CheckEquals('efxs/testmap.efx', EfxPathForMap('testmap'), 'efx path');
+  CheckNear(0.1, MillibelsToGain(-2000, 0, 1), 'millibels to gain', 1e-5);
+  CheckNear(1, MillibelsToGain(500, 0, 1), 'millibels to gain clamped', 1e-5);
+
+  Efx := TD3EfxFile.Create;
+  try
+    Check(Efx.LoadFromVfs('efxs/testmap.efx'), 'load efxs/testmap.efx');
+    CheckEquals(3, Efx.Effects.Count, 'efx effects');
+    CheckEquals(0, Efx.UnknownKeys, 'efx: no unknown keys');
+    E := Efx.Find('default');
+    Check(E <> nil, 'efx: default');
+    if E <> nil then
+    begin
+      Check(E.Reverb.Enabled, 'efx effect enabled');
+      CheckNear(1, E.Reverb.Density, 'efx: size 7.5 -> density 1 (clamped)');
+      CheckNear(0.3162, E.Reverb.Gain, 'efx: room -1000 mB', 1e-4);
+      CheckNear(0.8913, E.Reverb.GainHF, 'efx: room hf -100 mB', 1e-4);
+      CheckNear(0.05, E.Reverb.ReflectionsGain, 'efx: reflections -2602 mB', 1e-4);
+      CheckNear(1.2589, E.Reverb.LateReverbGain, 'efx: reverb 200 mB', 1e-4);
+      CheckNear(0.9943, E.Reverb.AirAbsorptionGainHF, 'efx: air absorption hf -5 mB', 1e-4);
+      CheckNear(1.49, E.Reverb.DecayTime, 'efx: decay time');
+      CheckNear(5000, E.Reverb.HFReference, 'efx: hf reference');
+      Check(E.Reverb.DecayHFLimit, 'efx: flags 0x3f -> decay hf limit');
+    end;
+    E := Efx.Find('ROOM_A');
+    Check(E <> nil, 'efx: find is case-insensitive');
+    if E <> nil then
+    begin
+      CheckNear(1.9 * 1.9 * 1.9 / 16, E.Reverb.Density, 'efx: size 1.9 -> density size^3/16');
+      Check(not E.Reverb.DecayHFLimit, 'efx: flags 0x1f -> no decay hf limit');
+    end;
+    E := Efx.Find('1');
+    if E <> nil then
+    begin
+      CheckNear(10.05, E.Reverb.DecayTime, 'efx "1": decay time');
+      CheckNear(0.5, E.Reverb.Diffusion, 'efx "1": diffusion');
+      CheckVec3(Vector3(0, 0, -1), E.Reverb.ReflectionsPan, 'efx "1": reflections pan');
+      CheckVec3(Vector3(0, 1, 0), E.Reverb.LateReverbPan, 'efx "1": reverb pan');
+    end;
+    { dhewm3's order: the area number, then the location, then "default" }
+    CheckEquals('1', Efx.Select(1, 'room_b').Name, 'efx select: by area number first');
+    CheckEquals('room_a', Efx.Select(0, 'room_a').Name, 'efx select: by location');
+    CheckEquals('default', Efx.Select(0, 'nowhere').Name, 'efx select: default');
+    CheckEquals('default', Efx.Select(-1, '').Name, 'efx select: outside the areas');
+
+    { keys without quotes, and other versions }
+    Check(Efx.LoadFromText('Version 1 reverb "x" {' + LineEnding +
+      'room hf -2000' + LineEnding + 'decay time 2.5' + LineEnding + '}'), 'efx: unquoted keys');
+    CheckEquals(1, Efx.Effects.Count, 'efx: one effect');
+    if Efx.Effects.Count = 1 then
+    begin
+      CheckNear(0.1, Efx.Effects[0].Reverb.GainHF, 'efx: unquoted "room hf"', 1e-4);
+      CheckNear(2.5, Efx.Effects[0].Reverb.DecayTime, 'efx: unquoted "decay time"');
+    end;
+    Check(Efx.Select(0, '') = nil, 'efx select: nothing without a default');
+    Check(not Efx.LoadFromText('Version 2 reverb "x" { }'), 'efx: unknown version');
+    CheckEquals(0, Efx.Effects.Count, 'efx: no effects from an unknown version');
+  finally
+    Efx.Free;
+  end;
+
+  { locations spread through the doorway's portal only while the door is
+    open; it is closed when the map spawns }
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for locations');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    CheckEquals('room_a', Game.LocationOfArea(0), 'room A location (lowercase)');
+    CheckEquals('room_b', Game.LocationOfArea(1), 'room B location (the closed door blocks room A''s)');
+    CheckEquals('room_a', Game.LocationAt(D3ToCge(Vector3(-160, -160, 40))), 'location at the player start');
+    CheckEquals('', Game.LocationOfArea(-1), 'no location outside');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestTriggers;
 var
   World: TCastleRootTransform;
@@ -2196,6 +2287,7 @@ begin
   TestGuis;
   TestShadowCasters;
   TestTriggers;
+  TestEfx;
   TestMovers;
   TestScriptVM;
   TestMapScripts;

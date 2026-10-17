@@ -53,6 +53,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | Entity activation: `trigger_once` / `trigger_multiple` / `trigger_hurt` touched by the player (volumes from the `.cm`; `delay`, `wait`, `triggerFirst`, `noTouch`), `trigger_relay` / `trigger_count`, `target` chains switching lights on / off, starting speakers, showing hidden entities and monsters, waking dormant monsters, opening / unlocking doors, `func_remove` | `TD3Game.Activate` / `ActivateTargets`, a queue of delayed firings; lights through `TDoom3Map.SetLightOn`, hidden entities through `TCastleTransform.Exists` |
 | `func_door` (opens when you come near, `movedir` incl. up / down, `lip`, `speed`, `time`, `wait`, `locked`, `snd_open` / `snd_close`, travel from the rotated bounds, `team`s opening together, `target_lock`), `func_static`, `func_rotating` (`start_on`, toggled by activation), `bind` (brush entities and models following a mover), entityDef spawn arguments as defaults | brush entity scenes moved by `TD3Mover`; `TCastleSoundSource` behaviors for door sounds |
 | `speaker` entities and sound shaders (`.sndshd`: files, `minDistance` / `maxDistance` in meters, `volume` in dB, `looping`) | `TCastleSound` (`ReferenceDistance`, `MaxDistance`, linear distance model) on a `TCastleSoundSource` |
+| Reverb like dhewm3: the map's `efxs/<map>.efx` EAX reverb settings, chosen by the listener's area number, location (`info_location`, spread through portals up to closed doors and `info_locationSeparator`s) or `"default"`. Console `reverb`, `s_useEAXReverb [0\|1]`, `soundinfo` | `Doom3Efx`, CGE's `SoundEngine.Reverb` (OpenAL EFX) |
 | Player: 68 units eye height, 16 radius, walk 140 / run 220, 16-18 unit steps, crouch, jump | `TCastleWalkNavigation` (gravity, `PreferredHeight`, `ClimbHeight`, `RunMultiplier`, mouse look), collisions with the area scenes and brush entities |
 | Monsters (`monster_*` entityDefs with md5 models) | a tiny idAI: sight checks with `WorldSegmentCollision`, chase with wall sliding, floor following with `WorldRayCast`, melee, death |
 | HUD, console, menu | `TDoom3Hud`, `TDoom3Console` (registered components), a map list from the PK4s |
@@ -80,7 +81,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 
