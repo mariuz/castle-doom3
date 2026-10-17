@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(20, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(23, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(47, MapFile.Entities.Count, 'entity count');
+    CheckEquals(49, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1653,7 +1653,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(27, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(29, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1828,7 +1828,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for actors');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(5, Game.Actors.Count, 'five actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1, blob_dodger_1)');
+    CheckEquals(6, Game.Actors.Count, 'six actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1, blob_dodger_1, blob_thrower_1)');
     A := nil;
     for I := 0 to Game.Actors.Count - 1 do
       if Game.Actors[I].Model.Entity.Name = 'test_walker_1' then
@@ -2480,6 +2480,140 @@ begin
   end;
 end;
 
+procedure TestFlyingRouteAndThrows;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A, Flyer, Thrower: TD3Actor;
+  M: TD3Monster;
+  Mov: TD3Moveable;
+  I, Health: Integer;
+  Eye, Pos, Waypoint, Start: TVector3;
+  Route: TD3Route;
+  RemoveMe: TRemoveType;
+  InRoomA, Bounced: Boolean;
+  MaxZ: Single;
+
+  procedure Step(const Seconds: Single);
+  begin
+    Game.Update(Seconds, Eye);
+    RemoveMe := rtNone;
+    Map.Update(Seconds, RemoveMe);
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for flying routes and throws');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Flyer := nil;
+    Thrower := nil;
+    for A in Game.Actors do
+      if A.Model.Entity.Name = 'blob_flyer_1' then
+        Flyer := A
+      else
+      if A.Model.Entity.Name = 'blob_thrower_1' then
+        Thrower := A
+      else
+        A.Thinking := False;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    Check((Flyer <> nil) and (Thrower <> nil), 'blob_flyer_1 and blob_thrower_1 run their scripts');
+    if (Flyer = nil) or (Thrower = nil) then
+      Exit;
+
+    { the flying route (idAASLocal::FlyPathToGoal): from room B to room A,
+      the wall between them is in the way: first the doorway }
+    Check(not Game.FlyPathClear(Vector3(620, -100, 60), Vector3(-100, -200, 0), 16, 72),
+      'no straight flight through the wall between the rooms');
+    Route := Default(TD3Route);
+    Waypoint := Game.FlyRouteWaypoint(Route, Vector3(620, -100, 60), Vector3(-100, -200, 0), 16, 72);
+    Check(Route.Found and Route.Fly, 'a flying AAS route from room B to room A');
+    Check((Waypoint.X > 150) and (Waypoint.X < 320) and (Abs(Waypoint.Y) < 60),
+      Format('it heads for the doorway first (%s)', [Waypoint.ToString]));
+    Waypoint := Game.FlyRouteWaypoint(Route, Vector3(620, -100, 60), Vector3(420, -250, 0), 16, 72);
+    CheckVec3(Vector3(420, -250, 0), Waypoint, 'in the same area: straight to the goal');
+
+    { the flyer follows it into room A (the door opens for it) }
+    Eye := D3ToCge(Vector3(-100, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Activate(Game.FindEntity('blob_flyer_1'));
+    InRoomA := False;
+    for I := 1 to 300 do
+    begin
+      Step(0.1);
+      if CgeToD3(Flyer.Model.Holder.Translation).X < 240 then
+      begin
+        InRoomA := True;
+        Break;
+      end;
+    end;
+    Pos := CgeToD3(Flyer.Model.Holder.Translation);
+    Check(InRoomA, Format('the flyer came around the wall into room A (%s)', [Pos.ToString]));
+    Flyer.Thinking := False;
+    Flyer.Model.Holder.Exists := False;
+
+    { a moveable lies still until something moves it, then falls, bounces
+      and rests on the floor }
+    CheckEquals(1, Game.Moveables.Count, 'one moveable (moveable_test_barrel, spawnclass idMoveable)');
+    if Game.Moveables.Count <> 1 then
+      Exit;
+    Mov := Game.Moveables[0];
+    Start := Mov.Origin;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 5 do
+      Step(0.1);
+    Check(Mov.AtRest and TVector3.Equals(Start, Mov.Origin, 0.01), 'the barrel lies still');
+    Mov.Velocity := Vector3(0, 0, 400);
+    Mov.AtRest := False;
+    MaxZ := 0;
+    Bounced := False;
+    for I := 1 to 60 do
+    begin
+      Step(0.05);
+      MaxZ := Max(MaxZ, Mov.Origin.Z);
+      if (I > 10) and (Mov.Velocity.Z > 0) then
+        Bounced := True;
+    end;
+    Check(MaxZ > 50, Format('pushed up, it rose (%.1f)', [MaxZ]));
+    Check(Bounced, 'it bounced on the floor');
+    Check(Mov.AtRest, 'it came to rest');
+    CheckNear(Start.Z, Mov.Origin.Z, 'on the floor again', 2);
+
+    { thrown hard with long frames (8 FPS) into room B's pillar: it bounces
+      and rests on the floor, not in it }
+    Eye := D3ToCge(Vector3(-100, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.ThrowMoveable(Mov, Vector3(0, -700, 200));
+    for I := 1 to 40 do
+      Step(0.12);
+    Check(Mov.AtRest, 'the hard-thrown barrel came to rest');
+    CheckNear(Start.Z, Mov.Origin.Z, 'on the floor, not in it', 2);
+    Check(Mov.Origin.Y > -232 + 18 - 1, Format('stopped by the pillar (y %.1f)', [Mov.Origin.Y]));
+    Mov.Brush.Scene.Translation := D3ToCge(Start);
+    Mov.CanDamage := False;
+    Mov.DamageUntil := 0;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+
+    { the vagary's throw: blob_thrower_1 picks the barrel and throws it at
+      the player, its damage on while it flies }
+    Health := Game.Health;
+    Game.Activate(Game.FindEntity('blob_thrower_1'));
+    for I := 1 to 40 do
+      Step(0.05);
+    Check(not TVector3.Equals(Start, Mov.Origin, 1), 'the barrel was thrown');
+    Check(Game.Health < Health, Format('the thrown barrel hit the player (%d -> %d)', [Health, Game.Health]));
+    Check(Health - Game.Health <= 12, 'by at most damage_test_moveable (12)');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2672,6 +2806,7 @@ begin
   TestRangedAttacks;
   TestFlying;
   TestDodgesAndCombatNodes;
+  TestFlyingRouteAndThrows;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
