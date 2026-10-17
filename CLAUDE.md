@@ -81,6 +81,6 @@ Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (522 che
 - The bash tool mangles backslashes in heredocs (a backslash before `t` becomes a tab): write Windows paths into Pascal sources with the file editor or a script file.
 - Locals named like `TCastleTransform` properties (`Center`, `Up`, `Direction`, `World`...) clash inside `TDoom3Map` methods.
 - `TCastleSoundSource` lives in `CastleBehaviors`; `Container.Pressed.KeyUp` has an `out` key string.
-- CGE cuts a light off hard at its `Radius`; keep attenuation low there (see `BuildLights`).
+- CGE cuts a light off hard at its `Radius`, unless `RadiusFalloff` (CGE change H, `doom3-port`) fades it to zero there: use it for lights that aren't light volumes (see `BuildLights`).
 - One X3D node must not be in two scenes: `MaterialAppearance` creates fresh nodes each call, textures are shared by URL.
 - Doom 3 decls: the first definition wins; names are lowercase with `/`. `ReadImageProgram` normalizes programs without spaces (they are also the `d3img:` URL paths).
