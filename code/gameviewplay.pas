@@ -79,6 +79,7 @@ uses
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
   Doom3Sampler,
+  CastleShapes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
@@ -318,13 +319,14 @@ var
   Dist: Single;
   Gui: TD3Gui;
   GuiImage: TCastleImage;
+  Hit: TRayCollision;
 begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
-    Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1],');
+    Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
@@ -468,6 +470,28 @@ begin
       end;
     Console.Print(S);
     WritelnLog('Ent', S);
+  end else
+  if Cmd = 'pick' then
+  begin
+    { what the view's center ray hits first (pickable, existing scenes,
+      also ones hidden by portal visibility) }
+    Hit := Map.World.WorldRay(Camera.Translation, Camera.Direction);
+    try
+      if (Hit = nil) or (Hit.Count = 0) then
+        S := 'nothing'
+      else
+      begin
+        S := Format('%s (visible %s) at %s, distance %.1f', [Hit[0].Item.Name,
+          BoolToStr(Hit[0].Item.Visible, '1', '0'), CgeToD3(Hit[0].Point).ToString, Hit.Distance]);
+        if Hit[0].Triangle <> nil then
+          S := S + Format(', shape %s, geometry %s', [Hit[0].Triangle^.Shape.Node.X3DName,
+            Hit[0].Triangle^.Shape.Geometry.X3DName]);
+        for I := 1 to Hit.Count - 1 do
+          S := S + ' < ' + Hit[I].Item.Name;
+      end;
+    finally FreeAndNil(Hit) end;
+    Console.Print(S);
+    WritelnLog('Pick', S);
   end else
   if Cmd = 'activate' then
   begin

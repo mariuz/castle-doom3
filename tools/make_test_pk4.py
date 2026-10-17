@@ -1716,16 +1716,17 @@ def lwo_vx(i):
 
 def make_lwo(points, polys, uvs, vmad, surfaces):
     """points: Doom 3 coordinates; polys: (surface index, [point indexes]) with
-    the corners counter-clockwise seen from the front in Doom 3 space (which
-    is LightWave's clockwise after the y/z swap); uvs: per point (u, v);
-    vmad: (point, poly, (u, v)) overrides."""
+    the corners counter-clockwise seen from the front in Doom 3 space; they
+    are written reversed, clockwise from the front, as LightWave stores them
+    (its y/z swap with Doom 3 only relabels the axes, it isn't a mirror);
+    uvs: per point (u, v); vmad: (point, poly, (u, v)) overrides."""
     tags = b''.join(lwo_str(n) for n in surfaces)
     layr = struct.pack('>HH', 0, 0) + struct.pack('>fff', 0, 0, 0) + lwo_str('test')
     # Doom 3 reads LightWave points as (x, z, y)
     pnts = b''.join(struct.pack('>fff', p[0], p[2], p[1]) for p in points)
     vmap = b'TXUV' + struct.pack('>H', 2) + lwo_str('txuv') + b''.join(
         lwo_vx(i) + struct.pack('>ff', u, v) for i, (u, v) in enumerate(uvs))
-    pols = b'FACE' + b''.join(struct.pack('>H', len(vs)) + b''.join(lwo_vx(v) for v in vs)
+    pols = b'FACE' + b''.join(struct.pack('>H', len(vs)) + b''.join(lwo_vx(v) for v in reversed(vs))
                               for _, vs in polys)
     ptag = b'SURF' + b''.join(lwo_vx(i) + struct.pack('>H', srf) for i, (srf, _) in enumerate(polys))
     vmad_data = b'TXUV' + struct.pack('>H', 2) + lwo_str('txuv') + b''.join(

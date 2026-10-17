@@ -7,8 +7,10 @@
   triangles counter-clockwise from the front.
 
   - LWO2 is left-handed and Y up; Doom 3 reads points as (x, z, y), which
-    mirrors them, so its polygons end up counter-clockwise seen from the
-    front. Texture t = 1 - v, so CGE's v = 1 - t is the file's v. VMAD
+    only relabels the axes (right, forward, up), so polygons stay clockwise
+    seen from the front, as LightWave stores them and as Doom 3 draws them:
+    the triangle fans are reversed. Texture t = 1 - v, so CGE's v = 1 - t is
+    the file's v. VMAD
     entries override UVs per polygon (texture seams). The polygon's surface
     tag is the material name.
   - ASE is right-handed and Z up like Doom 3; Doom flips faces (A, C, B) to
@@ -443,7 +445,8 @@ begin
       R.Limit := Length(R.Data);
     end;
 
-    { polygons -> triangle fans per surface }
+    { polygons -> triangle fans per surface, reversed: counter-clockwise
+      from the front }
     for I := 0 to High(Polys) do
     begin
       if (Polys[I].Tag < 0) or (Polys[I].Tag >= Tags.Count) or (Length(Polys[I].Verts) < 3) then
@@ -471,8 +474,8 @@ begin
       for J := 1 to High(Polys[I].Verts) - 1 do
       begin
         Surf.Indexes[K] := Base;
-        Surf.Indexes[K + 1] := Base + J;
-        Surf.Indexes[K + 2] := Base + J + 1;
+        Surf.Indexes[K + 1] := Base + J + 1;
+        Surf.Indexes[K + 2] := Base + J;
         Inc(K, 3);
       end;
     end;
