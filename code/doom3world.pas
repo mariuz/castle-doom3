@@ -335,6 +335,21 @@ type
     destructor Destroy; override;
   end;
 
+  { A combat node (idCombatNode, ai_attackcone): a spot a monster that
+    targets it can attack from, when its enemy is in the node's cone:
+    from MinDist to MaxDist along its facing, within fov, between
+    MinHeight and MaxHeight. Doom 3 coordinates. }
+  TD3CombatNode = class
+    Entity: TD3MapEntity;
+    { origin + offset }
+    Origin, Forward, ConeLeft, ConeRight: TVector3;
+    MinDist, MaxDist, MinHeight, MaxHeight: Single;
+    { start_off; activation toggles it; markUsed with use_once sets it }
+    Disabled, UseOnce: Boolean;
+    { idCombatNode::EntityInView for the player with its feet at Feet }
+    function PlayerInView(const Feet: TVector3): Boolean;
+  end;
+
   { A light fading in or out (idLight::FadeIn / FadeOut). }
   TD3LightFade = record
     Light: Integer;
@@ -391,6 +406,7 @@ type
     { per portal area: the "location" of the info_location spread there
       ('' = none), see SpreadLocations }
     FLocations: array of String;
+    FCombatNodes: specialize TObjectList<TD3CombatNode>;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -419,6 +435,8 @@ type
     procedure UpdateTriggers(const Feet: TVector3);
     procedure SpawnBindings;
     procedure SpreadLocations;
+    procedure SpawnCombatNode(const E: TD3MapEntity);
+    function CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
     procedure UpdateBindings;
     function TransformOf(const AName: String): TCastleTransform;
     function FindBinding(const Child: TCastleTransform): TD3Binding;
@@ -564,6 +582,7 @@ type
     property Actors: specialize TObjectList<TD3Actor> read FActors;
     property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
     property Aas: TD3AasFile read FAas;
+    property CombatNodes: specialize TObjectList<TD3CombatNode> read FCombatNodes;
     { The location (an info_location's "location" key, lowercase; '' when
       none) of a portal area, or of a point in CGE coordinates, like
       idGameLocal::LocationForPoint. Locations spread from their area
@@ -581,6 +600,9 @@ type
       def_splash_damage, fuse...) flying from From (CGE coordinates) with
       Velocity; nil if there's no such def. }
     function SpawnProjectile(const DefName, Owner: String; const From, Velocity: TVector3): TD3Projectile;
+    { idAI::Event_TestAnimMove: room for the anim's movement (turned to
+      Yaw) from where it stands: nothing in the way, no ledge }
+    function AnimMoveClear(const A: TD3Actor; const AnimName: String; const Yaw: Single): Boolean;
     { the script's kill: dies like from a shot (not counted as a kill) }
     procedure KillActor(const A: TD3Actor);
     { idAI::CreateProjectile: the monster's def_projectile, held at the
@@ -840,6 +862,7 @@ begin
   FAnimated := specialize TObjectList<TD3Animated>.Create(True);
   FActors := specialize TObjectList<TD3Actor>.Create(True);
   FProjectiles := specialize TObjectList<TD3Projectile>.Create(True);
+  FCombatNodes := specialize TObjectList<TD3CombatNode>.Create(True);
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
@@ -871,6 +894,7 @@ begin
   FAnimated.Free;
   FActors.Free;
   FProjectiles.Free;
+  FCombatNodes.Free;
   FScriptSounds.Free;
   FSoundSources.Free;
   FSoundTransforms.Free;
@@ -888,6 +912,7 @@ procedure TD3Game.Clear;
 begin
   FreeAndNil(FAas);
   FLocations := nil;
+  FCombatNodes.Clear;
   FMovers.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
@@ -1084,6 +1109,98 @@ begin
     if Sqr(P.X - Pos.X) + Sqr(P.Y - Pos.Y) > Sqr(Reached) then
       Exit(P);
   end;
+end;
+
+function TD3CombatNode.PlayerInView(const Feet: TVector3): Boolean;
+var
+  Dir: TVector3;
+  Dist: Single;
+begin
+  { the player's box is 74 high on its feet }
+  if (Feet.Z + 74 < MinHeight) or (Feet.Z >= MaxHeight) then
+    Exit(False);
+  Dir := Feet - Origin;
+  Dist := TVector3.DotProduct(Dir, Forward);
+  Result := (Dist >= MinDist) and (Dist <= MaxDist) and
+    (TVector3.DotProduct(Dir, ConeLeft) >= 0) and (TVector3.DotProduct(Dir, ConeRight) >= 0);
+end;
+
+procedure TD3Game.SpawnCombatNode(const E: TD3MapEntity);
+var
+  N: TD3CombatNode;
+  Fov, Yaw, Height: Single;
+
+  function YawDir(const Deg: Single): TVector3;
+  begin
+    Result := Vector3(Cos(DegToRad(Deg)), Sin(DegToRad(Deg)), 0);
+  end;
+
+begin
+  { idCombatNode::Spawn }
+  N := TD3CombatNode.Create;
+  N.Entity := E;
+  N.MinDist := E.FloatValue('min', 0);
+  N.MaxDist := E.FloatValue('max', 0);
+  Height := E.FloatValue('height', 0);
+  Fov := E.FloatValue('fov', 60);
+  N.Origin := E.Origin + E.VectorValue('offset', TVector3.Zero);
+  N.MinHeight := N.Origin.Z - Height * 0.5;
+  N.MaxHeight := N.MinHeight + Height;
+  Yaw := E.Angle;
+  N.Forward := YawDir(Yaw);
+  N.ConeLeft := YawDir(Yaw + Fov * 0.5 - 90);
+  N.ConeRight := YawDir(Yaw - Fov * 0.5 + 90);
+  N.Disabled := E.BoolValue('start_off');
+  N.UseOnce := E.BoolValue('use_once');
+  FCombatNodes.Add(N);
+end;
+
+function TD3Game.CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
+begin
+  for Result in FCombatNodes do
+    if Result.Entity = E then
+      Exit;
+  Result := nil;
+end;
+
+function TD3Game.AnimMoveClear(const A: TD3Actor; const AnimName: String; const Yaw: Single): Boolean;
+var
+  Delta, Move, From, Center, Dir, FloorStart: TVector3;
+  Radius, Height, Len, FloorDist: Single;
+begin
+  if not A.Model.Instance.HasAnim(AnimName) then
+    Exit(False);
+  Delta := A.Model.Instance.AnimMovementDelta(A.Model.Instance.ResolveAnim(AnimName));
+  { model space (x forward) turned to Yaw, Doom 3 coordinates }
+  Move := Vector3(Delta.X * Cos(DegToRad(Yaw)) - Delta.Y * Sin(DegToRad(Yaw)),
+    Delta.X * Sin(DegToRad(Yaw)) + Delta.Y * Cos(DegToRad(Yaw)), 0);
+  Len := Move.Length;
+  if Len < 0.5 then
+    Exit(True);
+  if A.Monster <> nil then
+  begin
+    Radius := A.Monster.Radius;
+    Height := A.Monster.Height;
+  end else
+  begin
+    Radius := 16;
+    Height := 72;
+  end;
+  { idAI::PredictPath: blocked (SE_BLOCKED) or off a ledge
+    (SE_ENTER_LEDGE_AREA: the floor drops more than a step) }
+  From := A.Model.Holder.Translation;
+  Center := From + Vector3(0, Height / 2, 0);
+  Dir := D3ToCge(Move / Len);
+  if FMap.World.WorldSegmentCollision(Center, Center + D3ToCge(Move) + Dir * Radius) then
+    Exit(False);
+  if A.MoveType <> MoveTypeFly then
+  begin
+    FloorStart := From + D3ToCge(Move) + Vector3(0, 24, 0);
+    if (FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist) = nil) or
+       (FloorDist > 24 + 18) then
+      Exit(False);
+  end;
+  Result := True;
 end;
 
 procedure TD3Game.SpreadLocations;
@@ -1482,7 +1599,10 @@ begin
         SpawnSpeaker(E)
       else
       if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') then
-        SpawnTrigger(E);
+        SpawnTrigger(E)
+      else
+      if E.Value('spawnclass') = 'idCombatNode' then
+        SpawnCombatNode(E);
     end;
   SpreadLocations;
   SpawnBindings;
@@ -1712,6 +1832,13 @@ begin
       StopCamera
     else
       StartCamera(E);
+    Exit;
+  end;
+  if SpawnClass = 'idCombatNode' then
+  begin
+    { idCombatNode::Event_Activate toggles it }
+    if CombatNodeOf(E) <> nil then
+      CombatNodeOf(E).Disabled := not CombatNodeOf(E).Disabled;
     Exit;
   end;
   if SpawnClass = 'idTrigger_Fade' then
@@ -2327,6 +2454,7 @@ var
   DamageDef: TStringList;
   I: Integer;
   Targets: array of Integer;
+  Node: TD3CombatNode;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -2488,7 +2616,7 @@ begin
         else
           EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
       end;
-    'canReachEnemy', 'enemyInCombatCone', 'canSee': EventResult := D3FloatValue(1);
+    'canReachEnemy', 'canSee': EventResult := D3FloatValue(1);
     'canHitEnemyFromAnim':
       EventResult := D3FloatValue(Ord(A.HasEnemy and ActorCanSeePlayer(A, False)));
     'entityInAttackCone':
@@ -2505,8 +2633,65 @@ begin
       EventResult := D3FloatValue(A.Model.Instance.AnimDurationOf(
         A.Model.Instance.ResolveAnim(D3ValueToString(Args[1]))));
     { no dodging, leaping, combat nodes or touching yet }
-    'touches', 'testAnimMove', 'testAnimMoveTowardEnemy': EventResult := D3FloatValue(0);
-    'getCombatNode', 'findEnemyInCombatNodes', 'getClosestHiddenTarget': EventResult := D3EntityValue(0);
+    'touches': EventResult := D3FloatValue(0);
+    'getClosestHiddenTarget': EventResult := D3EntityValue(0);
+    { dodges: room for an anim's movement (evade_left...), turned to the
+      ideal yaw, or towards the enemy }
+    'testAnimMove':
+      EventResult := D3FloatValue(Ord(AnimMoveClear(A, D3ValueToString(Args[0]), A.IdealYaw)));
+    'testAnimMoveTowardEnemy':
+      if A.HasEnemy then
+      begin
+        Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
+        EventResult := D3FloatValue(Ord(AnimMoveClear(A, D3ValueToString(Args[0]),
+          RadToDeg(ArcTan2(Pos.Y, Pos.X)))));
+      end else
+        EventResult := D3FloatValue(0);
+    { combat nodes (idCombatNode) among its targets }
+    'getCombatNode':
+      begin
+        { the closest one closer than the enemy, with the enemy in its cone }
+        EventResult := D3EntityValue(0);
+        if A.HasEnemy and not PlayerDead then
+        begin
+          Pos := CgeToD3(A.Model.Holder.Translation);
+          D := (Pos - CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))).Length;
+          for I := 0 to A.Model.Entity.Pairs.Count - 1 do
+            if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
+            begin
+              Node := CombatNodeOf(FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]));
+              if (Node <> nil) and not Node.Disabled and
+                 Node.PlayerInView(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))) and
+                 ((Pos - Node.Entity.Origin).Length < D) then
+              begin
+                D := (Pos - Node.Entity.Origin).Length;
+                EventResult := D3EntityValue(EntityHandle(Node.Entity));
+              end;
+            end;
+        end;
+      end;
+    'findEnemyInCombatNodes':
+      begin
+        EventResult := D3EntityValue(0);
+        if not NoTarget and not PlayerDead then
+          for I := 0 to A.Model.Entity.Pairs.Count - 1 do
+            if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
+            begin
+              Node := CombatNodeOf(FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]));
+              if (Node <> nil) and not Node.Disabled and
+                 Node.PlayerInView(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))) then
+              begin
+                EventResult := D3EntityValue(PlayerHandle);
+                Break;
+              end;
+            end;
+      end;
+    'enemyInCombatCone':
+      begin
+        Node := CombatNodeOf(HandleEntity(Args[0].E));
+        EventResult := D3FloatValue(Ord(A.HasEnemy and not PlayerDead and (Node <> nil) and
+          Node.PlayerInView(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)))));
+      end;
     'getJumpVelocity': EventResult := D3VectorValue(TVector3.Zero);
     'setLinearVelocity':
       ;
@@ -2945,7 +3130,8 @@ begin
 
     if not A.Thinking then
     begin
-      { stopThinking: its threads end }
+      { stopThinking: its threads end; its anims play in place again }
+      A.Model.Instance.LockOrigin := False;
       A.Main.State := tsDone;
       for Ch := Low(A.Channels) to High(A.Channels) do
         A.Channels[Ch].Thread.State := tsDone;
@@ -2995,7 +3181,9 @@ begin
       joint stays put: the entity moves instead); flying (idAI::FlyMove);
       static and dead ones stay }
     Pos := CgeToD3(A.Model.Holder.Translation);
-    A.Model.Instance.LockOrigin := A.Moving or (A.MoveType = MoveTypeFly);
+    { monsters standing still move by their animation (dodges, idAI's
+      AnimMove): the mesh's origin stays, the entity moves by its delta }
+    A.Model.Instance.LockOrigin := A.Moving or (A.MoveType = MoveTypeFly) or (A.Monster <> nil);
     if A.MoveType = MoveTypeFly then
       UpdateFlying(A, SecondsPassed)
     else
@@ -3003,6 +3191,14 @@ begin
     begin
       A.Moving := False;
       A.ChaseEnemy := False;
+    end else
+    if not A.Moving and (A.Monster <> nil) and not A.Model.Instance.LastOriginDelta.IsZero then
+    begin
+      Dir := A.Model.Instance.LastOriginDelta;
+      Dir := Vector3(Dir.X * Cos(DegToRad(A.Yaw)) - Dir.Y * Sin(DegToRad(A.Yaw)),
+        Dir.X * Sin(DegToRad(A.Yaw)) + Dir.Y * Cos(DegToRad(A.Yaw)), 0);
+      A.Model.Holder.Translation := StepTowards(A.Model.Holder.Translation, D3ToCge(Dir),
+        A.Monster.Radius, A.Monster.Height);
     end else
     if A.Moving then
     begin
@@ -3061,6 +3257,8 @@ begin
       A.Yaw := A.IdealYaw
     else
       A.Yaw := A.Yaw + Sign(Delta) * Turn;
+    { each anim delta moves it once }
+    A.Model.Instance.LastOriginDelta := TVector3.Zero;
     if A.MoveType = MoveTypeFly then
       SetD3Rotation(A.Model.Holder, AnglesMatrix(Vector3(A.FlyPitch, A.Yaw, A.FlyRoll)))
     else
@@ -4853,6 +5051,13 @@ begin
     Exit(False);
   if (FindActor(Target) <> nil) and ActorEvent(FindActor(Target), Thread, N, Args, EventResult) then
     Exit(True);
+  if (N = 'markUsed') and (CombatNodeOf(E) <> nil) then
+  begin
+    { idCombatNode::Event_MarkUsed: use_once nodes turn off }
+    if CombatNodeOf(E).UseOnce then
+      CombatNodeOf(E).Disabled := True;
+    Exit(True);
+  end;
   if N = 'randomPath' then
   begin
     { idEntity::Event_RandomPath: one of its targets that is a path_* }

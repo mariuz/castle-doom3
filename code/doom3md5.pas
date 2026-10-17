@@ -141,6 +141,10 @@ type
     FAnim: TD3Md5Anim;
     FAnimTime: Single;
     FLoop: Boolean;
+    { the origin joint's position after the last Update (before
+      LockOrigin), for LastOriginDelta }
+    FPrevOrigin: TVector3;
+    FHasPrevOrigin: Boolean;
     FAnims: TStringList;
     { shadow casting boxes, one per joint, for meshes too big to cast }
     FHullJoints: array of Integer;
@@ -164,11 +168,19 @@ type
       (Doom 3 coordinates): the game moves the entity instead, like idAI
       moving by the animation's delta. }
     LockOrigin: Boolean;
+    { How far the origin joint moved in X / Y (Doom 3 model space) during
+      the last Update: what an entity moved by its animation moves
+      (idAnimator::GetDelta). }
+    LastOriginDelta: TVector3;
     { The decl's anim for a name: itself, or one of name1, name2... at
       random (idDeclModelDef::GetAnim). '' if none. }
     function ResolveAnim(const AName: String): String;
     { Seconds of an anim (0 if there's no such anim). }
     function AnimDurationOf(const AName: String): Single;
+    { How far an anim's origin joint moves from its first to its last frame
+      (Doom 3 model space; zero if there's no such anim):
+      idAnimator::TotalMovementDelta. }
+    function AnimMovementDelta(const AName: String): TVector3;
     { Anims: anim name -> md5anim path (from a model decl). }
     constructor Create(const AModel: TD3Md5Model; const AAnims: TStrings;
       const SkinName: String = '');
@@ -1213,6 +1225,28 @@ begin
     Result := A.Duration;
 end;
 
+function TD3Md5Instance.AnimMovementDelta(const AName: String): TVector3;
+var
+  Path: String;
+  A: TD3Md5Anim;
+  First, Last: TD3JointArray;
+begin
+  Result := TVector3.Zero;
+  Path := FAnims.Values[LowerCase(AName)];
+  if (Path = '') and (ExtractFileExt(LowerCase(AName)) = '.md5anim') then
+    Path := AName;
+  if Path = '' then
+    Exit;
+  A := Md5Cache.Anim(Path);
+  if (A = nil) or (A.NumFrames < 2) then
+    Exit;
+  First := nil;
+  Last := nil;
+  A.FramePose(0, First);
+  A.FramePose(A.NumFrames - 1, Last);
+  Result := Last[0].Position - First[0].Position;
+end;
+
 function TD3Md5Instance.PlayAnim(const AnimName: String; const Loop: Boolean): Boolean;
 var
   Path, Resolved: String;
@@ -1231,6 +1265,8 @@ begin
   FAnimTime := 0;
   FLoop := Loop;
   Paused := False;
+  FHasPrevOrigin := False;
+  LastOriginDelta := TVector3.Zero;
   PlayingAnim := Resolved;
   Result := True;
 end;
@@ -1356,9 +1392,11 @@ end;
 procedure TD3Md5Instance.Update(const SecondsPassed: Single);
 var
   OldTime: Single;
+  First, Last: TD3JointArray;
 begin
   if (FAnim = nil) or Paused then
   begin
+    LastOriginDelta := TVector3.Zero;
     { a held pose still turns with its joint mods and copied joints }
     if (FModCount > 0) or FModsCleared or (Length(FCopyJoints) > 0) or (Length(FFinalPose) <> Length(FPose)) then
       ApplyPose;
@@ -1369,6 +1407,28 @@ begin
   if Assigned(OnFrameCommand) and (FrameCommands <> nil) then
     FireFrameCommands(OldTime, FAnimTime);
   FAnim.PoseAt(FAnimTime, FLoop, FPose);
+  { the origin's move since the last update (across a cycle's wrap: to
+    the last frame, then from the first) }
+  LastOriginDelta := TVector3.Zero;
+  if FHasPrevOrigin and (Length(FPose) > 0) then
+  begin
+    if FLoop and (FAnim.Duration > 0) and
+       (Floor(FAnimTime / FAnim.Duration) <> Floor(OldTime / FAnim.Duration)) then
+    begin
+      First := nil;
+      Last := nil;
+      FAnim.FramePose(0, First);
+      FAnim.FramePose(FAnim.NumFrames - 1, Last);
+      LastOriginDelta := (Last[0].Position - FPrevOrigin) + (FPose[0].Position - First[0].Position);
+    end else
+      LastOriginDelta := FPose[0].Position - FPrevOrigin;
+    LastOriginDelta.Z := 0;
+  end;
+  if Length(FPose) > 0 then
+  begin
+    FPrevOrigin := FPose[0].Position;
+    FHasPrevOrigin := True;
+  end;
   if LockOrigin then
     LockPoseOrigin;
   ApplyPose;

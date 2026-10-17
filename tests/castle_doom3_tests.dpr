@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(60, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(61, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(18, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(20, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -168,7 +168,7 @@ begin
   begin
     CheckEquals('models/md5/test/blob.md5mesh', Model.Mesh, 'model mesh');
     CheckEquals('models/md5/test/blob_walk.md5anim', Model.AnimFile('walk'), 'model anim (with frame commands)');
-    CheckEquals(5, Model.Anims.Count, 'model anim count');
+    CheckEquals(6, Model.Anims.Count, 'model anim count');
   end;
 
   Snd := Decls.SoundShader('test_hum');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(45, MapFile.Entities.Count, 'entity count');
+    CheckEquals(47, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1653,7 +1653,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(24, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(27, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1828,7 +1828,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for actors');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(4, Game.Actors.Count, 'four actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1)');
+    CheckEquals(5, Game.Actors.Count, 'five actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1, blob_dodger_1)');
     A := nil;
     for I := 0 to Game.Actors.Count - 1 do
       if Game.Actors[I].Model.Entity.Name = 'test_walker_1' then
@@ -2377,6 +2377,109 @@ begin
   end;
 end;
 
+procedure TestDodgesAndCombatNodes;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A, Dodger: TD3Actor;
+  M: TD3Monster;
+  Node: TD3CombatNode;
+  I: Integer;
+  Eye, Feet, Pos, NodePos, Before: TVector3;
+  Reached, Dodged, Walked: Boolean;
+  RemoveMe: TRemoveType;
+  Moved: Single;
+
+  procedure Step(const Seconds: Single);
+  begin
+    Game.Update(Seconds, Eye);
+    RemoveMe := rtNone;
+    Map.Update(Seconds, RemoveMe);
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for dodges');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Dodger := nil;
+    for A in Game.Actors do
+      if A.Model.Entity.Name = 'blob_dodger_1' then
+        Dodger := A
+      else
+        A.Thinking := False;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    Check(Dodger <> nil, 'blob_dodger_1 runs its script');
+    CheckEquals(1, Game.CombatNodes.Count, 'one combat node (ai_attackcone, spawnclass idCombatNode)');
+    if (Dodger = nil) or (Game.CombatNodes.Count <> 1) then
+      Exit;
+    Node := Game.CombatNodes[0];
+    Feet := Vector3(420, -250, 0);
+    Eye := D3ToCge(Feet) + Vector3(0, PlayerEyeHeight, 0);
+    { the cone: facing west (angle 180), up to 600 along it, 150 degrees }
+    Check(Node.PlayerInView(Feet), 'the player in room B is in the node''s cone');
+    Check(not Node.PlayerInView(Vector3(900, 100, 0)), 'behind the node: not in its cone');
+    Check(not Node.PlayerInView(Vector3(650, -250, 0)), 'beside the node (behind its facing): not in its cone');
+    Check(not Node.PlayerInView(Vector3(420, -250, 400)), 'above its height: not in its cone');
+    CheckVec3(Vector3(0, 64, 0), Dodger.Model.Instance.AnimMovementDelta('evade_left'),
+      'evade_left moves 64 to the left (model space)');
+
+    { activated: it goes to the node (closer than the player, the player
+      in its cone), marks it used (use_once: off), then dodges }
+    NodePos := Node.Entity.Origin;
+    Game.Activate(Game.FindEntity('blob_dodger_1'));
+    Reached := False;
+    for I := 1 to 120 do
+    begin
+      Step(0.1);
+      if Node.Disabled then
+      begin
+        Reached := True;
+        Break;
+      end;
+    end;
+    Check(Reached, 'it reached its combat node and marked it used (use_once)');
+    Pos := CgeToD3(Dodger.Model.Holder.Translation);
+    Check(Sqrt(Sqr(Pos.X - NodePos.X) + Sqr(Pos.Y - NodePos.Y)) < 40,
+      Format('at the combat node (%.0f %.0f)', [Pos.X, Pos.Y]));
+    Before := Pos;
+    Dodged := False;
+    Walked := False;
+    Moved := 0;
+    for I := 1 to 30 do
+    begin
+      Step(0.1);
+      if Dodger.Moving then
+        Walked := True;
+      Pos := CgeToD3(Dodger.Model.Holder.Translation);
+      Moved := Max(Moved, (Pos - Before).Length);
+      if Dodger.Channels[1].AnimName = 'evade_left' then
+        Dodged := True;
+    end;
+    Check(Dodged, 'it played evade_left (testAnimMove found room)');
+    Check(not Walked, 'a dodge is the anim''s move, not a walk');
+    Check((Moved > 40) and (Moved < 140), Format('the evade anim moved it sideways (%.1f)', [Moved]));
+    CheckNear(0, Pos.Z - Before.Z, 'on the floor', 1);
+
+    { no room: a wall to its left }
+    Dodger.Thinking := False;
+    Dodger.Model.Holder.Translation := D3ToCge(Vector3(560, 320, 0));
+    Check(not Game.AnimMoveClear(Dodger, 'evade_left', 0), 'testAnimMove: the north wall is to its left');
+    Check(Game.AnimMoveClear(Dodger, 'evade_left', 180), 'testAnimMove: room to its left facing west');
+    Check(not Game.AnimMoveClear(Dodger, 'no_such_anim', 0), 'testAnimMove: no such anim');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2568,6 +2671,7 @@ begin
   TestSplashDamage;
   TestRangedAttacks;
   TestFlying;
+  TestDodgesAndCombatNodes;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
