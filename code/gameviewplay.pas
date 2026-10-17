@@ -323,7 +323,7 @@ begin
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
-    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1],');
+    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, guidump <gui file>, scripts, g_stopTime [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, quit');
   end else
@@ -415,6 +415,17 @@ begin
     end else
       Console.Print(Format('r_md5ShadowTris %d (bigger md5 meshes cast with joint boxes, unless closed and r_md5ShadowClosed)',
         [MaxShadowCastingTriangles]));
+  end else
+  if Cmd = 'r_prelightshadows' then
+  begin
+    if Args <> '' then
+    begin
+      Map.PrelightShadows := Args <> '0';
+      Console.Print('r_prelightShadows ' + BoolToStr(Map.PrelightShadows, '1', '0') + ', reloading the map');
+      LoadLevel(MapName);
+    end else
+      Console.Print('r_prelightShadows ' + BoolToStr(Map.PrelightShadows, '1', '0') +
+        ' (lights also cast the shadow volumes precomputed in the .proc file)');
   end else
   if Cmd = 'r_md5shadowclosed' then
   begin
