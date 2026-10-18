@@ -333,6 +333,8 @@ type
     Owner: String;
     { fired by the player's weapon: hits monsters, not the player }
     FromPlayer: Boolean;
+    { def_damage, def_splash_damage }
+    DamageDefName, SplashDefName: String;
     ExplodeSound: String;
     { a glowing ball (fireballs), nil for bullets }
     Visual: TCastleTransform;
@@ -405,6 +407,14 @@ type
     Time: Single;
     { activate the targets of this entity }
     Entity: TD3MapEntity;
+  end;
+
+  { A damage def's screen blob (idPlayerView's screenBlob_t): a material
+    drawn on the 640 x 480 screen, fading out from Start to Finish. }
+  TD3ScreenBlob = record
+    Material: String;
+    X, Y, W, H: Single;
+    Start, Finish: Single;
   end;
 
   TD3WeaponStatus = (wsHolstered, wsRising, wsLowering, wsReady, wsOutOfAmmo, wsReload);
@@ -536,6 +546,11 @@ type
     { the last step up (idPlayer's stepUpDelta, stepUpTime) and the fall
       going on (from FFallStartZ, Doom 3 z of the eye) }
     FStepUpDelta, FStepUpTime: Single;
+    { damage feedback (idPlayerView): the head kick, blobs, the last damage
+      and pain times }
+    FKickAngles: TVector3;
+    FKickFinish, FLastDamageTime, FPainDebounce, FLastArmorPulse: Single;
+    FBlobs: array of TD3ScreenBlob;
     FFalling: Boolean;
     FFallStartZ: Single;
     FAttackPulse: Single;
@@ -580,6 +595,7 @@ type
     procedure UpdatePlayerMotion(const SecondsPassed: Single);
     { idPlayer::CrashLand after a fall: the view's dip, falling damage }
     procedure CrashLand(const FallHeight: Single);
+    procedure PlayerSound(const Key: String);
     { place the view model: bob, lag, idle drift, muzzle kick
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
       surfaces and light }
@@ -642,7 +658,7 @@ type
       to 0 at Radius, if nothing solid is between (rays start at Back,
       just off the surface) }
     procedure RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
-      const Radius: Single; const Owner: String);
+      const Radius: Single; const Owner: String; const SplashDefName: String = '');
     procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
     procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
@@ -711,6 +727,8 @@ type
     PlayerJumping, PlayerFlying: Boolean;
     { the last landing's delta (Doom 3: speed squared / 10000), for tests }
     LastFallDelta: Single;
+    { the player def's sound key last played (snd_pain_small...), for tests }
+    LastPlayerSound: String;
     { The attack button is held (idPlayer: WEAPON_ATTACK). }
     Attack: Boolean;
     constructor Create(const AMap: TDoom3Map);
@@ -725,7 +743,21 @@ type
     { Use: open a door in front of the player, or talk to a character
       (idAI::TalkTo) there. }
     procedure Use(const Origin, Dir: TVector3);
-    procedure DamagePlayer(const Amount: Integer);
+    procedure DamagePlayer(const Amount: Integer); overload;
+    { idPlayer::Damage with a damage def (its kick_time, kick_amplitude,
+      blob_*, mtr_blob) and the direction of the force (CGE, from the
+      attacker; zero: none): the view kicks, blobs and the tunnel vision
+      show, the player cries out (pain_delay apart) }
+    procedure DamagePlayer(const Amount: Integer; const DamageDefName: String;
+      const Direction: TVector3); overload;
+    { Doom 3's falling speed (gravity 1066) after Seconds of falling, at
+      least FallSpeedMin (stepping down stays quick) }
+    class function FallSpeed(const Seconds: Single): Single; static;
+    { The screen blobs still showing (idPlayerView's screenBlobs). }
+    function ScreenBlobs: specialize TArray<TD3ScreenBlob>;
+    { Seconds since the player was last hurt (large when never). }
+    function SinceDamage: Single;
+
     function PlayerDead: Boolean;
     { Fire the targets of E after Delay seconds (idEntity::ActivateTargets). }
     procedure ActivateTargets(const E: TD3MapEntity; const Delay: Single = 0);
@@ -1148,6 +1180,9 @@ begin
   FIdealSlot := -1;
   ViewBobEnabled := True;
   FLandTime := -1000;
+  FLastDamageTime := -1000;
+  FPainDebounce := -1000;
+  FLastArmorPulse := -1000;
   FStepUpTime := -1000;
 end;
 
@@ -2304,7 +2339,11 @@ begin
   if Def <> nil then
     Amount := StrToIntDef(Def.Values['damage'], Fallback);
   WritelnLog('Doom3World', 'Fall of %.0f units: %s (%d)', [FallHeight, DamageName, Amount]);
-  DamagePlayer(Amount);
+  { no pain cry: the landing sound instead (idPlayer::CrashLand sets
+    pain_debounce_time for its landing anim) }
+  FPainDebounce := FTime + 1;
+  PlayerSound('snd_land_hard');
+  DamagePlayer(Amount, DamageName, Vector3(0, -1, 0));
 end;
 
 function TD3Game.ViewBobOffset: TVector3;
@@ -2316,11 +2355,22 @@ begin
 end;
 
 function TD3Game.ViewBobAngles: TVector3;
+var
+  Offset: Single;
+  I: Integer;
 begin
   if ViewBobEnabled and not PlayerDead then
     Result := FViewBobAngles
   else
     Result := TVector3.Zero;
+  { the damage kick (idPlayerView::AngleOffset: the kick times the time
+    left squared, in ms, times g_kickAmplitude 0.0001, within 70 degrees) }
+  if not PlayerDead and (FTime < FKickFinish) then
+  begin
+    Offset := (FKickFinish - FTime) * 1000;
+    for I := 0 to 2 do
+      Result.Data[I] := Result.Data[I] + EnsureRange(FKickAngles.Data[I] * Sqr(Offset) * 0.0001, -70, 70);
+  end;
 end;
 
 function TD3Game.BobbedViewAxis: TMatrix3;
@@ -2859,7 +2909,7 @@ begin
         if DamageDef <> nil then
         begin
           Damage := Max(1, Round(StrToIntDef(DamageDef.Values['damage'], 10) * F));
-          DamagePlayer(Damage);
+          DamagePlayer(Damage, M.DamageDef, M.Velocity);
           WritelnLog('Doom3World', '%s hits the player (%s, %d)', [M.Brush.Entity.Name, M.DamageDef, Damage]);
         end;
         M.NextDamageTime := FTime + 1;
@@ -4035,7 +4085,7 @@ begin
         if M.AttackTimer <= 0 then
         begin
           M.AttackTimer := MonsterAttackDelay;
-          DamagePlayer(MonsterDamage);
+          DamagePlayer(MonsterDamage, '', FPlayerEye - M.Center);
         end;
       end;
     else ;
@@ -4723,7 +4773,8 @@ begin
           else
             Pos := MuzzlePosition(A, D3ValueToString(Args[0]));
           RadiusDamage(Pos, Pos, StrToIntDef(DamageDef.Values['damage'], 0),
-            StrToFloatDef(DamageDef.Values['radius'], 0, DefaultFormatSettings), A.Model.Entity.Name);
+            StrToFloatDef(DamageDef.Values['radius'], 0, DefaultFormatSettings), A.Model.Entity.Name,
+            D3ValueToString(Args[1]));
         end;
       end;
     'attackBegin': A.Attack := D3ValueToString(Args[0]);
@@ -5428,7 +5479,7 @@ begin
   Damage := StrToIntDef(Def.Values['damage'], 10);
   if Def.Values['snd_hit'] <> '' then
     PlaySoundAt(Def.Values['snd_hit'], FPlayerEye);
-  DamagePlayer(Damage);
+  DamagePlayer(Damage, DamageDefName, FPlayerEye - A.Model.Holder.Translation);
   WritelnLog('Doom3World', '%s hits the player (%s, %d)', [A.Model.Entity.Name, DamageDefName, Damage]);
 end;
 
@@ -5492,6 +5543,8 @@ begin
   Result.BurstVelocity := DefFloat('burstVelocity', 1.25);
   Result.Radius := Max(2, ParseVector3(Def.Values['maxs'], Vector3(1, 1, 1)).X);
   Result.Damage := 10;
+  Result.DamageDefName := Def.Values['def_damage'];
+  Result.SplashDefName := Def.Values['def_splash_damage'];
   DamageDef := Decls.EntityDef(Def.Values['def_damage']);
   if DamageDef <> nil then
     Result.Damage := StrToIntDef(DamageDef.Values['damage'], Result.Damage);
@@ -5527,7 +5580,7 @@ begin
   Back := P.Position;
   if not P.Velocity.IsZero then
     Back := Back - P.Velocity.Normalize * 2;
-  RadiusDamage(P.Position, Back, P.SplashDamage, P.SplashRadius, P.Owner);
+  RadiusDamage(P.Position, Back, P.SplashDamage, P.SplashRadius, P.Owner, P.SplashDefName);
   if P.FromPlayer and (P.SplashDamage > 0) and (P.SplashRadius > 0) then
     MonsterSplash(P.Position, P.SplashDamage, P.SplashRadius);
 end;
@@ -5557,7 +5610,7 @@ begin
 end;
 
 procedure TD3Game.RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
-  const Radius: Single; const Owner: String);
+  const Radius: Single; const Owner: String; const SplashDefName: String);
 const
   { the player's box (idPlayer's bounds: 32 wide, 74 high on its feet) }
   PlayerHalfWidth = 16;
@@ -5589,7 +5642,7 @@ begin
   Amount := Round(Damage * (1 - Dist / Radius));
   if Amount <= 0 then
     Exit;
-  DamagePlayer(Amount);
+  DamagePlayer(Amount, SplashDefName, Center - Position);
   WritelnLog('Doom3World', 'Splash of %s hits the player (%d)', [Owner, Amount]);
 end;
 
@@ -5738,7 +5791,7 @@ begin
     begin
       if P.DetonateOnActor then
       begin
-        DamagePlayer(P.Damage);
+        DamagePlayer(P.Damage, P.DamageDefName, P.Velocity);
         WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
         Detonate := True;
         HitPlayer := True;
@@ -7450,21 +7503,143 @@ begin
 end;
 
 procedure TD3Game.DamagePlayer(const Amount: Integer);
+begin
+  DamagePlayer(Amount, '', TVector3.Zero);
+end;
+
+procedure TD3Game.PlayerSound(const Key: String);
+begin
+  if (FPlayerDef = nil) or (FPlayerDef.Values[Key] = '') then
+    Exit;
+  LastPlayerSound := Key;
+  WritelnLog('Doom3World', 'Player sound %s (%s)', [Key, FPlayerDef.Values[Key]]);
+  PlaySoundAt(FPlayerDef.Values[Key], FPlayerEye);
+end;
+
+procedure TD3Game.DamagePlayer(const Amount: Integer; const DamageDefName: String;
+  const Direction: TVector3);
+const
+  { idPlayerView's IMPULSE_DELAY: hits closer than this make no new
+    effects (the shotgun's pellets) }
+  ImpulseDelay = 0.15;
 var
-  Absorbed: Integer;
+  Absorbed, I: Integer;
+  Def: TStringList;
+  Axis: TMatrix3;
+  Local, D: TVector3;
+  KickTime, Amp, BlobTime, Scale: Single;
+  Blob: TD3ScreenBlob;
 begin
   if God or PlayerDead then
     Exit;
+  Def := nil;
+  if DamageDefName <> '' then
+    Def := Decls.EntityDef(DamageDefName);
   { Doom 3 armor absorbs 1/3 of the damage }
   Absorbed := Min(Armor, Amount div 3);
   Dec(Armor, Absorbed);
+  if (Absorbed > 0) and (FTime > FLastArmorPulse + 0.2) then
+    PlayerSound('snd_hitArmor');
+  if Absorbed > 0 then
+    FLastArmorPulse := FTime;
+
+  { idPlayerView::DamageImpulse }
+  if (Def <> nil) and (FTime >= FLastDamageTime + ImpulseDelay) then
+  begin
+    { the head kick: forward / back and up / down pitch, sideways yaws
+      (half) and rolls; the direction in the player's (yaw only) axes }
+    KickTime := StrToFloatDef(Def.Values['kick_time'], 0, DefaultFormatSettings);
+    if KickTime > 0 then
+    begin
+      FKickFinish := FTime + KickTime / 1000;
+      Local := TVector3.Zero;
+      if not Direction.IsZero then
+      begin
+        D := CgeToD3(Direction).Normalize;
+        Axis := AnglesMatrix(Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0));
+        Local := Vector3(
+          TVector3.DotProduct(D, Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2])),
+          TVector3.DotProduct(D, Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2])),
+          TVector3.DotProduct(D, Vector3(Axis.Data[2, 0], Axis.Data[2, 1], Axis.Data[2, 2])));
+      end;
+      FKickAngles := Vector3(Local.X + Local.Z, Local.Y * 0.5, Local.Y);
+      Amp := StrToFloatDef(Def.Values['kick_amplitude'], 0, DefaultFormatSettings);
+      if Amp <> 0 then
+        FKickAngles := FKickAngles * Amp;
+    end;
+    { a screen blob }
+    BlobTime := StrToFloatDef(Def.Values['blob_time'], 0, DefaultFormatSettings);
+    if (BlobTime > 0) and (Def.Values['mtr_blob'] <> '') then
+    begin
+      Blob.Material := Def.Values['mtr_blob'];
+      Blob.X := StrToFloatDef(Def.Values['blob_x'], 0, DefaultFormatSettings) + Random(64) - 32;
+      Blob.Y := StrToFloatDef(Def.Values['blob_y'], 0, DefaultFormatSettings) + Random(64) - 32;
+      Scale := (256 + Random(64) - 32) / 256;
+      Blob.W := StrToFloatDef(Def.Values['blob_width'], 0, DefaultFormatSettings) * Scale;
+      Blob.H := StrToFloatDef(Def.Values['blob_height'], 0, DefaultFormatSettings) * Scale;
+      Blob.Start := FTime;
+      Blob.Finish := FTime + BlobTime / 1000;
+      { idPlayerView has 8 blobs, the oldest is reused }
+      for I := High(FBlobs) downto 0 do
+        if FBlobs[I].Finish <= FTime then
+          Delete(FBlobs, I, 1);
+      if Length(FBlobs) >= 8 then
+        Delete(FBlobs, 0, 1);
+      FBlobs := Concat(FBlobs, [Blob]);
+    end;
+  end;
+  if FTime >= FLastDamageTime + ImpulseDelay then
+    FLastDamageTime := FTime;
+
   Dec(Health, Amount - Absorbed);
   if Health <= 0 then
   begin
     Health := 0;
     FDeadTime := 0;
+    PlayerSound('snd_death');
     Message('You died');
+    Exit;
   end;
+  { idActor::Pain: a cry by how much health is left, pain_delay apart }
+  if FTime >= FPainDebounce then
+  begin
+    if Health > 75 then
+      PlayerSound('snd_pain_small')
+    else
+    if Health > 50 then
+      PlayerSound('snd_pain_medium')
+    else
+    if Health > 25 then
+      PlayerSound('snd_pain_large')
+    else
+      PlayerSound('snd_pain_huge');
+    FPainDebounce := FTime + 0.5;
+    if FPlayerDef <> nil then
+      FPainDebounce := FTime + StrToFloatDef(FPlayerDef.Values['pain_delay'], 0.5, DefaultFormatSettings);
+  end;
+end;
+
+class function TD3Game.FallSpeed(const Seconds: Single): Single;
+const
+  Gravity = 1066;
+  FallSpeedMin = 120;
+begin
+  Result := Max(FallSpeedMin, Gravity * Seconds);
+end;
+
+function TD3Game.ScreenBlobs: specialize TArray<TD3ScreenBlob>;
+var
+  B: TD3ScreenBlob;
+begin
+  Result := nil;
+  for B in FBlobs do
+    if B.Finish > FTime then
+      Result := Concat(Result, [B]);
+end;
+
+function TD3Game.SinceDamage: Single;
+begin
+  Result := FTime - FLastDamageTime;
 end;
 
 function TD3Game.PlayerDead: Boolean;

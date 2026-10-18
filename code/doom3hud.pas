@@ -7,22 +7,33 @@ unit Doom3Hud;
 interface
 
 uses
-  SysUtils, Classes,
-  CastleVectors, CastleUIControls, CastleRectangles, CastleColors;
+  SysUtils, Classes, Generics.Collections,
+  CastleVectors, CastleUIControls, CastleRectangles, CastleColors, CastleGLImages;
 
 type
+  { A damage blob on the screen (idPlayerView's screenBlob_t): an image on
+    Doom 3's 640 x 480 screen, faded by Alpha. }
+  TD3HudBlob = record
+    ImageUrl: String;
+    X, Y, W, H, Alpha: Single;
+  end;
+
   TDoom3Hud = class(TCastleUserInterface)
   strict private
     FMessages: TStringList;
     FMessageTimes: array of Single;
-    FDamageFlash: Single;
-    FLastHealth: Integer;
+    FVignette: TDrawableImage;
+    FImages: specialize TObjectDictionary<String, TDrawableImage>;
+    function Image(const Url: String): TDrawableImage;
   public
     Health, Armor: Integer;
     AmmoText: String;
     FlashlightOn: Boolean;
     Dead: Boolean;
     InfoText: String;
+    { seconds since the player was hurt (the tunnel vision pulses) }
+    DamageAge: Single;
+    Blobs: array of TD3HudBlob;
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
     procedure ShowMessage(const S: String; const Seconds: Single = 3);
@@ -34,7 +45,7 @@ implementation
 
 uses
   Math,
-  CastleGLUtils, CastleControls, CastleComponentSerialize;
+  CastleGLUtils, CastleControls, CastleComponentSerialize, CastleImages;
 
 constructor TDoom3Hud.Create(AOwner: TComponent);
 begin
@@ -42,12 +53,15 @@ begin
   FullSize := True;
   FMessages := TStringList.Create;
   Health := 100;
-  FLastHealth := 100;
   AmmoText := 'PISTOL';
+  DamageAge := 1000;
+  FImages := specialize TObjectDictionary<String, TDrawableImage>.Create([doOwnsValues]);
 end;
 
 destructor TDoom3Hud.Destroy;
 begin
+  FreeAndNil(FVignette);
+  FImages.Free;
   FMessages.Free;
   inherited Destroy;
 end;
@@ -81,10 +95,42 @@ begin
       SetLength(FMessageTimes, FMessages.Count);
     end;
   end;
-  if Health < FLastHealth then
-    FDamageFlash := Min(0.6, FDamageFlash + (FLastHealth - Health) / 40);
-  FLastHealth := Health;
-  FDamageFlash := Max(0, FDamageFlash - SecondsPassed * 1.5);
+end;
+
+function TDoom3Hud.Image(const Url: String): TDrawableImage;
+begin
+  if not FImages.TryGetValue(Url, Result) then
+  begin
+    try
+      Result := TDrawableImage.Create(Url);
+    except
+      on E: Exception do
+        Result := nil;
+    end;
+    FImages.Add(Url, Result);
+  end;
+end;
+
+{ A dark ring towards the screen's edges, clear in the middle (the shape
+  of Doom 3's textures/decals/tunnel). }
+function MakeVignette: TRGBAlphaImage;
+const
+  N = 128;
+var
+  X, Y: Integer;
+  R, A: Single;
+  P: PVector4Byte;
+begin
+  Result := TRGBAlphaImage.Create(N, N);
+  for Y := 0 to N - 1 do
+    for X := 0 to N - 1 do
+    begin
+      R := Sqrt(Sqr((X + 0.5) / N * 2 - 1) + Sqr((Y + 0.5) / N * 2 - 1)) / Sqrt(2);
+      A := EnsureRange((R - 0.3) / 0.7, 0, 1);
+      A := A * A * (3 - 2 * A);
+      P := Result.PixelPtr(X, Y);
+      P^ := Vector4Byte(255, 255, 255, Round(A * 255));
+    end;
 end;
 
 procedure TDoom3Hud.Render;
@@ -96,19 +142,44 @@ var
   CX, CY, S: Single;
   I: Integer;
   HealthColor: TCastleColor;
+  Img: TDrawableImage;
+  Strength: Single;
 begin
   inherited Render;
   R := RenderRect;
   S := UIScale;
 
-  if FDamageFlash > 0 then
-    DrawRectangle(R, Vector4(0.7, 0, 0, FDamageFlash));
+  { damage blobs (blood) on Doom 3's 640 x 480 screen }
+  for I := 0 to High(Blobs) do
+  begin
+    Img := Image(Blobs[I].ImageUrl);
+    if Img = nil then
+      Continue;
+    Img.Color := Vector4(1, 1, 1, Blobs[I].Alpha);
+    Img.Draw(FloatRectangle(R.Left + Blobs[I].X / 640 * R.Width,
+      R.Top - (Blobs[I].Y + Blobs[I].H) / 480 * R.Height,
+      Blobs[I].W / 640 * R.Width, Blobs[I].H / 480 * R.Height));
+  end;
+
+  { tunnel vision (idPlayerView: textures/decals/tunnel with the health
+    and the last damage time): darker edges as health goes down, a red
+    pulse at each hit }
+  Strength := (1 - EnsureRange(Health / 100, 0, 1)) * 0.55 + Max(0, 1 - DamageAge / 0.4) * 0.4;
+  if (Strength > 0.01) and not Dead then
+  begin
+    if FVignette = nil then
+      FVignette := TDrawableImage.Create(MakeVignette, True, True);
+    FVignette.Color := Vector4(0.45, 0, 0, Min(1, Strength));
+    FVignette.Draw(R);
+  end;
 
   if Dead then
   begin
     DrawRectangle(R, Vector4(0.25, 0, 0, 0.55));
-    UIFont.PrintRect(R, Vector4(1, 0.3, 0.2, 1), 'YOU ARE DEAD' + #10 + 'press fire to restart',
-      hpMiddle, vpMiddle);
+    UIFont.Print(R.Left + (R.Width - UIFont.TextWidth('YOU ARE DEAD')) / 2, R.Bottom + R.Height / 2 + 4 * S,
+      Vector4(1, 0.3, 0.2, 1), 'YOU ARE DEAD');
+    UIFont.Print(R.Left + (R.Width - UIFont.TextWidth('press fire to restart')) / 2,
+      R.Bottom + R.Height / 2 - UIFont.Height - 4 * S, Vector4(1, 0.3, 0.2, 1), 'press fire to restart');
     Exit;
   end;
 

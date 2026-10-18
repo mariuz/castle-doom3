@@ -1340,6 +1340,16 @@ textures/test/sky
 	}
 }
 
+// a damage blob on the screen (the test damage defs' mtr_blob)
+textures/test/blood_blob
+{
+	translucent
+	{
+		blend blend
+		map textures/test/blood_blob.tga
+	}
+}
+
 // the weapons' muzzle flash: shows for 1/12 s after a shot (parm4 is minus
 // the time of the shot, like Doom 3's SHADERPARM_TIMEOFFSET)
 models/weapons/test/muzzleflash
@@ -1608,10 +1618,26 @@ entityDef char_test_stepper {
 
 entityDef damage_test_melee {
 	"damage"				"7"
+	"kick_time"				"400"
+	"kick_amplitude"		"1"
+	"blob_time"				"500"
+	"mtr_blob"				"textures/test/blood_blob"
+	"blob_x"				"220"
+	"blob_y"				"140"
+	"blob_width"			"200"
+	"blob_height"			"200"
 }
 
 entityDef damage_test_projectile {
 	"damage"				"5"
+	"kick_time"				"400"
+	"kick_amplitude"		"1"
+	"blob_time"				"500"
+	"mtr_blob"				"textures/test/blood_blob"
+	"blob_x"				"220"
+	"blob_y"				"140"
+	"blob_width"			"200"
+	"blob_height"			"200"
 }
 
 entityDef damage_test_splash {
@@ -1745,6 +1771,14 @@ entityDef player_test {
 	"ammo_test_bullets"		"24"
 	"max_ammo_test_bullets"	"60"
 	"max_ammo_test_shells"	"24"
+	"pain_delay"			"0.5"
+	"snd_pain_small"		"test_pain"
+	"snd_pain_medium"		"test_pain"
+	"snd_pain_large"		"test_pain_large"
+	"snd_pain_huge"			"test_pain_large"
+	"snd_death"				"test_death"
+	"snd_land_hard"			"test_land"
+	"snd_hitArmor"			"test_step"
 }
 
 entityDef weapon_test_fists {
@@ -1905,6 +1939,30 @@ test_step {
 	minDistance	1
 	maxDistance	10
 	sound/test/step.wav
+}
+
+test_pain {
+	minDistance	1
+	maxDistance	20
+	sound/test/pain.wav
+}
+
+test_pain_large {
+	minDistance	1
+	maxDistance	20
+	sound/test/pain_large.wav
+}
+
+test_death {
+	minDistance	1
+	maxDistance	30
+	sound/test/death.wav
+}
+
+test_land {
+	minDistance	1
+	maxDistance	15
+	sound/test/land.wav
 }
 
 test_shot {
@@ -2103,6 +2161,26 @@ def muzzleflash_texture():
     return tga(n, n, rows)
 
 
+def blood_blob_texture():
+    """A dark red splat with soft, lumpy edges (alpha)."""
+    n = 64
+    rnd = random.Random(21)
+    lobes = [(rnd.uniform(0, 2 * math.pi), rnd.uniform(0.08, 0.2)) for _ in range(7)]
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            dx, dy = (x + 0.5) / n * 2 - 1, (y + 0.5) / n * 2 - 1
+            r = math.hypot(dx, dy)
+            a = math.atan2(dy, dx)
+            edge = 0.55 + sum(h * max(0, math.cos(a - p)) ** 6 for p, h in lobes)
+            alpha = max(0.0, min(1.0, (edge - r) / 0.12))
+            shade = 0.45 + 0.25 * (1 - r)
+            row.append((shade, 0.02, 0.02, alpha * 0.85))
+        rows.append(row)
+    return tga(n, n, rows, alpha=True)
+
+
 def quat_full(axis, angle):
     s = math.sin(angle / 2)
     return [axis[0] * s, axis[1] * s, axis[2] * s, math.cos(angle / 2)]
@@ -2128,6 +2206,7 @@ def weapon_models():
     add('models/md5/weapons/test_pistol/viewpistol.md5mesh', viewmodel_md5mesh(gun, flash_quads(1, 5)))
     add('models/md5/weapons/test_shotgun/viewshotgun.md5mesh', viewmodel_md5mesh(shotgun, flash_quads(7, 8)))
     add('models/weapons/test/muzzleflash.tga', muzzleflash_texture())
+    add('textures/test/blood_blob.tga', blood_blob_texture())
     add('models/md5/weapons/test_fists/viewfists.md5mesh', viewmodel_md5mesh(fists))
     s = math.sin
     add('models/md5/weapons/test_pistol/idle.md5anim', viewmodel_md5anim(
@@ -2439,6 +2518,25 @@ def sounds():
             shot.append(0.8 * math.exp(-t * decay) * lp * 2 + 0.5 * math.exp(-t * decay * 0.6) *
                         math.sin(2 * math.pi * thump * t))
         add('sound/test/%s.wav' % name, wav([max(-1, min(1, v)) for v in shot], rate))
+    # the player's cries: a voiced grunt (a low buzz through two vowel
+    # formants), longer and lower for big pain and death; a landing thud
+    for name, length, f0, f1, f2 in (('pain', 0.3, 140, 600, 1100), ('pain_large', 0.45, 115, 650, 1000),
+                                     ('death', 1.0, 95, 500, 850)):
+        n = int(rate * length)
+        out = []
+        for i in range(n):
+            t = i / rate
+            env = min(1, t * 40) * max(0.0, 1 - t / length) ** 1.5
+            pitch = f0 * (1 - 0.25 * t / length)
+            buzz = sum(math.sin(2 * math.pi * pitch * k * t) / k for k in range(1, 12))
+            form = 0.6 * math.sin(2 * math.pi * f1 * t) + 0.4 * math.sin(2 * math.pi * f2 * t)
+            out.append(0.35 * env * buzz * (0.6 + 0.4 * form))
+        add('sound/test/%s.wav' % name, wav([max(-1, min(1, v)) for v in out], rate))
+    n = int(rate * 0.25)
+    rnd = random.Random(5)
+    land = [0.7 * math.exp(-i / rate * 25) * (math.sin(2 * math.pi * 60 * i / rate) + 0.3 * (rnd.random() * 2 - 1))
+            for i in range(n)]
+    add('sound/test/land.wav', wav([max(-1, min(1, v)) for v in land], rate))
 
 
 # Scripts. The event declarations are the engine's interface (written here,
