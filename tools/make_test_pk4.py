@@ -1170,6 +1170,10 @@ def map_text():
          'target': 'item_armor_2'},
         {'classname': 'item_test_armor', 'name': 'item_armor_2', 'origin': '80 -210 0',
          'triggerFirst': '1'},
+        # powerups (idItemPowerup) in room A's north-west corner
+        {'classname': 'item_test_berserk', 'name': 'item_berserk_1', 'origin': '-220 120 0', 'spin': '1'},
+        {'classname': 'item_test_invisibility', 'name': 'item_invisibility_1', 'origin': '-220 200 0',
+         'spin': '1'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1781,6 +1785,8 @@ entityDef player_test {
 	"snd_death"				"test_death"
 	"snd_land_hard"			"test_land"
 	"snd_hitArmor"			"test_step"
+	"snd_berserk_third"		"test_berserk"
+	"snd_invisibility"		"test_invisibility"
 }
 
 entityDef weapon_test_fists {
@@ -1896,6 +1902,24 @@ entityDef item_test_clip {
 	"inv_ammo_test_bullets"	"20"
 }
 
+// powerups (Doom 3's are powerup_berserk... : not defined here, the
+// retail ones would lose to them)
+entityDef item_test_berserk {
+	"spawnclass"			"idItemPowerup"
+	"model"					"models/items/test/box.lwo"
+	"inv_name"				"Test Berserk"
+	"type"					"0"
+	"time"					"20"
+}
+
+entityDef item_test_invisibility {
+	"spawnclass"			"idItemPowerup"
+	"model"					"models/items/test/box.lwo"
+	"inv_name"				"Test Invisibility"
+	"type"					"1"
+	"time"					"20"
+}
+
 entityDef item_test_keycard {
 	"spawnclass"			"idItem"
 	"model"					"models/items/test/box.lwo"
@@ -1959,6 +1983,18 @@ test_death {
 	minDistance	1
 	maxDistance	30
 	sound/test/death.wav
+}
+
+test_berserk {
+	minDistance	1
+	maxDistance	30
+	sound/test/berserk.wav
+}
+
+test_invisibility {
+	minDistance	1
+	maxDistance	30
+	sound/test/invisibility.wav
 }
 
 test_land {
@@ -2534,6 +2570,23 @@ def sounds():
             form = 0.6 * math.sin(2 * math.pi * f1 * t) + 0.4 * math.sin(2 * math.pi * f2 * t)
             out.append(0.35 * env * buzz * (0.6 + 0.4 * form))
         add('sound/test/%s.wav' % name, wav([max(-1, min(1, v)) for v in out], rate))
+    # berserk: a rising growl; invisibility: a shimmering sweep
+    n = int(rate * 1.2)
+    growl = []
+    for i in range(n):
+        t = i / rate
+        env = min(1, t * 6) * max(0.0, 1 - t / 1.2)
+        f = 70 + 60 * t
+        growl.append(0.4 * env * sum(math.sin(2 * math.pi * f * k * t + k) / k for k in range(1, 8)))
+    add('sound/test/berserk.wav', wav([max(-1, min(1, v)) for v in growl], rate))
+    n = int(rate * 1.0)
+    sweep = []
+    for i in range(n):
+        t = i / rate
+        env = math.sin(math.pi * t)
+        f = 400 + 1600 * t
+        sweep.append(0.3 * env * math.sin(2 * math.pi * f * t) * (0.6 + 0.4 * math.sin(2 * math.pi * 9 * t)))
+    add('sound/test/invisibility.wav', wav(sweep, rate))
     n = int(rate * 0.25)
     rnd = random.Random(5)
     land = [0.7 * math.exp(-i / rate * 25) * (math.sin(2 * math.pi * 60 * i / rate) + 0.3 * (rnd.random() * 2 - 1))
