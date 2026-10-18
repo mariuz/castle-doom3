@@ -60,6 +60,8 @@ type
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
     procedure HandleConsoleCommand(const Cmd, Args: String);
+    { fire the weapon: Once from a demo script, else the button is held }
+    procedure Fire(const Once: Boolean);
     procedure SetFlashlight(const Value: Boolean);
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
@@ -402,6 +404,18 @@ begin
   end;
 end;
 
+procedure TViewPlay.Fire(const Once: Boolean);
+begin
+  { the player's weapon script fires on WEAPON_ATTACK; without one, the
+    built-in pistol }
+  if (FGame.Weapon <> nil) and FGame.Weapon.Scripted then
+  begin
+    if Once then
+      FGame.AttackOnce;
+  end else
+    FGame.Fire(Camera.Translation, Camera.Direction);
+end;
+
 procedure TViewPlay.HandleConsoleCommand(const Cmd, Args: String);
 var
   Maps: TStringList;
@@ -419,7 +433,7 @@ begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
-    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
+    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
@@ -482,6 +496,21 @@ begin
       FGame.Give(Words[0], '1000');
     Console.Print(FGame.InventoryStatus);
   end else
+  if Cmd = 'weapon' then
+  begin
+    if Args <> '' then
+      FGame.SelectWeapon(StrToIntDef(Args, -1));
+    Console.Print(Format('weapon slot %d: %s', [FGame.IdealSlot, FGame.WeaponHudText]));
+  end else
+  if Cmd = 'weapnext' then
+    FGame.NextWeapon(1)
+  else
+  if Cmd = 'weapprev' then
+    FGame.NextWeapon(-1)
+  else
+  if Cmd = 'reload' then
+    FGame.ReloadWeapon
+  else
   if Cmd = 'inventory' then
   begin
     S := FGame.InventoryStatus;
@@ -881,7 +910,7 @@ begin
     SetFlashlight(not Flashlight.Exists)
   else
   if Action = 'X' then
-    FGame.Fire(Camera.Translation, Camera.Direction)
+    Fire(True)
   else
   if Action = 'U' then
     FGame.Use(Camera.Translation, Camera.Direction)
@@ -954,6 +983,8 @@ begin
   if (AutoTestPrefix = '') and not Console.IsOpen then
   begin
     Firing := (buttonLeft in Container.MousePressed) or Container.Pressed[keyCtrl];
+    { a scripted weapon reads the held button (WEAPON_ATTACK) }
+    FGame.Attack := Firing and not FGame.PlayerDead;
     if Firing then
     begin
       if FGame.PlayerDead then
@@ -961,9 +992,10 @@ begin
         if FGame.DeadTime > 1 then
           LoadLevel(MapName);
       end else
-        FGame.Fire(Camera.Translation, Camera.Direction);
+        Fire(False);
     end;
   end;
+  FGame.PlayerViewDir := Camera.Direction;
 
   { during cinematics the player stays where the camera was }
   if FInCinematic then
@@ -979,7 +1011,7 @@ begin
   Hud.Armor := FGame.Armor;
   Hud.Dead := FGame.PlayerDead;
   Hud.FlashlightOn := Flashlight.Exists;
-  Hud.AmmoText := Format('PISTOL      KILLS %d', [FGame.Kills]);
+  Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
 
   if AutoTestPrefix <> '' then
     RunDemoStep(SecondsPassed);
@@ -1011,6 +1043,29 @@ begin
   if Event.IsKey(keyE) then
   begin
     FGame.Use(Camera.Translation, Camera.Direction);
+    Exit(True);
+  end;
+  { weapons: 1..0 select slots 0..9 (Doom 3's _impulse0..9), the wheel
+    cycles, R reloads }
+  if (Event.EventType = itKey) and (Event.Key in [key0..key9]) then
+  begin
+    if Event.Key = key0 then
+      FGame.SelectWeapon(9)
+    else
+      FGame.SelectWeapon(Ord(Event.Key) - Ord(key1));
+    Exit(True);
+  end;
+  if Event.EventType = itMouseWheel then
+  begin
+    if Event.MouseWheel in [mwUp, mwLeft] then
+      FGame.NextWeapon(-1)
+    else
+      FGame.NextWeapon(1);
+    Exit(True);
+  end;
+  if Event.IsKey(keyR) then
+  begin
+    FGame.ReloadWeapon;
     Exit(True);
   end;
   if Event.IsKey(keyF5) then

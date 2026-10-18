@@ -133,12 +133,13 @@ begin
     12 * S), HealthColor);
 
   { weapon / flashlight (bottom right) }
-  DrawRectangle(FloatRectangle(R.Right - 320 * S, R.Bottom + 20 * S, 300 * S, 70 * S), PanelColor);
-  UIFont.Print(R.Right - 306 * S, R.Bottom + 56 * S, Cyan, AmmoText);
+  { wide enough for "TEST SHOTGUN  7 / 16    KILLS 10" }
+  DrawRectangle(FloatRectangle(R.Right - 440 * S, R.Bottom + 20 * S, 420 * S, 70 * S), PanelColor);
+  UIFont.Print(R.Right - 426 * S, R.Bottom + 56 * S, Cyan, AmmoText);
   if FlashlightOn then
-    UIFont.Print(R.Right - 306 * S, R.Bottom + 30 * S, Vector4(1, 0.95, 0.6, 1), 'FLASHLIGHT ON  (F)')
+    UIFont.Print(R.Right - 426 * S, R.Bottom + 30 * S, Vector4(1, 0.95, 0.6, 1), 'FLASHLIGHT ON  (F)')
   else
-    UIFont.Print(R.Right - 306 * S, R.Bottom + 30 * S, Cyan, 'FLASHLIGHT     (F)');
+    UIFont.Print(R.Right - 426 * S, R.Bottom + 30 * S, Cyan, 'FLASHLIGHT     (F)');
 
   { messages (top left) }
   for I := 0 to FMessages.Count - 1 do
