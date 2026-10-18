@@ -186,13 +186,19 @@ jobs:
           grep -q "weapon_test_shotgun (clip 4)" test_output/items.log || { echo "::error::the shotgun pickup should give the weapon and its clip"; exit 1; }
           grep -q "Picked up item_armor_2" test_output/items.log || { echo "::error::the key's targets should let item_armor_2 (triggerFirst) be picked up"; exit 1; }
           grep -q "armor 50/100" test_output/items.log || { echo "::error::two armor pickups should give 50 armor"; exit 1; }
+          run_test weapons testmap "W:1,O:notarget,G:420 -250 0,A:0,W:1,X,W:0.6,S,O:reload,W:1.5,O:weapon 0,W:1.5,X,W:0.6,O:give all,O:weapon 2,W:1.8,X,W:0.6,S,O:inventory,Q"
+          grep -q "Weapon 1: weapon_test_pistol (script weapon_test_gun" test_output/weapons.log || { echo "::error::the pistol should run its weapon script"; exit 1; }
+          grep -q "Weapon weapon_test_pistol fires 1 (clip 11" test_output/weapons.log || { echo "::error::the pistol should fire from its clip"; exit 1; }
+          grep -q "Weapon 0: weapon_test_fists" test_output/weapons.log || { echo "::error::weapon 0 should switch to the fists"; exit 1; }
+          grep -q "Weapon weapon_test_shotgun fires 8" test_output/weapons.log || { echo "::error::the shotgun should fire 8 pellets"; exit 1; }
+          grep -q "1 weapon_test_pistol (clip 12)" test_output/weapons.log || { echo "::error::the pistol should have reloaded"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }
           grep -q 'Effect "1" (area 1, location "room_b")' test_output/reverb.log || { echo "::error::room B should get its reverb by area number"; exit 1; }
           grep -q "Off (s_useEAXReverb 0)" test_output/reverb.log || { echo "::error::s_useEAXReverb 0 should turn the reverb off"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 27
+          test "$(ls test_output/*.png | wc -l)" -ge 29
 
       - name: Upload screenshots and logs
         if: always()

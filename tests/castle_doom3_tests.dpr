@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(63, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(72, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,8 +120,8 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(32, Decls.DeclCount(dtEntityDef), 'entityDef count');
-  CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
+  CheckEquals(37, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(5, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
@@ -1653,7 +1653,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(30, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(39, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1673,7 +1673,7 @@ begin
     for I := 1 to 11 do
       Game.Update(0.1, Away);
     CheckNear(4 + 64, Lift.Scene.Translation.Y, 'lift up after 2 s');
-    CheckEquals(2, Game.Script.ThreadCount, 'the lift loop and main (waiting to move bar_1 along its curve) run');
+    CheckEquals(3, Game.Script.ThreadCount, 'the lift loop, main (waiting to move bar_1 along its curve) and the weapon''s thread run');
     { trigger_once_1's "call" runs test_trigger_called on the next frame }
     GuisBefore := GuiCacheCount;
     Game.Update(0.1, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
@@ -2791,6 +2791,156 @@ begin
   end;
 end;
 
+procedure TestWeapons;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M, Blob: TD3Monster;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  I, Health0, Shots0: Integer;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+  procedure AimAt(const Mon: TD3Monster);
+  begin
+    Game.PlayerViewDir := (Mon.Center - Eye).Normalize;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for weapons');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    Blob := nil;
+    for M in Game.Monsters do
+    begin
+      M.Dormant := True;
+      if M.Model.Entity.Name = 'blob_1' then
+        Blob := M;
+    end;
+    Check(Blob <> nil, 'blob_1');
+    if Blob = nil then
+      Exit;
+    { in room B, facing east (a wall far away) }
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Step(0.1);
+    Check(Game.Weapon <> nil, 'a weapon');
+    if Game.Weapon = nil then
+      Exit;
+    CheckEquals(1, Game.Weapon.Slot, 'the pistol (current_weapon 1)');
+    Check(Game.Weapon.Scripted, 'it runs its script (weapon_test_gun)');
+    Check(Game.Weapon.View <> nil, 'its view model (model_view)');
+    CheckEquals(12, Game.Clip[1], 'a full clip at first');
+    Step(0.6);
+    CheckEquals('Idle', Game.Weapon.StateName, 'raised, then idle');
+    Check(Game.Weapon.Status = wsReady, 'ready (weaponReady)');
+    Check(Game.Weapon.Holder.Exists, 'its view model shows');
+
+    { held: a shot every 0.35 s }
+    Game.Attack := True;
+    Step(1);
+    Game.Attack := False;
+    Check(Game.Weapon.Shots in [3, 4], Format('3 shots a second while held (%d)', [Game.Weapon.Shots]));
+    CheckEquals(12 - Game.Weapon.Shots, Game.Clip[1], 'each takes one from the clip');
+    CheckEquals(24 - Game.Weapon.Shots, Game.AmmoCount('ammo_test_bullets'), 'and from the ammo (the clip counts in it)');
+    Step(0.5);
+    Shots0 := Game.Weapon.Shots;
+    Game.AttackOnce;
+    Step(0.6);
+    CheckEquals(Shots0 + 1, Game.Weapon.Shots, 'AttackOnce: one shot');
+
+    { reload: the clip fills from the ammo }
+    Game.ReloadWeapon;
+    Step(0.2);
+    CheckEquals('Reload', Game.Weapon.StateName, 'reloading');
+    Step(1.2);
+    CheckEquals(12, Game.Clip[1], 'reloaded');
+    CheckEquals('Idle', Game.Weapon.StateName, 'idle again');
+
+    { a shot at blob_1 hurts it by the bullet's damage }
+    Eye := D3ToCge(Vector3(450, -40, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    AimAt(Blob);
+    Health0 := Blob.Health;
+    Game.AttackOnce;
+    Step(0.3);
+    CheckEquals(Health0 - 14, Blob.Health, 'a bullet: 14 damage');
+
+    { the fists: lower the pistol, raise the fists, punch }
+    Game.SelectWeapon(0);
+    Step(0.1);
+    Check(Game.Weapon.Slot = 1, 'the pistol is lowered first');
+    Step(1);
+    CheckEquals(0, Game.Weapon.Slot, 'then the fists');
+    Step(0.5);
+    CheckEquals('Idle', Game.Weapon.StateName, 'fists ready');
+    Eye := Blob.Position + D3ToCge(Vector3(-40, 0, 0)) + Vector3(0, PlayerEyeHeight - 10, 0);
+    AimAt(Blob);
+    Health0 := Blob.Health;
+    Game.AttackOnce;
+    Step(0.5);
+    CheckEquals(Health0 - 20, Blob.Health, 'a punch: 20 damage (melee)');
+
+    { the shotgun: 8 pellets a shot, one shell }
+    Game.SelectWeapon(2);
+    Check(Game.IdealSlot = 0, 'no shotgun yet');
+    Game.Give('weapon', 'weapon_test_shotgun');
+    Game.Give('ammo_test_shells', '16');
+    Game.SelectWeapon(2);
+    Step(1.5);
+    CheckEquals(2, Game.Weapon.Slot, 'the shotgun');
+    CheckEquals(8, Game.Clip[2], 'its clip filled from the shells');
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    I := Game.Projectiles.Count;
+    Game.AttackOnce;
+    Step(0.1);
+    Step(0.05);
+    CheckEquals(15, Game.AmmoCount('ammo_test_shells'), 'one shell a shot');
+    CheckEquals(7, Game.Clip[2], 'clip 7');
+    Check(Pos('TEST SHOTGUN  7 / 8', Game.WeaponHudText) = 1, 'HUD text: ' + Game.WeaponHudText);
+
+    { the wheel order: next carried weapon after the shotgun is the fists }
+    Game.NextWeapon(1);
+    CheckEquals(0, Game.IdealSlot, 'next weapon wraps to the fists');
+    Game.NextWeapon(-1);
+    CheckEquals(2, Game.IdealSlot, 'previous: the shotgun');
+
+    { out of ammo: no shot }
+    Game.SetAmmo('ammo_test_shells', 0);
+    Game.Clip[2] := 0;
+    Shots0 := Game.Weapon.Shots;
+    Game.AttackOnce;
+    Step(1);
+    CheckEquals(Shots0, Game.Weapon.Shots, 'no ammo: no shot');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2986,6 +3136,7 @@ begin
   TestFlyingRouteAndThrows;
   TestCharacterAnimMove;
   TestItems;
+  TestWeapons;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

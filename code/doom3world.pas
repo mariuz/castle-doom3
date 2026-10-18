@@ -331,6 +331,8 @@ type
     { detonate_on_fuse: explode when the fuse ends, else just vanish }
     DetonateOnFuse: Boolean;
     Owner: String;
+    { fired by the player's weapon: hits monsters, not the player }
+    FromPlayer: Boolean;
     ExplodeSound: String;
     { a glowing ball (fireballs), nil for bullets }
     Visual: TCastleTransform;
@@ -405,6 +407,44 @@ type
     Entity: TD3MapEntity;
   end;
 
+  TD3WeaponStatus = (wsHolstered, wsRising, wsLowering, wsReady, wsOutOfAmmo, wsReload);
+
+  { The player's weapon (idWeapon): its entityDef (def_weaponN of the
+    player def) runs its script object (weapon_pistol...) with the idWeapon
+    events, its view model (model_view) follows the view. Without a script
+    object it fires the built-in pistol (TD3Game.Fire). }
+  TD3Weapon = class
+    Slot: Integer;
+    DefName: String;
+    Def: TStringList;
+    Obj: TD3ScriptObject;
+    { owned by the script VM }
+    Thread: TD3ScriptThread;
+    StateName, IdealName: String;
+    IdealFunction: TD3ScriptFunction;
+    HasIdeal: Boolean;
+    Status: TD3WeaponStatus;
+    { ammoType ('' = none: fists), ammoRequired per shot (0: no ammo
+      needed), clipSize (0: no clip) }
+    AmmoType: String;
+    AmmoRequired, ClipSize: Integer;
+    ProjectileDef, MeleeDef: String;
+    MeleeDistance: Single;
+    { the view model (nil without model_view): at the player's eye, turned
+      with the view }
+    Holder: TCastleTransform;
+    View: TD3Md5Instance;
+    { game time when the playing anim ends (animDone), 0 for cycles }
+    AnimDoneTime: Single;
+    BlendFrames: Integer;
+    Shots: Integer;
+    destructor Destroy; override;
+    procedure SetFlag(const AName: String; const Value: Boolean);
+    function Flag(const AName: String): Boolean;
+    { the script runs it (else the built-in pistol) }
+    function Scripted: Boolean;
+  end;
+
   TD3Game = class
   strict private
     FMap: TDoom3Map;
@@ -458,6 +498,10 @@ type
     FPlayerDef: TStringList;
     FAmmo: specialize TDictionary<String, Integer>;
     FCarried: TStringList;
+    FWeapon: TD3Weapon;
+    FIdealSlot: Integer;
+    FAttackPulse: Single;
+    FReloadRequested: Boolean;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -492,6 +536,26 @@ type
     function ItemOf(const E: TD3MapEntity): TD3Item;
     procedure UpdateItems;
     procedure InitInventory;
+    function SpawnWeapon(const Slot: Integer): TD3Weapon;
+    procedure UpdateWeapon(const SecondsPassed: Single);
+    function WeaponEvent(const W: TD3Weapon; const Thread: TD3ScriptThread; const N: String;
+      const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+    procedure WeaponFrameCommand(const Sender: TD3Md5Instance; const Command: String);
+    { idInventory::HasAmmo: shots of AmmoRequired, -1 when unlimited }
+    function HasAmmo(const AmmoClass: String; const Required: Integer): Integer;
+    procedure UseAmmo(const AmmoClass: String; const Amount: Integer);
+    { idWeapon::Event_LaunchProjectiles }
+    procedure LaunchPlayerProjectiles(const W: TD3Weapon; const Count: Integer;
+      const Spread, FuseOffset, LaunchPower, DamagePower: Single);
+    { idWeapon::Event_Melee: True when it hit a monster }
+    function WeaponMelee(const W: TD3Weapon): Boolean;
+    { the nearest living monster on the ray, closer than MaxDist (CGE) }
+    function RayMonster(const Origin, Dir: TVector3; const MaxDist: Single;
+      out Dist: Single): TD3Monster;
+    procedure DamageMonster(const Mon: TD3Monster; const Amount: Integer);
+    procedure MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single);
+    { the player's view axes (Doom 3 rows: forward, left, up) }
+    function PlayerViewAxis: TMatrix3;
     procedure UpdateMoveables(const SecondsPassed: Single);
     function CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
     procedure UpdateBindings;
@@ -590,6 +654,11 @@ type
     WeaponBits: Cardinal;
     WeaponDefs: array [0..15] of String;
     Clip: array [0..15] of Integer;
+    { The player's view direction (CGE), set by the view each frame: weapons
+      aim and their view models turn with it. }
+    PlayerViewDir: TVector3;
+    { The attack button is held (idPlayer: WEAPON_ATTACK). }
+    Attack: Boolean;
     constructor Create(const AMap: TDoom3Map);
     destructor Destroy; override;
     { Create movers, monsters, speakers for the loaded map. }
@@ -672,6 +741,23 @@ type
     function InventoryStatus: String;
     { "give all": full health and armor, every weapon, full ammo }
     procedure GiveAll;
+    { Attack once (a demo script's fire): holds WEAPON_ATTACK until the
+      weapon fires, or a second passes. }
+    procedure AttackOnce;
+    { idPlayer::SelectWeapon: switch to the weapon in a slot (if carried),
+      lowering the current one first. }
+    procedure SelectWeapon(const Slot: Integer);
+    { The next (Delta 1) or previous (-1) carried weapon. }
+    procedure NextWeapon(const Delta: Integer);
+    { WEAPON_RELOAD for a frame }
+    procedure ReloadWeapon;
+    { The current weapon, nil before the first update or without a
+      player def. }
+    property Weapon: TD3Weapon read FWeapon;
+    { The slot being switched to (or the current one). }
+    property IdealSlot: Integer read FIdealSlot;
+    { "PISTOL  12 / 24" for the HUD }
+    function WeaponHudText: String;
     function MoveableOf(const E: TD3MapEntity): TD3Moveable;
     { Throw a moveable at Velocity (Doom 3), its damage on for 2.5 s
       (idAI_Vagary::Event_ThrowObjectAtEnemy, idMoveable::EnableDamage) }
@@ -742,6 +828,8 @@ const
   PlayerRadius = 16;
   { the player's entity handle for scripts (it's not a map entity) }
   PlayerHandle = $7FFFFF00;
+  { the player's weapon's handle (its script object's self) }
+  WeaponHandle = $7FFFFF01;
   { idAI's moveType_t }
   MoveTypeDead = 0;
   MoveTypeAnim = 1;
@@ -985,6 +1073,7 @@ begin
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
   Health := 100;
+  FIdealSlot := -1;
 end;
 
 destructor TD3Game.Destroy;
@@ -1044,6 +1133,8 @@ begin
   FCounts.Clear;
   FUnsupported.Clear;
   FActors.Clear;
+  { before the VM (it owns the weapon's thread) and the map }
+  FreeAndNil(FWeapon);
   FreeAndNil(FScript);
   FHandles.Clear;
   FScriptMovers.Clear;
@@ -1431,6 +1522,9 @@ begin
   { idInventory::RestoreInventory with the player's spawnArgs }
   FAmmo.Clear;
   FCarried.Clear;
+  FreeAndNil(FWeapon);
+  FIdealSlot := -1;
+  FAttackPulse := 0;
   WeaponBits := 0;
   for I := 0 to High(WeaponDefs) do
   begin
@@ -1689,6 +1783,550 @@ begin
       if Copy(K, 1, 9) = 'max_ammo_' then
         SetAmmo(Copy(K, 5, MaxInt), StrToIntDef(FPlayerDef.ValueFromIndex[I], 0));
     end;
+end;
+
+{ Weapons ------------------------------------------------------------------- }
+
+destructor TD3Weapon.Destroy;
+begin
+  if (View <> nil) and (Holder <> nil) then
+    Holder.Remove(View.Scene);
+  FreeAndNil(View);
+  FreeAndNil(Holder);
+  FreeAndNil(Obj);
+  inherited Destroy;
+end;
+
+procedure TD3Weapon.SetFlag(const AName: String; const Value: Boolean);
+var
+  I: Integer;
+begin
+  if (Obj <> nil) and Obj.Typ.FindField(AName, I) then
+    Obj.Fields[I] := D3FloatValue(Ord(Value));
+end;
+
+function TD3Weapon.Flag(const AName: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := (Obj <> nil) and Obj.Typ.FindField(AName, I) and (D3ValueToFloat(Obj.Fields[I]) <> 0);
+end;
+
+function TD3Weapon.Scripted: Boolean;
+begin
+  Result := (Obj <> nil) and (Thread <> nil);
+end;
+
+function TD3Game.HasAmmo(const AmmoClass: String; const Required: Integer): Integer;
+begin
+  if (AmmoClass = '') or (Required <= 0) then
+    Exit(-1);
+  Result := AmmoCount(AmmoClass);
+  if Result < 0 then
+    Exit(-1);
+  Result := Result div Required;
+end;
+
+procedure TD3Game.UseAmmo(const AmmoClass: String; const Amount: Integer);
+begin
+  if (HasAmmo(AmmoClass, Amount) <= 0) or (AmmoCount(AmmoClass) < 0) then
+    Exit;
+  SetAmmo(AmmoClass, AmmoCount(AmmoClass) - Amount);
+end;
+
+function TD3Game.PlayerViewAxis: TMatrix3;
+var
+  D: TVector3;
+begin
+  if PlayerViewDir.IsZero then
+    D := Vector3(1, 0, 0)
+  else
+    D := CgeToD3(PlayerViewDir);
+  Result := AnglesMatrix(Vector3(D3DirPitch(D), D3DirYaw(D), 0));
+end;
+
+function TD3Game.SpawnWeapon(const Slot: Integer): TD3Weapon;
+var
+  W: TD3Weapon;
+  T: TD3ScriptType;
+  Decl: TD3ModelDecl;
+  Md5: TD3Md5Model;
+  Avail: Integer;
+begin
+  { idWeapon::GetWeaponDef }
+  W := TD3Weapon.Create;
+  Result := W;
+  W.Slot := Slot;
+  W.DefName := WeaponDefs[Slot];
+  W.Def := Decls.EntityDef(W.DefName);
+  W.Status := wsReady;
+  if W.Def = nil then
+  begin
+    WritelnWarning('Doom3World', 'No weapon def "%s"', [W.DefName]);
+    Exit;
+  end;
+  W.AmmoType := W.Def.Values['ammoType'];
+  W.AmmoRequired := StrToIntDef(W.Def.Values['ammoRequired'], 0);
+  W.ClipSize := StrToIntDef(W.Def.Values['clipSize'], 0);
+  W.ProjectileDef := W.Def.Values['def_projectile'];
+  W.MeleeDef := W.Def.Values['def_melee'];
+  W.MeleeDistance := StrToFloatDef(W.Def.Values['melee_distance'], 64, DefaultFormatSettings);
+  { the clip: full the first time (Clip -1), within the ammo carried }
+  if (Clip[Slot] < 0) or (Clip[Slot] > W.ClipSize) then
+  begin
+    Clip[Slot] := W.ClipSize;
+    Avail := HasAmmo(W.AmmoType, W.AmmoRequired);
+    if (Avail >= 0) and (Clip[Slot] > Avail) then
+      Clip[Slot] := Avail;
+  end;
+  { the view model }
+  Decl := Decls.ModelDecl(W.Def.Values['model_view']);
+  if Decl <> nil then
+  begin
+    Md5 := Md5Cache.Model(Decl.Mesh);
+    if Md5 <> nil then
+    begin
+      W.View := TD3Md5Instance.Create(Md5, Decl.Anims, Decl.Skin);
+      W.View.FrameCommands := Decl.FrameCommands;
+      W.View.OnFrameCommand := @WeaponFrameCommand;
+      W.View.Scene.Collides := False;
+      W.View.Scene.Pickable := False;
+      W.View.Scene.CastShadows := False;
+      W.View.Scene.Translation := D3ToCge(Decl.Offset);
+      W.Holder := TCastleTransform.Create(nil);
+      W.Holder.SetTransient;
+      W.Holder.Name := 'ViewWeapon';
+      W.Holder.Collides := False;
+      W.Holder.Pickable := False;
+      W.Holder.Add(W.View.Scene);
+      { hidden until it plays an anim (idWeapon::Event_PlayAnim shows it) }
+      W.Holder.Exists := False;
+      FMap.Add(W.Holder);
+    end;
+  end;
+  { the script object, its init in its thread (idWeapon's thread) }
+  T := nil;
+  if FScript <> nil then
+    T := FScript.FindType(W.Def.Values['scriptobject']);
+  if T <> nil then
+  begin
+    W.Obj := TD3ScriptObject.Create(T);
+    W.Thread := FScript.NewPersistentThread('weapon ' + W.DefName);
+    W.Thread.Tag := WeaponHandle;
+    W.Status := wsHolstered;
+    FScript.RestartThread(W.Thread, T.FindMethodToRun('init'), WeaponHandle);
+    { idWeapon::Raise }
+    W.SetFlag('WEAPON_RAISEWEAPON', True);
+  end;
+  WritelnLog('Doom3World', 'Weapon %d: %s (%s, clip %d)', [Slot, W.DefName,
+    BoolToStr(W.Scripted, 'script ' + W.Def.Values['scriptobject'], 'built-in pistol'), Clip[Slot]]);
+end;
+
+procedure TD3Game.SelectWeapon(const Slot: Integer);
+begin
+  if HasWeapon(Slot) then
+    FIdealSlot := Slot;
+end;
+
+procedure TD3Game.NextWeapon(const Delta: Integer);
+var
+  I, Slot: Integer;
+begin
+  Slot := FIdealSlot;
+  for I := 1 to Length(WeaponDefs) do
+  begin
+    Slot := (Slot + Delta + Length(WeaponDefs)) mod Length(WeaponDefs);
+    if HasWeapon(Slot) then
+    begin
+      FIdealSlot := Slot;
+      Exit;
+    end;
+  end;
+end;
+
+procedure TD3Game.ReloadWeapon;
+begin
+  FReloadRequested := True;
+end;
+
+procedure TD3Game.AttackOnce;
+begin
+  FAttackPulse := 1;
+end;
+
+procedure TD3Game.UpdateWeapon(const SecondsPassed: Single);
+var
+  W: TD3Weapon;
+  Axis: TMatrix3;
+  Source: TCastleSoundSource;
+begin
+  if FPlayerDef = nil then
+    Exit;
+  { the weapon to start with: current_weapon (the pistol), else the first }
+  if (FIdealSlot < 0) or not HasWeapon(FIdealSlot) then
+  begin
+    FIdealSlot := -1;
+    SelectWeapon(StrToIntDef(FPlayerDef.Values['current_weapon'], 1));
+    if FIdealSlot < 0 then
+      NextWeapon(1);
+    if FIdealSlot < 0 then
+      Exit;
+  end;
+  { idPlayer::UpdateWeapon: lower the weapon, switch once it's holstered }
+  if not PlayerDead and ((FWeapon = nil) or (FWeapon.Slot <> FIdealSlot)) then
+  begin
+    if (FWeapon = nil) or not FWeapon.Scripted or (FWeapon.Status = wsHolstered) then
+    begin
+      if FWeapon <> nil then
+      begin
+        if (FScript <> nil) and (FWeapon.Thread <> nil) then
+          FScript.FreeThread(FWeapon.Thread);
+        FreeAndNil(FWeapon);
+      end;
+      FWeapon := SpawnWeapon(FIdealSlot);
+    end else
+    if FWeapon.Status in [wsReady, wsOutOfAmmo, wsReload] then
+      FWeapon.SetFlag('WEAPON_LOWERWEAPON', True);
+  end;
+  W := FWeapon;
+  if W = nil then
+    Exit;
+  if W.Scripted then
+  begin
+    { a state asked last frame (idWeapon::SetState) }
+    if W.HasIdeal then
+    begin
+      W.HasIdeal := False;
+      W.StateName := W.IdealName;
+      FScript.RestartThread(W.Thread, W.IdealFunction, WeaponHandle);
+    end;
+    W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead);
+    W.SetFlag('WEAPON_RELOAD', FReloadRequested);
+  end;
+  FReloadRequested := False;
+  FAttackPulse := Max(0, FAttackPulse - SecondsPassed);
+  { the view model at the eye, turned with the view }
+  if W.View <> nil then
+  begin
+    Axis := PlayerViewAxis;
+    W.Holder.Translation := FPlayerEye;
+    SetD3Rotation(W.Holder, Axis);
+    W.View.Shown := W.Holder.Exists;
+    W.View.Update(SecondsPassed);
+  end;
+  { its sounds follow the player }
+  if FSoundSources.TryGetValue(WeaponHandle, Source) and (Source.Parent <> nil) then
+    Source.Parent.Translation := FPlayerEye;
+end;
+
+procedure TD3Game.WeaponFrameCommand(const Sender: TD3Md5Instance; const Command: String);
+var
+  Cmd, Arg, Shader: String;
+begin
+  if (FWeapon = nil) or (FWeapon.View <> Sender) then
+    Exit;
+  Cmd := LowerCase(Copy(Command, 1, Pos(' ', Command + ' ') - 1));
+  Arg := Trim(Copy(Command, Length(Cmd) + 2, MaxInt));
+  if Copy(Cmd, 1, 5) = 'sound' then
+  begin
+    { sound, sound_weapon, sound_item...: a key of the weapon def, or a
+      shader }
+    Shader := FWeapon.Def.Values[Arg];
+    if Shader = '' then
+      Shader := Arg;
+    StartScriptSound(WeaponHandle, Shader, 0);
+  end;
+end;
+
+function TD3Game.WeaponEvent(const W: TD3Weapon; const Thread: TD3ScriptThread; const N: String;
+  const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
+var
+  Anim: String;
+  Amount, Avail: Integer;
+
+  function ArgF(const Index: Integer): Single;
+  begin
+    Result := D3ValueToFloat(Args[Index]);
+  end;
+
+  function ArgStr(const Index: Integer): String;
+  begin
+    Result := D3ValueToString(Args[Index]);
+  end;
+
+  procedure PlayViewAnim(const Loop: Boolean);
+  begin
+    W.AnimDoneTime := 0;
+    if W.View = nil then
+      Exit;
+    Anim := W.View.ResolveAnim(ArgStr(1));
+    if (Anim = '') or not W.View.PlayAnim(Anim, Loop) then
+    begin
+      Unsupported(Format('weapon anim %s of %s', [ArgStr(1), W.DefName]));
+      Exit;
+    end;
+    W.Holder.Exists := True;
+    if not Loop then
+      W.AnimDoneTime := FTime + W.View.AnimDurationOf(Anim);
+  end;
+
+begin
+  Result := True;
+  case N of
+    'weaponState':
+      begin
+        { idWeapon::Event_WeaponState: the thread switches next frame }
+        W.IdealFunction := W.Obj.Typ.FindMethodToRun(ArgStr(0));
+        W.IdealName := ArgStr(0);
+        W.HasIdeal := True;
+        W.BlendFrames := Round(ArgF(1));
+        if Thread = W.Thread then
+          Thread.Yield;
+      end;
+    'weaponReady':
+      begin
+        W.Status := wsReady;
+        W.SetFlag('WEAPON_RAISEWEAPON', False);
+      end;
+    'weaponOutOfAmmo':
+      begin
+        W.Status := wsOutOfAmmo;
+        W.SetFlag('WEAPON_RAISEWEAPON', False);
+      end;
+    'weaponReloading': W.Status := wsReload;
+    'weaponHolstered':
+      begin
+        W.Status := wsHolstered;
+        W.SetFlag('WEAPON_LOWERWEAPON', False);
+        if W.Holder <> nil then
+          W.Holder.Exists := False;
+      end;
+    'weaponRising':
+      begin
+        W.Status := wsRising;
+        W.SetFlag('WEAPON_LOWERWEAPON', False);
+      end;
+    'weaponLowering':
+      begin
+        W.Status := wsLowering;
+        W.SetFlag('WEAPON_RAISEWEAPON', False);
+      end;
+    'useAmmo':
+      begin
+        Amount := Round(ArgF(0)) * W.AmmoRequired;
+        UseAmmo(W.AmmoType, Amount);
+        if (W.ClipSize > 0) and (W.AmmoRequired > 0) then
+          Clip[W.Slot] := Max(0, Clip[W.Slot] - Amount);
+      end;
+    'addToClip':
+      begin
+        Clip[W.Slot] := Min(Clip[W.Slot] + Round(ArgF(0)), W.ClipSize);
+        Avail := HasAmmo(W.AmmoType, W.AmmoRequired);
+        if (Avail >= 0) and (Clip[W.Slot] > Avail) then
+          Clip[W.Slot] := Avail;
+      end;
+    'ammoInClip': EventResult := D3FloatValue(Clip[W.Slot]);
+    'ammoAvailable': EventResult := D3FloatValue(HasAmmo(W.AmmoType, W.AmmoRequired));
+    'totalAmmoCount': EventResult := D3FloatValue(HasAmmo(W.AmmoType, 1));
+    'clipSize': EventResult := D3FloatValue(W.ClipSize);
+    'playAnim': PlayViewAnim(False);
+    'playCycle': PlayViewAnim(True);
+    'animDone':
+      { blend frames are game frames (60 a second) }
+      EventResult := D3FloatValue(Ord(W.AnimDoneTime - ArgF(1) / 60 <= FTime));
+    'setBlendFrames': W.BlendFrames := Round(ArgF(1));
+    'getBlendFrames': EventResult := D3FloatValue(W.BlendFrames);
+    'launchProjectiles':
+      LaunchPlayerProjectiles(W, Round(ArgF(0)), ArgF(1), ArgF(2), ArgF(3), ArgF(4));
+    'melee': EventResult := D3FloatValue(Ord(WeaponMelee(W)));
+    'getOwner': EventResult := D3EntityValue(PlayerHandle);
+    'nextWeapon': NextWeapon(1);
+    'autoReload': EventResult := D3FloatValue(1);
+    'isInvisible': EventResult := D3FloatValue(0);
+    'getLightParm': EventResult := D3FloatValue(1);
+    'getName': EventResult := D3StringValue(W.DefName);
+    'createProjectile', 'getWorldModel': EventResult := D3EntityValue(0);
+    'flashlight', 'ejectBrass', 'allowDrop', 'netReload', 'netEndReload', 'setSkin',
+    'setLightParm', 'setLightParms', 'setShaderParm', 'setShaderParms', 'setColor':
+      ; { no effect here yet }
+    'hide':
+      if W.Holder <> nil then
+        W.Holder.Exists := False;
+    'show':
+      if W.Holder <> nil then
+        W.Holder.Exists := True;
+    'getKey': EventResult := D3StringValue(W.Def.Values[ArgStr(0)]);
+    'getFloatKey', 'getIntKey', 'getBoolKey':
+      EventResult := D3FloatValue(StrToFloatDef(W.Def.Values[ArgStr(0)], 0, DefaultFormatSettings));
+    'getVectorKey': EventResult := D3VectorValue(ParseVector3(W.Def.Values[ArgStr(0)], TVector3.Zero));
+    'startSound':
+      EventResult := D3FloatValue(StartScriptSound(WeaponHandle, W.Def.Values[ArgStr(0)], Round(ArgF(1))));
+    'startSoundShader':
+      EventResult := D3FloatValue(StartScriptSound(WeaponHandle, ArgStr(0), Round(ArgF(1))));
+    'stopSound': StopScriptSound(WeaponHandle, Round(ArgF(0)));
+    else
+      Result := False;
+  end;
+end;
+
+function TD3Game.RayMonster(const Origin, Dir: TVector3; const MaxDist: Single;
+  out Dist: Single): TD3Monster;
+var
+  Mon: TD3Monster;
+  D, ToCenter, Closest: TVector3;
+  T: Single;
+begin
+  { monsters as vertical cylinders }
+  Result := nil;
+  Dist := MaxDist;
+  D := Dir.Normalize;
+  for Mon in FMonsters do
+  begin
+    if (Mon.State = msDead) or not Mon.Model.Holder.Exists then
+      Continue;
+    ToCenter := Mon.Center - Origin;
+    T := TVector3.DotProduct(ToCenter, D);
+    if (T <= 0) or (T >= Dist) then
+      Continue;
+    Closest := Origin + D * T;
+    if (Sqr(Closest.X - Mon.Center.X) + Sqr(Closest.Z - Mon.Center.Z) < Sqr(Mon.Radius)) and
+       (Abs(Closest.Y - Mon.Center.Y) < Mon.Height / 2) then
+    begin
+      Result := Mon;
+      Dist := T;
+    end;
+  end;
+end;
+
+procedure TD3Game.DamageMonster(const Mon: TD3Monster; const Amount: Integer);
+begin
+  if Mon.State = msDead then
+    Exit;
+  Dec(Mon.Health, Amount);
+  Mon.PainTime := 0.2;
+  Mon.Dormant := False;
+  if (Mon.State = msIdle) and (Mon.Actor = nil) then
+  begin
+    Mon.State := msChase;
+    Mon.Model.Instance.PlayAnim('walk');
+  end;
+  if Mon.Health <= 0 then
+  begin
+    Mon.State := msDead;
+    Mon.StateTime := 0;
+    if Mon.Actor = nil then
+      Mon.Model.Instance.PlayAnim('idle', False);
+    Inc(Kills);
+    Message('Killed ' + Mon.Model.Entity.Name);
+  end;
+  if Mon.Actor <> nil then
+    ActorDamaged(Mon.Actor, Mon.Health <= 0);
+end;
+
+procedure TD3Game.LaunchPlayerProjectiles(const W: TD3Weapon; const Count: Integer;
+  const Spread, FuseOffset, LaunchPower, DamagePower: Single);
+var
+  Def: TStringList;
+  Axis: TMatrix3;
+  Fwd, Left, Up, Dir: TVector3;
+  Ang, Spin, Speed: Single;
+  I, Avail: Integer;
+  P: TD3Projectile;
+begin
+  if W.ProjectileDef = '' then
+  begin
+    Unsupported('weapon without def_projectile: ' + W.DefName);
+    Exit;
+  end;
+  { out of ammo, or the clip is empty }
+  Avail := HasAmmo(W.AmmoType, W.AmmoRequired);
+  if (Avail = 0) or ((W.ClipSize <> 0) and (Clip[W.Slot] <= 0)) then
+    Exit;
+  UseAmmo(W.AmmoType, W.AmmoRequired);
+  if (W.ClipSize > 0) and (W.AmmoRequired > 0) then
+    Dec(Clip[W.Slot]);
+  FAttackPulse := 0;
+  SinceFire := 0;
+  Inc(W.Shots);
+  Def := Decls.EntityDef(W.ProjectileDef);
+  Speed := 1000;
+  if Def <> nil then
+    Speed := ParseVector3(Def.Values['velocity'], Vector3(1000, 0, 0)).Length;
+  Speed := Speed * LaunchPower;
+  Axis := PlayerViewAxis;
+  Fwd := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);
+  Left := Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);
+  Up := Vector3(Axis.Data[2, 0], Axis.Data[2, 1], Axis.Data[2, 2]);
+  for I := 1 to Max(1, Count) do
+  begin
+    { spread: a random direction within the cone }
+    Ang := Sin(DegToRad(Spread) * Random);
+    Spin := 2 * Pi * Random;
+    Dir := (Fwd + Up * (Ang * Sin(Spin)) - Left * (Ang * Cos(Spin))).Normalize;
+    P := SpawnProjectile(W.ProjectileDef, 'player', FPlayerEye + D3ToCge(Fwd) * 2, D3ToCge(Dir) * Speed);
+    if P = nil then
+      Continue;
+    P.FromPlayer := True;
+    P.Damage := Round(P.Damage * DamagePower);
+    P.Fuse := P.Fuse - FuseOffset;
+  end;
+  WritelnLog('Doom3World', 'Weapon %s fires %d (clip %d, ammo %d)',
+    [W.DefName, Max(1, Count), Clip[W.Slot], AmmoCount(W.AmmoType)]);
+end;
+
+function TD3Game.WeaponMelee(const W: TD3Weapon): Boolean;
+var
+  Def: TStringList;
+  Dir: TVector3;
+  WallDist, MonDist: Single;
+  Mon: TD3Monster;
+  Damage: Integer;
+begin
+  Result := False;
+  FAttackPulse := 0;
+  Def := Decls.EntityDef(W.MeleeDef);
+  if Def = nil then
+  begin
+    Unsupported('weapon without def_melee: ' + W.DefName);
+    Exit;
+  end;
+  Inc(W.Shots);
+  Dir := D3ToCge(Vector3(PlayerViewAxis.Data[0, 0], PlayerViewAxis.Data[0, 1], PlayerViewAxis.Data[0, 2]));
+  if FMap.World.WorldRayCast(FPlayerEye, Dir, WallDist) = nil then
+    WallDist := W.MeleeDistance;
+  Mon := RayMonster(FPlayerEye, Dir, Min(WallDist, W.MeleeDistance), MonDist);
+  if Mon <> nil then
+  begin
+    Damage := StrToIntDef(Def.Values['damage'], 10);
+    WritelnLog('Doom3World', 'Weapon %s hits %s (%d)', [W.DefName, Mon.Model.Entity.Name, Damage]);
+    DamageMonster(Mon, Damage);
+    PlaySoundAt(Def.Values['snd_flesh'], FPlayerEye + Dir * MonDist);
+    Result := True;
+  end else
+  if WallDist < W.MeleeDistance then
+    PlaySoundAt(Def.Values['snd_hit'], FPlayerEye + Dir * WallDist)
+  else
+    PlaySoundAt(Def.Values['snd_miss'], FPlayerEye);
+end;
+
+function TD3Game.WeaponHudText: String;
+var
+  Name: String;
+  W: TD3Weapon;
+begin
+  W := FWeapon;
+  if (W = nil) or not W.Scripted then
+    Exit('PISTOL');
+  Name := UpperCase(LangString(W.Def.Values['inv_name']));
+  if Name = '' then
+    Name := UpperCase(W.DefName);
+  if W.AmmoType = '' then
+    Result := Name
+  else
+  if W.ClipSize > 0 then
+    Result := Format('%s  %d / %d', [Name, Clip[W.Slot], Max(0, AmmoCount(W.AmmoType) - Clip[W.Slot])])
+  else
+    Result := Format('%s  %d', [Name, AmmoCount(W.AmmoType)]);
 end;
 
 procedure TD3Game.ThrowMoveable(const M: TD3Moveable; const Velocity: TVector3);
@@ -3017,10 +3655,10 @@ begin
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
-  begin
     UpdateActors(SecondsPassed);
+  UpdateWeapon(SecondsPassed);
+  if (FScript <> nil) and not ScriptsPaused then
     FScript.Update(FTime);
-  end;
 end;
 
 constructor TD3Actor.Create;
@@ -3054,6 +3692,14 @@ function TD3Game.ScriptEntityObject(const Handle: Integer): TD3ScriptObject;
 var
   A: TD3Actor;
 begin
+  if Handle = WeaponHandle then
+  begin
+    if FWeapon <> nil then
+      Result := FWeapon.Obj
+    else
+      Result := nil;
+    Exit;
+  end;
   A := FindActor(Handle);
   if A <> nil then
     Result := A.Obj
@@ -4436,6 +5082,32 @@ begin
   if not P.Velocity.IsZero then
     Back := Back - P.Velocity.Normalize * 2;
   RadiusDamage(P.Position, Back, P.SplashDamage, P.SplashRadius, P.Owner);
+  if P.FromPlayer and (P.SplashDamage > 0) and (P.SplashRadius > 0) then
+    MonsterSplash(P.Position, P.SplashDamage, P.SplashRadius);
+end;
+
+procedure TD3Game.MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single);
+var
+  Mon: TD3Monster;
+  Dist: Single;
+  Amount: Integer;
+begin
+  { idGameLocal::RadiusDamage on monsters: by the distance to their box,
+    seen from the explosion }
+  for Mon in FMonsters do
+  begin
+    if (Mon.State = msDead) or not Mon.Model.Holder.Exists then
+      Continue;
+    Dist := Max(0, (Mon.Center - Position).Length - Mon.Radius);
+    if (Dist >= Radius) or not CanSee(Position, Mon.Center) then
+      Continue;
+    Amount := Round(Damage * (1 - Dist / Radius));
+    if Amount > 0 then
+    begin
+      WritelnLog('Doom3World', 'Splash of the player hits %s (%d)', [Mon.Model.Entity.Name, Amount]);
+      DamageMonster(Mon, Amount);
+    end;
+  end;
 end;
 
 procedure TD3Game.RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
@@ -4482,6 +5154,7 @@ var
   NewPos, Step, Feet, Normal, Pos, Seek, Nose, Dir, Vel: TVector3;
   Len, HitDist, Dist, Frac, DPitch, DYaw, MaxTurn: Single;
   Detonate, HitPlayer, Bounced: Boolean;
+  HitMonster: TD3Monster;
 
   procedure Remove;
   begin
@@ -4597,8 +5270,24 @@ begin
     Detonate := False;
     HitPlayer := False;
     Bounced := False;
+    { a monster (the player's projectiles) }
+    if P.FromPlayer and (Len > 0) then
+    begin
+      HitMonster := RayMonster(P.Position, Step, Len + P.Radius, Dist);
+      { not through walls }
+      if (HitMonster <> nil) and WorldHit(P.Position, Step / Len, Min(Dist, Len), HitDist, Normal) then
+        HitMonster := nil;
+      if HitMonster <> nil then
+      begin
+        WritelnLog('Doom3World', 'Projectile of the player hits %s (%d)', [HitMonster.Model.Entity.Name, P.Damage]);
+        DamageMonster(HitMonster, P.Damage);
+        NewPos := P.Position + Step * (Min(Dist, Len) / Len);
+        Detonate := True;
+        HitPlayer := True;
+      end;
+    end;
     { the player }
-    if not PlayerDead and (Len > 0) and
+    if not P.FromPlayer and not PlayerDead and (Len > 0) and
        (SegmentToPlayerDistance(P.Position, NewPos, Feet, FPlayerEye) <= P.Radius + PlayerRadius) then
     begin
       if P.DetonateOnActor then
@@ -5107,6 +5796,18 @@ begin
   if FSoundSources.TryGetValue(Handle, Result) then
     Exit;
   Result := nil;
+  if Handle = WeaponHandle then
+  begin
+    { the weapon's sounds: at the player's eye (UpdateWeapon moves it) }
+    T := TCastleTransform.Create(nil);
+    T.Translation := FPlayerEye;
+    FMap.Add(T);
+    FSoundTransforms.Add(T);
+    Result := TCastleSoundSource.Create(T);
+    T.AddBehavior(Result);
+    FSoundSources.Add(Handle, Result);
+    Exit;
+  end;
   E := HandleEntity(Handle);
   if E = nil then
     Exit;
@@ -5873,6 +6574,13 @@ begin
     Exit;
   end;
 
+  if Target = WeaponHandle then
+  begin
+    if (FWeapon = nil) or not FWeapon.Scripted then
+      Exit(False);
+    Exit(WeaponEvent(FWeapon, Thread, N, Args, EventResult));
+  end;
+
   if Target = PlayerHandle then
   begin
     case N of
@@ -6219,12 +6927,13 @@ end;
 
 function TD3Game.Fire(const Origin, Dir: TVector3): Boolean;
 var
-  WallDist, BestDist, T: Single;
-  Mon, Best: TD3Monster;
+  WallDist, BestDist: Single;
+  Best: TD3Monster;
   Hit: TCastleTransform;
-  D, ToCenter, Closest: TVector3;
+  D: TVector3;
   HitName: String;
 begin
+  { the built-in pistol: hitscan, PistolDamage every PistolDelay }
   Result := False;
   if (FFireCooldown > 0) or PlayerDead then
     Exit;
@@ -6235,25 +6944,7 @@ begin
   Hit := FMap.World.WorldRayCast(Origin, D, WallDist);
   if Hit = nil then
     WallDist := MaxSingle;
-  { monsters as vertical cylinders }
-  Best := nil;
-  BestDist := WallDist;
-  for Mon in FMonsters do
-  begin
-    if (Mon.State = msDead) or not Mon.Model.Holder.Exists then
-      Continue;
-    ToCenter := Mon.Center - Origin;
-    T := TVector3.DotProduct(ToCenter, D);
-    if (T <= 0) or (T >= BestDist) then
-      Continue;
-    Closest := Origin + D * T;
-    if (Sqr(Closest.X - Mon.Center.X) + Sqr(Closest.Z - Mon.Center.Z) < Sqr(Mon.Radius)) and
-       (Abs(Closest.Y - Mon.Center.Y) < Mon.Height / 2) then
-    begin
-      Best := Mon;
-      BestDist := T;
-    end;
-  end;
+  Best := RayMonster(Origin, D, WallDist, BestDist);
   if Best <> nil then
     HitName := 'hit ' + Best.Model.Entity.Name
   else
@@ -6263,27 +6954,7 @@ begin
   else
     WritelnLog('Doom3World', 'Shot: no wall, monster %s', [HitName]);
   if Best <> nil then
-  begin
-    Dec(Best.Health, PistolDamage);
-    Best.PainTime := 0.2;
-    Best.Dormant := False;
-    if (Best.State = msIdle) and (Best.Actor = nil) then
-    begin
-      Best.State := msChase;
-      Best.Model.Instance.PlayAnim('walk');
-    end;
-    if Best.Health <= 0 then
-    begin
-      Best.State := msDead;
-      Best.StateTime := 0;
-      if Best.Actor = nil then
-        Best.Model.Instance.PlayAnim('idle', False);
-      Inc(Kills);
-      Message('Killed ' + Best.Model.Entity.Name);
-    end;
-    if Best.Actor <> nil then
-      ActorDamaged(Best.Actor, Best.Health <= 0);
-  end;
+    DamageMonster(Best, PistolDamage);
 end;
 
 procedure TD3Game.Use(const Origin, Dir: TVector3);
