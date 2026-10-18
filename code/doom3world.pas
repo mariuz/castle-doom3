@@ -374,6 +374,25 @@ type
     function Origin: TVector3;
   end;
 
+  { An item (idItem, idMoveableItem, idItemPowerup, idPDAItem...): touched
+    by the player, it gives its inv_* keys (health, armor, ammo_*,
+    weapon...) and disappears. Its model is a static model or brush entity
+    (Brush, nil without one). }
+  TD3Item = class
+    Entity: TD3MapEntity;
+    Brush: TD3BrushEntity;
+    { the box touching picks it up (Doom 3 coordinates, world) }
+    Box: TBox3D;
+    PickedUp: Boolean;
+    { triggerFirst / no_touch: not until triggered }
+    CanPickUp: Boolean;
+    Spin: Boolean;
+    { where it was placed (spinning items bob around it), Doom 3 }
+    SpawnOrigin: TVector3;
+    { the entity number (idItem::Think's bob speed) }
+    Number: Integer;
+  end;
+
   { A light fading in or out (idLight::FadeIn / FadeOut). }
   TD3LightFade = record
     Light: Integer;
@@ -432,6 +451,13 @@ type
     FLocations: array of String;
     FCombatNodes: specialize TObjectList<TD3CombatNode>;
     FMoveables: specialize TObjectList<TD3Moveable>;
+    FItems: specialize TObjectList<TD3Item>;
+    { the player's inventory (idInventory): weapons by slot (def_weaponN of
+      the player def), ammo by ammo class, each weapon's clip (-1: full
+      when first used) }
+    FPlayerDef: TStringList;
+    FAmmo: specialize TDictionary<String, Integer>;
+    FCarried: TStringList;
     { script sounds: sound sources by entity handle, playing sounds by
       "handle:channel" }
     FSoundSources: specialize TDictionary<Integer, TCastleSoundSource>;
@@ -462,6 +488,10 @@ type
     procedure SpreadLocations;
     procedure SpawnCombatNode(const E: TD3MapEntity);
     procedure SpawnMoveable(const B: TD3BrushEntity);
+    procedure SpawnItem(const E: TD3MapEntity);
+    function ItemOf(const E: TD3MapEntity): TD3Item;
+    procedure UpdateItems;
+    procedure InitInventory;
     procedure UpdateMoveables(const SecondsPassed: Single);
     function CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
     procedure UpdateBindings;
@@ -553,6 +583,13 @@ type
     ProjectilesLaunched: Integer;
     { Script threads and the entities they move stand still (g_stopTime). }
     ScriptsPaused: Boolean;
+    { the inventory (idInventory): max health / armor of the player def,
+      weapons by slot (def_weaponN) and each one's clip (-1: full when
+      first used) }
+    MaxHealth, MaxArmor: Integer;
+    WeaponBits: Cardinal;
+    WeaponDefs: array [0..15] of String;
+    Clip: array [0..15] of Integer;
     constructor Create(const AMap: TDoom3Map);
     destructor Destroy; override;
     { Create movers, monsters, speakers for the loaded map. }
@@ -611,6 +648,30 @@ type
     property Aas: TD3AasFile read FAas;
     property CombatNodes: specialize TObjectList<TD3CombatNode> read FCombatNodes;
     property Moveables: specialize TObjectList<TD3Moveable> read FMoveables;
+    property Items: specialize TObjectList<TD3Item> read FItems;
+    { inventory (idInventory, idPlayer::Give) }
+    { the player's entityDef: player_doommarine, else the test level's
+      player_test (nil without one) }
+    property PlayerDef: TStringList read FPlayerDef;
+    { idPlayer::Give / idInventory::Give: one stat ("health", "armor",
+      "ammo_bullets", "weapon", "inclip_<ammo>", "item"...); False when it
+      took nothing (full) }
+    function Give(const Stat, Value: String): Boolean;
+    { an item's pickup (idItem::Pickup): True when the player took it }
+    function PickupItem(const Item: TD3Item): Boolean;
+    function AmmoCount(const AmmoClass: String): Integer;
+    procedure SetAmmo(const AmmoClass: String; const Count: Integer);
+    { max_<ammo class> of the player def (0: none can be carried) }
+    function MaxAmmo(const AmmoClass: String): Integer;
+    { the slot of a weapon entityDef name (def_weaponN), -1 if none }
+    function WeaponSlot(const WeaponName: String): Integer;
+    function HasWeapon(const Slot: Integer): Boolean;
+    { carried items (inv_carry: keys, PDAs) by inv_name }
+    property Carried: TStringList read FCarried;
+    { inventory as text, for the console }
+    function InventoryStatus: String;
+    { "give all": full health and armor, every weapon, full ammo }
+    procedure GiveAll;
     function MoveableOf(const E: TD3MapEntity): TD3Moveable;
     { Throw a moveable at Velocity (Doom 3), its damage on for 2.5 s
       (idAI_Vagary::Event_ThrowObjectAtEnemy, idMoveable::EnableDamage) }
@@ -699,7 +760,7 @@ uses
   Math,
   CastleLog, CastleUtils,
   Generics.Defaults,
-  Doom3Files, Doom3Collision, Doom3Portals;
+  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer;
 
 const
   MonsterWalkSpeed = 90;
@@ -914,6 +975,9 @@ begin
   FProjectiles := specialize TObjectList<TD3Projectile>.Create(True);
   FCombatNodes := specialize TObjectList<TD3CombatNode>.Create(True);
   FMoveables := specialize TObjectList<TD3Moveable>.Create(True);
+  FItems := specialize TObjectList<TD3Item>.Create(True);
+  FAmmo := specialize TDictionary<String, Integer>.Create;
+  FCarried := TStringList.Create;
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
@@ -947,6 +1011,9 @@ begin
   FProjectiles.Free;
   FCombatNodes.Free;
   FMoveables.Free;
+  FItems.Free;
+  FAmmo.Free;
+  FCarried.Free;
   FScriptSounds.Free;
   FSoundSources.Free;
   FSoundTransforms.Free;
@@ -966,6 +1033,7 @@ begin
   FLocations := nil;
   FCombatNodes.Clear;
   FMoveables.Clear;
+  FItems.Clear;
   FMovers.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
@@ -1264,6 +1332,363 @@ begin
     if Result.Brush.Entity = E then
       Exit;
   Result := nil;
+end;
+
+{ Items and the inventory ---------------------------------------------------- }
+
+var
+  LangStrings: TStringList;
+
+{ "#str_01234" through strings/english.lang (idLangDict), else as is }
+function LangString(const S: String): String;
+var
+  L: TDoom3Lexer;
+  Key: String;
+begin
+  if Copy(S, 1, 5) <> '#str_' then
+    Exit(S);
+  if LangStrings = nil then
+  begin
+    LangStrings := TStringList.Create;
+    LangStrings.CaseSensitive := False;
+    if D3Fs.FileExists('strings/english.lang') then
+    begin
+      L := TDoom3Lexer.Create(D3Fs.ReadText('strings/english.lang'));
+      try
+        L.Expect('{');
+        while L.Next(Key) and (Key <> '}') do
+          LangStrings.Values[Key] := L.NextStr;
+      finally
+        L.Free;
+      end;
+    end;
+  end;
+  Result := LangStrings.Values[S];
+  if Result = '' then
+    Result := S;
+end;
+
+procedure TD3Game.SpawnItem(const E: TD3MapEntity);
+var
+  It: TD3Item;
+  Size: Single;
+  Lo, Hi: TVector3;
+begin
+  { idItem::Spawn }
+  It := TD3Item.Create;
+  It.Entity := E;
+  if E.Name <> '' then
+    It.Brush := FMap.FindBrush(E.Name);
+  It.SpawnOrigin := E.Origin;
+  It.Number := FMap.MapFile.Entities.IndexOf(E);
+  It.Spin := E.BoolValue('spin');
+  It.CanPickUp := not (E.BoolValue('triggerFirst') or E.BoolValue('no_touch'));
+  { touched within triggersize of its origin, else its model's bounds
+    (idMoveableItem: expanded by triggersize, 16 by default) }
+  if (E.Value('spawnclass') <> 'idMoveableItem') and E.HasKey('triggersize') then
+  begin
+    Size := E.FloatValue('triggersize');
+    It.Box := Box3D(It.SpawnOrigin - Vector3(Size, Size, Size), It.SpawnOrigin + Vector3(Size, Size, Size));
+  end else
+  begin
+    if It.Brush <> nil then
+    begin
+      Lo := It.Brush.LocalMin;
+      Hi := It.Brush.LocalMax;
+    end else
+    begin
+      Lo := Vector3(-16, -16, 0);
+      Hi := Vector3(16, 16, 16);
+    end;
+    if E.Value('spawnclass') = 'idMoveableItem' then
+    begin
+      Size := E.FloatValue('triggersize', 16);
+      Lo := Lo - Vector3(Size, Size, Size);
+      Hi := Hi + Vector3(Size, Size, Size);
+    end;
+    { rotation ignored: items are small }
+    It.Box := Box3D(It.SpawnOrigin + Lo, It.SpawnOrigin + Hi);
+  end;
+  if E.BoolValue('start_off') and (It.Brush <> nil) then
+    It.Brush.SetHidden(True);
+  FItems.Add(It);
+end;
+
+function TD3Game.ItemOf(const E: TD3MapEntity): TD3Item;
+begin
+  for Result in FItems do
+    if Result.Entity = E then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.InitInventory;
+var
+  Def: TStringList;
+  I: Integer;
+  K: String;
+begin
+  { idInventory::RestoreInventory with the player's spawnArgs }
+  FAmmo.Clear;
+  FCarried.Clear;
+  WeaponBits := 0;
+  for I := 0 to High(WeaponDefs) do
+  begin
+    WeaponDefs[I] := '';
+    Clip[I] := -1;
+  end;
+  MaxHealth := 100;
+  MaxArmor := 100;
+  Def := Decls.EntityDef('player_doommarine');
+  if Def = nil then
+    Def := Decls.EntityDef('player_test');
+  FPlayerDef := Def;
+  if Def = nil then
+    Exit;
+  MaxHealth := StrToIntDef(Def.Values['maxhealth'], 100);
+  MaxArmor := StrToIntDef(Def.Values['maxarmor'], 100);
+  Armor := StrToIntDef(Def.Values['armor'], 50);
+  for I := 0 to High(WeaponDefs) do
+    WeaponDefs[I] := Def.Values['def_weapon' + IntToStr(I)];
+  for I := 0 to Def.Count - 1 do
+  begin
+    K := LowerCase(Def.Names[I]);
+    if Copy(K, 1, 5) = 'ammo_' then
+      FAmmo.AddOrSetValue(K, StrToIntDef(Def.ValueFromIndex[I], 0));
+  end;
+  if Def.Values['weapon'] <> '' then
+    Give('weapon', Def.Values['weapon']);
+end;
+
+function TD3Game.AmmoCount(const AmmoClass: String): Integer;
+begin
+  if not FAmmo.TryGetValue(LowerCase(AmmoClass), Result) then
+    Result := 0;
+end;
+
+procedure TD3Game.SetAmmo(const AmmoClass: String; const Count: Integer);
+begin
+  FAmmo.AddOrSetValue(LowerCase(AmmoClass), Count);
+end;
+
+function TD3Game.MaxAmmo(const AmmoClass: String): Integer;
+begin
+  Result := 0;
+  if FPlayerDef <> nil then
+    Result := StrToIntDef(FPlayerDef.Values['max_' + LowerCase(AmmoClass)], 0);
+end;
+
+function TD3Game.WeaponSlot(const WeaponName: String): Integer;
+var
+  I: Integer;
+begin
+  for I := 0 to High(WeaponDefs) do
+    if (WeaponDefs[I] <> '') and SameText(WeaponDefs[I], Trim(WeaponName)) then
+      Exit(I);
+  Result := -1;
+end;
+
+function TD3Game.HasWeapon(const Slot: Integer): Boolean;
+begin
+  Result := (Slot >= 0) and (Slot <= High(WeaponDefs)) and ((WeaponBits and (Cardinal(1) shl Slot)) <> 0);
+end;
+
+function TD3Game.Give(const Stat, Value: String): Boolean;
+var
+  S, AmmoClass: String;
+  Amount, Have, Limit, I: Integer;
+  Names: TStringArray;
+  WeaponDef: TStringList;
+begin
+  { idPlayer::Give, idInventory::Give }
+  Result := True;
+  S := LowerCase(Stat);
+  Amount := StrToIntDef(Trim(Value), 0);
+  if S = 'health' then
+  begin
+    if Health >= MaxHealth then
+      Exit(False);
+    Health := Min(Health + Amount, MaxHealth);
+  end else
+  if Copy(S, 1, 5) = 'ammo_' then
+  begin
+    Have := AmmoCount(S);
+    Limit := MaxAmmo(S);
+    if Have >= Limit then
+      Exit(False);
+    Inc(Have, Amount);
+    if (Limit > 0) and (Have > Limit) then
+      Have := Limit;
+    SetAmmo(S, Have);
+  end else
+  if S = 'armor' then
+  begin
+    if Armor >= MaxArmor then
+      Exit(False);
+    Armor := Min(Armor + Amount, MaxArmor);
+  end else
+  if Copy(S, 1, 7) = 'inclip_' then
+  begin
+    { the clip of the weapon using this ammo: set, not added }
+    AmmoClass := Copy(S, 8, MaxInt);
+    for I := 0 to High(WeaponDefs) do
+      if WeaponDefs[I] <> '' then
+      begin
+        WeaponDef := Decls.EntityDef(WeaponDefs[I]);
+        if (WeaponDef <> nil) and SameText(WeaponDef.Values['ammoType'], AmmoClass) then
+        begin
+          Clip[I] := Amount;
+          Break;
+        end;
+      end;
+  end else
+  if S = 'weapon' then
+  begin
+    Result := False;
+    Names := Value.Split([',']);
+    for I := 0 to High(Names) do
+    begin
+      Amount := WeaponSlot(Names[I]);
+      if Amount < 0 then
+      begin
+        WritelnWarning('Doom3World', 'Unknown weapon "%s"', [Trim(Names[I])]);
+        Continue;
+      end;
+      if not HasWeapon(Amount) then
+      begin
+        WeaponBits := WeaponBits or (Cardinal(1) shl Amount);
+        Result := True;
+      end;
+    end;
+  end else
+  if (S = 'item') or (S = 'icon') or (S = 'name') then
+    Result := False
+  else
+  if (S = 'stamina') or (S = 'air') or (S = 'heartrate') or (S = 'berserk') or (S = 'mega') then
+    { no stamina, air, powerups yet: taken, nothing happens }
+    Result := True
+  else
+  begin
+    Unsupported('inventory stat ' + S);
+    Result := False;
+  end;
+end;
+
+function TD3Game.PickupItem(const Item: TD3Item): Boolean;
+var
+  E: TD3MapEntity;
+  I: Integer;
+  K, ItemName: String;
+begin
+  Result := False;
+  if Item.PickedUp or PlayerDead then
+    Exit;
+  E := Item.Entity;
+  ItemName := LangString(E.Value('inv_name', E.Name));
+  { idItem::GiveToPlayer: carried items (keys, PDAs, video discs) go to
+    the inventory, the others give their inv_ keys }
+  if E.BoolValue('inv_carry') or (E.Value('spawnclass') = 'idPDAItem') or
+     (E.Value('spawnclass') = 'idMoveablePDAItem') or (E.Value('spawnclass') = 'idVideoCDItem') then
+  begin
+    FCarried.Add(ItemName);
+    Result := True;
+  end else
+    for I := 0 to E.Pairs.Count - 1 do
+    begin
+      K := LowerCase(E.Pairs.Names[I]);
+      if (Copy(K, 1, 4) = 'inv_') and (K <> 'inv_carry') then
+        if Give(Copy(K, 5, MaxInt), E.Pairs.ValueFromIndex[I]) then
+          Result := True;
+    end;
+  if not Result then
+    Exit;
+  { idItem::Pickup }
+  Item.PickedUp := True;
+  if Item.Brush <> nil then
+    Item.Brush.SetHidden(True);
+  PlaySoundAt(E.Value('snd_acquire'), D3ToCge(Item.SpawnOrigin));
+  WritelnLog('Doom3World', 'Picked up %s (%s)', [E.Name, ItemName]);
+  Message(ItemName);
+  ActivateTargets(E);
+end;
+
+procedure TD3Game.UpdateItems;
+var
+  It: TD3Item;
+  Feet, Org: TVector3;
+  PlayerBox: TBox3D;
+  Ms: Int64;
+begin
+  if FItems.Count = 0 then
+    Exit;
+  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  { the player's bounds, pm_bboxwidth 32, pm_normalheight 74 }
+  PlayerBox := Box3D(Feet + Vector3(-16, -16, 0), Feet + Vector3(16, 16, 74));
+  Ms := Round(FTime * 1000);
+  for It in FItems do
+  begin
+    if It.PickedUp then
+      Continue;
+    if It.Spin and (It.Brush <> nil) and (It.Brush.Scene <> nil) then
+    begin
+      { idItem::Think }
+      Org := It.SpawnOrigin;
+      Org.Z := Org.Z + 4 + Cos((Ms + 2000) * (0.005 + It.Number * 0.00001)) * 4;
+      It.Brush.Scene.Translation := D3ToCge(Org);
+      SetD3Rotation(It.Brush.Scene, YawMatrix((Ms and 4095) * 360 / -4096));
+    end;
+    if It.CanPickUp and not PlayerDead and ((It.Brush = nil) or not It.Brush.Hidden) and
+       It.Box.Collision(PlayerBox) then
+      PickupItem(It);
+  end;
+end;
+
+function TD3Game.InventoryStatus: String;
+var
+  I: Integer;
+  Pair: specialize TPair<String, Integer>;
+  Keys: TStringList;
+begin
+  Result := Format('health %d/%d, armor %d/%d', [Health, MaxHealth, Armor, MaxArmor]);
+  if FPlayerDef = nil then
+    Result := Result + ', no player def';
+  Result := Result + LineEnding + 'weapons:';
+  for I := 0 to High(WeaponDefs) do
+    if HasWeapon(I) then
+      Result := Result + Format(' %d %s (clip %d)', [I, WeaponDefs[I], Clip[I]]);
+  Keys := TStringList.Create;
+  try
+    Keys.Sorted := True;
+    for Pair in FAmmo do
+      Keys.Add(Format('%s %d/%d', [Pair.Key, Pair.Value, MaxAmmo(Pair.Key)]));
+    Keys.Delimiter := ',';
+    Keys.StrictDelimiter := True;
+    Result := Result + LineEnding + 'ammo: ' + StringReplace(Keys.DelimitedText, ',', ', ', [rfReplaceAll]);
+  finally
+    Keys.Free;
+  end;
+  FCarried.Delimiter := ',';
+  FCarried.StrictDelimiter := True;
+  Result := Result + LineEnding + 'items: ' + StringReplace(FCarried.DelimitedText, ',', ', ', [rfReplaceAll]);
+end;
+
+procedure TD3Game.GiveAll;
+var
+  I: Integer;
+  K: String;
+begin
+  Health := Max(Health, MaxHealth);
+  Armor := Max(Armor, MaxArmor);
+  for I := 0 to High(WeaponDefs) do
+    if WeaponDefs[I] <> '' then
+      WeaponBits := WeaponBits or (Cardinal(1) shl I);
+  if FPlayerDef <> nil then
+    for I := 0 to FPlayerDef.Count - 1 do
+    begin
+      K := LowerCase(FPlayerDef.Names[I]);
+      if Copy(K, 1, 9) = 'max_ammo_' then
+        SetAmmo(Copy(K, 5, MaxInt), StrToIntDef(FPlayerDef.ValueFromIndex[I], 0));
+    end;
 end;
 
 procedure TD3Game.ThrowMoveable(const M: TD3Moveable; const Velocity: TVector3);
@@ -1928,8 +2353,14 @@ begin
         SpawnTrigger(E)
       else
       if E.Value('spawnclass') = 'idCombatNode' then
-        SpawnCombatNode(E);
+        SpawnCombatNode(E)
+      else
+      if (E.Value('spawnclass') = 'idItem') or (E.Value('spawnclass') = 'idMoveableItem') or
+         (E.Value('spawnclass') = 'idItemPowerup') or (E.Value('spawnclass') = 'idPDAItem') or
+         (E.Value('spawnclass') = 'idMoveablePDAItem') or (E.Value('spawnclass') = 'idVideoCDItem') then
+        SpawnItem(E);
     end;
+  InitInventory;
   SpreadLocations;
   SpawnBindings;
   LoadProfileStep('spawn');
@@ -2165,6 +2596,16 @@ begin
     { idMoveable::Event_Activate: starts moving at init_velocity }
     MoveableOf(E).Velocity := E.VectorValue('init_velocity', TVector3.Zero);
     MoveableOf(E).AtRest := False;
+    Exit;
+  end;
+  if ItemOf(E) <> nil then
+  begin
+    { idItem::Event_Trigger: a triggerFirst item can be picked up from
+      now on, otherwise the player (the activator) picks it up }
+    if not ItemOf(E).CanPickUp and E.BoolValue('triggerFirst') then
+      ItemOf(E).CanPickUp := True
+    else
+      PickupItem(ItemOf(E));
     Exit;
   end;
   if SpawnClass = 'idCombatNode' then
@@ -2567,6 +3008,7 @@ begin
     UpdateScriptMovers;
   UpdateBindings;
   UpdateMoveables(SecondsPassed);
+  UpdateItems;
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
@@ -5928,4 +6370,6 @@ initialization
     'monster_flying_cacodemon', 'monster_flying_lostsoul',
     'monster_boss_cyberdemon', 'monster_boss_guardian', 'monster_boss_guardian_seeker',
     'monster_boss_sabaoth', 'monster_boss_vagary'];
+finalization
+  FreeAndNil(LangStrings);
 end.

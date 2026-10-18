@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Items and the player's inventory** (roadmap 5e): items (`item_*`, `ammo_*`, weapons' pickups; idItem, idMoveableItem, PDAs) are picked up by touching them and give their `inv_*` keys like idPlayer::Give: health and armor up to the player's limits, ammo up to `max_ammo_*`, weapons by their `def_weaponN` slot, clips (`inv_inclip_*`), carried items (`inv_carry`: keys); full stats leave the item. `triggersize`, `triggerFirst`, `spin`, `snd_acquire` and targets work. The inventory starts from `player_doommarine` (weapons, ammo, armor). Console `inventory`; `give all`, `give weapons`, `give <weapon>`, `give <stat> <amount>`.
+- Test level: `player_test` and items in room A (medkit, armor, clip, a spinning shotgun, a key whose targets let the second armor be picked up); 690 checks; CI checks the pickups.
 - **Characters move by their animations** (roadmap 5d): like monsters, characters that aren't walking move with their anims' origin (their `path_anim`s), colliding with the world by their `size`; an anim's first update no longer loses its first step.
 - Test level: `test_stepper_1` sidesteps by its anim when activated; 650 checks; CI checks it.
 - **Flying routes and thrown objects** (roadmap 5d): flyers follow their AAS route around walls (idAASLocal::FlyPathToGoal: the furthest route point they can fly straight to). Moveables (idMoveable) fall, bounce, rest and hurt the player when thrown; the vagary's `chooseObjectToThrow` / `throwObjectAtEnemy` throw them on an arc that reaches the player, `throwMoveable` lets go of a carried one; `setLinearVelocity`, `enableDamage`, `isAtRest`.

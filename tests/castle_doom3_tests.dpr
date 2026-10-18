@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(61, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(63, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(24, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(32, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(50, MapFile.Entities.Count, 'entity count');
+    CheckEquals(57, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -2684,6 +2684,113 @@ begin
   end;
 end;
 
+procedure TestItems;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  It: TD3Item;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+
+  procedure StandAt(const X, Y: Single);
+  begin
+    Eye := D3ToCge(Vector3(X, Y, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.1, Eye);
+    RemoveMe := rtNone;
+    Map.Update(0.1, RemoveMe);
+  end;
+
+  function ItemNamed(const AName: String): TD3Item;
+  begin
+    for Result in Game.Items do
+      if Result.Entity.Name = AName then
+        Exit;
+    Result := nil;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for items');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+
+    { the inventory from player_test }
+    Check(Game.PlayerDef <> nil, 'the player def (player_test)');
+    CheckEquals(100, Game.MaxHealth, 'maxhealth');
+    CheckEquals(0, Game.Armor, 'armor of the player def');
+    CheckEquals('weapon_test_shotgun', Game.WeaponDefs[2], 'def_weapon2');
+    CheckEquals(1, Game.WeaponSlot('weapon_test_pistol'), 'the pistol''s slot');
+    CheckEquals(-1, Game.WeaponSlot('weapon_nothing'), 'no slot for unknown weapons');
+    Check(Game.HasWeapon(0) and Game.HasWeapon(1) and not Game.HasWeapon(2), 'starts with the "weapon" key''s weapons');
+    CheckEquals(24, Game.AmmoCount('ammo_test_bullets'), 'starting ammo');
+    CheckEquals(60, Game.MaxAmmo('ammo_test_bullets'), 'max_ammo_test_bullets');
+    CheckEquals(-1, Game.Clip[1], 'clips start at -1 (full when first used)');
+    CheckEquals(6, Game.Items.Count, 'items spawned');
+
+    { Give, like idPlayer::Give }
+    Check(not Game.Give('health', '25'), 'full health takes no health');
+    Game.Health := 90;
+    Check(Game.Give('health', '25'), 'health given');
+    CheckEquals(100, Game.Health, 'up to maxhealth');
+    Check(Game.Give('ammo_test_bullets', '100'), 'ammo given');
+    CheckEquals(60, Game.AmmoCount('ammo_test_bullets'), 'up to max_ammo');
+    Check(not Game.Give('ammo_test_bullets', '10'), 'full ammo takes no more');
+    Check(not Game.Give('ammo_none', '10'), 'no ammo without a max_ammo');
+    Game.SetAmmo('ammo_test_bullets', 24);
+
+    { touching items }
+    StandAt(-40, -210);
+    Check(not ItemNamed('item_medkit_1').PickedUp, 'the medkit stays: full health');
+    StandAt(0, -150);
+    Check(not ItemNamed('item_armor_1').PickedUp, 'not touched from 60 away');
+    StandAt(0, -210);
+    Check(ItemNamed('item_armor_1').PickedUp, 'armor picked up');
+    CheckEquals(25, Game.Armor, 'armor 25');
+    Check(ItemNamed('item_armor_1').Brush.Hidden, 'a picked up item is hidden');
+    StandAt(40, -210);
+    CheckEquals(44, Game.AmmoCount('ammo_test_bullets'), 'a clip: 20 bullets');
+    StandAt(-80, -210);
+    Check(Game.HasWeapon(2), 'the shotgun picked up');
+    CheckEquals(8, Game.AmmoCount('ammo_test_shells'), 'with its shells');
+    CheckEquals(4, Game.Clip[2], 'and 4 in its clip (inv_inclip_)');
+
+    { triggerFirst: not until triggered (here by the key's targets) }
+    It := ItemNamed('item_armor_2');
+    Check(not It.CanPickUp, 'triggerFirst: can''t be picked up');
+    StandAt(80, -210);
+    Check(not It.PickedUp, 'touching it does nothing');
+    StandAt(-140, -230);
+    Check(ItemNamed('item_keycard_1').PickedUp, 'the key picked up within its triggersize');
+    CheckEquals(1, Game.Carried.Count, 'carried');
+    CheckEquals('Test Keycard', Game.Carried[0], 'by its inv_name');
+    CheckEquals(25, Game.Armor, 'a carried item gives nothing else');
+    StandAt(-120, -100);
+    Check(It.CanPickUp, 'the key''s targets let item_armor_2 be picked up');
+    StandAt(80, -210);
+    Check(It.PickedUp, 'item_armor_2 picked up');
+    CheckEquals(50, Game.Armor, 'armor 50');
+
+    Game.GiveAll;
+    CheckEquals(100, Game.Armor, 'give all: maxarmor');
+    CheckEquals(24, Game.AmmoCount('ammo_test_shells'), 'give all: max ammo');
+    Check(Pos('weapon_test_shotgun (clip 4)', Game.InventoryStatus) > 0, 'inventory status lists the weapons');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2878,6 +2985,7 @@ begin
   TestDodgesAndCombatNodes;
   TestFlyingRouteAndThrows;
   TestCharacterAnimMove;
+  TestItems;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

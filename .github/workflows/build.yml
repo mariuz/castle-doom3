@@ -117,7 +117,7 @@ jobs:
           run_test fight testmap "W:1,O:notarget,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,Q"
           run_test menu MENU "Q"
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
-          grep -q "5 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
+          grep -q "11 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -Eq "testmap.cm.: [0-9]+ models" test_output/clip.log || { echo "::error::collision model not loaded"; exit 1; }
           run_test portals testmap "W:1,S,G:200 0 0,A:0,W:2.2,S,A:180,W:0.2,S,Q"
@@ -180,6 +180,12 @@ jobs:
           run_test stepper testmap "W:1,O:notarget,G:-100 -200 0,A:0,O:activate test_stepper_1,W:2,O:actors,Q"
           grep -q "Script: test_stepper_1 stepped" test_output/stepper.log || { echo "::error::test_stepper_1 should play its evade_left anim"; exit 1; }
           awk '/test_stepper_1: / { x = $0; sub(/.* at /, "", x); split(x, p, " "); y = p[2] } END { exit !(y != "" && y + 0 > -40 && y + 0 < -32) }' test_output/stepper.log || { echo "::error::test_stepper_1 should move 64 left by its anim (characters move by their animations)"; exit 1; }
+          run_test items testmap "W:1,O:notarget,G:-40 -210 0,W:0.2,G:0 -210 0,W:0.2,G:40 -210 0,W:0.2,G:-80 -210 0,W:0.2,G:80 -210 0,W:0.2,G:-140 -210 0,W:0.2,G:80 -210 0,W:0.2,O:inventory,Q"
+          grep -q "Picked up item_armor_1" test_output/items.log || { echo "::error::touching an item should pick it up"; exit 1; }
+          if grep -q "Picked up item_medkit_1" test_output/items.log; then echo "::error::the medkit should stay (full health)"; exit 1; fi
+          grep -q "weapon_test_shotgun (clip 4)" test_output/items.log || { echo "::error::the shotgun pickup should give the weapon and its clip"; exit 1; }
+          grep -q "Picked up item_armor_2" test_output/items.log || { echo "::error::the key's targets should let item_armor_2 (triggerFirst) be picked up"; exit 1; }
+          grep -q "armor 50/100" test_output/items.log || { echo "::error::two armor pickups should give 50 armor"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }

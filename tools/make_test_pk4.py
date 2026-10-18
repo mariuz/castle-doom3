@@ -24,6 +24,10 @@ Contents (all made here, MIT licensed like the rest of the project):
   blob_dodger_1            goes to combat_node_1 when activated, then dodges
   blob_thrower_1           throws moveable_barrel_1 at the player when activated
   test_stepper_1           a character stepping aside by its anim when activated
+  item_* / weapon_*_1      items in room A's south (health, armor, ammo, a
+                           weapon, a key), picked up by touching; player_test
+                           is the player's inventory def (def_weaponN, max_ammo)
+  models/items/test/*.lwo  small boxes for the items
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1149,6 +1153,21 @@ def map_text():
         # (characters move by their animations, like their path anims)
         {'classname': 'char_test_stepper', 'name': 'test_stepper_1', 'origin': '60 -100 0',
          'angle': '0'},
+        # items along room A's south wall, picked up by touching (idItem):
+        # health (the player has full health: left), armor, ammo, a weapon
+        # (spinning), a key (carried, fires its target), and armor that can
+        # only be picked up once triggered (triggerFirst)
+        {'classname': 'item_test_medkit', 'name': 'item_medkit_1', 'origin': '-40 -210 0'},
+        {'classname': 'item_test_armor', 'name': 'item_armor_1', 'origin': '0 -210 0'},
+        {'classname': 'item_test_clip', 'name': 'item_clip_1', 'origin': '40 -210 0'},
+        {'classname': 'weapon_test_shotgun', 'name': 'weapon_shotgun_1', 'origin': '-80 -210 0',
+         'spin': '1'},
+        {'classname': 'item_test_keycard', 'name': 'item_keycard_1', 'origin': '-140 -210 0',
+         'target': 'trigger_relay_key'},
+        {'classname': 'trigger_relay', 'name': 'trigger_relay_key', 'origin': '-140 -210 100',
+         'target': 'item_armor_2'},
+        {'classname': 'item_test_armor', 'name': 'item_armor_2', 'origin': '80 -210 0',
+         'triggerFirst': '1'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1670,6 +1689,81 @@ entityDef damage_test_moveable {
 	"damage"				"12"
 }
 
+// the player's inventory (like player_doommarine: the full game's is used
+// when there is one): weapon slots, the weapons and ammo to start with,
+// the most ammo of each kind
+entityDef player_test {
+	"maxhealth"				"100"
+	"armor"					"0"
+	"maxarmor"				"100"
+	"def_weapon0"			"weapon_test_fists"
+	"def_weapon1"			"weapon_test_pistol"
+	"def_weapon2"			"weapon_test_shotgun"
+	"weapon"				"weapon_test_fists,weapon_test_pistol"
+	"ammo_test_bullets"		"24"
+	"max_ammo_test_bullets"	"60"
+	"max_ammo_test_shells"	"24"
+}
+
+entityDef weapon_test_fists {
+	"inv_name"				"Fists"
+	"inv_weapon"			"weapon_test_fists"
+	"ammoType"				""
+	"clipSize"				"0"
+}
+
+entityDef weapon_test_pistol {
+	"spawnclass"			"idItem"
+	"model"					"models/items/test/weapon.lwo"
+	"inv_name"				"Test Pistol"
+	"inv_weapon"			"weapon_test_pistol"
+	"inv_ammo_test_bullets"	"12"
+	"ammoType"				"ammo_test_bullets"
+	"clipSize"				"12"
+}
+
+// as in Doom 3, the weapon's def is also its pickup item
+entityDef weapon_test_shotgun {
+	"spawnclass"			"idItem"
+	"model"					"models/items/test/weapon.lwo"
+	"snd_acquire"			"test_door"
+	"inv_name"				"Test Shotgun"
+	"inv_weapon"			"weapon_test_shotgun"
+	"inv_ammo_test_shells"	"8"
+	"inv_inclip_ammo_test_shells" "4"
+	"ammoType"				"ammo_test_shells"
+	"clipSize"				"8"
+}
+
+entityDef item_test_medkit {
+	"spawnclass"			"idItem"
+	"model"					"models/items/test/box.lwo"
+	"inv_name"				"Test Medkit"
+	"inv_health"			"25"
+}
+
+entityDef item_test_armor {
+	"spawnclass"			"idItem"
+	"model"					"models/items/test/box.lwo"
+	"inv_name"				"Test Armor"
+	"inv_armor"				"25"
+}
+
+entityDef item_test_clip {
+	"spawnclass"			"idItem"
+	"model"					"models/items/test/box.lwo"
+	"inv_name"				"Test Clip"
+	"inv_ammo_test_bullets"	"20"
+}
+
+entityDef item_test_keycard {
+	"spawnclass"			"idItem"
+	"model"					"models/items/test/box.lwo"
+	"inv_name"				"Test Keycard"
+	"inv_carry"				"1"
+	"triggersize"			"24"
+}
+
 entityDef monster_test_thrower {
 	"inherit"				"monster_test_scripted"
 	"editor_usage"			"A test creature throwing a moveable at the player once activated, like the vagary (script object monster_test_thrower)."
@@ -1914,6 +2008,23 @@ def barrel_lwo():
     polys.append((1, [i for i in reversed(range(n))]))       # bottom, facing -Z
     return make_lwo(points, polys, uvs, vmad,
                     ['models/mapobjects/test/barrel', 'textures/test/metal', 'unused_surface'])
+
+
+def box_lwo(w, d, h):
+    """A box w x d x h on the floor: metal sides, a glowing (screen) top."""
+    x, y = w / 2.0, d / 2.0
+    points = [(-x, -y, 0), (x, -y, 0), (x, y, 0), (-x, y, 0),
+              (-x, -y, h), (x, -y, h), (x, y, h), (-x, y, h)]
+    uvs = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)]
+    polys = [
+        (1, [4, 5, 6, 7]),      # top, facing +Z
+        (0, [3, 2, 1, 0]),      # bottom, facing -Z
+        (0, [0, 1, 5, 4]),      # -Y
+        (0, [1, 2, 6, 5]),      # +X
+        (0, [2, 3, 7, 6]),      # +Y
+        (0, [3, 0, 4, 7]),      # -X
+    ]
+    return make_lwo(points, polys, uvs, [], ['textures/test/metal', 'textures/test/screen'])
 
 
 def terminal_ase():
@@ -2696,6 +2807,8 @@ def main():
     gui_assets()
     add('models/mapobjects/test/barrel.lwo', barrel_lwo())
     add('models/mapobjects/test/terminal.ase', terminal_ase())
+    add('models/items/test/box.lwo', box_lwo(16, 16, 10))
+    add('models/items/test/weapon.lwo', box_lwo(32, 8, 8))
     add('models/md5/test/blob_idle.md5anim', md5anim_text('idle'))
     add('models/md5/test/blob_walk.md5anim', md5anim_text('walk'))
     add('models/md5/test/blob_evade.md5anim', md5anim_text('evade'))
