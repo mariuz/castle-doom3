@@ -3092,6 +3092,138 @@ begin
   end;
 end;
 
+procedure TestPlayerMotion;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  I, Health0: Integer;
+  MinView: Single;
+
+  procedure Step;
+  begin
+    Game.Update(0.05, Eye);
+    RemoveMe := rtNone;
+    Map.Update(0.05, RemoveMe);
+  end;
+
+  { walk east 10 units a step (200 units a second), rising by Rise }
+  procedure Walk(const Rise: Single);
+  begin
+    Eye := Eye + D3ToCge(Vector3(10, 0, Rise));
+    Step;
+  end;
+
+  procedure Fall(const Height, PerStep: Single);
+  var
+    Done: Single;
+  begin
+    Done := 0;
+    while Done < Height - 0.01 do
+    begin
+      Eye := Eye - Vector3(0, Min(PerStep, Height - Done), 0);
+      Done := Done + PerStep;
+      Step;
+    end;
+    { landed: standing }
+    Step;
+    Step;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the player''s motion');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Eye := D3ToCge(Vector3(380, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 5 do
+      Step;
+
+    { a step up: the view starts 16 below and follows within 0.2 s }
+    Walk(0);
+    Walk(16);
+    Check(Game.ViewBobOffset.Y < -9, Format('after a step up the view is below the eye (%.1f)', [Game.ViewBobOffset.Y]));
+    for I := 1 to 4 do
+      Walk(0);
+    Check(Game.ViewBobOffset.Y > -0.01, Format('0.2 s later it caught up (%.1f)', [Game.ViewBobOffset.Y]));
+    { steps in a row add up, to 32 at most }
+    Walk(16);
+    Walk(16);
+    Check(Game.ViewBobOffset.Y < -16, Format('two steps add up (%.1f)', [Game.ViewBobOffset.Y]));
+    Walk(16);
+    Walk(16);
+    Check(Game.ViewBobOffset.Y >= -32.01, Format('at most 32 below (%.1f)', [Game.ViewBobOffset.Y]));
+    for I := 1 to 6 do
+      Walk(0);
+    { rising without walking (a lift) isn't a step }
+    MinView := 0;
+    for I := 1 to 10 do
+    begin
+      Eye := Eye + Vector3(0, 3, 0);
+      Step;
+      MinView := Min(MinView, Game.ViewBobOffset.Y);
+    end;
+    CheckNear(0, MinView, 'a lift doesn''t lower the view');
+    Step;
+    Step;
+
+    { a fall of 100 units: a dip, no damage (delta 21) }
+    Health0 := Game.Health;
+    Fall(100, 25);
+    CheckNear(21.32, Game.LastFallDelta, 'fall delta: 2 * 1066 * 100 / 10000', 0.01);
+    CheckEquals(Health0, Game.Health, 'no damage below delta 30');
+    { 200 units (delta 42.6): damage_softfall, 10 by default }
+    Fall(200, 25);
+    CheckEquals(Health0 - 10, Game.Health, 'a soft fall hurts by 10');
+    { 250 units (delta 53): damage_hardfall, 25 }
+    Game.Health := 100;
+    Fall(250, 25);
+    CheckEquals(75, Game.Health, 'a hard fall hurts by 25');
+    { flying (noclip): no falls }
+    Game.Health := 100;
+    Game.PlayerFlying := True;
+    Fall(250, 25);
+    Game.PlayerFlying := False;
+    CheckEquals(100, Game.Health, 'flying: no falling damage');
+    { god mode: no damage }
+    Game.God := True;
+    Fall(400, 25);
+    Game.God := False;
+    CheckEquals(100, Game.Health, 'god mode: no falling damage');
+    { a jump: the fall counts from its top }
+    Game.PlayerJumping := True;
+    for I := 1 to 4 do
+    begin
+      Eye := Eye + Vector3(0, 15, 0);
+      Step;
+    end;
+    Game.PlayerJumping := False;
+    Fall(60, 15);
+    CheckNear(2 * 1066 * 60 * 0.0001, Game.LastFallDelta, 'a jump''s fall is from its top', 0.01);
+    CheckEquals(100, Game.Health, 'jumping doesn''t hurt');
+    { 320 units (delta 68): damage_fatalfall }
+    Fall(320, 40);
+    Check(Game.PlayerDead, 'a fatal fall kills');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -3289,6 +3421,7 @@ begin
   TestItems;
   TestWeapons;
   TestWeaponPresentation;
+  TestPlayerMotion;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

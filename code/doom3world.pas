@@ -533,6 +533,11 @@ type
       landing (idPlayer's landChange, landTime) }
     FViewBob, FViewBobAngles: TVector3;
     FLandChange, FLandTime, FWeaponLand: Single;
+    { the last step up (idPlayer's stepUpDelta, stepUpTime) and the fall
+      going on (from FFallStartZ, Doom 3 z of the eye) }
+    FStepUpDelta, FStepUpTime: Single;
+    FFalling: Boolean;
+    FFallStartZ: Single;
     FAttackPulse: Single;
     FReloadRequested: Boolean;
     { script sounds: sound sources by entity handle, playing sounds by
@@ -573,6 +578,8 @@ type
     procedure UpdateWeapon(const SecondsPassed: Single);
     { the player's speed, bob cycle and movement changes }
     procedure UpdatePlayerMotion(const SecondsPassed: Single);
+    { idPlayer::CrashLand after a fall: the view's dip, falling damage }
+    procedure CrashLand(const FallHeight: Single);
     { place the view model: bob, lag, idle drift, muzzle kick
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
       surfaces and light }
@@ -699,6 +706,11 @@ type
     PlayerViewDir: TVector3;
     { pm_bob: the view bobs (the view model always does) }
     ViewBobEnabled: Boolean;
+    { set by the view each frame: the player is jumping (going up), or
+      flying (noclip: no steps, no falls) }
+    PlayerJumping, PlayerFlying: Boolean;
+    { the last landing's delta (Doom 3: speed squared / 10000), for tests }
+    LastFallDelta: Single;
     { The attack button is held (idPlayer: WEAPON_ATTACK). }
     Attack: Boolean;
     constructor Create(const AMap: TDoom3Map);
@@ -1136,6 +1148,7 @@ begin
   FIdealSlot := -1;
   ViewBobEnabled := True;
   FLandTime := -1000;
+  FStepUpTime := -1000;
 end;
 
 destructor TD3Game.Destroy;
@@ -2120,10 +2133,14 @@ const
   MinBobSpeed = 5;
   LandDeflectTime = 0.15;
   LandReturnTime = 0.3;
+  { idPlayer's STEPUP_TIME, pm_stepsize }
+  StepUpTime = 0.2;
+  StepSize = 16;
 var
   Vel, DV, Local: TVector3;
   Axis: TMatrix3;
-  BobMove, Delta, Speed, F: Single;
+  BobMove, Delta, Speed, F, DZ, T: Single;
+  Stepped, Airborne: Boolean;
 
   procedure LogAccel(const Dir: TVector3);
   begin
@@ -2140,9 +2157,49 @@ begin
     Vel := CgeToD3(FPlayerEye - FPrevEye) / SecondsPassed;
   FPrevEye := FPlayerEye;
   FHasPrevEye := True;
-  { a teleport isn't a move }
-  if Vel.Length > 1500 then
+  { a teleport isn't a move (nor a fall) }
+  if Vel.Length > 2000 then
+  begin
     Vel := TVector3.Zero;
+    FFalling := False;
+  end;
+  DZ := Vel.Z * SecondsPassed;
+  Airborne := PlayerJumping or FFalling;
+
+  { a step up (idPhysics_Player's step, then idPlayer::BobCycle): the body
+    is up at once, the view follows within 200 ms; steps in a row add up,
+    to 2 steps at most }
+  Stepped := not PlayerFlying and not Airborne and (DZ > 1) and (DZ <= 2 * StepSize + 1) and
+    (Vector2(Vel.X, Vel.Y).Length > MinBobSpeed);
+  if Stepped then
+  begin
+    T := FTime - FStepUpTime;
+    if T < StepUpTime then
+      FStepUpDelta := FStepUpDelta * (StepUpTime - T) / StepUpTime + DZ
+    else
+      FStepUpDelta := DZ;
+    FStepUpDelta := Min(FStepUpDelta, 2 * StepSize);
+    FStepUpTime := FTime;
+    { not a vertical move for the view's angles and the bob }
+    Vel.Z := 0;
+  end;
+
+  { falls: from where the descent started (the top of a jump) to where it
+    stops, with Doom 3's gravity (idPlayer::CrashLand) }
+  if PlayerFlying then
+    FFalling := False
+  else
+  if not FFalling and (DZ < -0.5) and (Vel.Z < -40) then
+  begin
+    FFalling := True;
+    FFallStartZ := CgeToD3(FPlayerEye).Z - DZ;
+  end else
+  if FFalling and (Vel.Z > -40) then
+  begin
+    FFalling := False;
+    CrashLand(FFallStartZ - CgeToD3(FPlayerEye).Z);
+  end;
+  Airborne := PlayerJumping or FFalling;
   { movement changes (idPlayer logs the move keys' changes, in view space:
     forward, right; a jump bounces the weapon) }
   DV := Vel - FPlayerVelocity;
@@ -2151,33 +2208,12 @@ begin
     -TVector3.DotProduct(DV, Vector3(Axis.Data[1, 0], Axis.Data[1, 1], 0)), 0);
   if Vector2(Local.X, Local.Y).Length > 30 then
     LogAccel(Local * (127 / 140));
-  if DV.Z > 150 then
+  if PlayerJumping and (DV.Z > 150) then
     LogAccel(Vector3(0, 0, 200));
-  { idPlayer::CrashLand: landing from a fall dips the view (delta is the
-    falling speed squared / 10000) }
-  if (FPlayerVelocity.Z < -100) and (Vel.Z > -40) then
-  begin
-    Delta := Sqr(FPlayerVelocity.Z) * 0.0001;
-    if Delta > 65 then
-      FLandChange := -32
-    else
-    if Delta > 45 then
-      FLandChange := -24
-    else
-    if Delta > 30 then
-      FLandChange := -16
-    else
-    if Delta > 7 then
-      FLandChange := -8
-    else
-      FLandChange := 0;
-    if FLandChange <> 0 then
-      FLandTime := FTime;
-  end;
   FPlayerVelocity := Vel;
   FXYSpeed := Vector2(Vel.X, Vel.Y).Length;
   { idPlayer::BobCycle: on the ground and moving }
-  if (Abs(Vel.Z) > 40) or (FXYSpeed <= MinBobSpeed) then
+  if Airborne or (FXYSpeed <= MinBobSpeed) then
   begin
     FBobCycle := 0;
     FBobFracSin := 0;
@@ -2205,6 +2241,10 @@ begin
   else
     FViewBobAngles.Z := FViewBobAngles.Z + FBobFracSin * 0.002 * Speed;
   FViewBob := Vector3(0, 0, Min(6, FBobFracSin * FXYSpeed * 0.005));
+  { below the body just after a step up }
+  T := FTime - FStepUpTime;
+  if T < StepUpTime then
+    FViewBob.Z := FViewBob.Z - FStepUpDelta * (StepUpTime - T) / StepUpTime;
   Delta := FTime - FLandTime;
   if Delta < LandDeflectTime then
     F := Delta / LandDeflectTime
@@ -2215,6 +2255,56 @@ begin
     F := 0;
   FViewBob.Z := FViewBob.Z + FLandChange * F;
   FWeaponLand := FLandChange * 0.25 * F;
+end;
+
+procedure TD3Game.CrashLand(const FallHeight: Single);
+const
+  Gravity = 1066;
+var
+  Delta: Single;
+  DamageName: String;
+  Fallback, Amount: Integer;
+  Def: TStringList;
+begin
+  { idPlayer::CrashLand: delta is the landing speed squared / 10000 }
+  if FallHeight <= 0 then
+    Exit;
+  Delta := 2 * Gravity * FallHeight * 0.0001;
+  LastFallDelta := Delta;
+  DamageName := '';
+  Fallback := 0;
+  if Delta > 65 then
+  begin
+    FLandChange := -32;
+    DamageName := 'damage_fatalfall';
+    Fallback := 1000;
+  end else
+  if Delta > 45 then
+  begin
+    FLandChange := -24;
+    DamageName := 'damage_hardfall';
+    Fallback := 25;
+  end else
+  if Delta > 30 then
+  begin
+    FLandChange := -16;
+    DamageName := 'damage_softfall';
+    Fallback := 10;
+  end else
+  if Delta > 7 then
+    FLandChange := -8
+  else
+    Exit;
+  FLandTime := FTime;
+  if DamageName = '' then
+    Exit;
+  { the game's damage defs, else Doom 3's values }
+  Amount := Fallback;
+  Def := Decls.EntityDef(DamageName);
+  if Def <> nil then
+    Amount := StrToIntDef(Def.Values['damage'], Fallback);
+  WritelnLog('Doom3World', 'Fall of %.0f units: %s (%d)', [FallHeight, DamageName, Amount]);
+  DamagePlayer(Amount);
 end;
 
 function TD3Game.ViewBobOffset: TVector3;

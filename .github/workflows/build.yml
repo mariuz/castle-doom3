@@ -192,6 +192,9 @@ jobs:
           grep -q "Weapon 0: weapon_test_fists" test_output/weapons.log || { echo "::error::weapon 0 should switch to the fists"; exit 1; }
           grep -q "Weapon weapon_test_shotgun fires 8" test_output/weapons.log || { echo "::error::the shotgun should fire 8 pellets"; exit 1; }
           grep -q "1 weapon_test_pistol (clip 12)" test_output/weapons.log || { echo "::error::the pistol should have reloaded"; exit 1; }
+          run_test fall testmap "W:1,O:notarget,G:420 -250 200,W:3,O:inventory,Q"
+          grep -q "damage_softfall (10)" test_output/fall.log || { echo "::error::a fall of about 200 units should do soft falling damage"; exit 1; }
+          grep -q "health 90/100" test_output/fall.log || { echo "::error::the soft fall should take 10 health"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }
