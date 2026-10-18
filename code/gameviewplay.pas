@@ -717,7 +717,7 @@ begin
     Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount] [up], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
-    Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1],');
+    Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1], pm_thirdPersonDeath [0|1], crouch [0|1], ragdoll [0|1], g_showBrass [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
@@ -840,6 +840,20 @@ begin
       BoolToStr(FGame.PlayerModel <> nil, 'yes', 'none'), FGame.PlayerSkinName]);
     Console.Print(S);
     WritelnLog('Console', S);
+  end else
+  if Cmd = 'g_showbrass' then
+  begin
+    if Args <> '' then
+      FGame.ShowBrass := Args <> '0';
+    Console.Print('g_showBrass ' + BoolToStr(FGame.ShowBrass, '1', '0'));
+  end else
+  if Cmd = 'ragdoll' then
+  begin
+    { ragdoll [0|1]: the dead body falls as a ragdoll (with the player
+      def's "ragdoll"), or plays its death anim }
+    if Args <> '' then
+      FGame.RagdollEnabled := Args <> '0';
+    Console.Print('ragdoll ' + BoolToStr(FGame.RagdollEnabled, '1', '0'));
   end else
   if Cmd = 'pm_thirdpersondeath' then
   begin
