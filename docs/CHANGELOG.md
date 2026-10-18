@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Crouch transitions**: the player's body plays `crouch_down` once when crouching starts and `crouch_up` when it stands up (Doom 3's player script Legs_Crouch / Legs_Uncrouch), then its crouch or stand loops.
+- **Third person muzzle flash**: the gun in the body's hand shows its flash surfaces (stage `if` with parm4, like the view model), and in third person the flash light comes from its `flash` joint (idWeapon's world muzzle flash), backed off walls along the gun. The test guns' world models have a `flash` joint and flash quads; the test body has `crouch_down` / `crouch_up` anims.
 - **Crouching** (idPhysics_Player::CheckDuck, idPlayer::Think): the crouch key (C) lowers the eye to 32 (pm_crouchviewheight) easing by pm_crouchrate 0.87 a frame, the player's box to 38 high (items, triggers, melee, splash damage and projectiles use it), the speed to 80 (pm_crouchspeed; no running, no stamina used, no jumping). Standing up waits until there is room up to 74. The test level has a crawl bar in room A (`crawl_bar_1`, its bottom at 52) to crouch under. Console `crouch [0|1]`, demo scripts `GO:x y seconds crouch`.
 - **Death view and the body's death animation**: dead, the eye goes down to 10 (pm_deadviewheight) and the box to 20; the player's body plays its `death` anim once and holds it (Doom 3 has a ragdoll); `pm_thirdPersonDeath 1` backs the view away from the body (20 to 140 units in 3 s, idPlayer::CalculateRenderView). The body plays `crouch` / `crouch_walk` crouched.
 - **The gun in the body's hand**: weapons' `model_world` is bound to the body's `joint_attach` joint in third person, shown while the weapon is raised and gone when dead.
