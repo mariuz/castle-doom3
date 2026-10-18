@@ -164,6 +164,9 @@ type
     OnFrameCommand: TD3FrameCommandEvent;
     { The anim playing (its name in the decl, e.g. "idle2"). }
     PlayingAnim: String;
+    { The meshes' shapes and their materials (after the skin) }
+    MeshShapes: array of TShapeNode;
+    MeshMaterials: array of String;
     { Keep the skeleton's origin joint where the animation starts in X / Y
       (Doom 3 coordinates): the game moves the entity instead, like idAI
       moving by the animation's delta. }
@@ -873,7 +876,6 @@ var
   SkinDecl: TD3Skin;
   MaterialName: String;
   AllClosed, UseHulls: Boolean;
-  MeshShapes: array of TShapeNode;
 begin
   inherited Create;
   FShown := True;
@@ -915,6 +917,7 @@ begin
     Shape.Geometry := Geometry;
     Shape.Appearance := MaterialAppearance(MaterialName);
     MeshShapes := Concat(MeshShapes, [Shape]);
+    MeshMaterials := Concat(MeshMaterials, [MaterialName]);
     if not FModel.MeshClosed(I) then
       AllClosed := False;
     Root.AddChildren(Shape);

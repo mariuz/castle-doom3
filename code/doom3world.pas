@@ -438,6 +438,21 @@ type
     AnimDoneTime: Single;
     BlendFrames: Integer;
     Shots: Integer;
+    { muzzle kick (idWeapon::MuzzleRise): each shot pushes KickEndTime by
+      KickTime, up to KickMaxTime ahead; the view model turns by
+      KickAngles (pitch, yaw, roll) and moves back by KickOffset, scaled
+      by the time left }
+    KickEndTime, KickTime, KickMaxTime: Single;
+    KickAngles, KickOffset: TVector3;
+    { the muzzle flash light (flashColor, flashRadius: 0 = none,
+      flashTime) at the view model's "flash" joint; FlashStart is the
+      game time of the last shot (its materials' parm4 is -FlashStart) }
+    FlashColor: TVector3;
+    FlashRadius, FlashTime, FlashStart: Single;
+    { the view model's lag behind turns and moves
+      (weaponAngleOffsetAverages / Scale / Max, weaponOffsetTime / Scale) }
+    AngleOffsetAverages, AngleOffsetScale, AngleOffsetMax: Single;
+    OffsetTime, OffsetScale: Single;
     destructor Destroy; override;
     procedure SetFlag(const AName: String; const Value: Boolean);
     function Flag(const AName: String): Boolean;
@@ -500,6 +515,20 @@ type
     FCarried: TStringList;
     FWeapon: TD3Weapon;
     FIdealSlot: Integer;
+    { the player's movement for the view weapon (idPlayer::BobCycle):
+      velocity (Doom 3), horizontal speed, bob cycle (0..256), its sine,
+      the view angles smoothed (gun lag), movement changes (view space) }
+    FPrevEye: TVector3;
+    FHasPrevEye: Boolean;
+    FPlayerVelocity: TVector3;
+    FXYSpeed, FBobCycle, FBobFracSin: Single;
+    FSmoothedView: TVector2;
+    FHasSmoothedView: Boolean;
+    FAccelTimes: array [0..15] of Single;
+    FAccelDirs: array [0..15] of TVector3;
+    FAccelCount: Integer;
+    FMuzzleFlashPos: TVector3;
+    FLastPresentTime: Single;
     FAttackPulse: Single;
     FReloadRequested: Boolean;
     { script sounds: sound sources by entity handle, playing sounds by
@@ -538,6 +567,13 @@ type
     procedure InitInventory;
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
     procedure UpdateWeapon(const SecondsPassed: Single);
+    { the player's speed, bob cycle and movement changes }
+    procedure UpdatePlayerMotion(const SecondsPassed: Single);
+    { place the view model: bob, lag, idle drift, muzzle kick
+      (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
+      surfaces and light }
+    procedure PresentWeapon(const W: TD3Weapon);
+    procedure UpdateWeaponView(const SecondsPassed: Single);
     function WeaponEvent(const W: TD3Weapon; const Thread: TD3ScriptThread; const N: String;
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     procedure WeaponFrameCommand(const Sender: TD3Md5Instance; const Command: String);
@@ -758,6 +794,13 @@ type
     property IdealSlot: Integer read FIdealSlot;
     { "PISTOL  12 / 24" for the HUD }
     function WeaponHudText: String;
+    { The weapon's muzzle flash light while it shows (flashTime after a
+      shot): where (CGE, world), its color and radius. False when there's
+      none (then the built-in pistol's flash may show, SinceFire). }
+    function MuzzleFlash(out Position, Color: TVector3; out Radius: Single): Boolean;
+    { The player's horizontal speed and the bob's sine (0..1), for tests }
+    property PlayerSpeed: Single read FXYSpeed;
+    property BobFracSin: Single read FBobFracSin;
     function MoveableOf(const E: TD3MapEntity): TD3Moveable;
     { Throw a moveable at Velocity (Doom 3), its damage on for 2.5 s
       (idAI_Vagary::Event_ThrowObjectAtEnemy, idMoveable::EnableDamage) }
@@ -848,7 +891,7 @@ uses
   Math,
   CastleLog, CastleUtils,
   Generics.Defaults,
-  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer;
+  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions;
 
 const
   MonsterWalkSpeed = 90;
@@ -1871,6 +1914,19 @@ begin
   W.ProjectileDef := W.Def.Values['def_projectile'];
   W.MeleeDef := W.Def.Values['def_melee'];
   W.MeleeDistance := StrToFloatDef(W.Def.Values['melee_distance'], 64, DefaultFormatSettings);
+  W.KickTime := StrToFloatDef(W.Def.Values['muzzle_kick_time'], 0, DefaultFormatSettings);
+  W.KickMaxTime := StrToFloatDef(W.Def.Values['muzzle_kick_maxtime'], 0, DefaultFormatSettings);
+  W.KickAngles := ParseVector3(W.Def.Values['muzzle_kick_angles'], TVector3.Zero);
+  W.KickOffset := ParseVector3(W.Def.Values['muzzle_kick_offset'], TVector3.Zero);
+  W.FlashColor := ParseVector3(W.Def.Values['flashColor'], TVector3.Zero);
+  W.FlashRadius := StrToFloatDef(W.Def.Values['flashRadius'], 0, DefaultFormatSettings);
+  W.FlashTime := StrToFloatDef(W.Def.Values['flashTime'], 0.25, DefaultFormatSettings);
+  W.FlashStart := -1000;
+  W.AngleOffsetAverages := StrToFloatDef(W.Def.Values['weaponAngleOffsetAverages'], 10, DefaultFormatSettings);
+  W.AngleOffsetScale := StrToFloatDef(W.Def.Values['weaponAngleOffsetScale'], 0.25, DefaultFormatSettings);
+  W.AngleOffsetMax := StrToFloatDef(W.Def.Values['weaponAngleOffsetMax'], 10, DefaultFormatSettings);
+  W.OffsetTime := StrToFloatDef(W.Def.Values['weaponOffsetTime'], 400, DefaultFormatSettings) / 1000;
+  W.OffsetScale := StrToFloatDef(W.Def.Values['weaponOffsetScale'], 0.005, DefaultFormatSettings);
   { the clip: full the first time (Clip -1), within the ammo carried }
   if (Clip[Slot] < 0) or (Clip[Slot] > W.ClipSize) then
   begin
@@ -1960,6 +2016,7 @@ var
   Axis: TMatrix3;
   Source: TCastleSoundSource;
 begin
+  UpdatePlayerMotion(SecondsPassed);
   if FPlayerDef = nil then
     Exit;
   { the weapon to start with: current_weapon (the pistol), else the first }
@@ -2005,18 +2062,203 @@ begin
   end;
   FReloadRequested := False;
   FAttackPulse := Max(0, FAttackPulse - SecondsPassed);
-  { the view model at the eye, turned with the view }
-  if W.View <> nil then
-  begin
-    Axis := PlayerViewAxis;
-    W.Holder.Translation := FPlayerEye;
-    SetD3Rotation(W.Holder, Axis);
-    W.View.Shown := W.Holder.Exists;
-    W.View.Update(SecondsPassed);
-  end;
+
   { its sounds follow the player }
   if FSoundSources.TryGetValue(WeaponHandle, Source) and (Source.Parent <> nil) then
     Source.Parent.Translation := FPlayerEye;
+end;
+
+{ Doom 3 matrix helpers (rows are the axes): A * B, and V * M (the sum of
+  V's components times M's rows: local to world) }
+function D3MatMul(const A, B: TMatrix3): TMatrix3;
+var
+  I, J, K: Integer;
+  Sum: Single;
+begin
+  for I := 0 to 2 do
+    for K := 0 to 2 do
+    begin
+      Sum := 0;
+      for J := 0 to 2 do
+        Sum := Sum + A.Data[I, J] * B.Data[J, K];
+      Result.Data[I, K] := Sum;
+    end;
+end;
+
+function D3VecMat(const V: TVector3; const M: TMatrix3): TVector3;
+var
+  K: Integer;
+begin
+  for K := 0 to 2 do
+    Result.Data[K] := V.X * M.Data[0, K] + V.Y * M.Data[1, K] + V.Z * M.Data[2, K];
+end;
+
+procedure TD3Game.UpdatePlayerMotion(const SecondsPassed: Single);
+const
+  MinBobSpeed = 5;
+var
+  Vel, DV, Local: TVector3;
+  Axis: TMatrix3;
+  BobMove: Single;
+
+  procedure LogAccel(const Dir: TVector3);
+  begin
+    FAccelTimes[FAccelCount and High(FAccelTimes)] := FTime;
+    FAccelDirs[FAccelCount and High(FAccelDirs)] := Dir;
+    Inc(FAccelCount);
+  end;
+
+begin
+  if SecondsPassed <= 0 then
+    Exit;
+  Vel := TVector3.Zero;
+  if FHasPrevEye then
+    Vel := CgeToD3(FPlayerEye - FPrevEye) / SecondsPassed;
+  FPrevEye := FPlayerEye;
+  FHasPrevEye := True;
+  { a teleport isn't a move }
+  if Vel.Length > 1500 then
+    Vel := TVector3.Zero;
+  { movement changes (idPlayer logs the move keys' changes, in view space:
+    forward, right; a jump bounces the weapon) }
+  DV := Vel - FPlayerVelocity;
+  Axis := PlayerViewAxis;
+  Local := Vector3(TVector3.DotProduct(DV, Vector3(Axis.Data[0, 0], Axis.Data[0, 1], 0)),
+    -TVector3.DotProduct(DV, Vector3(Axis.Data[1, 0], Axis.Data[1, 1], 0)), 0);
+  if Vector2(Local.X, Local.Y).Length > 30 then
+    LogAccel(Local * (127 / 140));
+  if DV.Z > 150 then
+    LogAccel(Vector3(0, 0, 200));
+  FPlayerVelocity := Vel;
+  FXYSpeed := Vector2(Vel.X, Vel.Y).Length;
+  { idPlayer::BobCycle: on the ground and moving }
+  if (Abs(Vel.Z) > 40) or (FXYSpeed <= MinBobSpeed) then
+  begin
+    FBobCycle := 0;
+    FBobFracSin := 0;
+  end else
+  begin
+    { pm_walkbob 0.3 at walking speed (140), pm_runbob 0.4 running (220) }
+    BobMove := 0.3 + 0.1 * EnsureRange((FXYSpeed - 140) / 80, 0, 1);
+    FBobCycle := FBobCycle + BobMove * SecondsPassed * 1000;
+    FBobCycle := FBobCycle - 256 * Floor(FBobCycle / 256);
+    FBobFracSin := Abs(Sin((Trunc(FBobCycle) and 127) / 127 * Pi));
+  end;
+end;
+
+procedure TD3Game.PresentWeapon(const W: TD3Weapon);
+var
+  ViewAxis, Axis: TMatrix3;
+  D, Origin, GunOfs, Fwd, Start: TVector3;
+  Angles, Current, Lag: TVector3;
+  Scale, FracSin, Bob, T, F, Left, Amount, Dist, Tau, K: Single;
+  I: Integer;
+  Ctx: TD3ExprContext;
+  Mat: TD3Material;
+  JointPos: TVector3;
+begin
+  ViewAxis := PlayerViewAxis;
+  if PlayerViewDir.IsZero then
+    D := Vector3(1, 0, 0)
+  else
+    D := CgeToD3(PlayerViewDir);
+  Current := Vector3(D3DirPitch(D), D3DirYaw(D), 0);
+  { the view weapon lags behind turns (idPlayer::GunTurningOffset: the
+    view angles averaged over weaponAngleOffsetAverages frames at 60 a
+    second; here smoothed over that time) }
+  if not FHasSmoothedView then
+  begin
+    FSmoothedView := Vector2(Current.X, Current.Y);
+    FHasSmoothedView := True;
+  end;
+  Tau := Max(1, W.AngleOffsetAverages) / 60 / 2;
+  K := 1 - Exp(-Max(0, FTime - FLastPresentTime) / Tau);
+  FLastPresentTime := FTime;
+  FSmoothedView.X := FSmoothedView.X + Normalize180(Current.X - FSmoothedView.X) * K;
+  FSmoothedView.Y := FSmoothedView.Y + Normalize180(Current.Y - FSmoothedView.Y) * K;
+  Lag := Vector3(Normalize180(FSmoothedView.X - Current.X), Normalize180(FSmoothedView.Y - Current.Y), 0) *
+    W.AngleOffsetScale;
+  for I := 0 to 2 do
+    Lag.Data[I] := EnsureRange(Lag.Data[I], -W.AngleOffsetMax, W.AngleOffsetMax);
+  { and behind moves (idPlayer::GunAcceleratingOffset) }
+  GunOfs := TVector3.Zero;
+  for I := Max(0, FAccelCount - Length(FAccelTimes)) to FAccelCount - 1 do
+  begin
+    T := FTime - FAccelTimes[I and High(FAccelTimes)];
+    if (T < 0) or (T >= W.OffsetTime) then
+      Continue;
+    F := (Cos(T / W.OffsetTime * 2 * Pi) - 1) * 0.5;
+    GunOfs := GunOfs + FAccelDirs[I and High(FAccelDirs)] * (F * W.OffsetScale);
+  end;
+  { the bob (idPlayer::CalculateViewWeaponPos): angles, on odd steps the
+    other way; the view's bob up and down (idPlayer::BobCycle) }
+  if (Trunc(FBobCycle) and 128) <> 0 then
+    Scale := -FXYSpeed
+  else
+    Scale := FXYSpeed;
+  Angles.X := FXYSpeed * FBobFracSin * 0.005;
+  Angles.Y := Scale * FBobFracSin * 0.01;
+  Angles.Z := Scale * FBobFracSin * 0.005;
+  Angles := Angles + Lag;
+  { a speed sensitive idle drift }
+  FracSin := (FXYSpeed + 40) * Sin(FTime) * 0.01;
+  Angles := Angles + Vector3(FracSin, FracSin, FracSin);
+  Bob := Min(6, FBobFracSin * FXYSpeed * 0.005);
+  Origin := CgeToD3(FPlayerEye) + Vector3(0, 0, Bob) + D3VecMat(GunOfs, ViewAxis);
+  Axis := D3MatMul(AnglesMatrix(Angles), ViewAxis);
+  { muzzle kick (idWeapon::MuzzleRise) }
+  Left := W.KickEndTime - FTime;
+  if (Left > 0) and (W.KickMaxTime > 0) then
+  begin
+    Amount := Min(Left, W.KickMaxTime) / W.KickMaxTime;
+    Origin := Origin - D3VecMat(W.KickOffset * Amount, Axis);
+    Axis := D3MatMul(AnglesMatrix(W.KickAngles * Amount), Axis);
+  end;
+  W.Holder.Translation := D3ToCge(Origin);
+  SetD3Rotation(W.Holder, Axis);
+
+  { flash surfaces: materials whose stage shows "if ( time + parm4 ) ..."
+    (parm4 = -the time of the shot) }
+  FillChar(Ctx, SizeOf(Ctx), 0);
+  Ctx.Time := FTime;
+  for I := 0 to 3 do
+    Ctx.Parms[I] := 1;
+  Ctx.Parms[4] := -W.FlashStart;
+  for I := 0 to High(W.View.MeshShapes) do
+  begin
+    Mat := Decls.Material(W.View.MeshMaterials[I]);
+    if Mat.StageCondition <> nil then
+      W.View.MeshShapes[I].Visible := Mat.StageCondition.Eval(Ctx) <> 0;
+  end;
+
+  { the flash light at the "flash" joint, backed up from walls to at least
+    8 units away (idWeapon::UpdateFlashPosition) }
+  if (W.FlashRadius > 0) and (FTime < W.FlashStart + W.FlashTime) then
+  begin
+    Fwd := D3ToCge(Vector3(ViewAxis.Data[0, 0], ViewAxis.Data[0, 1], ViewAxis.Data[0, 2]));
+    if W.View.JointPosition('flash', JointPos) then
+      FMuzzleFlashPos := W.View.Scene.LocalToWorld(JointPos)
+    else
+      FMuzzleFlashPos := FPlayerEye + Fwd * 24;
+    Start := FMuzzleFlashPos - Fwd * 16;
+    if FMap.World.WorldRayCast(Start, Fwd, Dist) = nil then
+      Dist := 24;
+    FMuzzleFlashPos := Start + Fwd * (Min(Dist, 24) - 8);
+  end;
+end;
+
+function TD3Game.MuzzleFlash(out Position, Color: TVector3; out Radius: Single): Boolean;
+var
+  W: TD3Weapon;
+begin
+  W := FWeapon;
+  Result := (W <> nil) and W.Scripted and (W.View <> nil) and W.Holder.Exists and
+    (W.FlashRadius > 0) and (FTime < W.FlashStart + W.FlashTime);
+  if not Result then
+    Exit;
+  Position := FMuzzleFlashPos;
+  Color := W.FlashColor;
+  Radius := W.FlashRadius;
 end;
 
 procedure TD3Game.WeaponFrameCommand(const Sender: TD3Md5Instance; const Command: String);
@@ -2248,6 +2490,11 @@ begin
   FAttackPulse := 0;
   SinceFire := 0;
   Inc(W.Shots);
+  { the muzzle kick adds up for repeated shots, the flash shows }
+  if W.KickEndTime < FTime then
+    W.KickEndTime := FTime;
+  W.KickEndTime := Min(W.KickEndTime + W.KickTime, FTime + W.KickMaxTime);
+  W.FlashStart := FTime;
   Def := Decls.EntityDef(W.ProjectileDef);
   Speed := 1000;
   if Def <> nil then
@@ -3659,6 +3906,17 @@ begin
   UpdateWeapon(SecondsPassed);
   if (FScript <> nil) and not ScriptsPaused then
     FScript.Update(FTime);
+  { after its script: a shot of this frame shows its flash now }
+  UpdateWeaponView(SecondsPassed);
+end;
+
+procedure TD3Game.UpdateWeaponView(const SecondsPassed: Single);
+begin
+  if (FWeapon = nil) or (FWeapon.View = nil) then
+    Exit;
+  PresentWeapon(FWeapon);
+  FWeapon.View.Shown := FWeapon.Holder.Exists;
+  FWeapon.View.Update(SecondsPassed);
 end;
 
 constructor TD3Actor.Create;

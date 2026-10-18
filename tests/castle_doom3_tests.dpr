@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(72, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(75, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -119,10 +119,10 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(28, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(37, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(5, Decls.DeclCount(dtModel), 'model decl count');
-  CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
+  CheckEquals(5, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
@@ -2941,6 +2941,128 @@ begin
   end;
 end;
 
+procedure TestWeaponPresentation;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  Eye, P, C, Dir: TVector3;
+  R, MaxAngle, MaxBob: Single;
+  RemoveMe: TRemoveType;
+  I, Flash: Integer;
+  Mat: TD3Material;
+  FlashSeen, LightSeen: Boolean;
+
+  procedure Step;
+  begin
+    Game.Update(0.05, Eye);
+    RemoveMe := rtNone;
+    Map.Update(0.05, RemoveMe);
+  end;
+
+  function GunAngle: Single;
+  begin
+    { between the view model's forward (Doom 3 +x) and the view }
+    Dir := Game.Weapon.Holder.LocalToWorldDirection(D3ToCge(Vector3(1, 0, 0))).Normalize;
+    Result := RadToDeg(AngleRadBetweenVectors(Dir, Game.PlayerViewDir));
+  end;
+
+begin
+  Mat := Decls.Material('models/weapons/test/muzzleflash');
+  Check(Mat.StageCondition <> nil, 'the muzzle flash stage has its "if" condition');
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the weapon presentation');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    for I := 1 to 20 do
+      Step;
+    Check((Game.Weapon <> nil) and (Game.Weapon.View <> nil), 'the pistol''s view model');
+    if (Game.Weapon = nil) or (Game.Weapon.View = nil) then
+      Exit;
+    Flash := -1;
+    for I := 0 to High(Game.Weapon.View.MeshMaterials) do
+      if Game.Weapon.View.MeshMaterials[I] = 'models/weapons/test/muzzleflash' then
+        Flash := I;
+    Check(Flash >= 0, 'its muzzle flash mesh');
+    if Flash < 0 then
+      Exit;
+    Check(not Game.Weapon.View.MeshShapes[Flash].Visible, 'the flash hides before a shot');
+    Check(not Game.MuzzleFlash(P, C, R), 'no flash light before a shot');
+    Check(GunAngle < 1, Format('standing still, the gun points along the view (%.2f)', [GunAngle]));
+
+    { a shot: the flash shows, the gun kicks up, then settles }
+    Game.AttackOnce;
+    FlashSeen := False;
+    LightSeen := False;
+    MaxAngle := 0;
+    for I := 1 to 6 do
+    begin
+      Step;
+      if Game.Weapon.View.MeshShapes[Flash].Visible then
+        FlashSeen := True;
+      if Game.MuzzleFlash(P, C, R) then
+      begin
+        LightSeen := True;
+        CheckNear(160, R, 'the flash light''s radius (flashRadius)');
+        CheckVec3(Vector3(1, 0.8, 0.4), C, 'its color (flashColor)');
+        Check(PointsDistance(P, Eye) < 60, 'near the gun');
+      end;
+      MaxAngle := Max(MaxAngle, GunAngle);
+    end;
+    CheckEquals(1, Game.Weapon.Shots, 'one shot');
+    Check(FlashSeen, 'the flash mesh showed');
+    Check(LightSeen, 'the flash light showed');
+    Check(MaxAngle > 2, Format('the gun kicked up (%.2f degrees)', [MaxAngle]));
+    for I := 1 to 10 do
+      Step;
+    Check(not Game.Weapon.View.MeshShapes[Flash].Visible, 'the flash hides again');
+    Check(not Game.MuzzleFlash(P, C, R), 'the flash light is off again');
+    Check(GunAngle < 1, Format('the kick settled (%.2f)', [GunAngle]));
+
+    { walking (200 units a second): the gun bobs }
+    MaxBob := 0;
+    MaxAngle := 0;
+    for I := 1 to 20 do
+    begin
+      Eye := Eye + D3ToCge(Vector3(10, 0, 0));
+      Step;
+      MaxBob := Max(MaxBob, Game.BobFracSin);
+      MaxAngle := Max(MaxAngle, GunAngle);
+    end;
+    CheckNear(200, Game.PlayerSpeed, 'the player''s speed', 1);
+    Check(MaxBob > 0.5, Format('the bob cycles (%.2f)', [MaxBob]));
+    Check(MaxAngle > 0.5, Format('the gun sways while walking (%.2f degrees)', [MaxAngle]));
+    for I := 1 to 10 do
+      Step;
+    CheckNear(0, Game.PlayerSpeed, 'standing again');
+    CheckNear(0, Game.BobFracSin, 'no bob standing');
+
+    { turning: the gun lags behind the view }
+    Game.PlayerViewDir := D3ToCge(Vector3(0, 1, 0));
+    Step;
+    Check(GunAngle > 2, Format('the gun lags behind a turn (%.2f)', [GunAngle]));
+    for I := 1 to 20 do
+      Step;
+    Check(GunAngle < 1, Format('then catches up (%.2f)', [GunAngle]));
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -3137,6 +3259,7 @@ begin
   TestCharacterAnimMove;
   TestItems;
   TestWeapons;
+  TestWeaponPresentation;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
