@@ -128,7 +128,7 @@ Order: PBR materials (keywords and `_rmao`), then a fallback environment probe a
 
 ## Changes needed in Castle Game Engine
 
-Things this port works around because Castle Game Engine (7.0-alpha.3) can't do them yet. Each is a change to propose upstream (https://github.com/castle-engine/castle-engine); CI builds against the `doom3-port` branch of [mariuz/castle-engine](https://github.com/mariuz/castle-engine/tree/doom3-port): CGE master with the open pull requests below merged in (A, C, D, L, M, N, O), so the port can use them before they land upstream; the workarounds can go once the port uses each change.
+Things this port works around because Castle Game Engine (7.0-alpha.3) can't do them yet. Each is a change to propose upstream (https://github.com/castle-engine/castle-engine); CI builds against the `doom3-port` branch of [mariuz/castle-engine](https://github.com/mariuz/castle-engine/tree/doom3-port): CGE master with the changes below merged in (A, C with its colored-images follow-up, D, E, F, G, H, L, M, N, O; J is merged upstream; the draft I isn't merged yet; checked 2026-10-18), so the port can use them before they land upstream; the workarounds can go once the port uses each change.
 
 | | Change | Status | Unblocks |
 |---|---|---|---|
