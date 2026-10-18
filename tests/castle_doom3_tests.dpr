@@ -3249,6 +3249,9 @@ var
     end;
   end;
 
+var
+  MaxShift: Single;
+  Moved: TVector3;
 begin
   CheckNear(120, TD3Game.FallSpeed(0), 'falling starts at 120 units a second');
   CheckNear(533, TD3Game.FallSpeed(0.5), 'Doom 3''s gravity: 1066 * 0.5 after half a second');
@@ -3318,6 +3321,45 @@ begin
     end;
     Step(0.1);
     CheckEquals('snd_land_hard', Game.LastPlayerSound, 'a hard landing sounds, no pain cry');
+    { double vision (dv_time 500 ms in damage_test_projectile) }
+    Game.Health := 100;
+    Step(1);
+    CheckNear(0, Game.DoubleVisionShift, 'no double vision before');
+    { the earlier hits' knockback (the view would have moved the camera) }
+    Game.KnockbackMove(5);
+    Game.DamagePlayer(5, 'damage_test_projectile', D3ToCge(Vector3(1, 0, 0)));
+    MaxShift := 0;
+    for I := 1 to 10 do
+    begin
+      MaxShift := Max(MaxShift, Game.DoubleVisionShift);
+      Step(0.05);
+    end;
+    Check((MaxShift > 0.05) and (MaxShift <= 0.5), Format('double vision shifts the view (%.2f, half the screen at most)', [MaxShift]));
+    CheckNear(0, Game.DoubleVisionShift, 'it ends after dv_time');
+    { knockback (40 in damage_test_projectile: 200 units a second along
+      the force), slowed by Doom 3's friction to a stop after about 25 }
+    CheckVec3(Vector3(200, 0, 0), Game.KnockbackVelocity, 'knockback velocity: 1000 * 40 / 200 along the force');
+    Moved := TVector3.Zero;
+    for I := 1 to 40 do
+      Moved := Moved + Game.KnockbackMove(0.05);
+    Check((CgeToD3(Moved).X > 20) and (CgeToD3(Moved).X < 30), Format('pushed about 25 units (%.1f)', [CgeToD3(Moved).X]));
+    CheckNear(0, Game.KnockbackVelocity.Length, 'then stopped');
+    { a def without "knockback": 20, 100 units a second }
+    Step(0.5);
+    Game.DamagePlayer(7, 'damage_test_melee', D3ToCge(Vector3(0, 1, 0)));
+    CheckVec3(Vector3(0, 100, 0), Game.KnockbackVelocity, 'default knockback 20');
+    Game.KnockbackMove(2);
+    { no direction: no push }
+    Game.DamagePlayer(3, 'damage_test_melee', TVector3.Zero);
+    CheckNear(0, Game.KnockbackVelocity.Length, 'no direction, no knockback');
+    { the armor's screen effect }
+    Step(0.5);
+    Game.Armor := 30;
+    Game.DamagePlayer(9);
+    Check(Game.ArmorPulse > 0.9, 'armor took a hit: its screen effect');
+    Step(0.3);
+    CheckNear(0, Game.ArmorPulse, 'it fades in 0.25 s');
+    Game.Armor := 0;
     { death }
     Step(1);
     Game.DamagePlayer(1000);

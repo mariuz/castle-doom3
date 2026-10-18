@@ -1638,6 +1638,8 @@ entityDef damage_test_projectile {
 	"blob_y"				"140"
 	"blob_width"			"200"
 	"blob_height"			"200"
+	"dv_time"				"500"
+	"knockback"				"40"
 }
 
 entityDef damage_test_splash {

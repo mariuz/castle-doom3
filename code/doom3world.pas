@@ -550,6 +550,10 @@ type
       and pain times }
     FKickAngles: TVector3;
     FKickFinish, FLastDamageTime, FPainDebounce, FLastArmorPulse: Single;
+    { double vision's end (idPlayerView's dvFinishTime) and the knockback
+      (Doom 3 velocity, horizontal) }
+    FDvFinish: Single;
+    FKnockVel: TVector3;
     FBlobs: array of TD3ScreenBlob;
     FFalling: Boolean;
     FFallStartZ: Single;
@@ -757,6 +761,16 @@ type
     function ScreenBlobs: specialize TArray<TD3ScreenBlob>;
     { Seconds since the player was last hurt (large when never). }
     function SinceDamage: Single;
+    { idPlayerView::DoubleVision's shift (0..0.5 of the screen's width; 0:
+      no double vision) }
+    function DoubleVisionShift: Single;
+    { The armor's screen effect (armorViewEffect) after armor took a hit:
+      1 fading to 0 in 0.25 s }
+    function ArmorPulse: Single;
+    { The knockback's move for this frame (CGE), its velocity slowed by
+      Doom 3's ground friction; the view moves the camera by it. }
+    function KnockbackMove(const SecondsPassed: Single): TVector3;
+    property KnockbackVelocity: TVector3 read FKnockVel;
 
     function PlayerDead: Boolean;
     { Fire the targets of E after Delay seconds (idEntity::ActivateTargets). }
@@ -1183,6 +1197,7 @@ begin
   FLastDamageTime := -1000;
   FPainDebounce := -1000;
   FLastArmorPulse := -1000;
+  FDvFinish := -1000;
   FStepUpTime := -1000;
 end;
 
@@ -1629,6 +1644,14 @@ var
   I: Integer;
   K: String;
 begin
+  { the damage effects of the last map end }
+  FDvFinish := -1000;
+  FKnockVel := TVector3.Zero;
+  FKickFinish := 0;
+  FBlobs := nil;
+  FLastDamageTime := -1000;
+  FLastArmorPulse := -1000;
+  FPainDebounce := -1000;
   { idInventory::RestoreInventory with the player's spawnArgs }
   FAmmo.Clear;
   FCarried.Clear;
@@ -7527,7 +7550,7 @@ var
   Def: TStringList;
   Axis: TMatrix3;
   Local, D: TVector3;
-  KickTime, Amp, BlobTime, Scale: Single;
+  KickTime, Amp, BlobTime, Scale, DvTime, Knockback: Single;
   Blob: TD3ScreenBlob;
 begin
   if God or PlayerDead then
@@ -7567,6 +7590,14 @@ begin
       if Amp <> 0 then
         FKickAngles := FKickAngles * Amp;
     end;
+    { double vision: dv_time (ms) adds up, to 5 s ahead at most }
+    DvTime := StrToFloatDef(Def.Values['dv_time'], 0, DefaultFormatSettings);
+    if DvTime > 0 then
+    begin
+      if FDvFinish < FTime then
+        FDvFinish := FTime;
+      FDvFinish := Min(FDvFinish + DvTime / 1000, FTime + 5);
+    end;
     { a screen blob }
     BlobTime := StrToFloatDef(Def.Values['blob_time'], 0, DefaultFormatSettings);
     if (BlobTime > 0) and (Def.Values['mtr_blob'] <> '') then
@@ -7590,6 +7621,20 @@ begin
   end;
   if FTime >= FLastDamageTime + ImpulseDelay then
     FLastDamageTime := FTime;
+
+  { knockback (idPlayer::Damage): the def's "knockback" (20 by default)
+    pushes along the force, g_knockback 1000 * knockback / 200 units a
+    second; only sideways here (the camera's height is navigation's) }
+  if not Direction.IsZero then
+  begin
+    Knockback := 20;
+    if Def <> nil then
+      Knockback := StrToFloatDef(Def.Values['knockback'], 20, DefaultFormatSettings);
+    D := CgeToD3(Direction);
+    D.Z := 0;
+    if (Knockback <> 0) and not D.IsZero then
+      FKnockVel := FKnockVel + D.Normalize * (1000 * Knockback / 200);
+  end;
 
   Dec(Health, Amount - Absorbed);
   if Health <= 0 then
@@ -7640,6 +7685,63 @@ end;
 function TD3Game.SinceDamage: Single;
 begin
   Result := FTime - FLastDamageTime;
+end;
+
+function TD3Game.DoubleVisionShift: Single;
+var
+  Offset, Scale: Single;
+begin
+  { idPlayerView::DoubleVision with g_dvAmplitude 0.001, g_dvFrequency 0.5:
+    the ms left times the amplitude (half the screen at most), wobbling }
+  Result := 0;
+  if PlayerDead or (FTime >= FDvFinish) then
+    Exit;
+  Offset := (FDvFinish - FTime) * 1000;
+  Scale := Min(0.5, Offset * 0.001);
+  Result := Abs(Scale * Sin(Sqrt(Offset) * 0.5));
+end;
+
+function TD3Game.ArmorPulse: Single;
+var
+  T: Single;
+begin
+  T := (FTime - FLastArmorPulse) / 0.25;
+  if (T >= 0) and (T < 1) then
+    Result := 1 - T
+  else
+    Result := 0;
+end;
+
+function TD3Game.KnockbackMove(const SecondsPassed: Single): TVector3;
+const
+  { pm_friction, pm_stopspeed }
+  Friction = 6;
+  StopSpeed = 100;
+var
+  Speed, NewSpeed, Left, Dt: Single;
+begin
+  Result := TVector3.Zero;
+  Speed := FKnockVel.Length;
+  if (Speed < 0.5) or (SecondsPassed <= 0) then
+  begin
+    FKnockVel := TVector3.Zero;
+    Exit;
+  end;
+  { idPhysics_Player::Friction, in Doom 3's 60 Hz steps (a long frame
+    would stop it at once, or overshoot) }
+  Left := SecondsPassed;
+  while (Left > 0) and not FKnockVel.IsZero do
+  begin
+    Dt := Min(Left, 1 / 60);
+    Left := Left - Dt;
+    Result := Result + D3ToCge(FKnockVel * Dt);
+    Speed := FKnockVel.Length;
+    NewSpeed := Max(0, Speed - Max(Speed, StopSpeed) * Friction * Dt);
+    if NewSpeed < 0.5 then
+      FKnockVel := TVector3.Zero
+    else
+      FKnockVel := FKnockVel * (NewSpeed / Speed);
+  end;
 end;
 
 function TD3Game.PlayerDead: Boolean;

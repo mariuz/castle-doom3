@@ -9,7 +9,7 @@ interface
 uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
-  CastleCameras, CastleTransform, CastleScene,
+  CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields,
   Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx;
 
 type
@@ -44,6 +44,9 @@ type
     FBobApplied: Boolean;
     { seconds walk navigation has been falling (Doom 3's falling speed) }
     FFallTime: Single;
+    { double vision (idPlayerView::DoubleVision) as a screen effect }
+    FDvEffect: TScreenEffectNode;
+    FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
     FPlayerFov: Single;
@@ -74,6 +77,9 @@ type
     procedure UpdateDamageView;
     { walk navigation falls at Doom 3's speed (TD3Game.FallSpeed) }
     procedure UpdateFallSpeed(const SecondsPassed: Single);
+    { knockback moves the camera (with collisions) }
+    procedure ApplyKnockback(const SecondsPassed: Single);
+    procedure CreateDoubleVision;
     procedure SetFlashlight(const Value: Boolean);
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
@@ -109,7 +115,7 @@ uses
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
   Doom3Sampler,
-  CastleShapes,
+  CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
@@ -142,6 +148,7 @@ begin
   { Doom 3 steps up at once and smooths only the view (TD3Game's step up),
     and has no falling camera effect (a landing dips the view instead) }
   WalkNavigation.GrowSpeed := 1000;
+  CreateDoubleVision;
   WalkNavigation.FallingEffect := False;
   if AutoTestPrefix <> '' then
   begin
@@ -478,6 +485,49 @@ begin
   inherited RenderOverChildren;
 end;
 
+procedure TViewPlay.CreateDoubleVision;
+var
+  Part: TShaderPartNode;
+  Shader: TComposedShaderNode;
+begin
+  if FDvEffect <> nil then
+    Exit;
+  { the frame drawn shifted left (opaque), then shifted right at half
+    alpha, like idPlayerView::DoubleVision's two stretched pictures }
+  Part := TShaderPartNode.Create;
+  Part.ShaderType := stFragment;
+  Part.Contents :=
+    'uniform float shift;' + NL +
+    'void main (void)' + NL +
+    '{' + NL +
+    '  vec2 p = screenf_position();' + NL +
+    '  float w = float(screen_width);' + NL +
+    '  vec4 a = screenf_get_color(vec2(shift * w + p.x * (1.0 - shift), p.y));' + NL +
+    '  vec4 b = screenf_get_color(vec2(p.x * (1.0 - shift), p.y));' + NL +
+    '  gl_FragColor = mix(a, b, 0.5);' + NL +
+    '}';
+  Shader := TComposedShaderNode.Create;
+  Shader.SetParts([Part]);
+  FDvShift := TSFFloat.Create(Shader, True, 'shift', 0);
+  Shader.AddCustomField(FDvShift);
+  FDvEffect := TScreenEffectNode.Create;
+  FDvEffect.SetShaders([Shader]);
+  FDvEffect.Enabled := False;
+  MainViewport.AddScreenEffect(FDvEffect);
+end;
+
+procedure TViewPlay.ApplyKnockback(const SecondsPassed: Single);
+var
+  Move, NewPos: TVector3;
+begin
+  Move := FGame.KnockbackMove(SecondsPassed);
+  if Move.IsZero or FNoclip or FInCinematic or FGame.PlayerDead then
+    Exit;
+  if Map.World.WorldMoveAllowed(Camera.Translation, Camera.Translation + Move, NewPos,
+    True, WalkNavigation.Radius, TBox3D.Empty, TBox3D.Empty, False) then
+    Camera.Translation := NewPos;
+end;
+
 procedure TViewPlay.UpdateFallSpeed(const SecondsPassed: Single);
 begin
   { CGE's walk navigation falls at FallSpeedStart times MoveSpeed, growing
@@ -503,6 +553,18 @@ var
   ImageName: String;
 begin
   Hud.DamageAge := FGame.SinceDamage;
+  Hud.ArmorPulse := FGame.ArmorPulse;
+  { Doom 3's armorViewEffect when the game has it, else the HUD's own }
+  if Decls.Material('armorViewEffect').Defined and (Decls.Material('armorViewEffect').StageImage <> '') then
+    Hud.ArmorImageUrl := ImageProgramUrl(Decls.Material('armorViewEffect').StageImage, ikColor)
+  else
+    Hud.ArmorImageUrl := '';
+  if FDvEffect <> nil then
+  begin
+    FDvEffect.Enabled := FGame.DoubleVisionShift > 0;
+    if FDvEffect.Enabled then
+      FDvShift.Send(FGame.DoubleVisionShift);
+  end;
   Blobs := FGame.ScreenBlobs;
   SetLength(Hud.Blobs, 0);
   for I := 0 to High(Blobs) do
@@ -579,7 +641,7 @@ begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
-    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
+    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
@@ -647,6 +709,23 @@ begin
     if Args <> '' then
       FGame.SelectWeapon(StrToIntDef(Args, -1));
     Console.Print(Format('weapon slot %d: %s', [FGame.IdealSlot, FGame.WeaponHudText]));
+  end else
+  if Cmd = 'hurt' then
+  begin
+    { hurt <damage def> [amount]: a hit from the front, with the def's
+      effects (kick, blobs, double vision, knockback) }
+    Words := Trim(Args).Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if Length(Words) = 0 then
+      Console.Print('hurt <damage def> [amount]')
+    else
+    begin
+      I := 10;
+      if Decls.EntityDef(Words[0]) <> nil then
+        I := StrToIntDef(Decls.EntityDef(Words[0]).Values['damage'], 10);
+      if Length(Words) > 1 then
+        I := StrToIntDef(Words[1], I);
+      FGame.DamagePlayer(I, Words[0], -Camera.Direction);
+    end;
   end else
   if Cmd = 'pm_bob' then
   begin
@@ -1151,6 +1230,7 @@ begin
   FGame.PlayerJumping := WalkNavigation.IsJumping;
   FGame.PlayerFlying := FNoclip;
   UpdateFallSpeed(SecondsPassed);
+  ApplyKnockback(SecondsPassed);
 
   { during cinematics the player stays where the camera was }
   if FInCinematic then
