@@ -133,6 +133,10 @@ begin
   { Doom 3's view bob (TD3Game.ViewBobOffset / ViewBobAngles) instead of
     CGE's head bobbing }
   WalkNavigation.HeadBobbing := 0;
+  { Doom 3 steps up at once and smooths only the view (TD3Game's step up),
+    and has no falling camera effect (a landing dips the view instead) }
+  WalkNavigation.GrowSpeed := 1000;
+  WalkNavigation.FallingEffect := False;
   if AutoTestPrefix <> '' then
   begin
     { results must not depend on the desktop mouse }
@@ -1091,6 +1095,8 @@ begin
     end;
   end;
   FGame.PlayerViewDir := Camera.Direction;
+  FGame.PlayerJumping := WalkNavigation.IsJumping;
+  FGame.PlayerFlying := FNoclip;
 
   { during cinematics the player stays where the camera was }
   if FInCinematic then
