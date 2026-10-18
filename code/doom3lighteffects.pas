@@ -61,6 +61,23 @@ function ProjectionShape(const ImageName: String): TD3LightShape;
 function CreateLightEffect(const Index: Integer; const M: TMatrix4;
   const ProjectionImage: String; const Projected: Boolean): TEffectNode;
 
+type
+  { One shared Effect per light shape and kind (point / projected), for a
+    map's lights (all in one scene). }
+  TD3SharedLightEffects = array [TD3LightShape, Boolean] of TEffectNode;
+
+{ Give Light its light volume: with SharedLightEffectsAvailable, the
+  shared Effect for its shape and kind (created in Shared on first use)
+  and its matrix as the light's own custom field (a per-light uniform,
+  CGE change K): lights of the same kind then share shader programs.
+  Otherwise its own Effect (CreateLightEffect, Index names the uniform). }
+procedure SetLightVolume(const Light: TAbstractLightNode; var Shared: TD3SharedLightEffects;
+  const Index: Integer; const M: TMatrix4; const ProjectionImage: String; const Projected: Boolean);
+
+{ CGE passes light nodes' custom fields to their effects as per-light
+  uniforms (light nodes have interface declarations). }
+function SharedLightEffectsAvailable: Boolean;
+
 { The light's strength (0..1) at a CGE world point: the same volume, shape
   and falloff as the shader (for picking the shadow casting light). }
 function LightVolumeStrength(const M: TMatrix4; const Shape: TD3LightShape;
@@ -75,6 +92,9 @@ procedure AddLightLibrary(const Root: TAbstractGroupingNode);
 var
   { Set False to use plain spherical lights (no effects). }
   LightVolumes: Boolean = True;
+  { Set False to give every light its own Effect even when CGE could share
+    them (r_sharedLightEffects 0). }
+  SharedLightEffects: Boolean = True;
 
 implementation
 
@@ -180,6 +200,8 @@ begin
     Result := lsRound;
 end;
 
+{ N is the light's uniform name suffix: its index, or "<Light>" (CGE puts
+  the light number there) for the shared effects. }
 function LightEffectCode(const N: String; const Shape: TD3LightShape; const Projected: Boolean): String;
 var
   ProjCode, FallCode: String;
@@ -231,6 +253,52 @@ begin
   Part.ShaderType := stFragment;
   Part.Contents := LightEffectCode(N, ProjectionShape(ProjectionImage), Projected);
   Result.SetParts([Part]);
+end;
+
+var
+  FSharedAvailable: Integer = -1;
+
+function SharedLightEffectsAvailable: Boolean;
+var
+  Probe: TPointLightNode;
+begin
+  if FSharedAvailable < 0 then
+  begin
+    Probe := TPointLightNode.Create;
+    try
+      FSharedAvailable := Ord(Probe.HasInterfaceDeclarations <> []);
+    finally
+      FreeAndNil(Probe);
+    end;
+  end;
+  Result := FSharedAvailable = 1;
+end;
+
+procedure SetLightVolume(const Light: TAbstractLightNode; var Shared: TD3SharedLightEffects;
+  const Index: Integer; const M: TMatrix4; const ProjectionImage: String; const Projected: Boolean);
+var
+  Shape: TD3LightShape;
+  Part: TEffectPartNode;
+begin
+  if not (SharedLightEffects and SharedLightEffectsAvailable) then
+  begin
+    Light.SetEffects([CreateLightEffect(Index, M, ProjectionImage, Projected)]);
+    Exit;
+  end;
+  Shape := ProjectionShape(ProjectionImage);
+  if Shared[Shape, Projected] = nil then
+  begin
+    Shared[Shape, Projected] := TEffectNode.Create;
+    Shared[Shape, Projected].Language := slGLSL;
+    Shared[Shape, Projected].UniformMissing := umIgnore;
+    Part := TEffectPartNode.Create;
+    Part.ShaderType := stFragment;
+    Part.Contents := LightEffectCode('<Light>', Shape, Projected);
+    Shared[Shape, Projected].SetParts([Part]);
+  end;
+  { the uniform d3_light_matrix_<Light> of the shared code }
+  Light.AddCustomField(TSFMatrix4f.Create(Light, True, 'd3_light_matrix_', M));
+  Light.SetEffects([Shared[Shape, Projected]]);
 end;
 
 function SmoothStep(const E0, E1, X: Single): Single;

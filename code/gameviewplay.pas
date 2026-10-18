@@ -944,6 +944,18 @@ begin
     MainViewport.ShadowVolumes := Map.Shadows;
     Console.Print('r_shadows ' + BoolToStr(Map.Shadows, '1', '0'));
   end else
+  if Cmd = 'r_sharedlighteffects' then
+  begin
+    { lights of a kind share one Effect with per-light uniforms (CGE change
+      K): fewer shader programs; 0 gives each light its own Effect }
+    if Args <> '' then
+      SharedLightEffects := StrToIntDef(Args, 1) <> 0
+    else
+      SharedLightEffects := not SharedLightEffects;
+    Console.Print('r_sharedLightEffects ' + BoolToStr(SharedLightEffects, '1', '0') +
+      BoolToStr(SharedLightEffectsAvailable, '', ' (not supported by this CGE)') + ', reloading the map');
+    LoadLevel(MapName);
+  end else
   if Cmd = 'r_lightvolumes' then
   begin
     if Args <> '' then
