@@ -33,6 +33,10 @@ type
     InfoText: String;
     { seconds since the player was hurt (the tunnel vision pulses) }
     DamageAge: Single;
+    { the armor's screen effect: 1 fading to 0; its image ('': the HUD's
+      own blue glow) }
+    ArmorPulse: Single;
+    ArmorImageUrl: String;
     Blobs: array of TD3HudBlob;
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -159,6 +163,26 @@ begin
     Img.Draw(FloatRectangle(R.Left + Blobs[I].X / 640 * R.Width,
       R.Top - (Blobs[I].Y + Blobs[I].H) / 480 * R.Height,
       Blobs[I].W / 640 * R.Width, Blobs[I].H / 480 * R.Height));
+  end;
+
+  { armor feedback (idPlayerView: armorViewEffect over the screen for
+    250 ms after armor took a hit) }
+  if (ArmorPulse > 0) and not Dead then
+  begin
+    Img := nil;
+    if ArmorImageUrl <> '' then
+      Img := Image(ArmorImageUrl);
+    if Img <> nil then
+    begin
+      Img.Color := Vector4(1, 1, 1, ArmorPulse);
+      Img.Draw(R);
+    end else
+    begin
+      if FVignette = nil then
+        FVignette := TDrawableImage.Create(MakeVignette, True, True);
+      FVignette.Color := Vector4(0.35, 0.7, 1, ArmorPulse * 0.8);
+      FVignette.Draw(R);
+    end;
   end;
 
   { tunnel vision (idPlayerView: textures/decals/tunnel with the health
