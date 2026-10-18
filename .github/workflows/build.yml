@@ -205,13 +205,19 @@ jobs:
           run_test hurt testmap "W:1,O:notarget,G:740 -200 96,A:-45,W:0.5,O:give armor 50,O:hurt damage_test_projectile,W:0.05,S,W:1,S,Q"
           grep -q "Player sound snd_hitArmor" test_output/hurt.log || { echo "::error::armor taking a hit should play snd_hitArmor"; exit 1; }
           awk '/Screenshot/ { x = $0; sub(/.* eye /, "", x); split(x, p, " "); last = p[1] } END { exit !(last != "" && last + 0 < 730) }' test_output/hurt.log || { echo "::error::knockback should push the player back"; exit 1; }
+          run_test body testmap "W:1,O:notarget,O:pm_thirdPerson 1,G:-160 -160 0,A:45,W:0.5,S,G:-220 120 0,W:1,G:-160 -160 0,A:45,W:0.3,S,G:-220 200 0,W:0.5,G:-160 -160 0,A:45,W:0.3,S,O:pm_thirdPerson 0,GO:1 0 3 run,O:stamina,G:-160 -160 0,A:45,W:0.5,O:hurt damage_test_projectile 1 up,W:1,Q"
+          grep -q 'Player model "models/md5/test/player.md5mesh" (skin "skins/test/player")' test_output/body.log || { echo "::error::player_test's body should be spawned with its skin"; exit 1; }
+          grep -q 'Player skin "skins/test/player_berserk"' test_output/body.log || { echo "::error::berserk should switch the body to the _berserk skin"; exit 1; }
+          grep -q 'Player skin "skins/test/player_invis"' test_output/body.log || { echo "::error::invisibility should switch the body to skin_invisibility"; exit 1; }
+          grep -qE 'Stamina 2[0-2]\.[0-9] of 24' test_output/body.log || { echo "::error::running 3 s should use 3 s of stamina"; exit 1; }
+          grep -qE 'Knockback: thrown up 1[78]\.[0-9] units' test_output/body.log || { echo "::error::a knockback from below should throw the player up about 18.8 units"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }
           grep -q 'Effect "1" (area 1, location "room_b")' test_output/reverb.log || { echo "::error::room B should get its reverb by area number"; exit 1; }
           grep -q "Off (s_useEAXReverb 0)" test_output/reverb.log || { echo "::error::s_useEAXReverb 0 should turn the reverb off"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 33
+          test "$(ls test_output/*.png | wc -l)" -ge 36
 
       - name: Upload screenshots and logs
         if: always()

@@ -27,6 +27,9 @@ type
     function Image(const Url: String): TDrawableImage;
   public
     Health, Armor: Integer;
+    { stamina in percent (-1: none); a bar shows while it isn't full,
+      like Doom 3's HUD }
+    Stamina: Integer;
     AmmoText: String;
     FlashlightOn: Boolean;
     Dead: Boolean;
@@ -62,6 +65,7 @@ begin
   FullSize := True;
   FMessages := TStringList.Create;
   Health := 100;
+  Stamina := -1;
   AmmoText := 'PISTOL';
   DamageAge := 1000;
   FImages := specialize TObjectDictionary<String, TDrawableImage>.Create([doOwnsValues]);
@@ -259,6 +263,13 @@ begin
   UIFont.Print(R.Left + 34 * S, R.Bottom + 30 * S, Cyan, Format('ARMOR   %d', [Armor]));
   DrawRectangle(FloatRectangle(R.Left + 190 * S, R.Bottom + 58 * S, 110 * S * Max(0, Min(100, Health)) / 100,
     12 * S), HealthColor);
+  if (Stamina >= 0) and (Stamina < 100) then
+  begin
+    DrawRectangle(FloatRectangle(R.Left + 190 * S, R.Bottom + 34 * S, 110 * S, 6 * S),
+      Vector4(0.2, 0.2, 0.1, 0.8));
+    DrawRectangle(FloatRectangle(R.Left + 190 * S, R.Bottom + 34 * S, 110 * S * Stamina / 100, 6 * S),
+      Vector4(1, 0.85, 0.3, 1));
+  end;
 
   { weapon / flashlight (bottom right) }
   { wide enough for "TEST SHOTGUN  7 / 16    KILLS 10" }

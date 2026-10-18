@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(82, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(87, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -119,9 +119,13 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(29, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(33, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(39, Decls.DeclCount(dtEntityDef), 'entityDef count');
-  CheckEquals(5, Decls.DeclCount(dtModel), 'model decl count');
+  CheckEquals(6, Decls.DeclCount(dtModel), 'model decl count');
+  CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
+  Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
+  CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
+    'the berserk skin remaps the body');
   CheckEquals(11, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
@@ -3471,6 +3475,172 @@ begin
   end;
 end;
 
+{ Stamina (idPlayer::AdjustSpeed), the player's body and its powerup
+  skins, a knockback throwing the player up. }
+procedure TestStaminaSkinsKnockback;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  Eye, Move, Angles: TVector3;
+  RemoveMe: TRemoveType;
+  Rise, Peak, T: Single;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for stamina');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.5);
+
+    { stamina: full (pm_stamina 24), running drains a second a second and
+      blends walking (140) with running (220) by stamina / 45 }
+    CheckNear(24, Game.Stamina, 'stamina starts full');
+    CheckEquals(100, Game.StaminaPercent, 'stamina 100%');
+    Game.PlayerRunning := True;
+    Game.PlayerMoving := True;
+    Step(4);
+    CheckNear(20, Game.Stamina, 'running 4 s uses 4', 0.1);
+    CheckNear(20 / 45, Game.RunFraction, 'run fraction stamina / threshold', 0.01);
+    CheckNear((140 * (1 - 20 / 45) + 220 * 20 / 45) / 140, Game.RunMultiplier, 'run speed blended', 0.01);
+    Step(25);
+    CheckNear(0, Game.Stamina, 'stamina runs out');
+    CheckNear(1, Game.RunMultiplier, 'out of stamina: walking speed');
+    { the run key alone (not moving) regenerates, 25% faster }
+    Game.PlayerMoving := False;
+    Step(4);
+    CheckNear(4 * 0.75 * 1.25, Game.Stamina, 'stamina regenerates at 0.75 * 1.25', 0.1);
+    Game.PlayerRunning := False;
+    Game.PlayerMoving := True;
+    Step(2);
+    CheckNear(4 * 0.75 * 1.25 + 2 * 0.75, Game.Stamina, 'walking: at 0.75', 0.1);
+    { adrenaline: stamina 100 (full speed), not used up while it lasts }
+    Check(Game.GivePowerUp(PowerupAdrenaline, 5), 'adrenaline given');
+    CheckNear(100, Game.Stamina, 'adrenaline: stamina 100');
+    Game.PlayerRunning := True;
+    Step(2);
+    CheckNear(100, Game.Stamina, 'adrenaline: running uses no stamina');
+    CheckNear(220 / 140, Game.RunMultiplier, 'adrenaline: full run speed', 0.01);
+    Step(4);
+    Check(not Game.PowerUpActive(PowerupAdrenaline), 'adrenaline ends');
+    Check(Game.Stamina < 100, 'then running uses it again');
+    { stopping caps it to pm_stamina }
+    Game.PlayerRunning := False;
+    Step(0.1);
+    CheckNear(24, Game.Stamina, 'more than pm_stamina is lost when not running');
+    Game.StaminaMax := 0;
+    CheckEquals(-1, Game.StaminaPercent, 'pm_stamina 0: no stamina on the HUD');
+    Game.PlayerRunning := True;
+    Step(0.1);
+    CheckNear(220 / 140, Game.RunMultiplier, 'pm_stamina 0: always full run speed', 0.01);
+    Game.StaminaMax := 24;
+    Game.PlayerRunning := False;
+    Game.PlayerMoving := False;
+
+    { the body: player_test's model with its skin, berserk's _berserk
+      skin, skin_invisibility }
+    Check(Game.PlayerModel <> nil, 'the player has a body');
+    CheckEquals('skins/test/player', Game.PlayerSkinName, 'its skin');
+    CheckEquals('models/test/player_armor', Game.PlayerModel.MeshMaterials[0], 'the skin''s material');
+    Check(not Game.PlayerModelHolder.Exists, 'not shown in first person');
+    Game.ThirdPerson := True;
+    Step(0.1);
+    Check(Game.PlayerModelHolder.Exists, 'shown in third person');
+    CheckNear(-160, CgeToD3(Game.PlayerModelHolder.Translation).X, 'at the player', 0.01);
+    CheckNear(0, CgeToD3(Game.PlayerModelHolder.Translation).Z, 'on the floor', 0.01);
+    Check(Game.GivePowerUp(PowerupBerserk, 2), 'berserk given');
+    Step(0.1);
+    CheckEquals('skins/test/player_berserk', Game.PlayerModel.SkinName, 'berserk: the _berserk skin');
+    CheckEquals('models/test/player_berserk', Game.PlayerModel.MeshMaterials[0], 'the berserk material');
+    Check(Game.GivePowerUp(PowerupInvisibility, 1), 'invisibility given');
+    Step(0.1);
+    CheckEquals('skins/test/player_invis', Game.PlayerModel.SkinName, 'invisible: skin_invisibility');
+    Step(1);
+    CheckEquals('skins/test/player_berserk', Game.PlayerModel.SkinName, 'invisibility over: berserk again');
+    Step(1.5);
+    CheckEquals('skins/test/player', Game.PlayerModel.SkinName, 'berserk over: the normal skin');
+    CheckEquals('models/test/player_armor', Game.PlayerModel.MeshMaterials[0], 'the armor again');
+    { the third person camera: 80 behind, 8 up, half the pitch }
+    Game.ThirdPersonClip := False;
+    Angles := Vector3(30, 0, 0);
+    Game.ThirdPersonView(Eye, Angles, Move);
+    CheckNear(-160 - 80 * Cos(DegToRad(15)), CgeToD3(Move).X, 'third person: 80 behind', 0.01);
+    CheckNear(68 + 8 + 80 * Sin(DegToRad(15)), CgeToD3(Move).Z, 'third person: 8 up, half the pitch', 0.01);
+    Check(Angles.X > 0, 'looking down at the focus point');
+    Game.ThirdPersonClip := True;
+    Game.ThirdPerson := False;
+    Step(0.1);
+    Check(not Game.PlayerModelHolder.Exists, 'hidden again in first person');
+
+    { knockback up (200 units a second): no friction, Doom 3's gravity,
+      down where it started: v^2 / 2g = 18.8 units }
+    Game.God := False;
+    Game.Health := 100;
+    Game.DamagePlayer(1, 'damage_test_projectile', Vector3(0, 1, 0));
+    Check(Game.KnockbackAirborne, 'thrown off the ground');
+    CheckNear(200, Game.KnockbackVelocity.Z, 'knockback 40: 200 up', 0.01);
+    Rise := 0;
+    Peak := 0;
+    T := 0;
+    while Game.KnockbackAirborne and (T < 2) do
+    begin
+      Move := Game.KnockbackMove(1 / 60);
+      Rise := Rise + Move.Y;
+      Peak := Max(Peak, Rise);
+      T := T + 1 / 60;
+    end;
+    CheckNear(18.8, Peak, 'rises v^2 / 2g', 0.3);
+    CheckNear(0.375, T, 'lands after 2 v / g', 0.03);
+    CheckNear(0, Rise, 'lands where it started', 0.01);
+    CheckNear(18.8, Game.KnockbackPeak, 'its peak', 0.3);
+    { pushed down on the ground: the ground takes it }
+    Game.DamagePlayer(1, 'damage_test_projectile', Vector3(0, -1, 0));
+    Check(not Game.KnockbackAirborne, 'down: not airborne');
+    CheckNear(0, Game.KnockbackVelocity.Z, 'down: no vertical speed', 0.01);
+    Move := Game.KnockbackMove(10);
+    { a ceiling stops the rise, then it falls }
+    Game.DamagePlayer(1, 'damage_test_projectile', Vector3(0, 1, 0));
+    Move := Game.KnockbackMove(0.05);
+    Game.KnockbackBlocked;
+    CheckNear(0, Game.KnockbackVelocity.Z, 'a ceiling stops the rise');
+    Check(Game.KnockbackAirborne, 'still in the air');
+    Move := Game.KnockbackMove(0.05);
+    Check(Move.Y < 0, 'falls back');
+    Game.KnockbackBlocked;
+    Check(not Game.KnockbackAirborne, 'landed on something');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -3671,6 +3841,7 @@ begin
   TestPlayerMotion;
   TestDamageFeedback;
   TestPowerups;
+  TestStaminaSkinsKnockback;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
