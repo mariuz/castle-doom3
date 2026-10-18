@@ -168,6 +168,9 @@ type
     OnFrameCommand: TD3FrameCommandEvent;
     { The anim playing (its name in the decl, e.g. "idle2"). }
     PlayingAnim: String;
+    { A ragdoll owns the pose: animations still run (their time, frame
+      commands, AnimFinished) but don't change it, nor do joint mods. }
+    PoseLocked: Boolean;
     { The meshes' shapes and their materials (after the skin) }
     MeshShapes: array of TShapeNode;
     MeshMaterials: array of String;
@@ -209,6 +212,8 @@ type
     { Show a pose of the model's joints (model space), holding it (a
       ragdoll's): the animation stops. }
     procedure SetPose(const APose: TD3JointArray);
+    { The model's bind pose (the md5mesh's joints, model space). }
+    function BindPose: TD3JointArray;
     { Show one frame (1 = the first) of an animation, holding it
       (idAnimator::SetFrame). False if there's no such animation. }
     function SetFrame(const AnimName: String; const Frame: Integer): Boolean;
@@ -1073,6 +1078,9 @@ var
 begin
   FModsCleared := False;
   FFinalPose := Copy(FPose);
+  { a ragdoll's pose: no head looks or copied joints }
+  if PoseLocked then
+    Exit;
   if FModCount > 0 then
     for J := 0 to High(FFinalPose) do
       if FHasMod[J] then
@@ -1119,6 +1127,11 @@ begin
   Paused := True;
   FPose := Copy(APose);
   ApplyPose;
+end;
+
+function TD3Md5Instance.BindPose: TD3JointArray;
+begin
+  Result := Copy(FModel.Joints);
 end;
 
 function TD3Md5Instance.Pose: TD3JointArray;
@@ -1372,7 +1385,7 @@ end;
 function TD3Md5Instance.SetFrame(const AnimName: String; const Frame: Integer): Boolean;
 begin
   Result := PlayAnim(AnimName, False);
-  if not Result then
+  if (not Result) or PoseLocked then
     Exit;
   FAnim.FramePose(Max(0, Frame - 1), FPose);
   ApplyPose;
@@ -1476,6 +1489,8 @@ begin
   if (FAnim = nil) or Paused then
   begin
     LastOriginDelta := TVector3.Zero;
+    if PoseLocked then
+      Exit;
     { a held pose still turns with its joint mods and copied joints }
     if (FModCount > 0) or FModsCleared or (Length(FCopyJoints) > 0) or (Length(FFinalPose) <> Length(FPose)) then
       ApplyPose;
@@ -1485,6 +1500,11 @@ begin
   FAnimTime := FAnimTime + SecondsPassed;
   if Assigned(OnFrameCommand) and (FrameCommands <> nil) then
     FireFrameCommands(OldTime, FAnimTime);
+  if PoseLocked then
+  begin
+    LastOriginDelta := TVector3.Zero;
+    Exit;
+  end;
   FAnim.PoseAt(FAnimTime, FLoop, FPose);
   { the origin's move since the last update (across a cycle's wrap: to
     the last frame, then from the first) }

@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx,
+  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(97, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(98, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -2368,7 +2368,9 @@ begin
     Pos := CgeToD3(Flyer.Model.Holder.Translation);
     CheckNear(PlayerEyeHeight + 10, Pos.Z, 'hovering at the player''s eyes plus fly_offset', 12);
 
-    { killed in the air, it falls to the floor }
+    { killed in the air, it falls to the floor (without its ragdoll: the
+      ragdoll is TestMonsterRagdoll's) }
+    Game.RagdollEnabled := False;
     Game.KillActor(Flyer);
     for I := 1 to 20 do
       Step(0.05);
@@ -3869,9 +3871,11 @@ begin
     Game.God := False;
     Game.DamagePlayer(1000, 'damage_test_projectile', D3ToCge(Vector3(1, 0, 0)));
     Step(0.1);
-    Check(Game.Ragdoll, 'dead: a ragdoll');
+    Check(Game.PlayerRagdoll <> nil, 'dead: a ragdoll');
+    Check((Game.PlayerRagdoll <> nil) and (Game.PlayerRagdoll.Figure <> nil) and
+      (Game.PlayerRagdoll.Figure.Name = 'test_player'), 'the player''s articulated figure');
     Step(4);
-    Check(Game.RagdollSettled, 'the ragdoll settles');
+    Check((Game.PlayerRagdoll <> nil) and Game.PlayerRagdoll.Settled, 'the ragdoll settles');
     Check(Game.PlayerModel.JointPosition('head', Head), 'the head joint');
     Head := CgeToD3(Game.PlayerModel.Scene.LocalToWorld(Head));
     Check(Head.Z < 30, 'the head is down (fell over)');
@@ -3880,8 +3884,162 @@ begin
     for I := 0 to High(Game.PlayerModel.Pose) do
       if CgeToD3(Game.PlayerModel.Scene.LocalToWorld(D3ToCge(Game.PlayerModel.Pose[I].Position))).Z < -1 then
         AllAbove := False;
-    Check(AllAbove, 'no joint under the floor');
+    Check(AllAbove, 'no joint under the floor (player)');
     Check(not Game.Weapon.WorldHolder.Exists, 'the gun is gone');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+{ Articulated figures: the generated ones and a retail-like snippet. }
+procedure TestArticulatedFigures;
+const
+  Retail =
+    'settings { model "monster_zombie" friction 0.01, 0.01, 0.8, 0.5 totalMass -1 }' + LineEnding +
+    'body "waist" { joint "Waist" mod orientation model dodecahedron( ( -8, -8, -8 ), ( 8, 8, 8 ) )' + LineEnding +
+    '  origin bonecenter( "Hips", "Waist" ) density 0.2 containedJoints "*Hips -*Chest" }' + LineEnding +
+    'body "luparm" { joint "Luparm" model bone( joint( "Luparm" ), joint( "Lloarm" ), 6 ) origin joint( "Luparm" ) }' + LineEnding +
+    'universalJoint "waist_chest" { body1 "chest" body2 "waist" position joint( "Chest" ) shafts ( 0, 0, 1 ), ( 0, 0, -1 )' + LineEnding +
+    '  pyramid ( 0, 0, -1 ), 30, 60, 0 friction 0.2 }' + LineEnding +
+    'fixed "f" { body1 "a" body2 "b" }' + LineEnding +
+    'spring "s" { body1 "a" body2 "b" anchor1 ( 1, 2, 3 ) anchor2 ( 4, 5, 6 ) friction 0.9 stretch 100 compress 0 damping 0.5 restLength 0 minLength 0 maxLength 10 }' + LineEnding +
+    'hinge "knee" { body1 "thigh" body2 "calf" position joint( "Knee" ) axis ( 0, 1, 0 ) limit 30, 120, 0 }' + LineEnding +
+    'unknownblock { a b c }';
+var
+  AF: TD3ArticulatedFigure;
+  B: TD3AFBody;
+  Ok: Boolean;
+  P: TVector3;
+  Model: TD3Md5Model;
+  Joints: specialize TArray<Integer>;
+begin
+  CheckEquals(2, Decls.DeclCount(dtAF), 'articulated figure decls');
+  AF := ArticulatedFigure('test_blob');
+  Check(AF <> nil, 'test_blob af');
+  if AF = nil then
+    Exit;
+  CheckEquals('test_blob', AF.ModelName, 'its settings'' model');
+  CheckEquals(6, AF.Bodies.Count, 'six bodies');
+  CheckEquals(5, AF.Constraints.Count, 'five constraints');
+  B := AF.Bodies[AF.BodyIndex('torso')];
+  CheckEquals('body', B.JointName, 'the torso''s joint');
+  CheckEquals('box', B.ModelKind, 'a box');
+  CheckNear(14, B.Radius, 'radius: half its smallest size');
+  P := B.Origin.Evaluate(nil, Ok);
+  CheckNear(45, P.Z, 'its origin');
+  Model := Md5Cache.Model('models/md5/test/blob.md5mesh');
+  Joints := B.JointList(Model.Joints);
+  CheckEquals(1, Length(Joints), 'the torso moves the body joint (not origin, the root)');
+  CheckEquals(Ord(acBallAndSocket), Ord(AF.Constraints[0].Kind), 'the neck: ball and socket');
+  CheckNear(40, AF.Constraints[0].LimitAngle, 'its cone');
+  CheckEquals(Ord(acUniversal), Ord(AF.Constraints[1].Kind), 'a shoulder: universal');
+  CheckEquals(Ord(avJoint), Ord(AF.Constraints[1].Anchor.Kind), 'positioned at joint( arm_l )');
+  P := AF.Constraints[1].Anchor.Evaluate(Model.Joints, Ok);
+  Check(Ok and (P.Y = 22) and (P.Z = 60), 'at the arm_l joint');
+  CheckEquals(Ord(acHinge), Ord(AF.Constraints[3].Kind), 'a hip: hinge');
+  CheckNear(90, AF.Constraints[3].LimitAngle, 'its limit''s width');
+  Check(ArticulatedFigure('test_player') <> nil, 'test_player af');
+  Check(ArticulatedFigure('no_such_af') = nil, 'no such af');
+
+  AF := ParseArticulatedFigure('retail', Retail);
+  try
+    CheckEquals('monster_zombie', AF.ModelName, 'retail: settings');
+    CheckEquals(2, AF.Bodies.Count, 'retail: bodies');
+    CheckEquals(4, AF.Constraints.Count, 'retail: constraints (unknown block skipped)');
+    CheckEquals(Ord(avBoneCenter), Ord(AF.Bodies[0].Origin.Kind), 'bonecenter origin');
+    CheckEquals('Hips', AF.Bodies[0].Origin.Joint1, 'bonecenter''s first joint');
+    CheckEquals('*Hips -*Chest', AF.Bodies[0].ContainedJoints, 'contained joints');
+    CheckEquals('bone', AF.Bodies[1].ModelKind, 'a bone model');
+    CheckNear(3, AF.Bodies[1].Radius, 'a bone''s radius: half its width');
+    CheckNear(60, AF.Constraints[0].LimitAngle, 'a pyramid: its larger angle');
+    CheckEquals(Ord(acFixed), Ord(AF.Constraints[1].Kind), 'fixed');
+    CheckEquals(Ord(acSpring), Ord(AF.Constraints[2].Kind), 'spring');
+    Check(AF.Constraints[2].HasAnchor and (AF.Constraints[2].Anchor.Point.Z = 3), 'a spring''s anchor1');
+    CheckNear(120, AF.Constraints[3].LimitAngle, 'a hinge''s limit width');
+  finally
+    AF.Free;
+  end;
+end;
+
+{ A monster killed falls as its ragdoll and stays. }
+procedure TestMonsterRagdoll;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M, Blob: TD3Monster;
+  Eye, P: TVector3;
+  RemoveMe: TRemoveType;
+  I, Shots: Integer;
+  AllAbove: Boolean;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(1 / 60, Eye);
+      RemoveMe := rtNone;
+      Map.Update(1 / 60, RemoveMe);
+      T := T + 1 / 60;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for monster ragdolls');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    Blob := nil;
+    for M in Game.Monsters do
+    begin
+      M.Dormant := True;
+      if M.Model.Entity.Name = 'blob_1' then
+        Blob := M;
+    end;
+    Check(Blob <> nil, 'blob_1');
+    if Blob = nil then
+      Exit;
+    Eye := Blob.Center - D3ToCge(Vector3(150, 0, 0));
+    Step(0.5);
+    Shots := 0;
+    while (Blob.State <> msDead) and (Shots < 20) do
+    begin
+      Game.Fire(Blob.Center - D3ToCge(Vector3(100, 0, 0)), D3ToCge(Vector3(1, 0, 0)));
+      Inc(Shots);
+      Step(0.4);
+    end;
+    Check(Blob.State = msDead, 'blob_1 shot dead');
+    Check(Blob.Ragdoll <> nil, 'a ragdoll (its "ragdoll" test_blob)');
+    if Blob.Ragdoll = nil then
+      Exit;
+    Check(Blob.Ragdoll.Figure <> nil, 'with its articulated figure');
+    CheckEquals(11, Blob.Ragdoll.ParticleCount, '6 bodies and 5 anchors');
+    Check(Blob.Model.Instance.PoseLocked, 'the ragdoll owns the pose');
+    Step(5);
+    Check(Blob.Ragdoll.Settled, 'it settles');
+    Check(Blob.Model.Holder.Exists, 'the corpse stays (no sinking away)');
+    Check(Blob.Model.Instance.JointPosition('head', P), 'its head');
+    P := CgeToD3(Blob.Model.Instance.Scene.LocalToWorld(P));
+    Check(P.Z < 50, 'the head came down');
+    AllAbove := True;
+    for I := 0 to High(Blob.Model.Instance.Pose) do
+      if CgeToD3(Blob.Model.Instance.Scene.LocalToWorld(
+         D3ToCge(Blob.Model.Instance.Pose[I].Position))).Z < -1 then
+        AllAbove := False;
+    Check(AllAbove, 'no joint under the floor');
+    Check(not Blob.Model.Holder.Pickable, 'the corpse isn''t shot');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
@@ -4091,6 +4249,8 @@ begin
   TestStaminaSkinsKnockback;
   TestCrouchAndDeath;
   TestBrassAndRagdoll;
+  TestArticulatedFigures;
+  TestMonsterRagdoll;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
