@@ -419,7 +419,7 @@ begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
-    Console.Print('give armor, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
+    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
@@ -462,8 +462,31 @@ begin
   else
   if Cmd = 'give' then
   begin
-    FGame.Health := 100;
-    FGame.Armor := 125;
+    { like Doom 3: give all, give <stat> [amount] }
+    Words := Trim(Args).Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if (Length(Words) = 0) or SameText(Words[0], 'all') then
+      FGame.GiveAll
+    else
+    if SameText(Words[0], 'weapons') then
+    begin
+      for I := 0 to High(FGame.WeaponDefs) do
+        if FGame.WeaponDefs[I] <> '' then
+          FGame.Give('weapon', FGame.WeaponDefs[I]);
+    end else
+    if SameText(Words[0], 'weapon') or (Length(Words) = 1) and (FGame.WeaponSlot(Words[0]) >= 0) then
+      FGame.Give('weapon', Words[High(Words)])
+    else
+    if Length(Words) >= 2 then
+      FGame.Give(Words[0], Words[1])
+    else
+      FGame.Give(Words[0], '1000');
+    Console.Print(FGame.InventoryStatus);
+  end else
+  if Cmd = 'inventory' then
+  begin
+    S := FGame.InventoryStatus;
+    Console.Print(S);
+    WritelnLog('Inventory', LineEnding + S);
   end else
   if Cmd = 'pos' then
   begin

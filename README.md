@@ -58,7 +58,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | Monsters (`monster_*` entityDefs with md5 models) | a tiny idAI: sight checks with `WorldSegmentCollision`, chase with wall sliding, floor following with `WorldRayCast`, melee, death |
 | HUD, console, menu | `TDoom3Hud`, `TDoom3Console` (registered components), a map list from the PK4s |
 
-The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with scrolling screens, pulsing ceiling panels, a skylight onto a starry sky, a GUI door panel and a status screen, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, ten lights (point, projected, ambient, a projected window pattern; flickering, pulsing and strobing light shaders), a looping hum and two animated md5 creatures that chase you.
+The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with scrolling screens, pulsing ceiling panels, a skylight onto a starry sky, a GUI door panel and a status screen, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, ten lights (point, projected, ambient, a projected window pattern; flickering, pulsing and strobing light shaders), a looping hum, two animated md5 creatures that chase you, and items to pick up (health, armor, ammo, a weapon, a key).
 
 ---
 
@@ -81,7 +81,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give [all\|weapons\|<weapon>\|<stat> <amount>]`, `inventory`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 
