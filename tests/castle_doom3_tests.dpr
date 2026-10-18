@@ -120,7 +120,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(27, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(23, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(24, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(2, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(49, MapFile.Entities.Count, 'entity count');
+    CheckEquals(50, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1653,7 +1653,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(29, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(30, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -1828,7 +1828,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for actors');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(6, Game.Actors.Count, 'six actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1, blob_dodger_1, blob_thrower_1)');
+    CheckEquals(7, Game.Actors.Count, 'seven actors (blob_scripted_1, test_walker_1, blob_ranged_1, blob_flyer_1, blob_dodger_1, blob_thrower_1, test_stepper_1)');
     A := nil;
     for I := 0 to Game.Actors.Count - 1 do
       if Game.Actors[I].Model.Entity.Name = 'test_walker_1' then
@@ -2614,6 +2614,76 @@ begin
   end;
 end;
 
+procedure TestCharacterAnimMove;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A, Stepper: TD3Actor;
+  M: TD3Monster;
+  I: Integer;
+  Eye, Start, Pos: TVector3;
+  Walked: Boolean;
+  RemoveMe: TRemoveType;
+
+  procedure Step(const Seconds: Single);
+  begin
+    Game.Update(Seconds, Eye);
+    RemoveMe := rtNone;
+    Map.Update(Seconds, RemoveMe);
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for a character moving by its anim');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Stepper := nil;
+    for A in Game.Actors do
+      if A.Model.Entity.Name = 'test_stepper_1' then
+        Stepper := A
+      else
+        A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Check((Stepper <> nil) and (Stepper.Monster = nil), 'test_stepper_1 is a character (no monster)');
+    if Stepper = nil then
+      Exit;
+    CheckNear(16, Game.ActorRadius(Stepper), 'a character''s radius: half its size (32)');
+    CheckNear(72, Game.ActorHeight(Stepper), 'a character''s height: its size (72)');
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Start := CgeToD3(Stepper.Model.Holder.Translation);
+    for I := 1 to 5 do
+      Step(0.1);
+    CheckVec3(Start, CgeToD3(Stepper.Model.Holder.Translation), 'it stands still until activated');
+
+    { activated: evade_left's origin moves 64 to its left (facing east:
+      +y), and it moves with it, without walking }
+    Game.Activate(Game.FindEntity('test_stepper_1'));
+    Walked := False;
+    for I := 1 to 20 do
+    begin
+      Step(0.1);
+      if Stepper.Moving then
+        Walked := True;
+    end;
+    Pos := CgeToD3(Stepper.Model.Holder.Translation);
+    Check(not Walked, 'it didn''t walk: its anim moved it');
+    CheckVec3(Start + Vector3(0, 64, 0), Pos, 'its anim moved it 64 to its left');
+    CheckEquals('idle', Stepper.Channels[2].AnimName, 'then it idles');
+    for I := 1 to 5 do
+      Step(0.1);
+    CheckVec3(Start + Vector3(0, 64, 0), CgeToD3(Stepper.Model.Holder.Translation), 'and stays there');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -2807,6 +2877,7 @@ begin
   TestFlying;
   TestDodgesAndCombatNodes;
   TestFlyingRouteAndThrows;
+  TestCharacterAnimMove;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

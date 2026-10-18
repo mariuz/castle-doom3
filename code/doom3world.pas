@@ -651,6 +651,10 @@ type
     function AnimMoveClear(const A: TD3Actor; const AnimName: String; const Yaw: Single): Boolean;
     { the script's kill: dies like from a shot (not counted as a kill) }
     procedure KillActor(const A: TD3Actor);
+    { its collision size: the monster's, else the entity's "size" (idAI:
+      width and height, default 32 x 72) }
+    function ActorRadius(const A: TD3Actor): Single;
+    function ActorHeight(const A: TD3Actor): Single;
     { idAI::CreateProjectile: the monster's def_projectile, held at the
       joint until launched (nil without a def_projectile) }
     function CreateMissile(const A: TD3Actor; const JointName: String): TD3Projectile;
@@ -1490,15 +1494,8 @@ begin
   Len := Move.Length;
   if Len < 0.5 then
     Exit(True);
-  if A.Monster <> nil then
-  begin
-    Radius := A.Monster.Radius;
-    Height := A.Monster.Height;
-  end else
-  begin
-    Radius := 16;
-    Height := 72;
-  end;
+  Radius := ActorRadius(A);
+  Height := ActorHeight(A);
   { idAI::PredictPath: blocked (SE_BLOCKED) or off a ledge
     (SE_ENTER_LEDGE_AREA: the floor drops more than a step) }
   From := A.Model.Holder.Translation;
@@ -1750,15 +1747,8 @@ var
 begin
   Pos := CgeToD3(A.Model.Holder.Translation);
   Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
-  if A.Monster <> nil then
-  begin
-    Radius := A.Monster.Radius;
-    Height := A.Monster.Height;
-  end else
-  begin
-    Radius := 16;
-    Height := 72;
-  end;
+  Radius := ActorRadius(A);
+  Height := ActorHeight(A);
   { idAI::ReachedPos }
   if A.Moving then
   begin
@@ -1856,6 +1846,22 @@ begin
   T := 1 - Power(0.95, SecondsPassed * 60);
   A.FlyRoll := A.FlyRoll + (Roll - A.FlyRoll) * T;
   A.FlyPitch := A.FlyPitch + (Pitch - A.FlyPitch) * T;
+end;
+
+function TD3Game.ActorRadius(const A: TD3Actor): Single;
+begin
+  if A.Monster <> nil then
+    Result := A.Monster.Radius
+  else
+    Result := ParseVector3(A.Model.Entity.Value('size'), Vector3(32, 32, 72)).X / 2;
+end;
+
+function TD3Game.ActorHeight(const A: TD3Actor): Single;
+begin
+  if A.Monster <> nil then
+    Result := A.Monster.Height
+  else
+    Result := ParseVector3(A.Model.Entity.Value('size'), Vector3(32, 32, 72)).Z;
 end;
 
 procedure TD3Game.KillActor(const A: TD3Actor);
@@ -3571,9 +3577,10 @@ begin
       joint stays put: the entity moves instead); flying (idAI::FlyMove);
       static and dead ones stay }
     Pos := CgeToD3(A.Model.Holder.Translation);
-    { monsters standing still move by their animation (dodges, idAI's
-      AnimMove): the mesh's origin stays, the entity moves by its delta }
-    A.Model.Instance.LockOrigin := A.Moving or (A.MoveType = MoveTypeFly) or (A.Monster <> nil);
+    { actors standing still move by their animation (dodges, characters'
+      path anims; idAI's AnimMove): the mesh's origin stays, the entity
+      moves by its delta }
+    A.Model.Instance.LockOrigin := True;
     if A.MoveType = MoveTypeFly then
       UpdateFlying(A, SecondsPassed)
     else
@@ -3582,13 +3589,13 @@ begin
       A.Moving := False;
       A.ChaseEnemy := False;
     end else
-    if not A.Moving and (A.Monster <> nil) and not A.Model.Instance.LastOriginDelta.IsZero then
+    if not A.Moving and not A.Model.Instance.LastOriginDelta.IsZero then
     begin
       Dir := A.Model.Instance.LastOriginDelta;
       Dir := Vector3(Dir.X * Cos(DegToRad(A.Yaw)) - Dir.Y * Sin(DegToRad(A.Yaw)),
         Dir.X * Sin(DegToRad(A.Yaw)) + Dir.Y * Cos(DegToRad(A.Yaw)), 0);
       A.Model.Holder.Translation := StepTowards(A.Model.Holder.Translation, D3ToCge(Dir),
-        A.Monster.Radius, A.Monster.Height);
+        ActorRadius(A), ActorHeight(A));
     end else
     if A.Moving then
     begin

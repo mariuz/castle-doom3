@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Characters move by their animations** (roadmap 5d): like monsters, characters that aren't walking move with their anims' origin (their `path_anim`s), colliding with the world by their `size`; an anim's first update no longer loses its first step.
+- Test level: `test_stepper_1` sidesteps by its anim when activated; 650 checks; CI checks it.
 - **Flying routes and thrown objects** (roadmap 5d): flyers follow their AAS route around walls (idAASLocal::FlyPathToGoal: the furthest route point they can fly straight to). Moveables (idMoveable) fall, bounce, rest and hurt the player when thrown; the vagary's `chooseObjectToThrow` / `throwObjectAtEnemy` throw them on an arc that reaches the player, `throwMoveable` lets go of a carried one; `setLinearVelocity`, `enableDamage`, `isAtRest`.
 - Test level: `moveable_barrel_1` and `blob_thrower_1` (throws it once activated); `blob_flyer_1` flies around the wall into room A; 641 checks; CI checks both.
 - **Dodges and combat nodes** (roadmap 5d): monsters standing still move by their animation's origin (evade anims sidestep, like idAI's AnimMove); `testAnimMove` / `testAnimMoveTowardEnemy` check the anim's move has room. Combat nodes (`ai_attackcone`, idCombatNode): `getCombatNode`, `findEnemyInCombatNodes`, `enemyInCombatCone`, `markUsed` (`use_once`), activation toggles them.

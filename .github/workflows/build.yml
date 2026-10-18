@@ -154,7 +154,7 @@ jobs:
           run_test cinematic testmap "W:1,O:notarget,G:340 -340 0,A:90,W:1,S,W:3.5,S,Q"
           grep "Screenshot" test_output/cinematic.log | sed -n 1p | grep -q "cinematic test_cam_1" || { echo "::error::trigger_once_cin should start the camera test_cam_1"; exit 1; }
           grep -q 'Animated animated_blob_1 plays "walk"' test_output/cinematic.log || { echo "::error::the cinematic should start the idAnimated blob"; exit 1; }
-          grep -q "md5 models (2 with heads)" test_output/cinematic.log || { echo "::error::the idAnimated blob and test_walker_1 should get their def_head"; exit 1; }
+          grep -q "md5 models (3 with heads)" test_output/cinematic.log || { echo "::error::the idAnimated blob, test_walker_1 and test_stepper_1 should get their def_head"; exit 1; }
           grep -q "Teleport to info_player_teleport_1" test_output/cinematic.log || { echo "::error::the camera's end should teleport the player"; exit 1; }
           grep "Screenshot" test_output/cinematic.log | sed -n 2p | grep -Eq "eye 500 (200|199.9)" || { echo "::error::the player should be at info_player_teleport_1 after the cinematic"; exit 1; }
           run_test monster testmap "W:1,O:god,G:740 300 96,A:0,W:4,O:actors,S,Q"
@@ -177,6 +177,9 @@ jobs:
           run_test throw testmap "W:1,O:god,G:420 -250 0,A:90,O:activate blob_thrower_1,W:1,S,W:1,Q"
           grep -q "blob_thrower_1 throws moveable_barrel_1" test_output/throw.log || { echo "::error::blob_thrower_1 should choose the barrel to throw (chooseObjectToThrow)"; exit 1; }
           grep -q "moveable_barrel_1 hits the player" test_output/throw.log || { echo "::error::the thrown barrel should hit the player (idMoveable damage)"; exit 1; }
+          run_test stepper testmap "W:1,O:notarget,G:-100 -200 0,A:0,O:activate test_stepper_1,W:2,O:actors,Q"
+          grep -q "Script: test_stepper_1 stepped" test_output/stepper.log || { echo "::error::test_stepper_1 should play its evade_left anim"; exit 1; }
+          awk '/test_stepper_1: / { x = $0; sub(/.* at /, "", x); split(x, p, " "); y = p[2] } END { exit !(y != "" && y + 0 > -40 && y + 0 < -32) }' test_output/stepper.log || { echo "::error::test_stepper_1 should move 64 left by its anim (characters move by their animations)"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }

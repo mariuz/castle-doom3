@@ -23,6 +23,7 @@ Contents (all made here, MIT licensed like the rest of the project):
   blob_flyer_1             a flying monster charging when activated
   blob_dodger_1            goes to combat_node_1 when activated, then dodges
   blob_thrower_1           throws moveable_barrel_1 at the player when activated
+  test_stepper_1           a character stepping aside by its anim when activated
 
 Run from the project root:  python tools/make_test_pk4.py
 """
@@ -1144,6 +1145,10 @@ def map_text():
         {'classname': 'moveable_test_barrel', 'name': 'moveable_barrel_1', 'origin': '470 40 0'},
         {'classname': 'monster_test_thrower', 'name': 'blob_thrower_1', 'origin': '420 80 0',
          'angle': '-90'},
+        # a character that sidesteps with its evade_left anim when activated
+        # (characters move by their animations, like their path anims)
+        {'classname': 'char_test_stepper', 'name': 'test_stepper_1', 'origin': '60 -100 0',
+         'angle': '0'},
     ]
     out = ['Version 2']
     for i, e in enumerate(ents):
@@ -1532,6 +1537,12 @@ entityDef char_test_walker {
 	"look_joint head"		"1 1 0"
 	"look_min"				"-45 -90 0"
 	"look_max"				"30 90 0"
+}
+
+entityDef char_test_stepper {
+	"inherit"				"char_test_walker"
+	"editor_usage"			"A character moving by its animation when activated (script object character_stepper)."
+	"scriptobject"			"character_stepper"
 }
 
 entityDef damage_test_melee {
@@ -2229,6 +2240,24 @@ void character::Legs_Walk() {
         waitFrame();
     }
     animState( ANIMCHANNEL_LEGS, "Legs_Idle", 4 );
+}
+
+// A character moving by its animation (like the path_anim commands of
+// Doom 3's characters): activated, it plays evade_left, whose origin moves
+// 64 to its left, and the character moves with it.
+object character_stepper : character {
+    void    state_Begin();
+};
+
+void character_stepper::state_Begin() {
+    animState( ANIMCHANNEL_LEGS, "Legs_Idle", 0 );
+    waitUntil( AI_ACTIVATED );
+    playAnim( ANIMCHANNEL_LEGS, "evade_left" );
+    waitUntil( animDone( ANIMCHANNEL_LEGS, 0 ) );
+    idleAnim( ANIMCHANNEL_LEGS, "idle" );
+    sys.print( "test_stepper_1 stepped\n" );
+    eachFrame {
+    }
 }
 
 // A monster's AI, in the way of Doom 3's monster scripts: wait for the
