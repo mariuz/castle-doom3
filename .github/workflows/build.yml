@@ -114,7 +114,9 @@ jobs:
           }
           run_test start testmap "W:2,S,T:-45,S,Q"
           run_test door testmap "W:1,G:200 0 0,A:0,W:2.2,S,G:420 -250 0,A:20,F,W:0.4,S,Q"
-          run_test fight testmap "W:1,O:notarget,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,Q"
+          run_test fight testmap "W:1,O:notarget,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,W:3,S,Q"
+          grep -q 'Ragdoll of blob_1: articulated figure "test_blob": 6 bodies, 5 constraints' test_output/fight.log || { echo "::error::the killed blob should fall as its articulated figure (af/test_creatures.af)"; exit 1; }
+          grep -q "Ragdoll of blob_1 settled" test_output/fight.log || { echo "::error::the blob's ragdoll should settle"; exit 1; }
           run_test menu MENU "Q"
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -q "13 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
@@ -226,7 +228,7 @@ jobs:
           grep -q "Brass of weapon_test_pistol from the view model" test_output/brass.log || { echo "::error::a shot should eject brass from the view model's eject joint"; exit 1; }
           grep -q "Brass of weapon_test_pistol from the world model" test_output/brass.log || { echo "::error::in third person brass should come from the world model's eject joint"; exit 1; }
           grep -q "Brass lands at" test_output/brass.log || { echo "::error::the brass should land"; exit 1; }
-          grep -q "Player body ragdoll: 7 joints" test_output/brass.log || { echo "::error::the dead body should become a ragdoll"; exit 1; }
+          grep -q 'Player body ragdoll: articulated figure "test_player"' test_output/brass.log || { echo "::error::the dead body should become its articulated figure's ragdoll"; exit 1; }
           grep -q "Player body ragdoll settled" test_output/brass.log || { echo "::error::the ragdoll should settle"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
@@ -234,7 +236,7 @@ jobs:
           grep -q 'Effect "1" (area 1, location "room_b")' test_output/reverb.log || { echo "::error::room B should get its reverb by area number"; exit 1; }
           grep -q "Off (s_useEAXReverb 0)" test_output/reverb.log || { echo "::error::s_useEAXReverb 0 should turn the reverb off"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 46
+          test "$(ls test_output/*.png | wc -l)" -ge 47
 
       - name: Upload screenshots and logs
         if: always()

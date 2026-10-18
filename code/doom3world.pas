@@ -54,7 +54,7 @@ uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions, X3DNodes,
-  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas;
+  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll;
 
 type
   { A monster's route through the AAS (the path between the areas it was
@@ -119,6 +119,9 @@ type
       second, CGE down) before it sinks }
     Falling: Boolean;
     FallSpeed: Single;
+    { its corpse's ragdoll (its "ragdoll" key), nil without one }
+    Ragdoll: TD3Ragdoll;
+    destructor Destroy; override;
     function Position: TVector3;
     function Center: TVector3;
   end;
@@ -378,13 +381,6 @@ type
     destructor Destroy; override;
   end;
 
-  { A ragdoll constraint between two joints: their distance kept within
-    MinLength..MaxLength. }
-  TD3RagdollLink = record
-    A, B: Integer;
-    MinLength, MaxLength: Single;
-  end;
-
   TD3Moveable = class
     Brush: TD3BrushEntity;
     Velocity: TVector3;
@@ -608,15 +604,8 @@ type
     { brass, and when the current weapon ejects the next (-1: none) }
     FBrass: specialize TObjectList<TD3Brass>;
     FBrassDue: Single;
-    { the body's ragdoll: one particle per joint (CGE, world; verlet), the
-      links between them, the pose it started from (model space), each
-      joint's first child; settled when it stopped moving }
-    FRagdoll, FRagdollSettled: Boolean;
-    FRagPos, FRagPrev: array of TVector3;
-    FRagStart: TD3JointArray;
-    FRagChild: array of Integer;
-    FRagLinks: array of TD3RagdollLink;
-    FRagStill, FRagTime, FRagLeft: Single;
+    { the dead body's ragdoll (nil: none) }
+    FRagdoll: TD3Ragdoll;
     { the direction of the last hit's force (CGE, zero: none) }
     FLastDamageDir: TVector3;
     { the shot whose world model flash was logged }
@@ -674,8 +663,12 @@ type
     procedure SpawnWorldWeapon(const W: TD3Weapon);
     procedure UpdateBrass(const SecondsPassed: Single);
     procedure StartRagdoll;
-    procedure StepRagdoll;
-    procedure UpdateRagdoll(const SecondsPassed: Single);
+    { a ragdoll for a model with this entityDef's "ragdoll" (its
+      articulated figure; the skeleton when there's none), nil without
+      the key or with RagdollEnabled off }
+    function CreateRagdoll(const Instance: TD3Md5Instance; const RagdollName: String): TD3Ragdoll;
+    { idAI::Killed: StartRagdoll with the monster's "ragdoll" }
+    procedure MonsterRagdoll(const Mon: TD3Monster);
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
@@ -934,9 +927,8 @@ type
       without brass or joint. }
     function EjectBrass(const W: TD3Weapon): Boolean;
     property Brass: specialize TObjectList<TD3Brass> read FBrass;
-    { the dead body is a ragdoll (and it stopped moving) }
-    property Ragdoll: Boolean read FRagdoll;
-    property RagdollSettled: Boolean read FRagdollSettled;
+    { the dead body's ragdoll, nil when it isn't one }
+    property PlayerRagdoll: TD3Ragdoll read FRagdoll;
     { the world along a segment: whether it hits within MaxDist, how far
       and the surface's normal (facing back along Dir) }
     function WorldHit(const From, Dir: TVector3; const MaxDist: Single;
@@ -1162,7 +1154,8 @@ uses
   Math,
   CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
-  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene;
+  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
+  Doom3AF;
 
 const
   MonsterWalkSpeed = 90;
@@ -1287,6 +1280,12 @@ begin
 end;
 
 { TD3Monster }
+
+destructor TD3Monster.Destroy;
+begin
+  FreeAndNil(Ragdoll);
+  inherited Destroy;
+end;
 
 function TD3Monster.Position: TVector3;
 begin
@@ -1456,7 +1455,7 @@ begin
   FMoveables.Clear;
   FBrass.Clear;
   FBrassDue := -1;
-  FRagdoll := False;
+  FreeAndNil(FRagdoll);
   FItems.Clear;
   FMovers.Clear;
   FMonsters.Clear;
@@ -3029,6 +3028,7 @@ begin
     Mon.StateTime := 0;
     if Mon.Actor = nil then
       Mon.Model.Instance.PlayAnim('idle', False);
+    MonsterRagdoll(Mon);
     Inc(Kills);
     Message('Killed ' + Mon.Model.Entity.Name);
   end;
@@ -3765,6 +3765,7 @@ begin
   A.Monster.Health := 0;
   A.Monster.State := msDead;
   A.Monster.StateTime := 0;
+  MonsterRagdoll(A.Monster);
   ActorDamaged(A, True);
 end;
 
@@ -4341,6 +4342,18 @@ begin
     Exit;
   if M.State = msDead then
   begin
+    { a ragdoll falls on its own and stays (a corpse) }
+    if M.Ragdoll <> nil then
+    begin
+      if not M.Ragdoll.Settled then
+      begin
+        M.Ragdoll.Update(SecondsPassed);
+        if M.Ragdoll.Settled then
+          WritelnLog('Doom3World', 'Ragdoll of %s settled after %.1f s',
+            [M.Model.Entity.Name, M.Ragdoll.SimulatedTime]);
+      end;
+      Exit;
+    end;
     { a flying one falls to the floor first (Doom 3's gravity, 1066) }
     if M.Falling then
     begin
@@ -4574,9 +4587,14 @@ begin
     Exit;
   end;
   { a ragdoll moves on its own: the body stays where it fell }
-  if FRagdoll then
+  if FRagdoll <> nil then
   begin
-    UpdateRagdoll(SecondsPassed);
+    if not FRagdoll.Settled then
+    begin
+      FRagdoll.Update(SecondsPassed);
+      if FRagdoll.Settled then
+        WritelnLog('Doom3World', 'Player body ragdoll settled after %.1f s', [FRagdoll.SimulatedTime]);
+    end;
     UpdateWorldWeapon;
     Exit;
   end;
@@ -4589,8 +4607,11 @@ begin
   begin
     { idPlayer::Killed: StartRagdoll }
     StartRagdoll;
-    UpdateRagdoll(SecondsPassed);
-    Exit;
+    if FRagdoll <> nil then
+    begin
+      FRagdoll.Update(SecondsPassed);
+      Exit;
+    end;
   end;
   if PlayerDead then
   begin
@@ -4808,210 +4829,60 @@ begin
   end;
 end;
 
-function QuatFromTo(const A, B: TVector3): TQuaternion;
-var
-  D: Single;
-  Axis: TVector3;
+function TD3Game.CreateRagdoll(const Instance: TD3Md5Instance; const RagdollName: String): TD3Ragdoll;
 begin
-  { the shortest arc turning unit A to unit B }
-  D := TVector3.DotProduct(A, B);
-  if D < -0.9999 then
-  begin
-    Axis := TVector3.CrossProduct(A, Vector3(1, 0, 0));
-    if Axis.Length < 0.01 then
-      Axis := TVector3.CrossProduct(A, Vector3(0, 1, 0));
-    Result.Data.Vector := Axis.Normalize;
-    Result.Data.Real := 0;
+  Result := nil;
+  if (Instance = nil) or (RagdollName = '') or not RagdollEnabled then
     Exit;
+  Result := TD3Ragdoll.Create(Instance, ArticulatedFigure(RagdollName), @WorldHit);
+end;
+
+procedure TD3Game.MonsterRagdoll(const Mon: TD3Monster);
+var
+  Key: String;
+  Def: TStringList;
+  Push: TVector3;
+begin
+  if (Mon.Ragdoll <> nil) or (Mon.Model = nil) or (Mon.Model.Instance = nil) or
+     not Mon.Model.Holder.Exists then
+    Exit;
+  Key := Mon.Model.Entity.Value('ragdoll');
+  if Key = '' then
+  begin
+    Def := Decls.EntityDef(Mon.Model.Entity.ClassName_);
+    if Def <> nil then
+      Key := Def.Values['ragdoll'];
   end;
-  Result.Data.Vector := TVector3.CrossProduct(A, B);
-  Result.Data.Real := 1 + D;
-  Result := QuatNormalize(Result);
+  Mon.Ragdoll := CreateRagdoll(Mon.Model.Instance, Key);
+  if Mon.Ragdoll = nil then
+    Exit;
+  { a corpse can't be shot, nor stop its own particles }
+  Mon.Model.Holder.Pickable := False;
+  Mon.Model.Instance.Scene.Pickable := False;
+  { pushed away from the player }
+  Push := Mon.Position - FPlayerEye;
+  Push.Y := 0;
+  if not Push.IsZero then
+    Push := Push.Normalize * 120;
+  Mon.Ragdoll.Launch(TVector3.Zero, Push, Mon.Position.Y, Mon.Height);
+  WritelnLog('Doom3World', 'Ragdoll of %s: %s', [Mon.Model.Entity.Name, Mon.Ragdoll.Description]);
 end;
 
 procedure TD3Game.StartRagdoll;
 var
-  Pose: TD3JointArray;
-  I, J, N: Integer;
-  Feet, Push, Back, V: TVector3;
-  Height: Single;
-
-  procedure Link(const A, B: Integer; const MinScale, MaxScale: Single);
-  var
-    L: TD3RagdollLink;
-    D: Single;
-  begin
-    D := (FRagPos[A] - FRagPos[B]).Length;
-    L.A := A;
-    L.B := B;
-    L.MinLength := D * MinScale;
-    L.MaxLength := D * MaxScale;
-    FRagLinks := Concat(FRagLinks, [L]);
-  end;
-
+  Back: TVector3;
 begin
-  { Doom 3 starts the player's articulated figure (its "ragdoll" af)
-    from the pose; here every joint is a particle, linked to its parent
-    (rigid), its siblings (a little give) and its grandparent (it can
-    bend, not stretch) }
-  Pose := Copy(FPlayerModel.Pose);
-  N := Length(Pose);
-  FRagStart := Pose;
-  SetLength(FRagPos, N);
-  SetLength(FRagPrev, N);
-  SetLength(FRagChild, N);
-  FRagLinks := nil;
-  for I := 0 to N - 1 do
-  begin
-    FRagPos[I] := FPlayerModel.Scene.LocalToWorld(D3ToCge(Pose[I].Position));
-    FRagChild[I] := -1;
-  end;
-  for I := N - 1 downto 0 do
-    if Pose[I].Parent >= 0 then
-      FRagChild[Pose[I].Parent] := I;
-  for I := 0 to N - 1 do
-  begin
-    if Pose[I].Parent >= 0 then
-    begin
-      Link(I, Pose[I].Parent, 1, 1);
-      if Pose[Pose[I].Parent].Parent >= 0 then
-        Link(I, Pose[Pose[I].Parent].Parent, 0.6, 1);
-    end;
-    for J := I + 1 to N - 1 do
-      if (Pose[J].Parent = Pose[I].Parent) and (Pose[I].Parent >= 0) then
-        Link(I, J, 0.8, 1.2);
-  end;
-  { the start velocity: the player's, the last hit's push, and a tip
-    backwards growing with the height (it falls over, not in a heap) }
-  Feet := PlayerFeet;
-  Push := FLastDamageDir * 150;
+  { idPlayer::Killed: StartRagdoll; pushed by the last hit and tipping
+    backwards (it falls over, not in a heap), growing with the height }
+  FRagdoll := CreateRagdoll(FPlayerModel, FPlayerDef.Values['ragdoll']);
+  if FRagdoll = nil then
+    Exit;
   Back := -PlayerViewDir;
   Back.Y := 0;
   if not Back.IsZero then
     Back := Back.Normalize;
-  for I := 0 to N - 1 do
-  begin
-    Height := EnsureRange((FRagPos[I].Y - Feet.Y) / 74, 0, 1.2);
-    V := D3ToCge(FPlayerVelocity) + Push * Height + Back * (60 * Height);
-    FRagPrev[I] := FRagPos[I] - V / 60;
-  end;
-  FRagdoll := True;
-  FRagdollSettled := False;
-  FRagStill := 0;
-  FRagTime := 0;
-  FRagLeft := 0;
-  WritelnLog('Doom3World', 'Player body ragdoll: %d joints, %d links', [N, Length(FRagLinks)]);
-end;
-
-procedure TD3Game.StepRagdoll;
-const
-  Dt = 1 / 60;
-  Gravity = 1066;
-  Radius = 3;
-  Iterations = 8;
-var
-  I, K: Integer;
-  Old: array of TVector3;
-  D, Corr, Move, Dir, N: TVector3;
-  L, Target, Dist, MaxMove: Single;
-begin
-  SetLength(Old, Length(FRagPos));
-  for I := 0 to High(FRagPos) do
-  begin
-    Old[I] := FRagPos[I];
-    D := (FRagPos[I] - FRagPrev[I]) * 0.99;
-    FRagPrev[I] := FRagPos[I];
-    FRagPos[I] := FRagPos[I] + D - Vector3(0, Gravity * Dt * Dt, 0);
-  end;
-  for K := 1 to Iterations do
-    for I := 0 to High(FRagLinks) do
-    begin
-      D := FRagPos[FRagLinks[I].B] - FRagPos[FRagLinks[I].A];
-      L := D.Length;
-      if L < 0.0001 then
-        Continue;
-      Target := EnsureRange(L, FRagLinks[I].MinLength, FRagLinks[I].MaxLength);
-      if Target = L then
-        Continue;
-      Corr := D * ((L - Target) / L * 0.5);
-      FRagPos[FRagLinks[I].A] := FRagPos[FRagLinks[I].A] + Corr;
-      FRagPos[FRagLinks[I].B] := FRagPos[FRagLinks[I].B] - Corr;
-    end;
-  { the world stops a joint where it hits (no sliding: it lies still) }
-  MaxMove := 0;
-  for I := 0 to High(FRagPos) do
-  begin
-    Move := FRagPos[I] - Old[I];
-    L := Move.Length;
-    if L > 0.0001 then
-    begin
-      Dir := Move / L;
-      if WorldHit(Old[I], Dir, L + Radius, Dist, N) then
-      begin
-        FRagPos[I] := Old[I] + Dir * Max(0, Dist - Radius);
-        FRagPrev[I] := FRagPos[I];
-      end;
-    end;
-    MaxMove := Max(MaxMove, (FRagPos[I] - Old[I]).Length);
-  end;
-  { settled after half a second of (almost) no motion }
-  if MaxMove < 0.05 then
-    FRagStill := FRagStill + Dt
-  else
-    FRagStill := 0;
-  FRagTime := FRagTime + Dt;
-  if (FRagStill > 0.5) or (FRagTime > 10) then
-  begin
-    FRagdollSettled := True;
-    WritelnLog('Doom3World', 'Player body ragdoll settled after %.1f s', [FRagTime]);
-  end;
-end;
-
-procedure TD3Game.UpdateRagdoll(const SecondsPassed: Single);
-var
-  Pose: TD3JointArray;
-  I, C: Integer;
-  Local: array of TVector3;
-  R: array of TQuaternion;
-  A, B: TVector3;
-begin
-  if FRagdollSettled then
-    Exit;
-  { Doom 3's 60 Hz }
-  FRagLeft := FRagLeft + SecondsPassed;
-  while (FRagLeft >= 1 / 60) and not FRagdollSettled do
-  begin
-    FRagLeft := FRagLeft - 1 / 60;
-    StepRagdoll;
-  end;
-  { back to the pose: each joint at its particle (model space), turned by
-    the arc from its first child's start direction to its current one
-    (joints without children turn with their parent) }
-  Pose := Copy(FRagStart);
-  SetLength(Local, Length(Pose));
-  SetLength(R, Length(Pose));
-  for I := 0 to High(Pose) do
-    Local[I] := CgeToD3(FPlayerModel.Scene.WorldToLocal(FRagPos[I]));
-  for I := 0 to High(Pose) do
-  begin
-    C := FRagChild[I];
-    R[I] := Quaternion(Vector4(0, 0, 0, 1));
-    if C >= 0 then
-    begin
-      A := FRagStart[C].Position - FRagStart[I].Position;
-      B := Local[C] - Local[I];
-      if (A.Length > 0.01) and (B.Length > 0.01) then
-        R[I] := QuatFromTo(A.Normalize, B.Normalize)
-      else
-      if Pose[I].Parent >= 0 then
-        R[I] := R[Pose[I].Parent];
-    end else
-    if Pose[I].Parent >= 0 then
-      R[I] := R[Pose[I].Parent];
-    Pose[I].Position := Local[I];
-    Pose[I].Orientation := QuatNormalize(QuatMultiply(R[I], FRagStart[I].Orientation));
-  end;
-  FPlayerModel.SetPose(Pose);
+  FRagdoll.Launch(D3ToCge(FPlayerVelocity), FLastDamageDir * 150 + Back * 60, PlayerFeet.Y, 74);
+  WritelnLog('Doom3World', 'Player body ragdoll: %s', [FRagdoll.Description]);
 end;
 
 procedure TD3Game.SpawnWorldWeapon(const W: TD3Weapon);

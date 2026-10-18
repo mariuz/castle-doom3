@@ -17,7 +17,7 @@ uses
   Doom3Lexer, Doom3Expressions;
 
 type
-  TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtOther);
+  TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtAF, dtOther);
 
   TD3BlendMode = (bmOpaque, bmBlend, bmAdd, bmFilter);
 
@@ -177,6 +177,8 @@ type
     procedure Clear;
     function DeclCount(const T: TD3DeclType): Integer;
     function HasDecl(const T: TD3DeclType; const Name: String): Boolean;
+    { the text between a decl's braces; False if there's no such decl }
+    function DeclBody(const T: TD3DeclType; const Name: String; out Body: String): Boolean;
     function DeclNames(const T: TD3DeclType): TStringList;
 
     { Material by name; never nil (an implicit one when not declared). }
@@ -207,7 +209,7 @@ uses
 
 const
   DeclTypeNames: array [TD3DeclType] of String =
-    ('material', 'entitydef', 'model', 'skin', 'sound', 'table', '');
+    ('material', 'entitydef', 'model', 'skin', 'sound', 'table', 'articulatedfigure', '');
 
 function ReadImageProgram(const Lexer: TDoom3Lexer): String;
 var
@@ -585,15 +587,21 @@ begin
   IndexDir('def/', '.def', dtOther);
   IndexDir('skins/', '.skin', dtSkin);
   IndexDir('sound/', '.sndshd', dtSound);
+  IndexDir('af/', '.af', dtAF);
   FLoaded := True;
-  WritelnLog('Doom3Decls', 'Indexed %d materials, %d entityDefs, %d models, %d skins, %d sound shaders',
+  WritelnLog('Doom3Decls', 'Indexed %d materials, %d entityDefs, %d models, %d skins, %d sound shaders, %d articulated figures',
     [FBodies[dtMaterial].Count, FBodies[dtEntityDef].Count, FBodies[dtModel].Count,
-     FBodies[dtSkin].Count, FBodies[dtSound].Count]);
+     FBodies[dtSkin].Count, FBodies[dtSound].Count, FBodies[dtAF].Count]);
 end;
 
 function TD3DeclManager.DeclCount(const T: TD3DeclType): Integer;
 begin
   Result := FBodies[T].Count;
+end;
+
+function TD3DeclManager.DeclBody(const T: TD3DeclType; const Name: String; out Body: String): Boolean;
+begin
+  Result := FBodies[T].TryGetValue(LowerCase(Name), Body);
 end;
 
 function TD3DeclManager.HasDecl(const T: TD3DeclType; const Name: String): Boolean;
