@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll,
+  Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -753,6 +753,55 @@ procedure CheckVec(const Expected, Actual: TVector3; const What: String);
 begin
   Check(TVector3.Equals(Expected, Actual, 0.01),
     Format('%s: expected %s, got %s', [What, Expected.ToString, Actual.ToString]));
+end;
+
+{ Lights of one kind share an Effect with per-light matrices when CGE
+  supports custom fields on lights; otherwise an effect each. }
+procedure TestSharedLightEffects;
+var
+  Shared: TD3SharedLightEffects;
+  A, B, C: TPointLightNode;
+  M: TMatrix4;
+  Field: TX3DField;
+begin
+  FillChar(Shared, SizeOf(Shared), 0);
+  M := PointLightMatrix(Vector3(10, 20, 30), TMatrix3.Identity, Vector3(100, 200, 50));
+  A := TPointLightNode.Create;
+  B := TPointLightNode.Create;
+  C := TPointLightNode.Create;
+  try
+    SetLightVolume(A, Shared, 0, M, '', False);
+    SetLightVolume(B, Shared, 1, M, '', False);
+    SetLightVolume(C, Shared, 2, M, '', True);
+    CheckEquals(1, A.FdEffects.Count, 'light A has one effect');
+    CheckEquals(1, C.FdEffects.Count, 'light C has one effect');
+    Check(A.FdEffects[0] <> C.FdEffects[0], 'projected and point lights have different effects');
+    if SharedLightEffectsAvailable then
+    begin
+      Check(A.FdEffects[0] = B.FdEffects[0], 'point lights share their effect');
+      Field := A.Field('d3_light_matrix_');
+      Check(Field is TSFMatrix4f, 'light A has the d3_light_matrix_ field');
+      if Field is TSFMatrix4f then
+        Check(TMatrix4.PerfectlyEquals(M, TSFMatrix4f(Field).Value), 'light A field holds its matrix');
+      Check(Pos('d3_light_matrix_<Light>',
+        (TEffectNode(A.FdEffects[0]).FdParts[0] as TEffectPartNode).Contents) > 0,
+        'shared code uses the <Light> uniform');
+    end else
+      Check(A.FdEffects[0] <> B.FdEffects[0], 'without CGE support, an effect each');
+
+    { r_sharedLightEffects 0 }
+    SharedLightEffects := False;
+    try
+      SetLightVolume(B, Shared, 1, M, '', False);
+      Check(A.FdEffects[0] <> B.FdEffects[0], 'r_sharedLightEffects 0: an effect each');
+    finally
+      SharedLightEffects := True;
+    end;
+  finally
+    FreeAndNil(A);
+    FreeAndNil(B);
+    FreeAndNil(C);
+  end;
 end;
 
 procedure TestLightVolumes;
@@ -4222,6 +4271,7 @@ begin
   TestPortals;
   TestExpressions;
   TestLightVolumes;
+  TestSharedLightEffects;
   TestMaterialStages;
   TestGuis;
   TestShadowCasters;

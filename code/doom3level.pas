@@ -687,8 +687,13 @@ var
   Projected: Boolean;
   LightMatrix: TMatrix4;
   ProjectionImage: String;
+  SharedEffects: TD3SharedLightEffects;
+  Shape: TD3LightShape;
+  SharedCount: Integer;
 begin
   N := 0;
+  { the lights' shared effects (all lights are in LightScene) }
+  FillChar(SharedEffects, SizeOf(SharedEffects), 0);
   for E in FMapFile.Entities do
   begin
     if not SameText(E.ClassName_, 'light') then
@@ -750,7 +755,7 @@ begin
         Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
         Point.Radius := LightRadius.Length + LightCenter.Length + 1;
       end;
-      Point.SetEffects([CreateLightEffect(N, LightMatrix, ProjectionImage, Projected)]);
+      SetLightVolume(Point, SharedEffects, N, LightMatrix, ProjectionImage, Projected);
       Node := Point;
     end else
     if Projected then
@@ -829,6 +834,16 @@ begin
     ApplyLightColor(N, LightShaderColor(N));
     Inc(N);
   end;
+  SharedCount := 0;
+  for Shape := Low(Shape) to High(Shape) do
+    for Projected := False to True do
+      if SharedEffects[Shape, Projected] <> nil then
+        Inc(SharedCount);
+  if SharedCount > 0 then
+    WritelnLog('Doom3Level', 'Light volumes: %d lights share %d effects (per-light uniforms)', [N, SharedCount])
+  else
+  if LightVolumes then
+    WritelnLog('Doom3Level', 'Light volumes: %d lights, an effect each', [N]);
 end;
 
 function TDoom3Map.LightShaderColor(const I: Integer): TVector3;

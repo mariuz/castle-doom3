@@ -12,8 +12,8 @@ implementation
 uses
   SysUtils, Classes,
   CastleWindow, CastleLog, CastleUIControls, CastleApplicationProperties, CastleParameters,
-  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils,
-  Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level
+  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils, CastleGLShaders,
+  Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level, Doom3LightEffects
   {$region 'Castle Initialization Uses'}
   // The content here may be automatically updated by CGE editor.
   , GameViewMenu
@@ -157,6 +157,14 @@ initialization
   ApplicationProperties.Version := '0.12.0';
   LogFileName := 'castle-doom3.log';
   InitializeLog;
+  { CD3_LOGSHADERS: log every GLSL program CGE links (counts the programs
+    a map needs, e.g. with and without r_sharedLightEffects) }
+  if GetEnvironmentVariable('CD3_LOGSHADERS') <> '' then
+    LogShaders := True;
+  { CD3_SHARED_LIGHT_EFFECTS=0: start with r_sharedLightEffects 0 (programs
+    stay cached across map reloads, so compare in separate runs) }
+  if GetEnvironmentVariable('CD3_SHARED_LIGHT_EFFECTS') = '0' then
+    SharedLightEffects := False;
   Application.OnInitialize := @ApplicationInitialize;
 
   Window := TCastleWindow.Create(Application);
