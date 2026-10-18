@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(80, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(82, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,9 +120,9 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(29, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(37, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(39, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(5, Decls.DeclCount(dtModel), 'model decl count');
-  CheckEquals(9, Decls.DeclCount(dtSound), 'sound shader count');
+  CheckEquals(11, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
@@ -265,7 +265,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(57, MapFile.Entities.Count, 'entity count');
+    CheckEquals(59, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -2736,7 +2736,7 @@ begin
     CheckEquals(24, Game.AmmoCount('ammo_test_bullets'), 'starting ammo');
     CheckEquals(60, Game.MaxAmmo('ammo_test_bullets'), 'max_ammo_test_bullets');
     CheckEquals(-1, Game.Clip[1], 'clips start at -1 (full when first used)');
-    CheckEquals(6, Game.Items.Count, 'items spawned');
+    CheckEquals(8, Game.Items.Count, 'items spawned');
 
     { Give, like idPlayer::Give }
     Check(not Game.Give('health', '25'), 'full health takes no health');
@@ -3370,6 +3370,107 @@ begin
   end;
 end;
 
+procedure TestPowerups;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M, Blob: TD3Monster;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  Health0: Integer;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for powerups');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    Blob := nil;
+    for M in Game.Monsters do
+    begin
+      M.Dormant := True;
+      if M.Model.Entity.Name = 'blob_1' then
+        Blob := M;
+    end;
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(1);
+    Check(not Game.PowerUpActive(PowerupBerserk), 'no berserk at first');
+    CheckNear(1, Game.SpeedModifier, 'normal speed');
+
+    { the berserk pickup (idItemPowerup, type 0, 20 s) }
+    Eye := D3ToCge(Vector3(-220, 120, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    Check(Game.PowerUpActive(PowerupBerserk), 'berserk picked up');
+    CheckNear(20, Game.PowerUpLeft(PowerupBerserk), 'for its "time"', 0.2);
+    CheckEquals('snd_berserk_third', Game.LastPlayerSound, 'its sound');
+    CheckEquals(0, Game.IdealSlot, 'berserk switches to the fists');
+    CheckNear(1.7, Game.SpeedModifier, 'berserk runs 1.7 times as fast');
+    { monsters can't hurt a berserk player; other damage still does }
+    Health0 := Game.Health;
+    Game.DamagePlayerByMonster(10, 'damage_test_melee', TVector3.Zero);
+    CheckEquals(Health0, Game.Health, 'monsters do no damage while berserk');
+    Game.DamagePlayer(10, '', TVector3.Zero);
+    CheckEquals(Health0 - 10, Game.Health, 'other damage still hurts');
+    { the player's damage times 1.7 (idPlayer::DamageFeedback) }
+    if Blob <> nil then
+    begin
+      Health0 := Blob.Health;
+      Game.Fire(Blob.Center - D3ToCge(Vector3(100, 0, 0)), D3ToCge(Vector3(1, 0, 0)));
+      CheckEquals(Health0 - 24, Blob.Health, 'the pistol''s 14 times 1.7');
+    end;
+    Step(20);
+    Check(not Game.PowerUpActive(PowerupBerserk), 'berserk ends after 20 s');
+    CheckNear(1, Game.SpeedModifier, 'normal speed again');
+
+    { invisibility: the view weapon turns see-through }
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(1.5);
+    Check(Game.GivePowerUp(PowerupInvisibility, 3), 'invisibility given');
+    Step(0.1);
+    Check((Game.Weapon <> nil) and Game.Weapon.Invisible, 'the view weapon is see-through');
+    CheckEquals('snd_invisibility', Game.LastPlayerSound, 'its sound');
+    Step(3.1);
+    Check(not Game.PowerUpActive(PowerupInvisibility), 'invisibility ends');
+    Check(not Game.Weapon.Invisible, 'the weapon is solid again');
+
+    { megahealth: 200 health (powerup_megahealth's inv_health, else 200) }
+    Check(Game.Give('mega', '0'), 'mega given');
+    CheckEquals(200, Game.Health, 'megahealth: 200');
+    { "berserk" through the inventory, then death clears the powerups }
+    Check(Game.Give('berserk', '5'), 'berserk through Give');
+    Check(Game.PowerUpActive(PowerupBerserk), 'berserk again');
+    Game.God := False;
+    Game.DamagePlayer(1000);
+    Check(not Game.PowerUpActive(PowerupBerserk), 'death clears the powerups');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -3569,6 +3670,7 @@ begin
   TestWeaponPresentation;
   TestPlayerMotion;
   TestDamageFeedback;
+  TestPowerups;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

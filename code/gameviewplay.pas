@@ -46,6 +46,8 @@ type
     FFallTime: Single;
     { double vision (idPlayerView::DoubleVision) as a screen effect }
     FDvEffect: TScreenEffectNode;
+    { walk navigation's MoveSpeed of the design (berserk multiplies it) }
+    FBaseMoveSpeed: Single;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
@@ -148,6 +150,7 @@ begin
   { Doom 3 steps up at once and smooths only the view (TD3Game's step up),
     and has no falling camera effect (a landing dips the view instead) }
   WalkNavigation.GrowSpeed := 1000;
+  FBaseMoveSpeed := WalkNavigation.MoveSpeed;
   CreateDoubleVision;
   WalkNavigation.FallingEffect := False;
   if AutoTestPrefix <> '' then
@@ -554,6 +557,18 @@ var
 begin
   Hud.DamageAge := FGame.SinceDamage;
   Hud.ArmorPulse := FGame.ArmorPulse;
+  { berserk (idPlayerView: textures/decals/berserk over the screen, fading
+    over its last 10 s); the HUD's own red tint without the material }
+  if FGame.PowerUpActive(PowerupBerserk) then
+    Hud.BerserkAlpha := Min(1, FGame.PowerUpLeft(PowerupBerserk) / 10)
+  else
+    Hud.BerserkAlpha := 0;
+  if Decls.Material('textures/decals/berserk').Defined and
+     (Decls.Material('textures/decals/berserk').StageImage <> '') then
+    Hud.BerserkImageUrl := ImageProgramUrl(Decls.Material('textures/decals/berserk').StageImage, ikColor)
+  else
+    Hud.BerserkImageUrl := '';
+  Hud.Invisible := FGame.PowerUpActive(PowerupInvisibility);
   { Doom 3's armorViewEffect when the game has it, else the HUD's own }
   if Decls.Material('armorViewEffect').Defined and (Decls.Material('armorViewEffect').StageImage <> '') then
     Hud.ArmorImageUrl := ImageProgramUrl(Decls.Material('armorViewEffect').StageImage, ikColor)
@@ -1229,6 +1244,8 @@ begin
   FGame.PlayerViewDir := Camera.Direction;
   FGame.PlayerJumping := WalkNavigation.IsJumping;
   FGame.PlayerFlying := FNoclip;
+  { berserk runs faster (idPlayer::PowerUpModifier( SPEED )) }
+  WalkNavigation.MoveSpeed := FBaseMoveSpeed * FGame.SpeedModifier;
   UpdateFallSpeed(SecondsPassed);
   ApplyKnockback(SecondsPassed);
 

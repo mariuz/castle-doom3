@@ -53,7 +53,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
-  CastleRenderOptions,
+  CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas;
 
 type
@@ -448,6 +448,9 @@ type
     AnimDoneTime: Single;
     BlendFrames: Integer;
     Shots: Integer;
+    { drawn see-through (invisibility), and the shapes' alpha modes before }
+    Invisible: Boolean;
+    SavedAlphaModes: array of TAlphaMode;
     { muzzle kick (idWeapon::MuzzleRise): each shot pushes KickEndTime by
       KickTime, up to KickMaxTime ahead; the view model turns by
       KickAngles (pitch, yaw, roll) and moves back by KickOffset, scaled
@@ -554,6 +557,8 @@ type
       (Doom 3 velocity, horizontal) }
     FDvFinish: Single;
     FKnockVel: TVector3;
+    { powerups' end times (game time; 0: off) }
+    FPowerupEnd: array [0..3] of Single;
     FBlobs: array of TD3ScreenBlob;
     FFalling: Boolean;
     FFallStartZ: Single;
@@ -599,12 +604,14 @@ type
     procedure UpdatePlayerMotion(const SecondsPassed: Single);
     { idPlayer::CrashLand after a fall: the view's dip, falling damage }
     procedure CrashLand(const FallHeight: Single);
+    procedure UpdatePowerUps;
     procedure PlayerSound(const Key: String);
     { place the view model: bob, lag, idle drift, muzzle kick
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
       surfaces and light }
     procedure PresentWeapon(const W: TD3Weapon);
     procedure UpdateWeaponView(const SecondsPassed: Single);
+    procedure SetWeaponInvisible(const W: TD3Weapon; const Value: Boolean);
     function WeaponEvent(const W: TD3Weapon; const Thread: TD3ScriptThread; const N: String;
       const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     procedure WeaponFrameCommand(const Sender: TD3Md5Instance; const Command: String);
@@ -771,6 +778,20 @@ type
       Doom 3's ground friction; the view moves the camera by it. }
     function KnockbackMove(const SecondsPassed: Single): TVector3;
     property KnockbackVelocity: TVector3 read FKnockVel;
+    { idPlayer::GivePowerUp: Powerup (PowerupBerserk...) for Seconds (0:
+      the "time" of its powerup_<name> def). Berserk switches to the
+      fists, megahealth sets the health; each plays its player sound. }
+    function GivePowerUp(const Powerup: Integer; const Seconds: Single): Boolean;
+    function PowerUpActive(const Powerup: Integer): Boolean;
+    { seconds left (0 when off) }
+    function PowerUpLeft(const Powerup: Integer): Single;
+    procedure ClearPowerUps;
+    { idPlayer::PowerUpModifier( SPEED ): 1.7 with berserk }
+    function SpeedModifier: Single;
+    { a monster hurts the player: nothing while berserk (idPlayer::Damage
+      ignores AI attackers then) }
+    procedure DamagePlayerByMonster(const Amount: Integer; const DamageDefName: String;
+      const Direction: TVector3);
 
     function PlayerDead: Boolean;
     { Fire the targets of E after Delay seconds (idEntity::ActivateTargets). }
@@ -944,6 +965,11 @@ const
   PlayerHandle = $7FFFFF00;
   { the player's weapon's handle (its script object's self) }
   WeaponHandle = $7FFFFF01;
+  { idPlayer's powerups (powerupEndTime indexes, idItemPowerup's "type") }
+  PowerupBerserk = 0;
+  PowerupInvisibility = 1;
+  PowerupMegaHealth = 2;
+  PowerupAdrenaline = 3;
   { idAI's moveType_t }
   MoveTypeDead = 0;
   MoveTypeAnim = 1;
@@ -1644,7 +1670,8 @@ var
   I: Integer;
   K: String;
 begin
-  { the damage effects of the last map end }
+  { the damage effects and powerups of the last map end }
+  ClearPowerUps;
   FDvFinish := -1000;
   FKnockVel := TVector3.Zero;
   FKickFinish := 0;
@@ -1791,8 +1818,14 @@ begin
   if (S = 'item') or (S = 'icon') or (S = 'name') then
     Result := False
   else
-  if (S = 'stamina') or (S = 'air') or (S = 'heartrate') or (S = 'berserk') or (S = 'mega') then
-    { no stamina, air, powerups yet: taken, nothing happens }
+  if S = 'berserk' then
+    Result := GivePowerUp(PowerupBerserk, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if S = 'mega' then
+    Result := GivePowerUp(PowerupMegaHealth, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if (S = 'stamina') or (S = 'air') or (S = 'heartrate') then
+    { no stamina, air yet: taken, nothing happens }
     Result := True
   else
   begin
@@ -1814,6 +1847,10 @@ begin
   ItemName := LangString(E.Value('inv_name', E.Name));
   { idItem::GiveToPlayer: carried items (keys, PDAs, video discs) go to
     the inventory, the others give their inv_ keys }
+  if E.Value('spawnclass') = 'idItemPowerup' then
+    { idItemPowerup::GiveToPlayer: its "type" for "time" seconds }
+    Result := GivePowerUp(E.IntValue('type', 0), E.FloatValue('time', 30))
+  else
   if E.BoolValue('inv_carry') or (E.Value('spawnclass') = 'idPDAItem') or
      (E.Value('spawnclass') = 'idMoveablePDAItem') or (E.Value('spawnclass') = 'idVideoCDItem') then
   begin
@@ -2407,6 +2444,36 @@ begin
   Result := AnglesMatrix(Vector3(D3DirPitch(D), D3DirYaw(D), 0) + ViewBobAngles);
 end;
 
+procedure TD3Game.SetWeaponInvisible(const W: TD3Weapon; const Value: Boolean);
+var
+  I: Integer;
+  App: TAppearanceNode;
+  Mat: TMaterialNode;
+begin
+  W.Invisible := Value;
+  if Length(W.SavedAlphaModes) <> Length(W.View.MeshShapes) then
+    SetLength(W.SavedAlphaModes, Length(W.View.MeshShapes));
+  for I := 0 to High(W.View.MeshShapes) do
+  begin
+    App := W.View.MeshShapes[I].Appearance;
+    if (App = nil) or not (App.Material is TMaterialNode) then
+      Continue;
+    Mat := TMaterialNode(App.Material);
+    if Value then
+    begin
+      W.SavedAlphaModes[I] := App.AlphaMode;
+      Mat.Transparency := 0.65;
+      Mat.EmissiveColor := Vector3(0.05, 0.15, 0.3);
+      App.AlphaMode := amBlend;
+    end else
+    begin
+      Mat.Transparency := 0;
+      Mat.EmissiveColor := TVector3.Zero;
+      App.AlphaMode := W.SavedAlphaModes[I];
+    end;
+  end;
+end;
+
 procedure TD3Game.PresentWeapon(const W: TD3Weapon);
 var
   ViewAxis, Axis: TMatrix3;
@@ -2477,6 +2544,10 @@ begin
   end;
   W.Holder.Translation := D3ToCge(Origin);
   SetD3Rotation(W.Holder, Axis);
+  { invisibility: the weapon's invisibility skin in Doom 3 (a refracting
+    shimmer); here its lit surfaces turn see-through with a cold glow }
+  if W.Invisible <> PowerUpActive(PowerupInvisibility) then
+    SetWeaponInvisible(W, not W.Invisible);
 
   { flash surfaces: materials whose stage shows "if ( time + parm4 ) ..."
     (parm4 = -the time of the shot) }
@@ -2645,7 +2716,7 @@ begin
     'getOwner': EventResult := D3EntityValue(PlayerHandle);
     'nextWeapon': NextWeapon(1);
     'autoReload': EventResult := D3FloatValue(1);
-    'isInvisible': EventResult := D3FloatValue(0);
+    'isInvisible': EventResult := D3FloatValue(Ord(PowerUpActive(PowerupInvisibility)));
     'getLightParm': EventResult := D3FloatValue(1);
     'getName': EventResult := D3StringValue(W.DefName);
     'createProjectile', 'getWorldModel': EventResult := D3EntityValue(0);
@@ -2702,10 +2773,17 @@ begin
 end;
 
 procedure TD3Game.DamageMonster(const Mon: TD3Monster; const Amount: Integer);
+var
+  Damage: Integer;
 begin
   if Mon.State = msDead then
     Exit;
-  Dec(Mon.Health, Amount);
+  { idPlayer::DamageFeedback multiplies the player's damage by
+    PowerUpModifier( BERSERK ), which reads as SPEED: 1.7 with berserk }
+  Damage := Amount;
+  if PowerUpActive(PowerupBerserk) then
+    Damage := Round(Damage * 1.7);
+  Dec(Mon.Health, Damage);
   Mon.PainTime := 0.2;
   Mon.Dormant := False;
   if (Mon.State = msIdle) and (Mon.Actor = nil) then
@@ -2776,6 +2854,9 @@ begin
       Continue;
     P.FromPlayer := True;
     P.Damage := Round(P.Damage * DamagePower);
+    { berserk: PowerUpModifier( PROJECTILE_DAMAGE ) }
+    if PowerUpActive(PowerupBerserk) then
+      P.Damage := P.Damage * 2;
     P.Fuse := P.Fuse - FuseOffset;
   end;
   WritelnLog('Doom3World', 'Weapon %s fires %d (clip %d, ammo %d)',
@@ -2786,7 +2867,7 @@ function TD3Game.WeaponMelee(const W: TD3Weapon): Boolean;
 var
   Def: TStringList;
   Dir: TVector3;
-  WallDist, MonDist: Single;
+  WallDist, MonDist, Reach: Single;
   Mon: TD3Monster;
   Damage: Integer;
 begin
@@ -2800,18 +2881,25 @@ begin
   end;
   Inc(W.Shots);
   Dir := D3ToCge(Vector3(PlayerViewAxis.Data[0, 0], PlayerViewAxis.Data[0, 1], PlayerViewAxis.Data[0, 2]));
+  { berserk: twice as far (PowerUpModifier( MELEE_DISTANCE )), 30 times
+    the damage (MELEE_DAMAGE) }
+  Reach := W.MeleeDistance;
+  if PowerUpActive(PowerupBerserk) then
+    Reach := Reach * 2;
   if FMap.World.WorldRayCast(FPlayerEye, Dir, WallDist) = nil then
-    WallDist := W.MeleeDistance;
-  Mon := RayMonster(FPlayerEye, Dir, Min(WallDist, W.MeleeDistance), MonDist);
+    WallDist := Reach;
+  Mon := RayMonster(FPlayerEye, Dir, Min(WallDist, Reach), MonDist);
   if Mon <> nil then
   begin
     Damage := StrToIntDef(Def.Values['damage'], 10);
+    if PowerUpActive(PowerupBerserk) then
+      Damage := Damage * 30;
     WritelnLog('Doom3World', 'Weapon %s hits %s (%d)', [W.DefName, Mon.Model.Entity.Name, Damage]);
     DamageMonster(Mon, Damage);
     PlaySoundAt(Def.Values['snd_flesh'], FPlayerEye + Dir * MonDist);
     Result := True;
   end else
-  if WallDist < W.MeleeDistance then
+  if WallDist < Reach then
     PlaySoundAt(Def.Values['snd_hit'], FPlayerEye + Dir * WallDist)
   else
     PlaySoundAt(Def.Values['snd_miss'], FPlayerEye);
@@ -4108,7 +4196,7 @@ begin
         if M.AttackTimer <= 0 then
         begin
           M.AttackTimer := MonsterAttackDelay;
-          DamagePlayer(MonsterDamage, '', FPlayerEye - M.Center);
+          DamagePlayerByMonster(MonsterDamage, '', FPlayerEye - M.Center);
         end;
       end;
     else ;
@@ -4155,6 +4243,7 @@ begin
   UpdateBindings;
   UpdateMoveables(SecondsPassed);
   UpdateItems;
+  UpdatePowerUps;
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
@@ -5502,7 +5591,7 @@ begin
   Damage := StrToIntDef(Def.Values['damage'], 10);
   if Def.Values['snd_hit'] <> '' then
     PlaySoundAt(Def.Values['snd_hit'], FPlayerEye);
-  DamagePlayer(Damage, DamageDefName, FPlayerEye - A.Model.Holder.Translation);
+  DamagePlayerByMonster(Damage, DamageDefName, FPlayerEye - A.Model.Holder.Translation);
   WritelnLog('Doom3World', '%s hits the player (%s, %d)', [A.Model.Entity.Name, DamageDefName, Damage]);
 end;
 
@@ -5665,7 +5754,10 @@ begin
   Amount := Round(Damage * (1 - Dist / Radius));
   if Amount <= 0 then
     Exit;
-  DamagePlayer(Amount, SplashDefName, Center - Position);
+  if Owner = 'player' then
+    DamagePlayer(Amount, SplashDefName, Center - Position)
+  else
+    DamagePlayerByMonster(Amount, SplashDefName, Center - Position);
   WritelnLog('Doom3World', 'Splash of %s hits the player (%d)', [Owner, Amount]);
 end;
 
@@ -5814,7 +5906,7 @@ begin
     begin
       if P.DetonateOnActor then
       begin
-        DamagePlayer(P.Damage, P.DamageDefName, P.Velocity);
+        DamagePlayerByMonster(P.Damage, P.DamageDefName, P.Velocity);
         WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
         Detonate := True;
         HitPlayer := True;
@@ -7641,6 +7733,7 @@ begin
   begin
     Health := 0;
     FDeadTime := 0;
+    ClearPowerUps;
     PlayerSound('snd_death');
     Message('You died');
     Exit;
@@ -7685,6 +7778,103 @@ end;
 function TD3Game.SinceDamage: Single;
 begin
   Result := FTime - FLastDamageTime;
+end;
+
+procedure TD3Game.DamagePlayerByMonster(const Amount: Integer; const DamageDefName: String;
+  const Direction: TVector3);
+begin
+  if PowerUpActive(PowerupBerserk) then
+    Exit;
+  DamagePlayer(Amount, DamageDefName, Direction);
+end;
+
+function TD3Game.PowerUpActive(const Powerup: Integer): Boolean;
+begin
+  Result := (Powerup >= Low(FPowerupEnd)) and (Powerup <= High(FPowerupEnd)) and
+    (FPowerupEnd[Powerup] > FTime);
+end;
+
+function TD3Game.PowerUpLeft(const Powerup: Integer): Single;
+begin
+  if PowerUpActive(Powerup) then
+    Result := FPowerupEnd[Powerup] - FTime
+  else
+    Result := 0;
+end;
+
+procedure TD3Game.ClearPowerUps;
+var
+  I: Integer;
+begin
+  for I := Low(FPowerupEnd) to High(FPowerupEnd) do
+    FPowerupEnd[I] := 0;
+end;
+
+procedure TD3Game.UpdatePowerUps;
+var
+  I: Integer;
+begin
+  { idPlayer::UpdatePowerUps: ended ones are cleared (their end time
+    stays for the log) }
+  for I := Low(FPowerupEnd) to High(FPowerupEnd) do
+    if (FPowerupEnd[I] > 0) and (FPowerupEnd[I] <= FTime) then
+    begin
+      WritelnLog('Doom3World', 'Powerup %d ended', [I]);
+      FPowerupEnd[I] := 0;
+    end;
+end;
+
+function TD3Game.SpeedModifier: Single;
+begin
+  if PowerUpActive(PowerupBerserk) then
+    Result := 1.7
+  else
+    Result := 1;
+end;
+
+function TD3Game.GivePowerUp(const Powerup: Integer; const Seconds: Single): Boolean;
+const
+  DefNames: array [PowerupBerserk..PowerupAdrenaline] of String =
+    ('powerup_berserk', 'powerup_invisibility', 'powerup_megahealth', 'powerup_adrenaline');
+var
+  Duration: Single;
+  Def: TStringList;
+begin
+  Result := False;
+  if PlayerDead then
+    Exit;
+  if (Powerup < Low(FPowerupEnd)) or (Powerup > High(FPowerupEnd)) then
+  begin
+    WritelnWarning('Doom3World', 'Player given power up %d which is out of range', [Powerup]);
+    Exit;
+  end;
+  Def := Decls.EntityDef(DefNames[Powerup]);
+  Duration := Seconds;
+  if (Duration <= 0) and (Def <> nil) then
+    Duration := StrToFloatDef(Def.Values['time'], 30, DefaultFormatSettings);
+  if Duration <= 0 then
+    Duration := 30;
+  if Powerup <> PowerupMegaHealth then
+    FPowerupEnd[Powerup] := FTime + Duration;
+  case Powerup of
+    PowerupBerserk:
+      begin
+        PlayerSound('snd_berserk_third');
+        { the fists }
+        SelectWeapon(0);
+      end;
+    PowerupInvisibility:
+      PlayerSound('snd_invisibility');
+    PowerupMegaHealth:
+      begin
+        PlayerSound('snd_megahealth');
+        Health := 200;
+        if Def <> nil then
+          Health := StrToIntDef(Def.Values['inv_health'], 200);
+      end;
+  end;
+  WritelnLog('Doom3World', 'Powerup %s for %.0f s', [DefNames[Powerup], Duration]);
+  Result := True;
 end;
 
 function TD3Game.DoubleVisionShift: Single;

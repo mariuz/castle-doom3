@@ -37,6 +37,11 @@ type
       own blue glow) }
     ArmorPulse: Single;
     ArmorImageUrl: String;
+    { berserk's screen tint (0: off) and its image ('': the HUD's own) }
+    BerserkAlpha: Single;
+    BerserkImageUrl: String;
+    { invisibility: a cold rim on the screen's edges }
+    Invisible: Boolean;
     Blobs: array of TD3HudBlob;
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -163,6 +168,34 @@ begin
     Img.Draw(FloatRectangle(R.Left + Blobs[I].X / 640 * R.Width,
       R.Top - (Blobs[I].Y + Blobs[I].H) / 480 * R.Height,
       Blobs[I].W / 640 * R.Width, Blobs[I].H / 480 * R.Height));
+  end;
+
+  { berserk (idPlayerView: textures/decals/berserk) }
+  if (BerserkAlpha > 0) and not Dead then
+  begin
+    Img := nil;
+    if BerserkImageUrl <> '' then
+      Img := Image(BerserkImageUrl);
+    if Img <> nil then
+    begin
+      Img.Color := Vector4(1, 1, 1, BerserkAlpha);
+      Img.Draw(R);
+    end else
+    begin
+      DrawRectangle(R, Vector4(0.6, 0, 0, 0.1 * BerserkAlpha));
+      if FVignette = nil then
+        FVignette := TDrawableImage.Create(MakeVignette, True, True);
+      FVignette.Color := Vector4(0.8, 0.05, 0, 0.55 * BerserkAlpha);
+      FVignette.Draw(R);
+    end;
+  end;
+  { invisibility: the edges shimmer cold }
+  if Invisible and not Dead then
+  begin
+    if FVignette = nil then
+      FVignette := TDrawableImage.Create(MakeVignette, True, True);
+    FVignette.Color := Vector4(0.5, 0.8, 1, 0.25 + 0.1 * Sin(Now * 86400 * 4));
+    FVignette.Draw(R);
   end;
 
   { armor feedback (idPlayerView: armorViewEffect over the screen for
