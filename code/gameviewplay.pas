@@ -62,6 +62,9 @@ type
     procedure HandleConsoleCommand(const Cmd, Args: String);
     { fire the weapon: Once from a demo script, else the button is held }
     procedure Fire(const Once: Boolean);
+    { the weapon's muzzle flash light (its def's flashColor, flashRadius,
+      flashTime), else the built-in pistol's }
+    procedure UpdateMuzzleFlash;
     procedure SetFlashlight(const Value: Boolean);
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
@@ -401,6 +404,31 @@ begin
     Result := Result + Format(', effect "%s": gain %.3f, decay %.2f s, reflections %.3f after %.3f s, late reverb %.3f after %.3f s, density %.2f, diffusion %.2f', [
       FReverbEffect.Name, R.Gain, R.DecayTime, R.ReflectionsGain, R.ReflectionsDelay,
       R.LateReverbGain, R.LateReverbDelay, R.Density, R.Diffusion]);
+  end;
+end;
+
+procedure TViewPlay.UpdateMuzzleFlash;
+var
+  P, C: TVector3;
+  R: Single;
+begin
+  if FGame.MuzzleFlash(P, C, R) then
+  begin
+    MuzzleFlash.Exists := True;
+    MuzzleFlash.Translation := MuzzleFlash.Parent.WorldToLocal(P);
+    MuzzleFlash.Color := C;
+    MuzzleFlash.Radius := R;
+    { Doom 3's light color is the light at its center }
+    MuzzleFlash.Intensity := 1;
+  end else
+  begin
+    { the built-in pistol: a short flash in front of the camera }
+    MuzzleFlash.Exists := (FGame.SinceFire < 0.07) and
+      ((FGame.Weapon = nil) or not FGame.Weapon.Scripted);
+    MuzzleFlash.Translation := Vector3(0, 0, -24);
+    MuzzleFlash.Color := Vector3(1, 0.8, 0.4);
+    MuzzleFlash.Radius := 400;
+    MuzzleFlash.Intensity := 2;
   end;
 end;
 
@@ -1005,7 +1033,7 @@ begin
   UpdateCinematic;
   Map.UpdateVisibility(Camera);
   UpdateReverb;
-  MuzzleFlash.Exists := FGame.SinceFire < 0.07;
+  UpdateMuzzleFlash;
 
   Hud.Health := FGame.Health;
   Hud.Armor := FGame.Armor;

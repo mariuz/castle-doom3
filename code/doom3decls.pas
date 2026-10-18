@@ -67,6 +67,9 @@ type
     { Color registers (red, green, blue, alpha) of the first plain stage
       (for lights: the light's color); nil means 1. Owned. }
     StageColorExpr: array [0..3] of TD3Expr;
+    { The first plain stage's "if" condition (nil: always drawn). Owned.
+      Weapons' muzzle flashes show with "if ( time + parm4 ) * 8 < 1". }
+    StageCondition: TD3Expr;
     { Texture matrix keywords of the diffuse stage and of the first plain
       stage (scroll, translate, scale, centerScale, shear, rotate). Owned. }
     DiffuseTexOps, StageTexOps: TD3TexOps;
@@ -279,6 +282,7 @@ begin
   end;
   for I := 0 to 1 do
     FreeAndNil(HazeScroll[I]);
+  FreeAndNil(StageCondition);
   FreeTexOps(DiffuseTexOps);
   FreeTexOps(StageTexOps);
   inherited Destroy;
@@ -686,6 +690,7 @@ var
   StageVertexParms: array [0..1] of String;
   StageAlphaTest: Single;
   Regs: array [0..3] of TD3Expr;
+  StageCond: TD3Expr;
   Parts: TStringArray;
   I: Integer;
   StageOps: TD3TexOps;
@@ -720,6 +725,7 @@ var
 
 begin
   HasStageColor := False;
+  StageCond := nil;
   for I := 0 to 3 do
     Regs[I] := nil;
   Result := TD3Material.Create;
@@ -750,6 +756,7 @@ begin
           StageVertexParms[I] := '';
         HasBlend := False;
         StageAlphaTest := -1;
+        FreeAndNil(StageCond);
         for I := 0 to 3 do
           FreeAndNil(Regs[I]);
         FreeTexOps(StageOps);
@@ -850,6 +857,11 @@ begin
           if L = 'alphatest' then
             StageAlphaTest := Lexer.ReadFloat
           else
+          if L = 'if' then
+          begin
+            FreeAndNil(StageCond);
+            StageCond := ParseD3ExpressionString(Lexer.RestOfLine, @Table);
+          end else
           if (L = 'cubemap') or (L = 'cameracubemap') or (L = 'videomap') or
              (L = 'soundmap') or (L = 'remoterendermap') or (L = 'mirrorrendermap') or
              (L = 'texgen') then
@@ -957,6 +969,8 @@ begin
         begin
           Result.StageImage := StageMap;
           Result.StageBlend := StageBlendMode;
+          Result.StageCondition := StageCond;
+          StageCond := nil;
           if not HasBlend then
             Result.StageBlend := bmOpaque;
           if StageAlphaTest >= 0 then
@@ -1030,6 +1044,7 @@ begin
     Lexer.Free;
     for I := 0 to 3 do
       FreeAndNil(Regs[I]);
+    FreeAndNil(StageCond);
     FreeTexOps(StageOps);
   end;
 end;
