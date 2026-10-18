@@ -83,7 +83,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give [all\|weapons\|<weapon>\|<stat> <amount>]`, `inventory`, `weapon <slot>`, `weapnext`, `weapprev`, `reload`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give [all\|weapons\|<weapon>\|<stat> <amount>]`, `inventory`, `weapon <slot>`, `weapnext`, `weapprev`, `reload`, `pm_bob [0\|1]`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 

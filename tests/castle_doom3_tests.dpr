@@ -2949,7 +2949,7 @@ var
   A: TD3Actor;
   M: TD3Monster;
   Eye, P, C, Dir: TVector3;
-  R, MaxAngle, MaxBob: Single;
+  R, MaxAngle, MaxBob, MaxRoll, MaxUp: Single;
   RemoveMe: TRemoveType;
   I, Flash: Integer;
   Mat: TD3Material;
@@ -3032,16 +3032,27 @@ begin
     Check(not Game.MuzzleFlash(P, C, R), 'the flash light is off again');
     Check(GunAngle < 1, Format('the kick settled (%.2f)', [GunAngle]));
 
-    { walking (200 units a second): the gun bobs }
+    Check(Game.Weapon.Holder.RenderLayer = rlFront, 'the view model is drawn in front (the depth hack)');
+
+    { walking (200 units a second): the gun and the view bob }
     MaxBob := 0;
     MaxAngle := 0;
+    MaxRoll := 0;
+    MaxUp := 0;
     for I := 1 to 20 do
     begin
       Eye := Eye + D3ToCge(Vector3(10, 0, 0));
       Step;
       MaxBob := Max(MaxBob, Game.BobFracSin);
       MaxAngle := Max(MaxAngle, GunAngle);
+      MaxRoll := Max(MaxRoll, Abs(Game.ViewBobAngles.Z));
+      MaxUp := Max(MaxUp, Game.ViewBobOffset.Y);
     end;
+    Check(MaxRoll > 0.2, Format('the view rolls with the steps (%.2f degrees)', [MaxRoll]));
+    Check((MaxUp > 0.5) and (MaxUp <= 6), Format('the view bobs up (%.2f, at most 6)', [MaxUp]));
+    Game.ViewBobEnabled := False;
+    Check(Game.ViewBobOffset.IsZero and Game.ViewBobAngles.IsZero, 'pm_bob 0: no view bob');
+    Game.ViewBobEnabled := True;
     CheckNear(200, Game.PlayerSpeed, 'the player''s speed', 1);
     Check(MaxBob > 0.5, Format('the bob cycles (%.2f)', [MaxBob]));
     Check(MaxAngle > 0.5, Format('the gun sways while walking (%.2f degrees)', [MaxAngle]));
@@ -3049,6 +3060,24 @@ begin
       Step;
     CheckNear(0, Game.PlayerSpeed, 'standing again');
     CheckNear(0, Game.BobFracSin, 'no bob standing');
+    CheckNear(0, Game.ViewBobOffset.Y, 'the view at the eye standing');
+
+    { a landing at 400 units a second dips the view by 8 }
+    for I := 1 to 4 do
+    begin
+      Eye := Eye - Vector3(0, 20, 0);
+      Step;
+    end;
+    MaxUp := 0;
+    for I := 1 to 6 do
+    begin
+      Step;
+      MaxUp := Min(MaxUp, Game.ViewBobOffset.Y);
+    end;
+    Check((MaxUp < -4) and (MaxUp >= -8.01), Format('a landing dips the view (%.2f)', [MaxUp]));
+    for I := 1 to 10 do
+      Step;
+    CheckNear(0, Game.ViewBobOffset.Y, 'and it comes back');
 
     { turning: the gun lags behind the view }
     Game.PlayerViewDir := D3ToCge(Vector3(0, 1, 0));
