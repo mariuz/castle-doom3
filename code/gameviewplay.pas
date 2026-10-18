@@ -48,6 +48,13 @@ type
     FDvEffect: TScreenEffectNode;
     { walk navigation's MoveSpeed of the design (berserk multiplies it) }
     FBaseMoveSpeed: Single;
+    { the jump's height (JumpMaxHeight times PreferredHeight, which
+      crouching changes) }
+    FBaseJump: Single;
+    { the console's crouch holds the crouch key }
+    FDemoCrouch: Boolean;
+    { GO:... crouch holds it while moving }
+    FDemoGoCrouch: Boolean;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
@@ -86,6 +93,7 @@ type
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
     procedure ReleaseDemoKeys;
+    procedure UpdateCrouch(const SecondsPassed: Single);
     procedure CaptureScreenshot;
     function CameraYaw: Single;
   public
@@ -151,6 +159,10 @@ begin
     and has no falling camera effect (a landing dips the view instead) }
   WalkNavigation.GrowSpeed := 1000;
   FBaseMoveSpeed := WalkNavigation.MoveSpeed;
+  FBaseJump := WalkNavigation.JumpMaxHeight * WalkNavigation.PreferredHeight;
+  { crouching is TD3Game's (Doom 3's heights and rate): CGE's own crouch
+    (Input_Crouch lowering the camera) does nothing, its key is read }
+  WalkNavigation.CrouchHeight := 1;
   CreateDoubleVision;
   WalkNavigation.FallingEffect := False;
   if AutoTestPrefix <> '' then
@@ -182,8 +194,14 @@ begin
 end;
 
 procedure TViewPlay.PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
+var
+  EyeHeight: Single;
 begin
-  Camera.SetWorldView(FeetPos + Vector3(0, PlayerEyeHeight, 0), YawToCgeDir(YawDeg),
+  { crouched, the eye is lower }
+  EyeHeight := PlayerEyeHeight;
+  if FGame <> nil then
+    EyeHeight := FGame.EyeHeight;
+  Camera.SetWorldView(FeetPos + Vector3(0, EyeHeight, 0), YawToCgeDir(YawDeg),
     Vector3(0, 1, 0));
 end;
 
@@ -460,8 +478,11 @@ begin
     Angles := Angles + FGame.ViewBobAngles;
   Pos := Camera.Translation + FGame.ViewBobOffset;
   { pm_thirdPerson: behind the player (idPlayer::OffsetThirdPersonView) }
-  if FGame.ThirdPerson then
+  if FGame.ThirdPersonActive then
   begin
+    { the plain view angles (no dead tilt) }
+    if FGame.PlayerDead then
+      Angles := Vector3(D3DirPitch(D), D3DirYaw(D), 0);
     FGame.ThirdPersonView(Pos, Angles, ViewPos);
     Pos := ViewPos;
   end else
@@ -543,6 +564,29 @@ begin
   end else
   if FGame.KnockbackAirborne then
     FGame.KnockbackBlocked;
+end;
+
+procedure TViewPlay.UpdateCrouch(const SecondsPassed: Single);
+var
+  OldHeight: Single;
+begin
+  FGame.PlayerCrouchHeld := FDemoCrouch or FDemoGoCrouch or
+    (not Console.IsOpen and WalkNavigation.Input_Crouch.IsPressed(Container));
+  OldHeight := FGame.EyeHeight;
+  FGame.UpdateCrouch(SecondsPassed, Camera.Translation);
+  { the eye goes down / up by the change (the feet stay) }
+  if (FGame.EyeHeight <> OldHeight) and not FInCinematic then
+    Camera.Translation := Camera.Translation + Vector3(0, FGame.EyeHeight - OldHeight, 0);
+  if FGame.EyeHeight >= WalkNavigation.Radius then
+    WalkNavigation.PreferredHeight := FGame.EyeHeight;
+  { crouched: crouch speed, no running, no jumping (idPhysics_Player) }
+  if FGame.Crouched then
+  begin
+    WalkNavigation.MoveSpeed := FBaseMoveSpeed * FGame.CrouchSpeedScale;
+    WalkNavigation.RunMultiplier := 1;
+    WalkNavigation.JumpMaxHeight := 0;
+  end else
+    WalkNavigation.JumpMaxHeight := FBaseJump / WalkNavigation.PreferredHeight;
 end;
 
 procedure TViewPlay.UpdateFallSpeed(const SecondsPassed: Single);
@@ -797,6 +841,22 @@ begin
     Console.Print(S);
     WritelnLog('Console', S);
   end else
+  if Cmd = 'pm_thirdpersondeath' then
+  begin
+    if Args <> '' then
+      FGame.ThirdPersonDeath := Args <> '0';
+    Console.Print('pm_thirdPersonDeath ' + BoolToStr(FGame.ThirdPersonDeath, '1', '0'));
+  end else
+  if Cmd = 'crouch' then
+  begin
+    { crouch [0|1]: hold the crouch key (without an argument: the state) }
+    if Args <> '' then
+      FDemoCrouch := Args <> '0';
+    S := Format('crouch %s (crouched %s, eye height %.1f)', [BoolToStr(FDemoCrouch, '1', '0'),
+      BoolToStr(FGame.Crouched, 'yes', 'no'), FGame.EyeHeight]);
+    Console.Print(S);
+    WritelnLog('Console', S);
+  end else
   if Cmd = 'pm_thirdpersonrange' then
   begin
     if Args <> '' then
@@ -844,7 +904,7 @@ begin
   end else
   if Cmd = 'pos' then
   begin
-    P := CgeToD3(Camera.Translation - Vector3(0, PlayerEyeHeight, 0));
+    P := CgeToD3(Camera.Translation - Vector3(0, FGame.EyeHeight, 0));
     Console.Print(Format('origin %.0f %.0f %.0f  yaw %.0f  area %d',
       [P.X, P.Y, P.Z, CameraYaw, Map.AreaAt(Camera.Translation)]));
   end else
@@ -1144,6 +1204,7 @@ begin
     for K in FDemoHeld do
       Container.Pressed.KeyUp(K, KeyString);
   FDemoHeld := nil;
+  FDemoGoCrouch := False;
 end;
 
 { Demo script commands (comma separated):
@@ -1205,6 +1266,8 @@ begin
       { GO:x y seconds run: with the run key held }
       if (Length(Parts) > 3) and SameText(Parts[3], 'run') then
         FDemoHeld := Concat(FDemoHeld, [keyShift]);
+      if (Length(Parts) > 3) and SameText(Parts[3], 'crouch') then
+        FDemoGoCrouch := True;
       for I := 0 to High(FDemoHeld) do
         Container.Pressed.KeyDown(FDemoHeld[I], '');
     end;
@@ -1335,6 +1398,7 @@ begin
     WalkNavigation.Input_LeftStrafe.IsPressed(Container) or
     WalkNavigation.Input_RightStrafe.IsPressed(Container);
   WalkNavigation.RunMultiplier := FGame.RunMultiplier;
+  UpdateCrouch(SecondsPassed);
   { thrown up by a knockback: its own arc, no navigation gravity }
   WalkNavigation.Gravity := not FNoclip and not FGame.KnockbackAirborne;
   UpdateFallSpeed(SecondsPassed);

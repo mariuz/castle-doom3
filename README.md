@@ -58,7 +58,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | Monsters (`monster_*` entityDefs with md5 models) | a tiny idAI: sight checks with `WorldSegmentCollision`, chase with wall sliding, floor following with `WorldRayCast`, melee, death |
 | HUD, console, menu | `TDoom3Hud`, `TDoom3Console` (registered components), a map list from the PK4s |
 
-The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with scrolling screens, pulsing ceiling panels, a skylight onto a starry sky, a GUI door panel and a status screen, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, ten lights (point, projected, ambient, a projected window pattern; flickering, pulsing and strobing light shaders), a looping hum, two animated md5 creatures that chase you, pain cries, blood blobs and a tunnel vision when hurt, berserk and invisibility powerups, stamina, a third person view of the player's body (`pm_thirdPerson 1`) wearing powerup skins, and items to pick up (health, armor, ammo, a shotgun, a key); the player starts with fists and a pistol, scripted weapons with view models.
+The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with scrolling screens, pulsing ceiling panels, a skylight onto a starry sky, a GUI door panel and a status screen, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, ten lights (point, projected, ambient, a projected window pattern; flickering, pulsing and strobing light shaders), a looping hum, two animated md5 creatures that chase you, pain cries, blood blobs and a tunnel vision when hurt, berserk and invisibility powerups, stamina, crouching (C) under a crawl bar, a third person view of the player's body (`pm_thirdPerson 1`) wearing powerup skins, crouching, dying and holding its gun, and items to pick up (health, armor, ammo, a shotgun, a key); the player starts with fists and a pistol, scripted weapons with view models.
 
 ---
 
@@ -83,7 +83,7 @@ The bundled test level has two rooms joined by a portal and an auto-opening door
 | **Space** / **C** | Jump / Crouch |
 | **F** | Flashlight |
 | **E** | Use (open doors) |
-| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give [all\|weapons\|<weapon>\|<stat> <amount>]`, `inventory`, `weapon <slot>`, `weapnext`, `weapprev`, `reload`, `pm_bob [0\|1]`, `hurt <damage def> [amount] [up]`, `stamina [value]`, `pm_stamina <seconds>`, `pm_thirdPerson [0\|1]`, `pm_thirdPersonRange <units>`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
+| **~** | Console (`map <name>`, `maps`, `noclip`, `god`, `notarget`, `flashlight`, `kill`, `give [all\|weapons\|<weapon>\|<stat> <amount>]`, `inventory`, `weapon <slot>`, `weapnext`, `weapprev`, `reload`, `pm_bob [0\|1]`, `hurt <damage def> [amount] [up]`, `stamina [value]`, `pm_stamina <seconds>`, `pm_thirdPerson [0\|1]`, `pm_thirdPersonRange <units>`, `pm_thirdPersonDeath [0\|1]`, `crouch [0\|1]`, `pos`, `setviewpos x y z [yaw]`, `fps`, `lightscale <f>`, `decls`, `r_usePortals [0\|1]`, `r_lightVolumes [0\|1]`, `r_shadows [0\|1]`, `r_prelightShadows [0\|1]`, `portals`, `lights`, `soundinfo`, `reverb`, `s_useEAXReverb [0\|1]`, `quit`, `help`) |
 | **F5** / **F12** | FPS counter / screenshot |
 | **Escape** | Back to the menu |
 
@@ -131,7 +131,7 @@ Doom 3 BFG Edition's binary formats (`.bimage`, `.bproc`, `.bcm`) are not suppor
 .\castle-doom3.exe --autotest MENU test_output\shot      # title screen screenshot
 ```
 
-Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds [run]` hold movement keys (and the run key), `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command, `L:map` load map, `Q` quit. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area, number of visible areas and the shadow casting light, and every shot (`Shot:`).
+Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds [run\|crouch]` hold movement keys (and the run key or crouch), `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command, `L:map` load map, `Q` quit. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area, number of visible areas and the shadow casting light, and every shot (`Shot:`).
 
 ### Tests
 

@@ -444,6 +444,11 @@ type
       with the view }
     Holder: TCastleTransform;
     View: TD3Md5Instance;
+    { the world model (model_world) in the body's hand (joint_attach), seen
+      in third person; nil without one or without a body }
+    WorldHolder: TCastleTransform;
+    World: TD3Md5Instance;
+    AttachJoint: String;
     { game time when the playing anim ends (animDone), 0 for cycles }
     AnimDoneTime: Single;
     BlendFrames: Integer;
@@ -568,6 +573,10 @@ type
     FPlayerModel: TD3Md5Instance;
     FPlayerHolder: TCastleTransform;
     FPlayerAnim: String;
+    { crouching (idPhysics_Player::CheckDuck) and the eye's height over the
+      feet, easing to the crouched / standing / dead one (idPlayer::Think) }
+    FCrouched: Boolean;
+    FEyeHeight: Single;
     { powerups' end times (game time; 0: off) }
     FPowerupEnd: array [0..3] of Single;
     FBlobs: array of TD3ScreenBlob;
@@ -618,6 +627,8 @@ type
     procedure UpdatePowerUps;
     procedure UpdateStamina(const SecondsPassed: Single);
     procedure SpawnPlayerModel;
+    procedure SpawnWorldWeapon(const W: TD3Weapon);
+    procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
     { place the view model: bob, lag, idle drift, muzzle kick
@@ -755,6 +766,10 @@ type
     PlayerRunning, PlayerMoving: Boolean;
     { pm_thirdPerson: the view is behind the player, whose body shows }
     ThirdPerson: Boolean;
+    { pm_thirdPersonDeath: dead, the view backs away from the body }
+    ThirdPersonDeath: Boolean;
+    { set by the view each frame: the crouch key is held }
+    PlayerCrouchHeld: Boolean;
     { pm_thirdPersonRange, pm_thirdPersonHeight, pm_thirdPersonAngle,
       pm_thirdPersonClip }
     ThirdPersonRange, ThirdPersonHeight, ThirdPersonAngle: Single;
@@ -826,8 +841,33 @@ type
     function PlayerSkinName: String;
     { idPlayer::OffsetThirdPersonView: the camera (CGE) behind the eye,
       for the view's angles (Doom 3 pitch, yaw, roll), clipped by walls;
-      Angles comes back looking at the focus point. }
+      Angles comes back looking at the focus point. With pm_thirdPerson
+      its cvars, dead with pm_thirdPersonDeath backing away from 20 to 140
+      in 3 s (idPlayer::CalculateRenderView). }
     procedure ThirdPersonView(const Eye: TVector3; var Angles: TVector3; out ViewPos: TVector3);
+    procedure ThirdPersonViewAt(const Eye: TVector3; var Angles: TVector3; const AAngle, ARange,
+      AHeight: Single; const AClip: Boolean; out ViewPos: TVector3);
+    { the view is a third person one (pm_thirdPerson, or dead with
+      pm_thirdPersonDeath) }
+    function ThirdPersonActive: Boolean;
+    { Crouching: the crouch key held makes the player crouch; standing up
+      waits for room above (pm_normalheight). The eye eases to its height
+      (pm_crouchviewheight 32, pm_normalviewheight 68, pm_deadviewheight 10
+      when dead) by pm_crouchrate 0.87 a 60 Hz frame. Eye is the camera; the
+      view moves it by the change of EyeHeight. }
+    procedure UpdateCrouch(const SecondsPassed: Single; const Eye: TVector3);
+    property Crouched: Boolean read FCrouched;
+    property EyeHeight: Single read FEyeHeight;
+    { room above the crouched player to stand up }
+    function CanStandUp(const Eye: TVector3): Boolean;
+    { the player's feet (CGE): the eye minus EyeHeight }
+    function PlayerFeet: TVector3;
+    { the player's box height: pm_normalheight 74, pm_crouchheight 38,
+      pm_deadheight 20 }
+    function PlayerBodyHeight: Single;
+    { walking speed's multiplier for the crouched speed (pm_crouchspeed 80
+      over pm_walkspeed 140), 1 standing }
+    function CrouchSpeedScale: Single;
     { the stamina in percent (the HUD's player_stamina), -1 without }
     function StaminaPercent: Integer;
     { stamina is off: pm_stamina 0 or worldspawn's no_stamina }
@@ -1280,6 +1320,7 @@ begin
   StaminaRate := 0.75;
   StaminaThreshold := 45;
   ThirdPersonRange := 80;
+  FEyeHeight := PlayerEyeHeight;
   ThirdPersonClip := True;
   FLandTime := -1000;
   FLastDamageTime := -1000;
@@ -1748,6 +1789,8 @@ begin
     StrToBoolDef(FMap.MapFile.Entities[0].Value('no_stamina'), False);
   FStamina := StaminaMax;
   FRunFraction := 0;
+  FCrouched := False;
+  FEyeHeight := PlayerEyeHeight;
   FKickFinish := 0;
   FBlobs := nil;
   FLastDamageTime := -1000;
@@ -1970,9 +2013,9 @@ var
 begin
   if FItems.Count = 0 then
     Exit;
-  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  Feet := CgeToD3(PlayerFeet);
   { the player's bounds, pm_bboxwidth 32, pm_normalheight 74 }
-  PlayerBox := Box3D(Feet + Vector3(-16, -16, 0), Feet + Vector3(16, 16, 74));
+  PlayerBox := Box3D(Feet + Vector3(-16, -16, 0), Feet + Vector3(16, 16, PlayerBodyHeight));
   Ms := Round(FTime * 1000);
   for It in FItems do
   begin
@@ -2048,6 +2091,10 @@ begin
     Holder.Remove(View.Scene);
   FreeAndNil(View);
   FreeAndNil(Holder);
+  if (World <> nil) and (WorldHolder <> nil) then
+    WorldHolder.Remove(World.Scene);
+  FreeAndNil(World);
+  FreeAndNil(WorldHolder);
   FreeAndNil(Obj);
   inherited Destroy;
 end;
@@ -2175,6 +2222,7 @@ begin
       FMap.Add(W.Holder);
     end;
   end;
+  SpawnWorldWeapon(W);
   { the script object, its init in its thread (idWeapon's thread) }
   T := nil;
   if FScript <> nil then
@@ -2334,8 +2382,9 @@ begin
     Exit;
   Vel := TVector3.Zero;
   if FHasPrevEye then
-    Vel := CgeToD3(FPlayerEye - FPrevEye) / SecondsPassed;
-  FPrevEye := FPlayerEye;
+    Vel := CgeToD3(PlayerFeet - FPrevEye) / SecondsPassed;
+  { the feet: the eye going down to crouch isn't a fall }
+  FPrevEye := PlayerFeet;
   FHasPrevEye := True;
   { a teleport isn't a move (nor a fall) }
   if Vel.Length > 2000 then
@@ -2372,12 +2421,12 @@ begin
   if not FFalling and (DZ < -0.5) and (Vel.Z < -40) then
   begin
     FFalling := True;
-    FFallStartZ := CgeToD3(FPlayerEye).Z - DZ;
+    FFallStartZ := CgeToD3(PlayerFeet).Z - DZ;
   end else
   if FFalling and (Vel.Z > -40) then
   begin
     FFalling := False;
-    CrashLand(FFallStartZ - CgeToD3(FPlayerEye).Z);
+    CrashLand(FFallStartZ - CgeToD3(PlayerFeet).Z);
   end;
   Airborne := PlayerJumping or FFalling;
   { movement changes (idPlayer logs the move keys' changes, in view space:
@@ -3057,7 +3106,7 @@ var
   Damage, Axis, Corner: Integer;
   WasPickable, OnFloor: Boolean;
 begin
-  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  Feet := CgeToD3(PlayerFeet);
   for M in FMoveables do
   begin
     if M.Brush.Hidden or (M.Brush.Scene = nil) then
@@ -3092,7 +3141,7 @@ begin
       scaled by the speed) }
     ToPlayer := Vector3(Feet.X - Center.X, Feet.Y - Center.Y, 0);
     if not PlayerDead and (TVector3.DotProduct(M.Velocity, ToPlayer) > 0) and
-       (SegmentToPlayerDistance(D3ToCge(Center), D3ToCge(Center + Step), FPlayerEye - Vector3(0, PlayerEyeHeight, 0),
+       (SegmentToPlayerDistance(D3ToCge(Center), D3ToCge(Center + Step), PlayerFeet,
           FPlayerEye) <= Radius + PlayerRadius) then
     begin
       if M.CanDamage and (M.DamageDef <> '') and (Speed > M.MinDamageVelocity) and
@@ -3375,7 +3424,7 @@ var
 begin
   if FAas = nil then
     Exit('No AAS for this map');
-  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  Feet := CgeToD3(PlayerFeet);
   Result := Format('AAS "%s": the player is in area %d', [FAas.Name, FAas.OriginAreaNum(Feet)]);
   if EntityName = '' then
     Exit;
@@ -3490,7 +3539,7 @@ var
 
 begin
   Pos := CgeToD3(A.Model.Holder.Translation);
-  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  Feet := CgeToD3(PlayerFeet);
   Radius := ActorRadius(A);
   Height := ActorHeight(A);
   { idAI::ReachedPos }
@@ -4134,7 +4183,7 @@ begin
   begin
     PlayerBox := Box3D(
       Feet - Vector3(PlayerRadius, 0, PlayerRadius),
-      Feet + Vector3(PlayerRadius, PlayerEyeHeight + 6, PlayerRadius));
+      Feet + Vector3(PlayerRadius, PlayerBodyHeight, PlayerRadius));
     for T in FTriggers do
       if (not T.Disabled) and (not T.NoTouch) and (not T.WaitingForActivation) and
          (FTime >= T.NextTime) and T.Box.Collision(PlayerBox) then
@@ -4302,7 +4351,7 @@ begin
   FPlayerEye := PlayerEye;
   if PlayerDead then
     FDeadTime := FDeadTime + SecondsPassed;
-  Feet := PlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  Feet := PlayerFeet;
   for Mover in FMovers do
   begin
     if (Mover.Kind = mkDoor) and not Mover.NoTouch and not PlayerDead and
@@ -4405,16 +4454,30 @@ begin
     WritelnLog('Doom3World', 'Player skin "%s"', [PlayerSkinName]);
     FPlayerModel.SetSkin(PlayerSkinName);
   end;
-  FPlayerHolder.Exists := ThirdPerson and not CinematicActive;
+  FPlayerHolder.Exists := ThirdPersonActive and not CinematicActive;
   FPlayerModel.Shown := FPlayerHolder.Exists;
   if not FPlayerHolder.Exists then
     Exit;
-  FPlayerHolder.Translation := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  FPlayerHolder.Translation := PlayerFeet;
   SetD3Rotation(FPlayerHolder, AnglesMatrix(Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0)));
   { the legs' anim by the speed (idPlayer's legs states: run over the
-    walking speed, walk, idle); dead it holds its pose }
-  if not PlayerDead then
+    walking speed, walk, idle; crouched crouch_walk, crouch); dead the
+    death anim once, holding its last frame (Doom 3 has a ragdoll) }
+  if PlayerDead then
   begin
+    if (FPlayerAnim <> 'death') and FPlayerModel.PlayAnim('death', False) then
+    begin
+      FPlayerAnim := 'death';
+      WritelnLog('Doom3World', 'Player body plays death');
+    end;
+  end else
+  begin
+    if FCrouched and (FXYSpeed > 20) and FPlayerModel.HasAnim('crouch_walk') then
+      Anim := 'crouch_walk'
+    else
+    if FCrouched and FPlayerModel.HasAnim('crouch') then
+      Anim := 'crouch'
+    else
     if (FXYSpeed > 170) and FPlayerModel.HasAnim('run') then
       Anim := 'run'
     else
@@ -4426,9 +4489,161 @@ begin
       FPlayerAnim := Anim;
   end;
   FPlayerModel.Update(SecondsPassed);
+  UpdateWorldWeapon;
+end;
+
+procedure TD3Game.SpawnWorldWeapon(const W: TD3Weapon);
+var
+  Decl: TD3ModelDecl;
+  Md5: TD3Md5Model;
+begin
+  if (FPlayerModel = nil) or (W.Def = nil) then
+    Exit;
+  Decl := Decls.ModelDecl(W.Def.Values['model_world']);
+  if Decl = nil then
+    Exit;
+  Md5 := Md5Cache.Model(Decl.Mesh);
+  if Md5 = nil then
+    Exit;
+  W.AttachJoint := W.Def.Values['joint_attach'];
+  W.World := TD3Md5Instance.Create(Md5, Decl.Anims, Decl.Skin);
+  W.World.Scene.Collides := False;
+  W.World.Scene.Pickable := False;
+  W.World.Scene.Translation := D3ToCge(Decl.Offset);
+  W.WorldHolder := TCastleTransform.Create(nil);
+  W.WorldHolder.SetTransient;
+  W.WorldHolder.Name := 'WorldWeapon';
+  W.WorldHolder.Collides := False;
+  W.WorldHolder.Pickable := False;
+  W.WorldHolder.Add(W.World.Scene);
+  FPlayerHolder.Add(W.WorldHolder);
+  WritelnLog('Doom3World', 'Weapon %s world model "%s" on joint "%s"', [W.DefName, Decl.Mesh, W.AttachJoint]);
+end;
+
+procedure TD3Game.UpdateWorldWeapon;
+var
+  M: TMatrix4;
+  T, Scale: TVector3;
+  R: TVector4;
+begin
+  if (FWeapon = nil) or (FWeapon.WorldHolder = nil) then
+    Exit;
+  { shown while the view weapon is (raised), not dead (idPlayer drops it) }
+  FWeapon.WorldHolder.Exists := FWeapon.Holder.Exists and not PlayerDead;
+  FWeapon.World.Shown := FWeapon.WorldHolder.Exists;
+  if not FWeapon.WorldHolder.Exists then
+    Exit;
+  { at the joint (idEntity::BindToJoint), in the body's model space }
+  if not FPlayerModel.JointTransform(FWeapon.AttachJoint, M) then
+    M := TMatrix4.Identity;
+  MatrixDecompose(TranslationMatrix(FPlayerModel.Scene.Translation) * M, T, R, Scale);
+  FWeapon.WorldHolder.Translation := T;
+  FWeapon.WorldHolder.Rotation := R;
+end;
+
+function TD3Game.ThirdPersonActive: Boolean;
+begin
+  Result := ThirdPerson or (PlayerDead and ThirdPersonDeath);
+end;
+
+function TD3Game.PlayerFeet: TVector3;
+begin
+  Result := FPlayerEye - Vector3(0, FEyeHeight, 0);
+end;
+
+function TD3Game.PlayerBodyHeight: Single;
+begin
+  if PlayerDead then
+    Result := 20
+  else
+  if FCrouched then
+    Result := 38
+  else
+    Result := 74;
+end;
+
+function TD3Game.CrouchSpeedScale: Single;
+begin
+  if FCrouched and not PlayerDead then
+    Result := 80 / 140
+  else
+    Result := 1;
+end;
+
+function TD3Game.CanStandUp(const Eye: TVector3): Boolean;
+const
+  { the box's corners, a little inside (the walls touch its sides) }
+  Corners: array [0..4] of TVector2 = ((X: 0; Y: 0), (X: -14; Y: -14), (X: 14; Y: -14),
+    (X: -14; Y: 14), (X: 14; Y: 14));
+var
+  Feet, A: TVector3;
+  I: Integer;
+begin
+  { idPhysics_Player::CheckDuck: a trace up from the crouched box to the
+    standing height }
+  Result := True;
+  if (FMap = nil) or (FMap.World = nil) then
+    Exit;
+  Feet := Eye - Vector3(0, FEyeHeight, 0);
+  for I := Low(Corners) to High(Corners) do
+  begin
+    A := Feet + Vector3(Corners[I].X, 37, Corners[I].Y);
+    if FMap.World.WorldSegmentCollision(A, A + Vector3(0, 74 - 37, 0)) then
+      Exit(False);
+  end;
+end;
+
+procedure TD3Game.UpdateCrouch(const SecondsPassed: Single; const Eye: TVector3);
+const
+  { pm_normalviewheight, pm_crouchviewheight, pm_deadviewheight,
+    pm_crouchrate }
+  NormalViewHeight = 68;
+  CrouchViewHeight = 32;
+  DeadViewHeight = 10;
+  CrouchRate = 0.87;
+var
+  Target: Single;
+  WasCrouched: Boolean;
+begin
+  WasCrouched := FCrouched;
+  if PlayerDead then
+    Target := DeadViewHeight
+  else
+  begin
+    if PlayerCrouchHeld and not PlayerFlying then
+      FCrouched := True
+    else
+    if FCrouched and (PlayerFlying or CanStandUp(Eye)) then
+      FCrouched := False;
+    if FCrouched then
+      Target := CrouchViewHeight
+    else
+      Target := NormalViewHeight;
+  end;
+  if FCrouched <> WasCrouched then
+    WritelnLog('Doom3World', 'Player %s', [BoolToStr(FCrouched, 'crouches', 'stands up')]);
+  if (FEyeHeight <> Target) and (SecondsPassed > 0) then
+  begin
+    FEyeHeight := Target + (FEyeHeight - Target) * Power(CrouchRate, SecondsPassed * 60);
+    if Abs(FEyeHeight - Target) < 0.05 then
+      FEyeHeight := Target;
+  end;
 end;
 
 procedure TD3Game.ThirdPersonView(const Eye: TVector3; var Angles: TVector3; out ViewPos: TVector3);
+const
+  { RAGDOLL_DEATH_TIME }
+  DeathTime = 3;
+begin
+  if ThirdPerson then
+    ThirdPersonViewAt(Eye, Angles, ThirdPersonAngle, ThirdPersonRange, ThirdPersonHeight,
+      ThirdPersonClip, ViewPos)
+  else
+    ThirdPersonViewAt(Eye, Angles, 0, 20 + 120 * Min(1, FDeadTime / DeathTime), 0, False, ViewPos);
+end;
+
+procedure TD3Game.ThirdPersonViewAt(const Eye: TVector3; var Angles: TVector3; const AAngle, ARange,
+  AHeight: Single; const AClip: Boolean; out ViewPos: TVector3);
 const
   { THIRD_PERSON_FOCUS_DISTANCE, the clip box's half size }
   FocusDistance = 512;
@@ -4458,21 +4673,21 @@ var
 begin
   Origin := CgeToD3(Eye);
   A := Angles;
-  if ThirdPersonAngle <> 0 then
+  if AAngle <> 0 then
     A.X := 0;
   { not too far overhead }
   A.X := Min(A.X, 45);
   Focus := Origin + D3Forward(A.X, A.Y) * FocusDistance;
-  Focus.Z := Focus.Z + ThirdPersonHeight;
+  Focus.Z := Focus.Z + AHeight;
   View := Origin;
-  View.Z := View.Z + 8 + ThirdPersonHeight;
+  View.Z := View.Z + 8 + AHeight;
   A.X := A.X * 0.5;
   M := AnglesMatrix(A);
   Fwd := Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2]);
   Right := Vector3(M.Data[1, 0], M.Data[1, 1], M.Data[1, 2]);
-  SinCos(DegToRad(ThirdPersonAngle), SideScale, ForwardScale);
-  View := View - Fwd * (ThirdPersonRange * ForwardScale) + Right * (ThirdPersonRange * SideScale);
-  if ThirdPersonClip and (FMap <> nil) and (FMap.World <> nil) then
+  SinCos(DegToRad(AAngle), SideScale, ForwardScale);
+  View := View - Fwd * (ARange * ForwardScale) + Right * (ARange * SideScale);
+  if AClip and (FMap <> nil) and (FMap.World <> nil) then
   begin
     { not in a wall; a low ceiling lifts it, then once more }
     Fraction := Trace(View);
@@ -4488,7 +4703,7 @@ begin
   Dir := Focus - View;
   FocusDist := Max(1, Sqrt(Sqr(Dir.X) + Sqr(Dir.Y)));
   A.X := -RadToDeg(ArcTan2(Dir.Z, FocusDist));
-  A.Y := A.Y - ThirdPersonAngle;
+  A.Y := A.Y - AAngle;
   Angles := A;
   ViewPos := D3ToCge(View);
 end;
@@ -4873,7 +5088,7 @@ begin
           Pos.Z := 0;
         EventResult := D3FloatValue(Pos.Length);
       end;
-    'enemyPosition': EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+    'enemyPosition': EventResult := D3VectorValue(CgeToD3(PlayerFeet));
     'testMeleeAttack', 'canHitEnemy':
       begin
         Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
@@ -4896,7 +5111,7 @@ begin
         EventResult := D3FloatValue(Ord((Args[0].E = PlayerHandle) and
           (Abs(D) <= A.Model.Entity.FloatValue('attack_cone', 70) / 2)));
       end;
-    'predictEnemyPos': EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+    'predictEnemyPos': EventResult := D3VectorValue(CgeToD3(PlayerFeet));
     'animLength':
       EventResult := D3FloatValue(A.Model.Instance.AnimDurationOf(
         A.Model.Instance.ResolveAnim(D3ValueToString(Args[1]))));
@@ -4923,13 +5138,13 @@ begin
         if A.HasEnemy and not PlayerDead then
         begin
           Pos := CgeToD3(A.Model.Holder.Translation);
-          D := (Pos - CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))).Length;
+          D := (Pos - CgeToD3(PlayerFeet)).Length;
           for I := 0 to A.Model.Entity.Pairs.Count - 1 do
             if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
             begin
               Node := CombatNodeOf(FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]));
               if (Node <> nil) and not Node.Disabled and
-                 Node.PlayerInView(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))) and
+                 Node.PlayerInView(CgeToD3(PlayerFeet)) and
                  ((Pos - Node.Entity.Origin).Length < D) then
               begin
                 D := (Pos - Node.Entity.Origin).Length;
@@ -4947,7 +5162,7 @@ begin
             begin
               Node := CombatNodeOf(FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]));
               if (Node <> nil) and not Node.Disabled and
-                 Node.PlayerInView(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))) then
+                 Node.PlayerInView(CgeToD3(PlayerFeet)) then
               begin
                 EventResult := D3EntityValue(PlayerHandle);
                 Break;
@@ -4958,7 +5173,7 @@ begin
       begin
         Node := CombatNodeOf(HandleEntity(Args[0].E));
         EventResult := D3FloatValue(Ord(A.HasEnemy and not PlayerDead and (Node <> nil) and
-          Node.PlayerInView(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)))));
+          Node.PlayerInView(CgeToD3(PlayerFeet))));
       end;
     'getJumpVelocity': EventResult := D3VectorValue(TVector3.Zero);
     'setLinearVelocity':
@@ -5058,7 +5273,7 @@ begin
       begin
         Other := HandleEntity(Args[0].E);
         if Args[0].E = PlayerHandle then
-          EventResult := D3FloatValue((CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)) -
+          EventResult := D3FloatValue((CgeToD3(PlayerFeet) -
             CgeToD3(A.Model.Holder.Translation)).Length)
         else
         if Other <> nil then
@@ -5107,7 +5322,7 @@ begin
         Pos := MuzzlePosition(A, D3ValueToString(Args[0]));
         if A.HasEnemy and not PlayerDead and
            (SegmentToPlayerDistance(A.Model.Holder.Translation + Vector3(0, 64, 0), Pos,
-              FPlayerEye - Vector3(0, PlayerEyeHeight, 0), FPlayerEye) <= PlayerRadius) then
+              PlayerFeet, FPlayerEye) <= PlayerRadius) then
           ActorDirectDamage(A, D3ValueToString(Args[1]));
       end;
     'radiusDamageFromJoint':
@@ -5141,7 +5356,7 @@ begin
           A.MoveDirect := True;
           A.Velocity := (Pos - CgeToD3(A.Model.Holder.Translation)).Normalize * A.FlySpeed;
         end else
-          MoveTo(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+          MoveTo(CgeToD3(PlayerFeet));
         Pos := CgeToD3(FPlayerEye) - CgeToD3(A.Model.Holder.Translation);
         if Sqr(Pos.X) + Sqr(Pos.Y) > 0.01 then
           A.IdealYaw := RadToDeg(ArcTan2(Pos.Y, Pos.X));
@@ -5149,7 +5364,7 @@ begin
     'testChargeAttack':
       { the distance to charge, 0 when it can't (idAI: a clear path) }
       if A.HasEnemy and not PlayerDead and ActorCanSeePlayer(A, False) then
-        EventResult := D3FloatValue((CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)) -
+        EventResult := D3FloatValue((CgeToD3(PlayerFeet) -
           CgeToD3(A.Model.Holder.Translation)).Length)
       else
         EventResult := D3FloatValue(0);
@@ -5188,7 +5403,7 @@ begin
         { away from the entity until Range away }
         Other := HandleEntity(Args[0].E);
         if Args[0].E = PlayerHandle then
-          Pos := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))
+          Pos := CgeToD3(PlayerFeet)
         else
         if Other <> nil then
           Pos := Other.Origin
@@ -5202,7 +5417,7 @@ begin
         else
           MoveDone;
       end;
-    'getEnemyPos': EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+    'getEnemyPos': EventResult := D3VectorValue(CgeToD3(PlayerFeet));
     'getEnemyEyePos': EventResult := D3VectorValue(CgeToD3(FPlayerEye));
     'enemyPositionValid': EventResult := D3FloatValue(Ord(A.HasEnemy));
     'findEnemyAI', 'closestReachableEnemyOfEntity':
@@ -5215,7 +5430,7 @@ begin
     'pushPointIntoAAS': EventResult := D3VectorValue(Args[0].V);
     'getReachableEntityPosition':
       if Args[0].E = PlayerHandle then
-        EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)))
+        EventResult := D3VectorValue(CgeToD3(PlayerFeet))
       else
       if HandleEntity(Args[0].E) <> nil then
         EventResult := D3VectorValue(HandleEntity(Args[0].E).Origin);
@@ -5232,7 +5447,7 @@ begin
             Pos := CgeToD3(A.Model.Holder.Translation)
           else
           if Args[0].E = PlayerHandle then
-            Pos := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0))
+            Pos := CgeToD3(PlayerFeet)
           else
           if HandleEntity(Args[0].E) <> nil then
             Pos := HandleEntity(Args[0].E).Origin
@@ -5243,7 +5458,7 @@ begin
           else
             I := 1;
           if Args[I].E = PlayerHandle then
-            D := (CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)) - Pos).Length
+            D := (CgeToD3(PlayerFeet) - Pos).Length
           else
           if HandleEntity(Args[I].E) <> nil then
             D := (HandleEntity(Args[I].E).Origin - Pos).Length
@@ -5261,7 +5476,7 @@ begin
     'findActorsInBounds':
       begin
         { the player, when its feet are in the box (Doom 3 coordinates) }
-        Pos := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+        Pos := CgeToD3(PlayerFeet);
         if not PlayerDead and (Pos.X >= Args[0].V.X) and (Pos.Y >= Args[0].V.Y) and (Pos.Z >= Args[0].V.Z) and
            (Pos.X <= Args[1].V.X) and (Pos.Y <= Args[1].V.Y) and (Pos.Z <= Args[1].V.Z) then
           EventResult := D3EntityValue(PlayerHandle)
@@ -5500,7 +5715,7 @@ begin
         A.Moving := False;
       end else
       begin
-        A.Goal := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+        A.Goal := CgeToD3(PlayerFeet);
         A.Moving := True;
       end;
     end;
@@ -5805,10 +6020,10 @@ begin
   if A.Monster <> nil then
     Height := A.Monster.Height;
   Pos := CgeToD3(A.Model.Holder.Translation);
-  Feet := CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0));
+  Feet := CgeToD3(PlayerFeet);
   if (Abs(Feet.X - Pos.X) > A.MeleeRange + PlayerRadius) or
      (Abs(Feet.Y - Pos.Y) > A.MeleeRange + PlayerRadius) or
-     (Feet.Z > Pos.Z + Height + 4) or (Feet.Z + 74 < Pos.Z - 4) then
+     (Feet.Z > Pos.Z + Height + 4) or (Feet.Z + PlayerBodyHeight < Pos.Z - 4) then
     Exit;
   Result := ActorCanSeePlayer(A, False);
 end;
@@ -5959,18 +6174,20 @@ end;
 procedure TD3Game.RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
   const Radius: Single; const Owner: String; const SplashDefName: String);
 const
-  { the player's box (idPlayer's bounds: 32 wide, 74 high on its feet) }
+  { the player's box (idPlayer's bounds: 32 wide, PlayerBodyHeight high
+    on its feet) }
   PlayerHalfWidth = 16;
-  PlayerHeight = 74;
 var
+  PlayerHeight: Single;
   Feet, Closest, Center, ToPlayer: TVector3;
   Dist, HitDist: Single;
   Amount: Integer;
 begin
   if (Damage <= 0) or (Radius <= 0) or PlayerDead then
     Exit;
+  PlayerHeight := PlayerBodyHeight;
   { the distance to the player's box (zero inside it) }
-  Feet := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  Feet := PlayerFeet;
   Closest := Vector3(
     EnsureRange(Position.X, Feet.X - PlayerHalfWidth, Feet.X + PlayerHalfWidth),
     EnsureRange(Position.Y, Feet.Y, Feet.Y + PlayerHeight),
@@ -6046,7 +6263,7 @@ var
   end;
 
 begin
-  Feet := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  Feet := PlayerFeet;
   for I := FProjectiles.Count - 1 downto 0 do
   begin
     P := FProjectiles[I];
@@ -7434,7 +7651,7 @@ begin
   begin
     case N of
       'getOrigin', 'getWorldOrigin':
-        EventResult := D3VectorValue(CgeToD3(FPlayerEye - Vector3(0, PlayerEyeHeight, 0)));
+        EventResult := D3VectorValue(CgeToD3(PlayerFeet));
       'getName': EventResult := D3StringValue('player1');
       'getHealth': EventResult := D3FloatValue(Health);
       else
@@ -8260,7 +8477,8 @@ begin
     FRunFraction := 1;
     Exit;
   end;
-  if PlayerRunning and PlayerMoving then
+  { holding crouch (upmove < 0) isn't running }
+  if PlayerRunning and PlayerMoving and not PlayerCrouchHeld then
   begin
     if not PowerUpActive(PowerupAdrenaline) then
       FStamina := Max(0, FStamina - SecondsPassed);

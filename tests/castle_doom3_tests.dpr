@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(87, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(92, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -121,7 +121,7 @@ var
 begin
   CheckEquals(33, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(39, Decls.DeclCount(dtEntityDef), 'entityDef count');
-  CheckEquals(6, Decls.DeclCount(dtModel), 'model decl count');
+  CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
@@ -230,7 +230,7 @@ begin
   Proc := TD3ProcFile.Create;
   try
     Check(Proc.LoadFromVfs('maps/testmap.proc'), 'load testmap.proc');
-    CheckEquals(11, Proc.ModelCount, 'proc model count');
+    CheckEquals(12, Proc.ModelCount, 'proc model count');
     CheckEquals(2, Proc.NumAreas, 'proc areas');
     CheckEquals(1, Length(Proc.Portals), 'proc portals');
     CheckEquals(1, Length(Proc.Nodes), 'proc nodes');
@@ -269,7 +269,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(59, MapFile.Entities.Count, 'entity count');
+    CheckEquals(60, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -508,7 +508,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(12, Cm.ModelCount, 'cm models (world + 9 brush entities + 2 triggers)');
+    CheckEquals(13, Cm.ModelCount, 'cm models (world + 10 brush entities + 2 triggers)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -3641,6 +3641,131 @@ begin
   end;
 end;
 
+{ Crouching (heights, rate, speed, the crawl bar), the body's crouch and
+  death anims, the gun in its hand, the dead view. }
+procedure TestCrouchAndDeath;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  Eye, P, Angles, ViewPos: TVector3;
+  RemoveMe: TRemoveType;
+  Old: Single;
+
+  { like TViewPlay: crouch, the eye moves by the change, then the game }
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Old := Game.EyeHeight;
+      Game.UpdateCrouch(1 / 60, Eye);
+      Eye := Eye + Vector3(0, Game.EyeHeight - Old, 0);
+      Game.Update(1 / 60, Eye);
+      RemoveMe := rtNone;
+      Map.Update(1 / 60, RemoveMe);
+      T := T + 1 / 60;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for crouching');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Eye := D3ToCge(Vector3(40, 80, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.5);
+    CheckNear(68, Game.EyeHeight, 'standing eye height');
+    CheckNear(74, Game.PlayerBodyHeight, 'standing: 74 high');
+
+    { crouching: the eye eases to 32 by 0.87 a frame, the feet stay }
+    Game.PlayerCrouchHeld := True;
+    Step(1 / 60);
+    Check(Game.Crouched, 'crouched');
+    CheckNear(32 + 36 * 0.87, Game.EyeHeight, 'one frame: pm_crouchrate', 0.01);
+    Step(1);
+    CheckNear(32, Game.EyeHeight, 'crouched eye height');
+    CheckNear(0, CgeToD3(Game.PlayerFeet).Z, 'the feet stay on the floor', 0.01);
+    CheckNear(38, Game.PlayerBodyHeight, 'crouched: 38 high');
+    CheckNear(80 / 140, Game.CrouchSpeedScale, 'crouch speed 80');
+    { holding crouch isn't running: no stamina used }
+    Game.PlayerRunning := True;
+    Game.PlayerMoving := True;
+    Step(1);
+    CheckNear(24, Game.Stamina, 'crouched running uses no stamina');
+    Game.PlayerRunning := False;
+    Game.PlayerMoving := False;
+
+    { under the crawl bar (x 112..128, bottom at 52) it can't stand up }
+    Eye := D3ToCge(Vector3(120, 80, 32));
+    Game.PlayerCrouchHeld := False;
+    Step(0.5);
+    Check(not Game.CanStandUp(Eye), 'no room under the bar');
+    Check(Game.Crouched, 'stays crouched under the bar');
+    CheckNear(32, Game.EyeHeight, 'eye stays low under the bar');
+    Eye := D3ToCge(Vector3(170, 80, 32));
+    Step(0.1);
+    Check(not Game.Crouched, 'out from under it: stands up');
+    Step(1);
+    CheckNear(68, Game.EyeHeight, 'standing again');
+
+    { the body: crouch anim, the gun in its hand }
+    Game.ThirdPerson := True;
+    Step(0.5);
+    Check((Game.Weapon <> nil) and (Game.Weapon.World <> nil), 'the gun has a world model');
+    Check(Game.Weapon.WorldHolder.Exists, 'the gun shows in the body''s hand');
+    CheckEquals('arm_r', Game.Weapon.AttachJoint, 'on joint_attach');
+    Check(Game.PlayerModel.JointPosition('arm_r', P), 'the body has arm_r');
+    CheckNear(P.X, Game.Weapon.WorldHolder.Translation.X, 'at the joint (x)', 0.01);
+    CheckNear(P.Y, Game.Weapon.WorldHolder.Translation.Y, 'at the joint (height)', 0.01);
+    Game.PlayerCrouchHeld := True;
+    Step(0.5);
+    CheckEquals('crouch', Game.PlayerModel.PlayingAnim, 'crouched: the crouch anim');
+    Check(Game.PlayerModel.JointPosition('body', P), 'the body joint');
+    CheckNear(18, CgeToD3(P).Z, 'crouched: the body 22 lower', 1);
+    Game.PlayerCrouchHeld := False;
+    Step(1);
+    Game.ThirdPerson := False;
+
+    { death: the eye goes down to 10 (pm_deadviewheight), the body plays
+      its death anim once and lies on the floor; pm_thirdPersonDeath backs
+      the view away from it }
+    Game.ThirdPersonDeath := True;
+    Game.God := False;
+    Game.DamagePlayer(1000);
+    Check(Game.PlayerDead, 'dead');
+    Check(Game.ThirdPersonActive, 'dead with pm_thirdPersonDeath: third person');
+    Step(2);
+    CheckNear(10, Game.EyeHeight, 'dead eye height', 0.1);
+    CheckNear(20, Game.PlayerBodyHeight, 'dead: 20 high');
+    Check(Game.PlayerModelHolder.Exists, 'the body shows dead');
+    CheckEquals('death', Game.PlayerModel.PlayingAnim, 'the death anim');
+    Check(Game.PlayerModel.JointPosition('body', P), 'the body joint dead');
+    Check(CgeToD3(P).Z < 15, 'lying on the floor');
+    Check(not Game.Weapon.WorldHolder.Exists, 'dead: the gun is gone');
+    Angles := Vector3(0, 0, 0);
+    Game.ThirdPersonView(Eye, Angles, ViewPos);
+    CheckNear(20 + 120 * 2 / 3, (CgeToD3(Eye) - CgeToD3(ViewPos)).X, 'backing away (20 + 120 * t / 3)', 0.5);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -3842,6 +3967,7 @@ begin
   TestDamageFeedback;
   TestPowerups;
   TestStaminaSkinsKnockback;
+  TestCrouchAndDeath;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

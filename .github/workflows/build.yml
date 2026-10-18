@@ -211,13 +211,20 @@ jobs:
           grep -q 'Player skin "skins/test/player_invis"' test_output/body.log || { echo "::error::invisibility should switch the body to skin_invisibility"; exit 1; }
           grep -qE 'Stamina 2[0-2]\.[0-9] of 24' test_output/body.log || { echo "::error::running 3 s should use 3 s of stamina"; exit 1; }
           grep -qE 'Knockback: thrown up 1[78]\.[0-9] units' test_output/body.log || { echo "::error::a knockback from below should throw the player up about 18.8 units"; exit 1; }
+          run_test crouch testmap "W:1,O:notarget,G:40 80 0,A:0,W:0.5,GO:1 0 1.5,S,G:40 80 0,A:0,O:crouch 1,W:0.6,GO:1 0 1,O:crouch 0,W:0.6,O:crouch,S,GO:1 0 1 crouch,W:1,O:crouch,O:pm_thirdPerson 1,O:pm_thirdPersonAngle 180,O:pm_thirdPersonRange 110,G:-40 -40 0,A:45,W:1,S,O:pm_thirdPerson 0,O:pm_thirdPersonDeath 1,O:kill,W:2,S,Q"
+          awk '/Screenshot/ { x = $0; sub(/.* eye /, "", x); split(x, p, " "); print p[1]; exit }' test_output/crouch.log | awk '{ exit !($1 < 100) }' || { echo "::error::standing, the crawl bar should stop the player"; exit 1; }
+          test "$(grep -c 'crouched yes, eye height 32.0' test_output/crouch.log)" -ge 2 || { echo "::error::the player should stay crouched under the crawl bar"; exit 1; }
+          grep -q "Player stands up" test_output/crouch.log || { echo "::error::past the crawl bar the player should stand up"; exit 1; }
+          grep -q 'Weapon weapon_test_pistol world model "models/md5/weapons/test_pistol/worldpistol.md5mesh" on joint "arm_r"' test_output/crouch.log || { echo "::error::the pistol's world model should be in the body's hand"; exit 1; }
+          grep -q "Player body plays death" test_output/crouch.log || { echo "::error::the dead body should play its death anim"; exit 1; }
+          awk '/Screenshot/ { last = $0 } END { exit !(last ~ / eye -40 -40 10[ .,]/) }' test_output/crouch.log || { echo "::error::dead, the eye should be 10 above the floor"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }
           grep -q 'Effect "1" (area 1, location "room_b")' test_output/reverb.log || { echo "::error::room B should get its reverb by area number"; exit 1; }
           grep -q "Off (s_useEAXReverb 0)" test_output/reverb.log || { echo "::error::s_useEAXReverb 0 should turn the reverb off"; exit 1; }
           ls -l test_output
-          test "$(ls test_output/*.png | wc -l)" -ge 36
+          test "$(ls test_output/*.png | wc -l)" -ge 40
 
       - name: Upload screenshots and logs
         if: always()
