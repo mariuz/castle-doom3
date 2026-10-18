@@ -40,6 +40,9 @@ type
     FQuitting: Boolean;
     { a cinematic camera has the view: the player's view to go back to }
     FInCinematic: Boolean;
+    { the camera before ApplyViewBob }
+    FBobApplied: Boolean;
+    FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
     FPlayerFov: Single;
     FPlayerFovAxis: TFieldOfViewAxis;
@@ -81,6 +84,13 @@ type
     procedure Stop; override;
     procedure Update(const SecondsPassed: Single; var HandleInput: Boolean); override;
     function Press(const Event: TInputPressRelease): Boolean; override;
+    { the view's bob, only while rendering (walk navigation moves the
+      camera without it) }
+    procedure Render; override;
+    procedure RenderOverChildren; override;
+  strict private
+    procedure ApplyViewBob;
+    procedure RemoveViewBob;
   end;
 
 var
@@ -120,6 +130,9 @@ begin
   Console.OnCommand := @HandleConsoleCommand;
   FNoclip := False;
   FShots := 0;
+  { Doom 3's view bob (TD3Game.ViewBobOffset / ViewBobAngles) instead of
+    CGE's head bobbing }
+  WalkNavigation.HeadBobbing := 0;
   if AutoTestPrefix <> '' then
   begin
     { results must not depend on the desktop mouse }
@@ -407,6 +420,54 @@ begin
   end;
 end;
 
+procedure TViewPlay.ApplyViewBob;
+var
+  Angles: TVector3;
+  D: TVector3;
+  M: TMatrix3;
+begin
+  if FBobApplied or (FGame = nil) or FInCinematic then
+    Exit;
+  FBobSavedPos := Camera.Translation;
+  FBobSavedDir := Camera.Direction;
+  FBobSavedUp := Camera.Up;
+  D := CgeToD3(Camera.Direction);
+  Angles := Vector3(D3DirPitch(D), D3DirYaw(D), 0);
+  if FGame.PlayerDead then
+    { idPlayer::GetViewPos: dead, the view tilts }
+    Angles := Vector3(-15, Angles.Y, 40)
+  else
+    Angles := Angles + FGame.ViewBobAngles;
+  if Angles.IsZero(0.0001) and FGame.ViewBobOffset.IsZero then
+    Exit;
+  M := AnglesMatrix(Angles);
+  Camera.SetView(Camera.Translation + FGame.ViewBobOffset,
+    D3ToCge(Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2])),
+    D3ToCge(Vector3(M.Data[2, 0], M.Data[2, 1], M.Data[2, 2])));
+  FBobApplied := True;
+end;
+
+procedure TViewPlay.RemoveViewBob;
+begin
+  if not FBobApplied then
+    Exit;
+  FBobApplied := False;
+  Camera.SetView(FBobSavedPos, FBobSavedDir, FBobSavedUp);
+end;
+
+procedure TViewPlay.Render;
+begin
+  inherited Render;
+  { before the children: the viewport renders with the bob }
+  ApplyViewBob;
+end;
+
+procedure TViewPlay.RenderOverChildren;
+begin
+  RemoveViewBob;
+  inherited RenderOverChildren;
+end;
+
 procedure TViewPlay.UpdateMuzzleFlash;
 var
   P, C: TVector3;
@@ -461,7 +522,7 @@ begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
-    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
+    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
@@ -529,6 +590,12 @@ begin
     if Args <> '' then
       FGame.SelectWeapon(StrToIntDef(Args, -1));
     Console.Print(Format('weapon slot %d: %s', [FGame.IdealSlot, FGame.WeaponHudText]));
+  end else
+  if Cmd = 'pm_bob' then
+  begin
+    if Args <> '' then
+      FGame.ViewBobEnabled := Args <> '0';
+    Console.Print('pm_bob ' + BoolToStr(FGame.ViewBobEnabled, '1', '0') + ' (the view bobs)');
   end else
   if Cmd = 'weapnext' then
     FGame.NextWeapon(1)

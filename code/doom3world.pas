@@ -529,6 +529,10 @@ type
     FAccelCount: Integer;
     FMuzzleFlashPos: TVector3;
     FLastPresentTime: Single;
+    { the view's bob (Doom 3 offset, angles: pitch, yaw, roll) and the last
+      landing (idPlayer's landChange, landTime) }
+    FViewBob, FViewBobAngles: TVector3;
+    FLandChange, FLandTime, FWeaponLand: Single;
     FAttackPulse: Single;
     FReloadRequested: Boolean;
     { script sounds: sound sources by entity handle, playing sounds by
@@ -693,6 +697,8 @@ type
     { The player's view direction (CGE), set by the view each frame: weapons
       aim and their view models turn with it. }
     PlayerViewDir: TVector3;
+    { pm_bob: the view bobs (the view model always does) }
+    ViewBobEnabled: Boolean;
     { The attack button is held (idPlayer: WEAPON_ATTACK). }
     Attack: Boolean;
     constructor Create(const AMap: TDoom3Map);
@@ -800,6 +806,13 @@ type
     function MuzzleFlash(out Position, Color: TVector3; out Radius: Single): Boolean;
     { The player's horizontal speed and the bob's sine (0..1), for tests }
     property PlayerSpeed: Single read FXYSpeed;
+    { The view's bob (idPlayer::GetViewPos): add the offset (CGE) to the
+      eye and the angles (Doom 3 pitch, yaw, roll) to the view angles.
+      Zero when ViewBobEnabled is false or the player is dead. }
+    function ViewBobOffset: TVector3;
+    function ViewBobAngles: TVector3;
+    { the view axis with the bob (Doom 3 rows) }
+    function BobbedViewAxis: TMatrix3;
     property BobFracSin: Single read FBobFracSin;
     function MoveableOf(const E: TD3MapEntity): TD3Moveable;
     { Throw a moveable at Velocity (Doom 3), its damage on for 2.5 s
@@ -884,6 +897,10 @@ var
   { Script objects of monsters that run their AI script (the others use the
     game's simple AI): the object or one it derives from. }
   ScriptedMonsterObjects: array of String;
+
+{ Doom 3 angles (pitch down, yaw) of a direction in Doom 3 coordinates. }
+function D3DirPitch(const D: TVector3): Single;
+function D3DirYaw(const D: TVector3): Single;
 
 implementation
 
@@ -1117,6 +1134,8 @@ begin
   FUnsupported.Sorted := True;
   Health := 100;
   FIdealSlot := -1;
+  ViewBobEnabled := True;
+  FLandTime := -1000;
 end;
 
 destructor TD3Game.Destroy;
@@ -1954,6 +1973,9 @@ begin
       W.Holder.Name := 'ViewWeapon';
       W.Holder.Collides := False;
       W.Holder.Pickable := False;
+      { Doom 3's weaponDepthHack: drawn in front of the world (depth range
+        0..0.1), so it never pokes into walls }
+      W.Holder.RenderLayer := rlFront;
       W.Holder.Add(W.View.Scene);
       { hidden until it plays an anim (idWeapon::Event_PlayAnim shows it) }
       W.Holder.Exists := False;
@@ -2096,10 +2118,12 @@ end;
 procedure TD3Game.UpdatePlayerMotion(const SecondsPassed: Single);
 const
   MinBobSpeed = 5;
+  LandDeflectTime = 0.15;
+  LandReturnTime = 0.3;
 var
   Vel, DV, Local: TVector3;
   Axis: TMatrix3;
-  BobMove: Single;
+  BobMove, Delta, Speed, F: Single;
 
   procedure LogAccel(const Dir: TVector3);
   begin
@@ -2129,6 +2153,27 @@ begin
     LogAccel(Local * (127 / 140));
   if DV.Z > 150 then
     LogAccel(Vector3(0, 0, 200));
+  { idPlayer::CrashLand: landing from a fall dips the view (delta is the
+    falling speed squared / 10000) }
+  if (FPlayerVelocity.Z < -100) and (Vel.Z > -40) then
+  begin
+    Delta := Sqr(FPlayerVelocity.Z) * 0.0001;
+    if Delta > 65 then
+      FLandChange := -32
+    else
+    if Delta > 45 then
+      FLandChange := -24
+    else
+    if Delta > 30 then
+      FLandChange := -16
+    else
+    if Delta > 7 then
+      FLandChange := -8
+    else
+      FLandChange := 0;
+    if FLandChange <> 0 then
+      FLandTime := FTime;
+  end;
   FPlayerVelocity := Vel;
   FXYSpeed := Vector2(Vel.X, Vel.Y).Length;
   { idPlayer::BobCycle: on the ground and moving }
@@ -2144,6 +2189,59 @@ begin
     FBobCycle := FBobCycle - 256 * Floor(FBobCycle / 256);
     FBobFracSin := Abs(Sin((Trunc(FBobCycle) and 127) / 127 * Pi));
   end;
+
+  { the view's bob (idPlayer::BobCycle): pitch and roll from the velocity
+    (pm_runpitch 0.002, pm_runroll 0.005) and the bob (pm_bobpitch,
+    pm_bobroll 0.002 at 200 units a second at least), the roll the other
+    way on every other step; up to 6 units up (pm_bobup 0.005); the dip
+    of a landing, 150 ms down and 300 ms back }
+  FViewBobAngles := TVector3.Zero;
+  FViewBobAngles.X := TVector3.DotProduct(Vel, Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2])) * 0.002;
+  FViewBobAngles.Z := -TVector3.DotProduct(Vel, Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2])) * 0.005;
+  Speed := Max(FXYSpeed, 200);
+  FViewBobAngles.X := FViewBobAngles.X + FBobFracSin * 0.002 * Speed;
+  if (Trunc(FBobCycle) and 128) <> 0 then
+    FViewBobAngles.Z := FViewBobAngles.Z - FBobFracSin * 0.002 * Speed
+  else
+    FViewBobAngles.Z := FViewBobAngles.Z + FBobFracSin * 0.002 * Speed;
+  FViewBob := Vector3(0, 0, Min(6, FBobFracSin * FXYSpeed * 0.005));
+  Delta := FTime - FLandTime;
+  if Delta < LandDeflectTime then
+    F := Delta / LandDeflectTime
+  else
+  if Delta < LandDeflectTime + LandReturnTime then
+    F := 1 - (Delta - LandDeflectTime) / LandReturnTime
+  else
+    F := 0;
+  FViewBob.Z := FViewBob.Z + FLandChange * F;
+  FWeaponLand := FLandChange * 0.25 * F;
+end;
+
+function TD3Game.ViewBobOffset: TVector3;
+begin
+  if ViewBobEnabled and not PlayerDead then
+    Result := D3ToCge(FViewBob)
+  else
+    Result := TVector3.Zero;
+end;
+
+function TD3Game.ViewBobAngles: TVector3;
+begin
+  if ViewBobEnabled and not PlayerDead then
+    Result := FViewBobAngles
+  else
+    Result := TVector3.Zero;
+end;
+
+function TD3Game.BobbedViewAxis: TMatrix3;
+var
+  D: TVector3;
+begin
+  if PlayerViewDir.IsZero then
+    D := Vector3(1, 0, 0)
+  else
+    D := CgeToD3(PlayerViewDir);
+  Result := AnglesMatrix(Vector3(D3DirPitch(D), D3DirYaw(D), 0) + ViewBobAngles);
 end;
 
 procedure TD3Game.PresentWeapon(const W: TD3Weapon);
@@ -2151,13 +2249,13 @@ var
   ViewAxis, Axis: TMatrix3;
   D, Origin, GunOfs, Fwd, Start: TVector3;
   Angles, Current, Lag: TVector3;
-  Scale, FracSin, Bob, T, F, Left, Amount, Dist, Tau, K: Single;
+  Scale, FracSin, T, F, Left, Amount, Dist, Tau, K: Single;
   I: Integer;
   Ctx: TD3ExprContext;
   Mat: TD3Material;
   JointPos: TVector3;
 begin
-  ViewAxis := PlayerViewAxis;
+  ViewAxis := BobbedViewAxis;
   if PlayerViewDir.IsZero then
     D := Vector3(1, 0, 0)
   else
@@ -2203,8 +2301,8 @@ begin
   { a speed sensitive idle drift }
   FracSin := (FXYSpeed + 40) * Sin(FTime) * 0.01;
   Angles := Angles + Vector3(FracSin, FracSin, FracSin);
-  Bob := Min(6, FBobFracSin * FXYSpeed * 0.005);
-  Origin := CgeToD3(FPlayerEye) + Vector3(0, 0, Bob) + D3VecMat(GunOfs, ViewAxis);
+  { at the bobbing eye; a landing drops it a quarter more }
+  Origin := CgeToD3(FPlayerEye + ViewBobOffset) + Vector3(0, 0, FWeaponLand) + D3VecMat(GunOfs, ViewAxis);
   Axis := D3MatMul(AnglesMatrix(Angles), ViewAxis);
   { muzzle kick (idWeapon::MuzzleRise) }
   Left := W.KickEndTime - FTime;
