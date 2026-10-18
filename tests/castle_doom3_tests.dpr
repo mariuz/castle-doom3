@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(94, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(97, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -119,14 +119,14 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(33, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(39, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(34, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(40, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
     'the berserk skin remaps the body');
-  CheckEquals(11, Decls.DeclCount(dtSound), 'sound shader count');
+  CheckEquals(12, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
@@ -3762,6 +3762,8 @@ begin
       its death anim once and lies on the floor; pm_thirdPersonDeath backs
       the view away from it }
     Game.ThirdPersonDeath := True;
+    { the death anim (the ragdoll is TestBrassAndRagdoll's) }
+    Game.RagdollEnabled := False;
     Game.God := False;
     Game.DamagePlayer(1000);
     Check(Game.PlayerDead, 'dead');
@@ -3777,6 +3779,109 @@ begin
     Angles := Vector3(0, 0, 0);
     Game.ThirdPersonView(Eye, Angles, ViewPos);
     CheckNear(20 + 120 * 2 / 3, (CgeToD3(Eye) - CgeToD3(ViewPos)).X, 'backing away (20 + 120 * t / 3)', 0.5);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+{ Brass (def_ejectBrass from the eject joints) and the dead body's
+  ragdoll. }
+procedure TestBrassAndRagdoll;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  Eye, P, Head, Feet: TVector3;
+  RemoveMe: TRemoveType;
+  I: Integer;
+  AllAbove: Boolean;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(1 / 60, Eye);
+      RemoveMe := rtNone;
+      Map.Update(1 / 60, RemoveMe);
+      T := T + 1 / 60;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for brass');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Eye := D3ToCge(Vector3(-20, -20, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(1.5);
+    Check(Game.Weapon <> nil, 'a weapon for brass');
+    CheckEquals('debris_test_brass', Game.Weapon.BrassDef, 'def_ejectBrass');
+
+    { from the view model's eject joint, 40 * (forward + left + up) }
+    Check(Game.EjectBrass(Game.Weapon), 'brass ejected');
+    CheckEquals(1, Game.Brass.Count, 'one casing');
+    Check(Game.Weapon.View.JointPosition('eject', P), 'the view model has an eject joint');
+    P := Game.Weapon.View.Scene.LocalToWorld(P);
+    CheckNear(0, (Game.Brass[0].Position - P).Length, 'at the view model''s eject joint', 0.01);
+    CheckNear(40, CgeToD3(Game.Brass[0].Velocity).X, 'forward 40', 0.5);
+    CheckNear(40, CgeToD3(Game.Brass[0].Velocity).Y, 'left 40', 0.5);
+    CheckNear(40, CgeToD3(Game.Brass[0].Velocity).Z, 'up 40', 0.5);
+    Step(2);
+    Check(Game.Brass[0].Resting, 'the casing lies on the floor');
+    CheckNear(0, CgeToD3(Game.Brass[0].Position).Z, 'on the floor', 1);
+    Step(2.5);
+    CheckEquals(0, Game.Brass.Count, 'gone after its fuse (4 s)');
+    { a shot ejects one (ejectBrassDelay 0) }
+    Game.AttackOnce;
+    Step(1);
+    CheckEquals(1, Game.Brass.Count, 'a shot ejects a casing');
+    { third person: from the world model's eject joint }
+    Game.ThirdPerson := True;
+    Step(0.2);
+    Check(Game.EjectBrass(Game.Weapon), 'brass in third person');
+    Check(Game.Weapon.World.JointPosition('eject', P), 'the world model has an eject joint');
+    P := Game.Weapon.World.Scene.LocalToWorld(P);
+    CheckNear(0, (Game.Brass[Game.Brass.Count - 1].Position - P).Length,
+      'at the world model''s eject joint', 0.01);
+    Game.ShowBrass := False;
+    Check(not Game.EjectBrass(Game.Weapon), 'g_showBrass 0: none');
+    Game.ShowBrass := True;
+
+    { the ragdoll: player_test has "ragdoll"; it falls over, lies on the
+      floor and settles }
+    Feet := CgeToD3(Game.PlayerFeet);
+    Game.God := False;
+    Game.DamagePlayer(1000, 'damage_test_projectile', D3ToCge(Vector3(1, 0, 0)));
+    Step(0.1);
+    Check(Game.Ragdoll, 'dead: a ragdoll');
+    Step(4);
+    Check(Game.RagdollSettled, 'the ragdoll settles');
+    Check(Game.PlayerModel.JointPosition('head', Head), 'the head joint');
+    Head := CgeToD3(Game.PlayerModel.Scene.LocalToWorld(Head));
+    Check(Head.Z < 30, 'the head is down (fell over)');
+    Check(Vector2(Head.X - Feet.X, Head.Y - Feet.Y).Length > 20, 'the head away from the feet');
+    AllAbove := True;
+    for I := 0 to High(Game.PlayerModel.Pose) do
+      if CgeToD3(Game.PlayerModel.Scene.LocalToWorld(D3ToCge(Game.PlayerModel.Pose[I].Position))).Z < -1 then
+        AllAbove := False;
+    Check(AllAbove, 'no joint under the floor');
+    Check(not Game.Weapon.WorldHolder.Exists, 'the gun is gone');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
@@ -3985,6 +4090,7 @@ begin
   TestPowerups;
   TestStaminaSkinsKnockback;
   TestCrouchAndDeath;
+  TestBrassAndRagdoll;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

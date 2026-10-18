@@ -363,6 +363,28 @@ type
     (def_damage, scaled by the speed between minDamageVelocity and
     maxDamageVelocity, once a second) while its damage is on. Doom 3
     coordinates. }
+  { A spent casing (idDebris from a weapon's def_ejectBrass): it flies
+    from the weapon's "eject" joint, bounces (bouncyness, snd_bounce) and
+    goes after its fuse. }
+  TD3Brass = class
+    Holder: TCastleTransform;
+    Scene: TCastleScene;
+    { CGE, world; Angles and AngularVelocity are Doom 3 degrees }
+    Position, Velocity: TVector3;
+    Angles, AngularVelocity: TVector3;
+    FuseEnd, Bounce, NextSound: Single;
+    BounceSound: String;
+    Resting: Boolean;
+    destructor Destroy; override;
+  end;
+
+  { A ragdoll constraint between two joints: their distance kept within
+    MinLength..MaxLength. }
+  TD3RagdollLink = record
+    A, B: Integer;
+    MinLength, MaxLength: Single;
+  end;
+
   TD3Moveable = class
     Brush: TD3BrushEntity;
     Velocity: TVector3;
@@ -449,6 +471,9 @@ type
     WorldHolder: TCastleTransform;
     World: TD3Md5Instance;
     AttachJoint: String;
+    { def_ejectBrass and ejectBrassDelay (s): brass after each launch }
+    BrassDef: String;
+    BrassDelay: Single;
     { game time when the playing anim ends (animDone), 0 for cycles }
     AnimDoneTime: Single;
     BlendFrames: Integer;
@@ -580,6 +605,20 @@ type
     { the body's crouch state (its crouch_down / crouch_up played), and a
       transition anim playing }
     FBodyCrouched, FBodyTransition: Boolean;
+    { brass, and when the current weapon ejects the next (-1: none) }
+    FBrass: specialize TObjectList<TD3Brass>;
+    FBrassDue: Single;
+    { the body's ragdoll: one particle per joint (CGE, world; verlet), the
+      links between them, the pose it started from (model space), each
+      joint's first child; settled when it stopped moving }
+    FRagdoll, FRagdollSettled: Boolean;
+    FRagPos, FRagPrev: array of TVector3;
+    FRagStart: TD3JointArray;
+    FRagChild: array of Integer;
+    FRagLinks: array of TD3RagdollLink;
+    FRagStill, FRagTime, FRagLeft: Single;
+    { the direction of the last hit's force (CGE, zero: none) }
+    FLastDamageDir: TVector3;
     { the shot whose world model flash was logged }
     FWorldFlashLogged: Single;
     { powerups' end times (game time; 0: off) }
@@ -633,6 +672,10 @@ type
     procedure UpdateStamina(const SecondsPassed: Single);
     procedure SpawnPlayerModel;
     procedure SpawnWorldWeapon(const W: TD3Weapon);
+    procedure UpdateBrass(const SecondsPassed: Single);
+    procedure StartRagdoll;
+    procedure StepRagdoll;
+    procedure UpdateRagdoll(const SecondsPassed: Single);
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
@@ -782,6 +825,11 @@ type
     ThirdPersonDeath: Boolean;
     { set by the view each frame: the crouch key is held }
     PlayerCrouchHeld: Boolean;
+    { the dead body falls as a ragdoll when the player def has "ragdoll"
+      (console ragdoll), else it plays its death anim }
+    RagdollEnabled: Boolean;
+    { brass is ejected (g_showBrass) }
+    ShowBrass: Boolean;
     { pm_thirdPersonRange, pm_thirdPersonHeight, pm_thirdPersonAngle,
       pm_thirdPersonClip }
     ThirdPersonRange, ThirdPersonHeight, ThirdPersonAngle: Single;
@@ -880,6 +928,19 @@ type
     { walking speed's multiplier for the crouched speed (pm_crouchspeed 80
       over pm_walkspeed 140), 1 standing }
     function CrouchSpeedScale: Single;
+    { idWeapon::Event_EjectBrass: a casing of the weapon's def_ejectBrass
+      from its "eject" joint (the world model's in third person, else the
+      view model's), flying 40 along the view's forward + left + up. False
+      without brass or joint. }
+    function EjectBrass(const W: TD3Weapon): Boolean;
+    property Brass: specialize TObjectList<TD3Brass> read FBrass;
+    { the dead body is a ragdoll (and it stopped moving) }
+    property Ragdoll: Boolean read FRagdoll;
+    property RagdollSettled: Boolean read FRagdollSettled;
+    { the world along a segment: whether it hits within MaxDist, how far
+      and the surface's normal (facing back along Dir) }
+    function WorldHit(const From, Dir: TVector3; const MaxDist: Single;
+      out Distance: Single; out N: TVector3): Boolean;
     { the stamina in percent (the HUD's player_stamina), -1 without }
     function StaminaPercent: Integer;
     { stamina is off: pm_stamina 0 or worldspawn's no_stamina }
@@ -1099,9 +1160,9 @@ implementation
 
 uses
   Math,
-  CastleLog, CastleUtils,
+  CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
-  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions;
+  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene;
 
 const
   MonsterWalkSpeed = 90;
@@ -1299,6 +1360,10 @@ begin
   inherited Create;
   FMap := AMap;
   FMovers := specialize TObjectList<TD3Mover>.Create(True);
+  FBrass := specialize TObjectList<TD3Brass>.Create(True);
+  FBrassDue := -1;
+  RagdollEnabled := True;
+  ShowBrass := True;
   FMonsters := specialize TObjectList<TD3Monster>.Create(True);
   FSpeakers := specialize TObjectList<TD3Speaker>.Create(True);
   FSounds := specialize TObjectDictionary<String, TCastleSound>.Create([doOwnsValues]);
@@ -1346,6 +1411,7 @@ destructor TD3Game.Destroy;
 begin
   Clear;
   FMovers.Free;
+  FBrass.Free;
   FMonsters.Free;
   FSpeakers.Free;
   FSounds.Free;
@@ -1388,6 +1454,9 @@ begin
   FLocations := nil;
   FCombatNodes.Clear;
   FMoveables.Clear;
+  FBrass.Clear;
+  FBrassDue := -1;
+  FRagdoll := False;
   FItems.Clear;
   FMovers.Clear;
   FMonsters.Clear;
@@ -1802,6 +1871,7 @@ begin
   FStamina := StaminaMax;
   FRunFraction := 0;
   FCrouched := False;
+  FLastDamageDir := TVector3.Zero;
   FBodyCrouched := False;
   FBodyTransition := False;
   FWorldFlashLogged := -1000;
@@ -2196,6 +2266,8 @@ begin
   W.FlashRadius := StrToFloatDef(W.Def.Values['flashRadius'], 0, DefaultFormatSettings);
   W.FlashTime := StrToFloatDef(W.Def.Values['flashTime'], 0.25, DefaultFormatSettings);
   W.FlashStart := -1000;
+  W.BrassDef := W.Def.Values['def_ejectBrass'];
+  W.BrassDelay := StrToFloatDef(W.Def.Values['ejectBrassDelay'], 0, DefaultFormatSettings) / 1000;
   W.AngleOffsetAverages := StrToFloatDef(W.Def.Values['weaponAngleOffsetAverages'], 10, DefaultFormatSettings);
   W.AngleOffsetScale := StrToFloatDef(W.Def.Values['weaponAngleOffsetScale'], 0.25, DefaultFormatSettings);
   W.AngleOffsetMax := StrToFloatDef(W.Def.Values['weaponAngleOffsetMax'], 10, DefaultFormatSettings);
@@ -2879,7 +2951,8 @@ begin
     'getLightParm': EventResult := D3FloatValue(1);
     'getName': EventResult := D3StringValue(W.DefName);
     'createProjectile', 'getWorldModel': EventResult := D3EntityValue(0);
-    'flashlight', 'ejectBrass', 'allowDrop', 'netReload', 'netEndReload', 'setSkin',
+    'ejectBrass': EjectBrass(W);
+    'flashlight', 'allowDrop', 'netReload', 'netEndReload', 'setSkin',
     'setLightParm', 'setLightParms', 'setShaderParm', 'setShaderParms', 'setColor':
       ; { no effect here yet }
     'hide':
@@ -2993,6 +3066,9 @@ begin
     W.KickEndTime := FTime;
   W.KickEndTime := Min(W.KickEndTime + W.KickTime, FTime + W.KickMaxTime);
   W.FlashStart := FTime;
+  { idWeapon::Event_LaunchProjectiles: brass after ejectBrassDelay }
+  if W.BrassDef <> '' then
+    FBrassDue := FTime + W.BrassDelay;
   Def := Decls.EntityDef(W.ProjectileDef);
   Speed := 1000;
   if Def <> nil then
@@ -4409,6 +4485,7 @@ begin
   UpdateLightFades;
   UpdateAnimated;
   UpdateProjectiles(SecondsPassed);
+  UpdateBrass(SecondsPassed);
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
@@ -4420,6 +4497,14 @@ begin
   { after its script: a shot of this frame shows its flash now }
   UpdateWeaponView(SecondsPassed);
   UpdatePlayerModel(SecondsPassed);
+  { brass due after a launch (ejectBrassDelay), from where the weapon is
+    now }
+  if (FBrassDue >= 0) and (FTime >= FBrassDue) then
+  begin
+    FBrassDue := -1;
+    if FWeapon <> nil then
+      EjectBrass(FWeapon);
+  end;
 end;
 
 procedure TD3Game.SpawnPlayerModel;
@@ -4488,11 +4573,25 @@ begin
     FBodyTransition := False;
     Exit;
   end;
+  { a ragdoll moves on its own: the body stays where it fell }
+  if FRagdoll then
+  begin
+    UpdateRagdoll(SecondsPassed);
+    UpdateWorldWeapon;
+    Exit;
+  end;
   FPlayerHolder.Translation := PlayerFeet;
   SetD3Rotation(FPlayerHolder, AnglesMatrix(Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0)));
   { the legs' anim by the speed (idPlayer's legs states: run over the
     walking speed, walk, idle; crouched crouch_walk, crouch); dead the
     death anim once, holding its last frame (Doom 3 has a ragdoll) }
+  if PlayerDead and RagdollEnabled and (FPlayerDef <> nil) and (FPlayerDef.Values['ragdoll'] <> '') then
+  begin
+    { idPlayer::Killed: StartRagdoll }
+    StartRagdoll;
+    UpdateRagdoll(SecondsPassed);
+    Exit;
+  end;
   if PlayerDead then
   begin
     if (FPlayerAnim <> 'death') and FPlayerModel.PlayAnim('death', False) then
@@ -4538,6 +4637,381 @@ begin
   end;
   FPlayerModel.Update(SecondsPassed);
   UpdateWorldWeapon;
+end;
+
+destructor TD3Brass.Destroy;
+begin
+  if (Scene <> nil) and (Holder <> nil) then
+    Holder.Remove(Scene);
+  FreeAndNil(Scene);
+  FreeAndNil(Holder);
+  inherited Destroy;
+end;
+
+function TD3Game.WorldHit(const From, Dir: TVector3; const MaxDist: Single;
+  out Distance: Single; out N: TVector3): Boolean;
+var
+  R: TRayCollision;
+  Node: TRayCollisionNode;
+begin
+  Result := False;
+  Distance := MaxDist;
+  N := -Dir;
+  R := FMap.World.WorldRay(From, Dir);
+  if R = nil then
+    Exit;
+  try
+    Distance := R.Distance;
+    Result := Distance <= MaxDist;
+    if Result and R.Info(Node) and (Node.Triangle <> nil) and (Node.Item <> nil) then
+    begin
+      N := Node.Item.LocalToWorldDirection(Node.Triangle^.SceneSpace.Normal);
+      if N.IsZero then
+        N := -Dir
+      else
+      begin
+        N := N.Normalize;
+        if TVector3.DotProduct(N, Dir) > 0 then
+          N := -N;
+      end;
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+function TD3Game.EjectBrass(const W: TD3Weapon): Boolean;
+const
+  { idDebris' at most (older casings go first) }
+  MaxBrass = 32;
+var
+  Def: TStringList;
+  Model: TD3StaticModel;
+  Joint, Fwd, Left, Up: TVector3;
+  Axis: TMatrix3;
+  Source: String;
+  B: TD3Brass;
+begin
+  Result := False;
+  if (W = nil) or (W.BrassDef = '') or not ShowBrass or PlayerDead then
+    Exit;
+  { the world model's eject joint in third person (ejectJointWorld), else
+    the view model's (ejectJointView); none: no brass }
+  if ThirdPersonActive and (W.World <> nil) and W.WorldHolder.Exists and
+     W.World.JointPosition('eject', Joint) then
+  begin
+    Joint := W.World.Scene.LocalToWorld(Joint);
+    Source := 'world';
+  end else
+  if (W.View <> nil) and W.View.JointPosition('eject', Joint) then
+  begin
+    Joint := W.View.Scene.LocalToWorld(Joint);
+    Source := 'view';
+  end else
+    Exit;
+  Def := Decls.EntityDef(W.BrassDef);
+  if Def = nil then
+    Exit;
+  Model := nil;
+  if IsStaticModelPath(Def.Values['model']) then
+    Model := StaticModels.Model(Def.Values['model']);
+  if Model = nil then
+    Exit;
+  B := TD3Brass.Create;
+  B.Holder := TCastleTransform.Create(nil);
+  B.Holder.SetTransient;
+  B.Holder.Collides := False;
+  B.Holder.Pickable := False;
+  B.Scene := TD3Scene.Create(nil);
+  B.Scene.SetTransient;
+  B.Scene.Load(Model.BuildNode(Def.Values['skin'], nil), True);
+  B.Scene.Collides := False;
+  B.Scene.Pickable := False;
+  B.Scene.CastShadows := False;
+  B.Holder.Add(B.Scene);
+  FMap.Add(B.Holder);
+  { idWeapon::Event_EjectBrass: 40 * (forward + left + up) of the view,
+    spinning at random (idDebris: fuse, bouncyness, snd_bounce) }
+  Axis := PlayerViewAxis;
+  Fwd := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);
+  Left := Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);
+  Up := Vector3(Axis.Data[2, 0], Axis.Data[2, 1], Axis.Data[2, 2]);
+  B.Position := Joint;
+  B.Velocity := D3ToCge((Fwd + Left + Up) * 40) + D3ToCge(FPlayerVelocity);
+  B.Angles := Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0);
+  B.AngularVelocity := Vector3(RandomFloatRange(-1, 1), RandomFloatRange(-1, 1),
+    RandomFloatRange(-1, 1)) * RadToDeg(10);
+  B.FuseEnd := FTime + StrToFloatDef(Def.Values['fuse'], 3, DefaultFormatSettings);
+  B.Bounce := StrToFloatDef(Def.Values['bouncyness'], 0.6, DefaultFormatSettings);
+  B.BounceSound := Def.Values['snd_bounce'];
+  B.Holder.Translation := B.Position;
+  SetD3Rotation(B.Holder, AnglesMatrix(B.Angles));
+  if FBrass.Count >= MaxBrass then
+    FBrass.Delete(0);
+  FBrass.Add(B);
+  WritelnLog('Doom3World', 'Brass of %s from the %s model at %s', [W.DefName, Source,
+    CgeToD3(Joint).ToString]);
+  Result := True;
+end;
+
+procedure TD3Game.UpdateBrass(const SecondsPassed: Single);
+const
+  Gravity = 1066;
+var
+  I: Integer;
+  B: TD3Brass;
+  Step, Dir, N, V: TVector3;
+  Len, Dist, Vn: Single;
+begin
+  for I := FBrass.Count - 1 downto 0 do
+  begin
+    B := FBrass[I];
+    if FTime >= B.FuseEnd then
+    begin
+      FBrass.Delete(I);
+      Continue;
+    end;
+    if B.Resting or (SecondsPassed <= 0) then
+      Continue;
+    V := B.Velocity - Vector3(0, Gravity * SecondsPassed, 0);
+    Step := V * SecondsPassed;
+    Len := Step.Length;
+    if Len < 0.0001 then
+      Continue;
+    Dir := Step / Len;
+    if WorldHit(B.Position, Dir, Len + 0.5, Dist, N) then
+    begin
+      { bounce: the normal part back times bouncyness, the rest slowed }
+      B.Position := B.Position + Dir * Max(0, Dist - 0.5);
+      Vn := TVector3.DotProduct(V, N);
+      V := (V - N * Vn) * 0.7 - N * (Vn * B.Bounce);
+      if (Abs(Vn) > 60) and (B.BounceSound <> '') and (FTime >= B.NextSound) then
+      begin
+        PlaySoundAt(B.BounceSound, B.Position);
+        B.NextSound := FTime + 0.1;
+      end;
+      { on a floor, slow: it lies there }
+      if (N.Y > 0.7) and (V.Length < 40) then
+      begin
+        B.Resting := True;
+        V := TVector3.Zero;
+        B.Angles := Vector3(0, B.Angles.Y, 90);
+        WritelnLog('Doom3World', 'Brass lands at %s', [CgeToD3(B.Position).ToString]);
+      end;
+    end else
+      B.Position := B.Position + Step;
+    B.Velocity := V;
+    if not B.Resting then
+      B.Angles := B.Angles + B.AngularVelocity * SecondsPassed;
+    B.Holder.Translation := B.Position;
+    SetD3Rotation(B.Holder, AnglesMatrix(B.Angles));
+  end;
+end;
+
+function QuatFromTo(const A, B: TVector3): TQuaternion;
+var
+  D: Single;
+  Axis: TVector3;
+begin
+  { the shortest arc turning unit A to unit B }
+  D := TVector3.DotProduct(A, B);
+  if D < -0.9999 then
+  begin
+    Axis := TVector3.CrossProduct(A, Vector3(1, 0, 0));
+    if Axis.Length < 0.01 then
+      Axis := TVector3.CrossProduct(A, Vector3(0, 1, 0));
+    Result.Data.Vector := Axis.Normalize;
+    Result.Data.Real := 0;
+    Exit;
+  end;
+  Result.Data.Vector := TVector3.CrossProduct(A, B);
+  Result.Data.Real := 1 + D;
+  Result := QuatNormalize(Result);
+end;
+
+procedure TD3Game.StartRagdoll;
+var
+  Pose: TD3JointArray;
+  I, J, N: Integer;
+  Feet, Push, Back, V: TVector3;
+  Height: Single;
+
+  procedure Link(const A, B: Integer; const MinScale, MaxScale: Single);
+  var
+    L: TD3RagdollLink;
+    D: Single;
+  begin
+    D := (FRagPos[A] - FRagPos[B]).Length;
+    L.A := A;
+    L.B := B;
+    L.MinLength := D * MinScale;
+    L.MaxLength := D * MaxScale;
+    FRagLinks := Concat(FRagLinks, [L]);
+  end;
+
+begin
+  { Doom 3 starts the player's articulated figure (its "ragdoll" af)
+    from the pose; here every joint is a particle, linked to its parent
+    (rigid), its siblings (a little give) and its grandparent (it can
+    bend, not stretch) }
+  Pose := Copy(FPlayerModel.Pose);
+  N := Length(Pose);
+  FRagStart := Pose;
+  SetLength(FRagPos, N);
+  SetLength(FRagPrev, N);
+  SetLength(FRagChild, N);
+  FRagLinks := nil;
+  for I := 0 to N - 1 do
+  begin
+    FRagPos[I] := FPlayerModel.Scene.LocalToWorld(D3ToCge(Pose[I].Position));
+    FRagChild[I] := -1;
+  end;
+  for I := N - 1 downto 0 do
+    if Pose[I].Parent >= 0 then
+      FRagChild[Pose[I].Parent] := I;
+  for I := 0 to N - 1 do
+  begin
+    if Pose[I].Parent >= 0 then
+    begin
+      Link(I, Pose[I].Parent, 1, 1);
+      if Pose[Pose[I].Parent].Parent >= 0 then
+        Link(I, Pose[Pose[I].Parent].Parent, 0.6, 1);
+    end;
+    for J := I + 1 to N - 1 do
+      if (Pose[J].Parent = Pose[I].Parent) and (Pose[I].Parent >= 0) then
+        Link(I, J, 0.8, 1.2);
+  end;
+  { the start velocity: the player's, the last hit's push, and a tip
+    backwards growing with the height (it falls over, not in a heap) }
+  Feet := PlayerFeet;
+  Push := FLastDamageDir * 150;
+  Back := -PlayerViewDir;
+  Back.Y := 0;
+  if not Back.IsZero then
+    Back := Back.Normalize;
+  for I := 0 to N - 1 do
+  begin
+    Height := EnsureRange((FRagPos[I].Y - Feet.Y) / 74, 0, 1.2);
+    V := D3ToCge(FPlayerVelocity) + Push * Height + Back * (60 * Height);
+    FRagPrev[I] := FRagPos[I] - V / 60;
+  end;
+  FRagdoll := True;
+  FRagdollSettled := False;
+  FRagStill := 0;
+  FRagTime := 0;
+  FRagLeft := 0;
+  WritelnLog('Doom3World', 'Player body ragdoll: %d joints, %d links', [N, Length(FRagLinks)]);
+end;
+
+procedure TD3Game.StepRagdoll;
+const
+  Dt = 1 / 60;
+  Gravity = 1066;
+  Radius = 3;
+  Iterations = 8;
+var
+  I, K: Integer;
+  Old: array of TVector3;
+  D, Corr, Move, Dir, N: TVector3;
+  L, Target, Dist, MaxMove: Single;
+begin
+  SetLength(Old, Length(FRagPos));
+  for I := 0 to High(FRagPos) do
+  begin
+    Old[I] := FRagPos[I];
+    D := (FRagPos[I] - FRagPrev[I]) * 0.99;
+    FRagPrev[I] := FRagPos[I];
+    FRagPos[I] := FRagPos[I] + D - Vector3(0, Gravity * Dt * Dt, 0);
+  end;
+  for K := 1 to Iterations do
+    for I := 0 to High(FRagLinks) do
+    begin
+      D := FRagPos[FRagLinks[I].B] - FRagPos[FRagLinks[I].A];
+      L := D.Length;
+      if L < 0.0001 then
+        Continue;
+      Target := EnsureRange(L, FRagLinks[I].MinLength, FRagLinks[I].MaxLength);
+      if Target = L then
+        Continue;
+      Corr := D * ((L - Target) / L * 0.5);
+      FRagPos[FRagLinks[I].A] := FRagPos[FRagLinks[I].A] + Corr;
+      FRagPos[FRagLinks[I].B] := FRagPos[FRagLinks[I].B] - Corr;
+    end;
+  { the world stops a joint where it hits (no sliding: it lies still) }
+  MaxMove := 0;
+  for I := 0 to High(FRagPos) do
+  begin
+    Move := FRagPos[I] - Old[I];
+    L := Move.Length;
+    if L > 0.0001 then
+    begin
+      Dir := Move / L;
+      if WorldHit(Old[I], Dir, L + Radius, Dist, N) then
+      begin
+        FRagPos[I] := Old[I] + Dir * Max(0, Dist - Radius);
+        FRagPrev[I] := FRagPos[I];
+      end;
+    end;
+    MaxMove := Max(MaxMove, (FRagPos[I] - Old[I]).Length);
+  end;
+  { settled after half a second of (almost) no motion }
+  if MaxMove < 0.05 then
+    FRagStill := FRagStill + Dt
+  else
+    FRagStill := 0;
+  FRagTime := FRagTime + Dt;
+  if (FRagStill > 0.5) or (FRagTime > 10) then
+  begin
+    FRagdollSettled := True;
+    WritelnLog('Doom3World', 'Player body ragdoll settled after %.1f s', [FRagTime]);
+  end;
+end;
+
+procedure TD3Game.UpdateRagdoll(const SecondsPassed: Single);
+var
+  Pose: TD3JointArray;
+  I, C: Integer;
+  Local: array of TVector3;
+  R: array of TQuaternion;
+  A, B: TVector3;
+begin
+  if FRagdollSettled then
+    Exit;
+  { Doom 3's 60 Hz }
+  FRagLeft := FRagLeft + SecondsPassed;
+  while (FRagLeft >= 1 / 60) and not FRagdollSettled do
+  begin
+    FRagLeft := FRagLeft - 1 / 60;
+    StepRagdoll;
+  end;
+  { back to the pose: each joint at its particle (model space), turned by
+    the arc from its first child's start direction to its current one
+    (joints without children turn with their parent) }
+  Pose := Copy(FRagStart);
+  SetLength(Local, Length(Pose));
+  SetLength(R, Length(Pose));
+  for I := 0 to High(Pose) do
+    Local[I] := CgeToD3(FPlayerModel.Scene.WorldToLocal(FRagPos[I]));
+  for I := 0 to High(Pose) do
+  begin
+    C := FRagChild[I];
+    R[I] := Quaternion(Vector4(0, 0, 0, 1));
+    if C >= 0 then
+    begin
+      A := FRagStart[C].Position - FRagStart[I].Position;
+      B := Local[C] - Local[I];
+      if (A.Length > 0.01) and (B.Length > 0.01) then
+        R[I] := QuatFromTo(A.Normalize, B.Normalize)
+      else
+      if Pose[I].Parent >= 0 then
+        R[I] := R[Pose[I].Parent];
+    end else
+    if Pose[I].Parent >= 0 then
+      R[I] := R[Pose[I].Parent];
+    Pose[I].Position := Local[I];
+    Pose[I].Orientation := QuatNormalize(QuatMultiply(R[I], FRagStart[I].Orientation));
+  end;
+  FPlayerModel.SetPose(Pose);
 end;
 
 procedure TD3Game.SpawnWorldWeapon(const W: TD3Weapon);
@@ -6291,39 +6765,6 @@ var
     if (P.HeldBy <> nil) and (P.HeldBy.Missile = P) then
       P.HeldBy.Missile := nil;
     FProjectiles.Delete(I);
-  end;
-
-  { the world along the step: distance and surface normal (facing the
-    projectile) }
-  function WorldHit(const From, Dir: TVector3; const MaxDist: Single;
-    out Distance: Single; out N: TVector3): Boolean;
-  var
-    R: TRayCollision;
-    Node: TRayCollisionNode;
-  begin
-    Result := False;
-    N := -Dir;
-    R := FMap.World.WorldRay(From, Dir);
-    if R = nil then
-      Exit;
-    try
-      Distance := R.Distance;
-      Result := Distance <= MaxDist;
-      if Result and R.Info(Node) and (Node.Triangle <> nil) and (Node.Item <> nil) then
-      begin
-        N := Node.Item.LocalToWorldDirection(Node.Triangle^.SceneSpace.Normal);
-        if N.IsZero then
-          N := -Dir
-        else
-        begin
-          N := N.Normalize;
-          if TVector3.DotProduct(N, Dir) > 0 then
-            N := -N;
-        end;
-      end;
-    finally
-      R.Free;
-    end;
   end;
 
 begin
@@ -8229,6 +8670,8 @@ begin
   end;
   if FTime >= FLastDamageTime + ImpulseDelay then
     FLastDamageTime := FTime;
+  if not Direction.IsZero then
+    FLastDamageDir := Direction.Normalize;
 
   { knockback (idPlayer::Damage): the def's "knockback" (20 by default)
     pushes along the force, g_knockback 1000 * knockback / 200 units a

@@ -206,6 +206,9 @@ type
     function ShadowHullCount: Integer;
     function AnimFinished: Boolean;
     procedure Update(const SecondsPassed: Single);
+    { Show a pose of the model's joints (model space), holding it (a
+      ragdoll's): the animation stops. }
+    procedure SetPose(const APose: TD3JointArray);
     { Show one frame (1 = the first) of an animation, holding it
       (idAnimator::SetFrame). False if there's no such animation. }
     function SetFrame(const AnimName: String; const Frame: Integer): Boolean;
@@ -255,6 +258,7 @@ function QuatNlerp(const A, B: TQuaternion; const T: Single): TQuaternion;
 function QuatFromAngles(const Pitch, Yaw, Roll: Single): TQuaternion;
 function QuatMultiply(const A, B: TQuaternion): TQuaternion;
 function QuatConjugate(const Q: TQuaternion): TQuaternion;
+function QuatNormalize(const Q: TQuaternion): TQuaternion;
 
 { The transformation of a joint's space, in CGE coordinates. }
 function JointMatrix(const Joint: TD3Joint): TMatrix4;
@@ -1106,6 +1110,15 @@ begin
   FShown := Value;
   if FShown and FSkinPending then
     ApplyPose;
+end;
+
+procedure TD3Md5Instance.SetPose(const APose: TD3JointArray);
+begin
+  if Length(APose) <> Length(FPose) then
+    Exit;
+  Paused := True;
+  FPose := Copy(APose);
+  ApplyPose;
 end;
 
 function TD3Md5Instance.Pose: TD3JointArray;
