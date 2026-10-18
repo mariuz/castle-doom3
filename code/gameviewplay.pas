@@ -42,6 +42,8 @@ type
     FInCinematic: Boolean;
     { the camera before ApplyViewBob }
     FBobApplied: Boolean;
+    { seconds walk navigation has been falling (Doom 3's falling speed) }
+    FFallTime: Single;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
     FPlayerFov: Single;
@@ -68,6 +70,10 @@ type
     { the weapon's muzzle flash light (its def's flashColor, flashRadius,
       flashTime), else the built-in pistol's }
     procedure UpdateMuzzleFlash;
+    { the HUD's tunnel vision and blood blobs from the game's damage }
+    procedure UpdateDamageView;
+    { walk navigation falls at Doom 3's speed (TD3Game.FallSpeed) }
+    procedure UpdateFallSpeed(const SecondsPassed: Single);
     procedure SetFlashlight(const Value: Boolean);
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
@@ -104,7 +110,7 @@ uses
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
   Doom3Sampler,
   CastleShapes,
-  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, GameViewMenu;
+  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu;
 
 constructor TViewPlay.Create(AOwner: TComponent);
 begin
@@ -470,6 +476,53 @@ procedure TViewPlay.RenderOverChildren;
 begin
   RemoveViewBob;
   inherited RenderOverChildren;
+end;
+
+procedure TViewPlay.UpdateFallSpeed(const SecondsPassed: Single);
+begin
+  { CGE's walk navigation falls at FallSpeedStart times MoveSpeed, growing
+    exponentially by FallSpeedIncrease; Doom 3's speed grows linearly
+    (gravity 1066). FallSpeedStart is read when a fall starts, so Falling
+    is reset every frame to take the speed for the next one. Navigation
+    updates before the view: its Falling says whether it fell this frame. }
+  if WalkNavigation.Falling then
+    FFallTime := FFallTime + SecondsPassed
+  else
+    FFallTime := 0;
+  WalkNavigation.FallSpeedIncrease := 1;
+  WalkNavigation.FallSpeedStart := FGame.FallSpeed(FFallTime + SecondsPassed * 0.5) /
+    (WalkNavigation.MoveSpeed * WalkNavigation.MoveVerticalSpeed);
+  WalkNavigation.Falling := False;
+end;
+
+procedure TViewPlay.UpdateDamageView;
+var
+  Blobs: specialize TArray<TD3ScreenBlob>;
+  I: Integer;
+  Mat: TD3Material;
+  ImageName: String;
+begin
+  Hud.DamageAge := FGame.SinceDamage;
+  Blobs := FGame.ScreenBlobs;
+  SetLength(Hud.Blobs, 0);
+  for I := 0 to High(Blobs) do
+  begin
+    { the blob material's image (its first plain stage, else its diffuse map) }
+    Mat := Decls.Material(Blobs[I].Material);
+    ImageName := Mat.StageImage;
+    if ImageName = '' then
+      ImageName := Mat.DiffuseImage;
+    if ImageName = '' then
+      Continue;
+    SetLength(Hud.Blobs, Length(Hud.Blobs) + 1);
+    Hud.Blobs[High(Hud.Blobs)].ImageUrl := ImageProgramUrl(ImageName, ikColor);
+    Hud.Blobs[High(Hud.Blobs)].X := Blobs[I].X;
+    Hud.Blobs[High(Hud.Blobs)].Y := Blobs[I].Y;
+    Hud.Blobs[High(Hud.Blobs)].W := Blobs[I].W;
+    Hud.Blobs[High(Hud.Blobs)].H := Blobs[I].H;
+    Hud.Blobs[High(Hud.Blobs)].Alpha := EnsureRange((Blobs[I].Finish - FGame.Time) /
+      Max(0.001, Blobs[I].Finish - Blobs[I].Start), 0, 1);
+  end;
 end;
 
 procedure TViewPlay.UpdateMuzzleFlash;
@@ -1097,6 +1150,7 @@ begin
   FGame.PlayerViewDir := Camera.Direction;
   FGame.PlayerJumping := WalkNavigation.IsJumping;
   FGame.PlayerFlying := FNoclip;
+  UpdateFallSpeed(SecondsPassed);
 
   { during cinematics the player stays where the camera was }
   if FInCinematic then
@@ -1111,6 +1165,7 @@ begin
   Hud.Health := FGame.Health;
   Hud.Armor := FGame.Armor;
   Hud.Dead := FGame.PlayerDead;
+  UpdateDamageView;
   Hud.FlashlightOn := Flashlight.Exists;
   Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
 

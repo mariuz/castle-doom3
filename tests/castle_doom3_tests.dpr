@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(75, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(80, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -119,10 +119,10 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(28, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(29, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(37, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(5, Decls.DeclCount(dtModel), 'model decl count');
-  CheckEquals(5, Decls.DeclCount(dtSound), 'sound shader count');
+  CheckEquals(9, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
@@ -3224,6 +3224,110 @@ begin
   end;
 end;
 
+procedure TestDamageFeedback;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  A: TD3Actor;
+  M: TD3Monster;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  I: Integer;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  CheckNear(120, TD3Game.FallSpeed(0), 'falling starts at 120 units a second');
+  CheckNear(533, TD3Game.FallSpeed(0.5), 'Doom 3''s gravity: 1066 * 0.5 after half a second');
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for damage feedback');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(1);
+    Check(Game.SinceDamage > 100, 'not hurt yet');
+    Check(Length(Game.ScreenBlobs) = 0, 'no blobs yet');
+
+    { a hit from the front with damage_test_melee: pain, a kick, a blob }
+    Game.DamagePlayer(7, 'damage_test_melee', D3ToCge(Vector3(-1, 0, 0)));
+    CheckEquals(93, Game.Health, 'hurt by 7');
+    CheckEquals('snd_pain_small', Game.LastPlayerSound, 'above 75 health: snd_pain_small');
+    CheckEquals(1, Length(Game.ScreenBlobs), 'a blob (blob_time, mtr_blob)');
+    CheckEquals('textures/test/blood_blob', Game.ScreenBlobs[0].Material, 'the blob''s material');
+    Check(Abs(Game.ViewBobAngles.X) > 5, Format('the view kicks (pitch %.1f)', [Game.ViewBobAngles.X]));
+    CheckNear(0, Game.SinceDamage, 'just hurt');
+    { the shotgun's pellets: hits within 0.15 s make no new effects, nor
+      a new cry within pain_delay }
+    Game.LastPlayerSound := '';
+    Game.DamagePlayer(7, 'damage_test_melee', D3ToCge(Vector3(-1, 0, 0)));
+    CheckEquals(1, Length(Game.ScreenBlobs), 'no second blob at once');
+    CheckEquals('', Game.LastPlayerSound, 'no cry within pain_delay');
+    Step(0.6);
+    CheckEquals(0, Length(Game.ScreenBlobs), 'the blob is gone after blob_time');
+    CheckNear(0, Game.ViewBobAngles.Length, 'the kick is over after kick_time', 0.01);
+    { cries by the health left }
+    Game.Health := 60;
+    Game.DamagePlayer(5);
+    CheckEquals('snd_pain_medium', Game.LastPlayerSound, 'above 50: snd_pain_medium');
+    Step(0.6);
+    Game.Health := 40;
+    Game.DamagePlayer(5);
+    CheckEquals('snd_pain_large', Game.LastPlayerSound, 'above 25: snd_pain_large');
+    Step(0.6);
+    Game.DamagePlayer(20);
+    CheckEquals('snd_pain_huge', Game.LastPlayerSound, 'below 25: snd_pain_huge');
+    Step(0.6);
+    { armor takes a third and clanks }
+    Game.Health := 100;
+    Game.Armor := 30;
+    Game.DamagePlayer(9);
+    CheckEquals(27, Game.Armor, 'armor absorbed 3');
+    { the cry comes after the armor's sound }
+    Check(Game.LastPlayerSound = 'snd_pain_small', 'then the cry');
+    Game.Armor := 0;
+    Step(0.6);
+    { a damaging fall: the landing sound, no cry }
+    Game.LastPlayerSound := '';
+    for I := 1 to 8 do
+    begin
+      Eye := Eye - Vector3(0, 25, 0);
+      Step(0.05);
+    end;
+    Step(0.1);
+    CheckEquals('snd_land_hard', Game.LastPlayerSound, 'a hard landing sounds, no pain cry');
+    { death }
+    Step(1);
+    Game.DamagePlayer(1000);
+    CheckEquals('snd_death', Game.LastPlayerSound, 'snd_death');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestSplashDamage;
 var
   World: TCastleRootTransform;
@@ -3422,6 +3526,7 @@ begin
   TestWeapons;
   TestWeaponPresentation;
   TestPlayerMotion;
+  TestDamageFeedback;
   TestAas;
   TestAasChase;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

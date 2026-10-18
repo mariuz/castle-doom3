@@ -58,7 +58,7 @@ It reads Doom 3's own file formats at runtime: PK4 archives, `.proc` render geom
 | Monsters (`monster_*` entityDefs with md5 models) | a tiny idAI: sight checks with `WorldSegmentCollision`, chase with wall sliding, floor following with `WorldRayCast`, melee, death |
 | HUD, console, menu | `TDoom3Hud`, `TDoom3Console` (registered components), a map list from the PK4s |
 
-The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with scrolling screens, pulsing ceiling panels, a skylight onto a starry sky, a GUI door panel and a status screen, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, ten lights (point, projected, ambient, a projected window pattern; flickering, pulsing and strobing light shaders), a looping hum, two animated md5 creatures that chase you, and items to pick up (health, armor, ammo, a shotgun, a key); the player starts with fists and a pistol, scripted weapons with view models.
+The bundled test level has two rooms joined by a portal and an auto-opening door, stairs to a balcony, a crate stack, LWO barrels, ASE computer terminals with scrolling screens, pulsing ceiling panels, a skylight onto a starry sky, a GUI door panel and a status screen, an invisible playerclip wall and a monster clip strip in its `.cm`, a spinning fan, ten lights (point, projected, ambient, a projected window pattern; flickering, pulsing and strobing light shaders), a looping hum, two animated md5 creatures that chase you, pain cries, blood blobs and a tunnel vision when hurt, and items to pick up (health, armor, ammo, a shotgun, a key); the player starts with fists and a pistol, scripted weapons with view models.
 
 ---
 
