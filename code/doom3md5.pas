@@ -149,6 +149,10 @@ type
     { shadow casting boxes, one per joint, for meshes too big to cast }
     FHullJoints: array of Integer;
     FHullTransforms: array of TMatrixTransformNode;
+    FUseHulls: Boolean;
+    { the skin set, and each MeshShapes' material before the skin }
+    FSkinName: String;
+    FMeshShaders: array of String;
     procedure SetShown(const Value: Boolean);
     procedure ApplyPose;
     procedure FinishPose;
@@ -193,6 +197,11 @@ type
     function PlayAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
     function HasAnim(const AnimName: String): Boolean;
     function TriangleCount: Integer;
+    { Change the skin (idEntity::SetSkin, renderEntity.customSkin): the
+      meshes' materials remapped by it ('' or an unknown skin: none).
+      Meshes the first skin made invisible stay away. }
+    procedure SetSkin(const SkinName: String);
+    property SkinName: String read FSkinName;
     { Joints casting shadows with a box (0 when the mesh itself casts). }
     function ShadowHullCount: Integer;
     function AnimFinished: Boolean;
@@ -882,6 +891,8 @@ begin
   FModel := AModel;
   AllClosed := True;
   MeshShapes := nil;
+  FMeshShaders := nil;
+  FSkinName := SkinName;
   FAnims := TStringList.Create;
   if AAnims <> nil then
     FAnims.Assign(AAnims);
@@ -918,6 +929,7 @@ begin
     Shape.Appearance := MaterialAppearance(MaterialName);
     MeshShapes := Concat(MeshShapes, [Shape]);
     MeshMaterials := Concat(MeshMaterials, [MaterialName]);
+    FMeshShaders := Concat(FMeshShaders, [Mesh.Shader]);
     if not FModel.MeshClosed(I) then
       AllClosed := False;
     Root.AddChildren(Shape);
@@ -926,6 +938,7 @@ begin
     wouldn't cast at all (CGE skips them) }
   UseHulls := (TriangleCount > MaxShadowCastingTriangles) and
     not (ClosedMeshesCastShadows and AllClosed);
+  FUseHulls := UseHulls;
   if UseHulls then
   begin
     for Shape in MeshShapes do
@@ -946,6 +959,50 @@ begin
     if not PlayAnim('stand') then
       if FAnims.Count > 0 then
         PlayAnim(FAnims.Names[0]);
+end;
+
+procedure TD3Md5Instance.SetSkin(const SkinName: String);
+var
+  SkinDecl: TD3Skin;
+  I: Integer;
+  MaterialName: String;
+  Old: array of TAppearanceNode;
+begin
+  if SameText(SkinName, FSkinName) then
+    Exit;
+  FSkinName := SkinName;
+  SkinDecl := nil;
+  if SkinName <> '' then
+    SkinDecl := Decls.Skin(SkinName);
+  { the old appearances live until the scene let go of them (freed while
+    the scene still enumerates their textures, they crash it) }
+  Old := nil;
+  try
+    for I := 0 to High(MeshShapes) do
+    begin
+      MaterialName := FMeshShaders[I];
+      if SkinDecl <> nil then
+        MaterialName := SkinDecl.Remap(MaterialName);
+      if MaterialName = MeshMaterials[I] then
+        Continue;
+      MeshMaterials[I] := MaterialName;
+      if MeshShapes[I].Appearance <> nil then
+      begin
+        MeshShapes[I].Appearance.KeepExistingBegin;
+        Old := Concat(Old, [MeshShapes[I].Appearance]);
+      end;
+      MeshShapes[I].Visible := not Decls.Material(MaterialName).IsInvisible;
+      MeshShapes[I].Appearance := MaterialAppearance(MaterialName);
+      if FUseHulls then
+        MeshShapes[I].Appearance.ShadowCaster := False;
+    end;
+  finally
+    for I := 0 to High(Old) do
+    begin
+      Old[I].KeepExistingEnd;
+      Old[I].FreeIfUnused;
+    end;
+  end;
 end;
 
 destructor TD3Md5Instance.Destroy;

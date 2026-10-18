@@ -442,7 +442,7 @@ end;
 
 procedure TViewPlay.ApplyViewBob;
 var
-  Angles: TVector3;
+  Angles, Pos, ViewPos: TVector3;
   D: TVector3;
   M: TMatrix3;
 begin
@@ -458,10 +458,17 @@ begin
     Angles := Vector3(-15, Angles.Y, 40)
   else
     Angles := Angles + FGame.ViewBobAngles;
+  Pos := Camera.Translation + FGame.ViewBobOffset;
+  { pm_thirdPerson: behind the player (idPlayer::OffsetThirdPersonView) }
+  if FGame.ThirdPerson then
+  begin
+    FGame.ThirdPersonView(Pos, Angles, ViewPos);
+    Pos := ViewPos;
+  end else
   if Angles.IsZero(0.0001) and FGame.ViewBobOffset.IsZero then
     Exit;
   M := AnglesMatrix(Angles);
-  Camera.SetView(Camera.Translation + FGame.ViewBobOffset,
+  Camera.SetView(Pos,
     D3ToCge(Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2])),
     D3ToCge(Vector3(M.Data[2, 0], M.Data[2, 1], M.Data[2, 2])));
   FBobApplied := True;
@@ -528,7 +535,14 @@ begin
     Exit;
   if Map.World.WorldMoveAllowed(Camera.Translation, Camera.Translation + Move, NewPos,
     True, WalkNavigation.Radius, TBox3D.Empty, TBox3D.Empty, False) then
+  begin
+    { a ceiling or a floor stopped the vertical part }
+    if FGame.KnockbackAirborne and (Abs(NewPos.Y - (Camera.Translation.Y + Move.Y)) > 0.01) then
+      FGame.KnockbackBlocked;
     Camera.Translation := NewPos;
+  end else
+  if FGame.KnockbackAirborne then
+    FGame.KnockbackBlocked;
 end;
 
 procedure TViewPlay.UpdateFallSpeed(const SecondsPassed: Single);
@@ -656,9 +670,10 @@ begin
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
-    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
+    Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount] [up], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
+    Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
@@ -727,11 +742,12 @@ begin
   end else
   if Cmd = 'hurt' then
   begin
-    { hurt <damage def> [amount]: a hit from the front, with the def's
-      effects (kick, blobs, double vision, knockback) }
+    { hurt <damage def> [amount] [up]: a hit from the front (from below
+      with "up"), with the def's effects (kick, blobs, double vision,
+      knockback) }
     Words := Trim(Args).Split([' '], TStringSplitOptions.ExcludeEmpty);
     if Length(Words) = 0 then
-      Console.Print('hurt <damage def> [amount]')
+      Console.Print('hurt <damage def> [amount] [up]')
     else
     begin
       I := 10;
@@ -739,8 +755,71 @@ begin
         I := StrToIntDef(Decls.EntityDef(Words[0]).Values['damage'], 10);
       if Length(Words) > 1 then
         I := StrToIntDef(Words[1], I);
-      FGame.DamagePlayer(I, Words[0], -Camera.Direction);
+      if (Length(Words) > 2) and SameText(Words[2], 'up') then
+        FGame.DamagePlayer(I, Words[0], Vector3(0, 1, 0))
+      else
+        FGame.DamagePlayer(I, Words[0], -Camera.Direction);
     end;
+  end else
+  if Cmd = 'stamina' then
+  begin
+    if Args <> '' then
+      FGame.Stamina := StrToFloatDef(Args, FGame.Stamina);
+    S := Format('Stamina %.1f of %.0f (%d%%), running %.2f, speed x%.2f', [FGame.Stamina,
+      FGame.StaminaMax, FGame.StaminaPercent, FGame.RunFraction, FGame.RunMultiplier], DefaultFormatSettings);
+    Console.Print(S);
+    WritelnLog('Console', S);
+  end else
+  if Cmd = 'pm_stamina' then
+  begin
+    if Args <> '' then
+      FGame.StaminaMax := StrToFloatDef(Args, FGame.StaminaMax);
+    Console.Print(Format('pm_stamina %g (seconds of running, 0: no stamina)', [FGame.StaminaMax], DefaultFormatSettings));
+  end else
+  if Cmd = 'pm_staminarate' then
+  begin
+    if Args <> '' then
+      FGame.StaminaRate := StrToFloatDef(Args, FGame.StaminaRate);
+    Console.Print(Format('pm_staminarate %g', [FGame.StaminaRate], DefaultFormatSettings));
+  end else
+  if Cmd = 'pm_staminathreshold' then
+  begin
+    if Args <> '' then
+      FGame.StaminaThreshold := StrToFloatDef(Args, FGame.StaminaThreshold);
+    Console.Print(Format('pm_staminathreshold %g', [FGame.StaminaThreshold], DefaultFormatSettings));
+  end else
+  if Cmd = 'pm_thirdperson' then
+  begin
+    if Args <> '' then
+      FGame.ThirdPerson := Args <> '0';
+    S := Format('pm_thirdPerson %s (player model %s, skin "%s")', [BoolToStr(FGame.ThirdPerson, '1', '0'),
+      BoolToStr(FGame.PlayerModel <> nil, 'yes', 'none'), FGame.PlayerSkinName]);
+    Console.Print(S);
+    WritelnLog('Console', S);
+  end else
+  if Cmd = 'pm_thirdpersonrange' then
+  begin
+    if Args <> '' then
+      FGame.ThirdPersonRange := StrToFloatDef(Args, FGame.ThirdPersonRange);
+    Console.Print(Format('pm_thirdPersonRange %g', [FGame.ThirdPersonRange], DefaultFormatSettings));
+  end else
+  if Cmd = 'pm_thirdpersonheight' then
+  begin
+    if Args <> '' then
+      FGame.ThirdPersonHeight := StrToFloatDef(Args, FGame.ThirdPersonHeight);
+    Console.Print(Format('pm_thirdPersonHeight %g', [FGame.ThirdPersonHeight], DefaultFormatSettings));
+  end else
+  if Cmd = 'pm_thirdpersonangle' then
+  begin
+    if Args <> '' then
+      FGame.ThirdPersonAngle := StrToFloatDef(Args, FGame.ThirdPersonAngle);
+    Console.Print(Format('pm_thirdPersonAngle %g', [FGame.ThirdPersonAngle], DefaultFormatSettings));
+  end else
+  if Cmd = 'pm_thirdpersonclip' then
+  begin
+    if Args <> '' then
+      FGame.ThirdPersonClip := Args <> '0';
+    Console.Print('pm_thirdPersonClip ' + BoolToStr(FGame.ThirdPersonClip, '1', '0'));
   end else
   if Cmd = 'pm_bob' then
   begin
@@ -1123,6 +1202,9 @@ begin
         FDemoHeld := Concat(FDemoHeld, [keyD]);
       if (Length(Parts) > 1) and (StrToFloatDef(Parts[1], 0) < 0) then
         FDemoHeld := Concat(FDemoHeld, [keyA]);
+      { GO:x y seconds run: with the run key held }
+      if (Length(Parts) > 3) and SameText(Parts[3], 'run') then
+        FDemoHeld := Concat(FDemoHeld, [keyShift]);
       for I := 0 to High(FDemoHeld) do
         Container.Pressed.KeyDown(FDemoHeld[I], '');
     end;
@@ -1244,8 +1326,17 @@ begin
   FGame.PlayerViewDir := Camera.Direction;
   FGame.PlayerJumping := WalkNavigation.IsJumping;
   FGame.PlayerFlying := FNoclip;
-  { berserk runs faster (idPlayer::PowerUpModifier( SPEED )) }
+  { berserk runs faster (idPlayer::PowerUpModifier( SPEED )); running
+    is as fast as the stamina lets it (idPlayer::AdjustSpeed) }
   WalkNavigation.MoveSpeed := FBaseMoveSpeed * FGame.SpeedModifier;
+  FGame.PlayerRunning := WalkNavigation.Input_Run.IsPressed(Container);
+  FGame.PlayerMoving := WalkNavigation.Input_Forward.IsPressed(Container) or
+    WalkNavigation.Input_Backward.IsPressed(Container) or
+    WalkNavigation.Input_LeftStrafe.IsPressed(Container) or
+    WalkNavigation.Input_RightStrafe.IsPressed(Container);
+  WalkNavigation.RunMultiplier := FGame.RunMultiplier;
+  { thrown up by a knockback: its own arc, no navigation gravity }
+  WalkNavigation.Gravity := not FNoclip and not FGame.KnockbackAirborne;
   UpdateFallSpeed(SecondsPassed);
   ApplyKnockback(SecondsPassed);
 
@@ -1261,6 +1352,7 @@ begin
 
   Hud.Health := FGame.Health;
   Hud.Armor := FGame.Armor;
+  Hud.Stamina := FGame.StaminaPercent;
   Hud.Dead := FGame.PlayerDead;
   UpdateDamageView;
   Hud.FlashlightOn := Flashlight.Exists;

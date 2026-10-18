@@ -554,9 +554,20 @@ type
     FKickAngles: TVector3;
     FKickFinish, FLastDamageTime, FPainDebounce, FLastArmorPulse: Single;
     { double vision's end (idPlayerView's dvFinishTime) and the knockback
-      (Doom 3 velocity, horizontal) }
+      (Doom 3 velocity); FKnockAir while it carries the player up and
+      down again, FKnockRise above where it took off }
     FDvFinish: Single;
     FKnockVel: TVector3;
+    FKnockAir: Boolean;
+    FKnockRise, FKnockPeak: Single;
+    { stamina (idPlayer::AdjustSpeed): seconds of running left, and how far
+      running is from walking (0) to running (1) }
+    FStamina, FRunFraction: Single;
+    FNoStamina: Boolean;
+    { the player's body (the player def's "model"): seen in third person }
+    FPlayerModel: TD3Md5Instance;
+    FPlayerHolder: TCastleTransform;
+    FPlayerAnim: String;
     { powerups' end times (game time; 0: off) }
     FPowerupEnd: array [0..3] of Single;
     FBlobs: array of TD3ScreenBlob;
@@ -605,6 +616,9 @@ type
     { idPlayer::CrashLand after a fall: the view's dip, falling damage }
     procedure CrashLand(const FallHeight: Single);
     procedure UpdatePowerUps;
+    procedure UpdateStamina(const SecondsPassed: Single);
+    procedure SpawnPlayerModel;
+    procedure UpdatePlayerModel(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
     { place the view model: bob, lag, idle drift, muzzle kick
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
@@ -736,6 +750,18 @@ type
     { set by the view each frame: the player is jumping (going up), or
       flying (noclip: no steps, no falls) }
     PlayerJumping, PlayerFlying: Boolean;
+    { set by the view each frame: the run key is held, the player moves
+      (forward / sideways keys) }
+    PlayerRunning, PlayerMoving: Boolean;
+    { pm_thirdPerson: the view is behind the player, whose body shows }
+    ThirdPerson: Boolean;
+    { pm_thirdPersonRange, pm_thirdPersonHeight, pm_thirdPersonAngle,
+      pm_thirdPersonClip }
+    ThirdPersonRange, ThirdPersonHeight, ThirdPersonAngle: Single;
+    ThirdPersonClip: Boolean;
+    { pm_stamina (seconds of running, 0: no stamina), pm_staminarate,
+      pm_staminathreshold }
+    StaminaMax, StaminaRate, StaminaThreshold: Single;
     { the last landing's delta (Doom 3: speed squared / 10000), for tests }
     LastFallDelta: Single;
     { the player def's sound key last played (snd_pain_small...), for tests }
@@ -778,6 +804,37 @@ type
       Doom 3's ground friction; the view moves the camera by it. }
     function KnockbackMove(const SecondsPassed: Single): TVector3;
     property KnockbackVelocity: TVector3 read FKnockVel;
+    { the knockback threw the player up (the view turns its gravity off
+      until it lands, at the height it took off from) }
+    property KnockbackAirborne: Boolean read FKnockAir;
+    { the highest the last knockback threw the player (units) }
+    property KnockbackPeak: Single read FKnockPeak;
+    { the view couldn't move the camera by the knockback's move: it hit a
+      ceiling (it falls), or landed on something }
+    procedure KnockbackBlocked;
+    { stamina: seconds of running left (StaminaMax when full) }
+    property Stamina: Single read FStamina write FStamina;
+    { idPlayer::AdjustSpeed's bobFrac: 1 runs at full speed, 0 walks }
+    property RunFraction: Single read FRunFraction;
+    { The player's body (nil without a player def "model"); its holder
+      exists in third person. }
+    property PlayerModel: TD3Md5Instance read FPlayerModel;
+    property PlayerModelHolder: TCastleTransform read FPlayerHolder;
+    { The skin the body should wear: the def's "skin", its "_berserk"
+      skin under berserk, "skin_invisibility" when invisible (idPlayer's
+      powerUpSkin). }
+    function PlayerSkinName: String;
+    { idPlayer::OffsetThirdPersonView: the camera (CGE) behind the eye,
+      for the view's angles (Doom 3 pitch, yaw, roll), clipped by walls;
+      Angles comes back looking at the focus point. }
+    procedure ThirdPersonView(const Eye: TVector3; var Angles: TVector3; out ViewPos: TVector3);
+    { the stamina in percent (the HUD's player_stamina), -1 without }
+    function StaminaPercent: Integer;
+    { stamina is off: pm_stamina 0 or worldspawn's no_stamina }
+    function StaminaDisabled: Boolean;
+    { pm_walkspeed, pm_runspeed blended by RunFraction, over walking: the
+      run key's speed multiplier }
+    function RunMultiplier: Single;
     { idPlayer::GivePowerUp: Powerup (PowerupBerserk...) for Seconds (0:
       the "time" of its powerup_<name> def). Berserk switches to the
       fists, megahealth sets the health; each plays its player sound. }
@@ -1219,6 +1276,11 @@ begin
   Health := 100;
   FIdealSlot := -1;
   ViewBobEnabled := True;
+  StaminaMax := 24;
+  StaminaRate := 0.75;
+  StaminaThreshold := 45;
+  ThirdPersonRange := 80;
+  ThirdPersonClip := True;
   FLandTime := -1000;
   FLastDamageTime := -1000;
   FPainDebounce := -1000;
@@ -1286,6 +1348,11 @@ begin
   FActors.Clear;
   { before the VM (it owns the weapon's thread) and the map }
   FreeAndNil(FWeapon);
+  if (FPlayerModel <> nil) and (FPlayerHolder <> nil) then
+    FPlayerHolder.Remove(FPlayerModel.Scene);
+  FreeAndNil(FPlayerModel);
+  FreeAndNil(FPlayerHolder);
+  FPlayerAnim := '';
   FreeAndNil(FScript);
   FHandles.Clear;
   FScriptMovers.Clear;
@@ -1674,6 +1741,13 @@ begin
   ClearPowerUps;
   FDvFinish := -1000;
   FKnockVel := TVector3.Zero;
+  FKnockAir := False;
+  FKnockRise := 0;
+  { idPlayer::Spawn: full stamina; worldspawn's no_stamina turns it off }
+  FNoStamina := (FMap <> nil) and (FMap.MapFile <> nil) and (FMap.MapFile.Entities.Count > 0) and
+    StrToBoolDef(FMap.MapFile.Entities[0].Value('no_stamina'), False);
+  FStamina := StaminaMax;
+  FRunFraction := 0;
   FKickFinish := 0;
   FBlobs := nil;
   FLastDamageTime := -1000;
@@ -1824,8 +1898,19 @@ begin
   if S = 'mega' then
     Result := GivePowerUp(PowerupMegaHealth, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
   else
-  if (S = 'stamina') or (S = 'air') or (S = 'heartrate') then
-    { no stamina, air yet: taken, nothing happens }
+  if S = 'stamina' then
+  begin
+    { idPlayer::Give: up to 100 (more than pm_stamina: running at full
+      speed for longer) }
+    Result := FStamina < 100;
+    if Result then
+      FStamina := Min(100, FStamina + StrToFloatDef(Trim(Value), 0, DefaultFormatSettings));
+  end else
+  if S = 'adrenaline' then
+    Result := GivePowerUp(PowerupAdrenaline, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if (S = 'air') or (S = 'heartrate') then
+    { no air, heart rate yet: taken, nothing happens }
     Result := True
   else
   begin
@@ -3595,6 +3680,7 @@ begin
         SpawnItem(E);
     end;
   InitInventory;
+  SpawnPlayerModel;
   SpreadLocations;
   SpawnBindings;
   LoadProfileStep('spawn');
@@ -4244,6 +4330,7 @@ begin
   UpdateMoveables(SecondsPassed);
   UpdateItems;
   UpdatePowerUps;
+  UpdateStamina(SecondsPassed);
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
@@ -4258,6 +4345,152 @@ begin
     FScript.Update(FTime);
   { after its script: a shot of this frame shows its flash now }
   UpdateWeaponView(SecondsPassed);
+  UpdatePlayerModel(SecondsPassed);
+end;
+
+procedure TD3Game.SpawnPlayerModel;
+var
+  Decl: TD3ModelDecl;
+  Md5: TD3Md5Model;
+begin
+  if (FPlayerDef = nil) or (FPlayerModel <> nil) then
+    Exit;
+  Decl := Decls.ModelDecl(FPlayerDef.Values['model']);
+  if Decl = nil then
+    Exit;
+  Md5 := Md5Cache.Model(Decl.Mesh);
+  if Md5 = nil then
+    Exit;
+  FPlayerModel := TD3Md5Instance.Create(Md5, Decl.Anims, PlayerSkinName);
+  { the game moves the body (walk anims would carry it away) }
+  FPlayerModel.LockOrigin := True;
+  FPlayerModel.Scene.Collides := False;
+  FPlayerModel.Scene.Pickable := False;
+  FPlayerModel.Scene.Translation := D3ToCge(Decl.Offset);
+  FPlayerHolder := TCastleTransform.Create(nil);
+  FPlayerHolder.SetTransient;
+  FPlayerHolder.Name := 'PlayerBody';
+  FPlayerHolder.Collides := False;
+  FPlayerHolder.Pickable := False;
+  FPlayerHolder.Add(FPlayerModel.Scene);
+  FPlayerHolder.Exists := False;
+  FMap.Add(FPlayerHolder);
+  WritelnLog('Doom3World', 'Player model "%s" (skin "%s")', [Decl.Mesh, PlayerSkinName]);
+end;
+
+function TD3Game.PlayerSkinName: String;
+var
+  Base: String;
+begin
+  Result := '';
+  if FPlayerDef = nil then
+    Exit;
+  Base := FPlayerDef.Values['skin'];
+  Result := Base;
+  if PowerUpActive(PowerupInvisibility) and (FPlayerDef.Values['skin_invisibility'] <> '') then
+    Result := FPlayerDef.Values['skin_invisibility']
+  else
+  if PowerUpActive(PowerupBerserk) and (Base <> '') and (Decls.Skin(Base + '_berserk') <> nil) then
+    Result := Base + '_berserk';
+end;
+
+procedure TD3Game.UpdatePlayerModel(const SecondsPassed: Single);
+var
+  Anim: String;
+begin
+  if FPlayerModel = nil then
+    Exit;
+  if not SameText(PlayerSkinName, FPlayerModel.SkinName) then
+  begin
+    WritelnLog('Doom3World', 'Player skin "%s"', [PlayerSkinName]);
+    FPlayerModel.SetSkin(PlayerSkinName);
+  end;
+  FPlayerHolder.Exists := ThirdPerson and not CinematicActive;
+  FPlayerModel.Shown := FPlayerHolder.Exists;
+  if not FPlayerHolder.Exists then
+    Exit;
+  FPlayerHolder.Translation := FPlayerEye - Vector3(0, PlayerEyeHeight, 0);
+  SetD3Rotation(FPlayerHolder, AnglesMatrix(Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0)));
+  { the legs' anim by the speed (idPlayer's legs states: run over the
+    walking speed, walk, idle); dead it holds its pose }
+  if not PlayerDead then
+  begin
+    if (FXYSpeed > 170) and FPlayerModel.HasAnim('run') then
+      Anim := 'run'
+    else
+    if (FXYSpeed > 20) and FPlayerModel.HasAnim('walk') then
+      Anim := 'walk'
+    else
+      Anim := 'idle';
+    if (Anim <> FPlayerAnim) and FPlayerModel.PlayAnim(Anim) then
+      FPlayerAnim := Anim;
+  end;
+  FPlayerModel.Update(SecondsPassed);
+end;
+
+procedure TD3Game.ThirdPersonView(const Eye: TVector3; var Angles: TVector3; out ViewPos: TVector3);
+const
+  { THIRD_PERSON_FOCUS_DISTANCE, the clip box's half size }
+  FocusDistance = 512;
+  ClipSize = 4;
+var
+  Origin, Focus, View, Fwd, Right, Dir: TVector3;
+  SideScale, ForwardScale, Fraction, FocusDist: Single;
+  M: TMatrix3;
+  A: TVector3;
+
+  { the trace from Origin to View: how far it gets (0..1) }
+  function Trace(const ToPos: TVector3): Single;
+  var
+    D: TVector3;
+    L, HitDist: Single;
+  begin
+    Result := 1;
+    D := D3ToCge(ToPos - Origin);
+    L := D.Length;
+    if L < 0.01 then
+      Exit;
+    if (FMap.World.WorldRayCast(D3ToCge(Origin), D / L, HitDist) <> nil) and
+       (HitDist < L + ClipSize) then
+      Result := Max(0, (HitDist - ClipSize) / L);
+  end;
+
+begin
+  Origin := CgeToD3(Eye);
+  A := Angles;
+  if ThirdPersonAngle <> 0 then
+    A.X := 0;
+  { not too far overhead }
+  A.X := Min(A.X, 45);
+  Focus := Origin + D3Forward(A.X, A.Y) * FocusDistance;
+  Focus.Z := Focus.Z + ThirdPersonHeight;
+  View := Origin;
+  View.Z := View.Z + 8 + ThirdPersonHeight;
+  A.X := A.X * 0.5;
+  M := AnglesMatrix(A);
+  Fwd := Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2]);
+  Right := Vector3(M.Data[1, 0], M.Data[1, 1], M.Data[1, 2]);
+  SinCos(DegToRad(ThirdPersonAngle), SideScale, ForwardScale);
+  View := View - Fwd * (ThirdPersonRange * ForwardScale) + Right * (ThirdPersonRange * SideScale);
+  if ThirdPersonClip and (FMap <> nil) and (FMap.World <> nil) then
+  begin
+    { not in a wall; a low ceiling lifts it, then once more }
+    Fraction := Trace(View);
+    if Fraction < 1 then
+    begin
+      View := Origin + (View - Origin) * Fraction;
+      View.Z := View.Z + (1 - Fraction) * 32;
+      Fraction := Trace(View);
+      View := Origin + (View - Origin) * Fraction;
+    end;
+  end;
+  { look at the focus point }
+  Dir := Focus - View;
+  FocusDist := Max(1, Sqrt(Sqr(Dir.X) + Sqr(Dir.Y)));
+  A.X := -RadToDeg(ArcTan2(Dir.Z, FocusDist));
+  A.Y := A.Y - ThirdPersonAngle;
+  Angles := A;
+  ViewPos := D3ToCge(View);
 end;
 
 procedure TD3Game.UpdateWeaponView(const SecondsPassed: Single);
@@ -4265,7 +4498,9 @@ begin
   if (FWeapon = nil) or (FWeapon.View = nil) then
     Exit;
   PresentWeapon(FWeapon);
-  FWeapon.View.Shown := FWeapon.Holder.Exists;
+  { no view model in third person (idPlayer: pm_thirdPerson hides it) }
+  FWeapon.Holder.Visible := not ThirdPerson;
+  FWeapon.View.Shown := FWeapon.Holder.Exists and not ThirdPerson;
   FWeapon.View.Update(SecondsPassed);
 end;
 
@@ -7716,16 +7951,26 @@ begin
 
   { knockback (idPlayer::Damage): the def's "knockback" (20 by default)
     pushes along the force, g_knockback 1000 * knockback / 200 units a
-    second; only sideways here (the camera's height is navigation's) }
+    second. Up more than 10 units a second throws the player off the
+    ground (idPhysics_Player::CheckGround); down, the ground takes it. }
   if not Direction.IsZero then
   begin
     Knockback := 20;
     if Def <> nil then
       Knockback := StrToFloatDef(Def.Values['knockback'], 20, DefaultFormatSettings);
     D := CgeToD3(Direction);
-    D.Z := 0;
-    if (Knockback <> 0) and not D.IsZero then
+    if Knockback <> 0 then
+    begin
       FKnockVel := FKnockVel + D.Normalize * (1000 * Knockback / 200);
+      if not FKnockAir and not PlayerJumping and (FKnockVel.Z < 0) then
+        FKnockVel.Z := 0;
+      if not FKnockAir and (FKnockVel.Z > 10) and not PlayerFlying then
+      begin
+        FKnockAir := True;
+        FKnockRise := 0;
+        FKnockPeak := 0;
+      end;
+    end;
   end;
 
   Dec(Health, Amount - Absorbed);
@@ -7865,6 +8110,12 @@ begin
       end;
     PowerupInvisibility:
       PlayerSound('snd_invisibility');
+    PowerupAdrenaline:
+      begin
+        { idPlayer::GivePowerUp: stamina 100, no draining while it lasts }
+        PlayerSound('snd_adrenaline');
+        FStamina := 100;
+      end;
     PowerupMegaHealth:
       begin
         PlayerSound('snd_megahealth');
@@ -7904,26 +8155,53 @@ end;
 
 function TD3Game.KnockbackMove(const SecondsPassed: Single): TVector3;
 const
-  { pm_friction, pm_stopspeed }
+  { pm_friction, pm_stopspeed, gravity }
   Friction = 6;
   StopSpeed = 100;
+  Gravity = 1066;
 var
-  Speed, NewSpeed, Left, Dt: Single;
+  Speed, NewSpeed, Left, Dt, DZ: Single;
+  Step: TVector3;
 begin
   Result := TVector3.Zero;
+  if not FKnockAir then
+    FKnockVel.Z := 0;
   Speed := FKnockVel.Length;
-  if (Speed < 0.5) or (SecondsPassed <= 0) then
+  if (not FKnockAir and (Speed < 0.5)) or (SecondsPassed <= 0) then
   begin
-    FKnockVel := TVector3.Zero;
+    if not FKnockAir then
+      FKnockVel := TVector3.Zero;
     Exit;
   end;
   { idPhysics_Player::Friction, in Doom 3's 60 Hz steps (a long frame
-    would stop it at once, or overshoot) }
+    would stop it at once, or overshoot); in the air no friction, gravity
+    (idPhysics_Player::AirMove) until it is back down where it started }
   Left := SecondsPassed;
-  while (Left > 0) and not FKnockVel.IsZero do
+  while (Left > 0) and (FKnockAir or not FKnockVel.IsZero) do
   begin
     Dt := Min(Left, 1 / 60);
     Left := Left - Dt;
+    if FKnockAir then
+    begin
+      DZ := FKnockVel.Z * Dt - 0.5 * Gravity * Sqr(Dt);
+      FKnockVel.Z := FKnockVel.Z - Gravity * Dt;
+      if FKnockRise + DZ <= 0 then
+      begin
+        { landed: the rest of the frame on the ground }
+        DZ := -FKnockRise;
+        FKnockRise := 0;
+        FKnockVel.Z := 0;
+        FKnockAir := False;
+        WritelnLog('Doom3World', 'Knockback: thrown up %.1f units', [FKnockPeak]);
+      end else
+      begin
+        FKnockRise := FKnockRise + DZ;
+        FKnockPeak := Max(FKnockPeak, FKnockRise);
+      end;
+      Step := Vector3(FKnockVel.X * Dt, FKnockVel.Y * Dt, DZ);
+      Result := Result + D3ToCge(Step);
+      Continue;
+    end;
     Result := Result + D3ToCge(FKnockVel * Dt);
     Speed := FKnockVel.Length;
     NewSpeed := Max(0, Speed - Max(Speed, StopSpeed) * Friction * Dt);
@@ -7931,6 +8209,78 @@ begin
       FKnockVel := TVector3.Zero
     else
       FKnockVel := FKnockVel * (NewSpeed / Speed);
+  end;
+end;
+
+procedure TD3Game.KnockbackBlocked;
+begin
+  if not FKnockAir then
+    Exit;
+  if FKnockVel.Z > 0 then
+    { a ceiling: down from here (the view's gravity once it lands) }
+    FKnockVel.Z := 0
+  else
+  begin
+    FKnockAir := False;
+    FKnockRise := 0;
+    FKnockVel.Z := 0;
+    WritelnLog('Doom3World', 'Knockback: thrown up %.1f units, landed on something', [FKnockPeak]);
+  end;
+end;
+
+function TD3Game.StaminaDisabled: Boolean;
+begin
+  Result := FNoStamina or (StaminaMax <= 0);
+end;
+
+function TD3Game.StaminaPercent: Integer;
+begin
+  if StaminaDisabled then
+    Result := -1
+  else
+    Result := Round(100 * FStamina / StaminaMax);
+end;
+
+function TD3Game.RunMultiplier: Single;
+const
+  { pm_walkspeed, pm_runspeed }
+  WalkSpeed = 140;
+  RunSpeed = 220;
+begin
+  Result := (WalkSpeed * (1 - FRunFraction) + RunSpeed * FRunFraction) / WalkSpeed;
+end;
+
+procedure TD3Game.UpdateStamina(const SecondsPassed: Single);
+var
+  Rate: Single;
+begin
+  { idPlayer::AdjustSpeed }
+  if PlayerDead or PlayerFlying then
+  begin
+    FRunFraction := 1;
+    Exit;
+  end;
+  if PlayerRunning and PlayerMoving then
+  begin
+    if not PowerUpActive(PowerupAdrenaline) then
+      FStamina := Max(0, FStamina - SecondsPassed);
+    if StaminaDisabled or (FStamina > StaminaThreshold) then
+      FRunFraction := 1
+    else
+    if StaminaThreshold <= 0.0001 then
+      FRunFraction := 0
+    else
+      FRunFraction := FStamina / StaminaThreshold;
+  end else
+  begin
+    { 25% faster standing still }
+    Rate := StaminaRate;
+    if not PlayerMoving then
+      Rate := Rate * 1.25;
+    { up to pm_stamina: more (adrenaline's 100) is lost once the player
+      stops running, as in Doom 3 }
+    FStamina := Min(StaminaMax, FStamina + Rate * SecondsPassed);
+    FRunFraction := 0;
   end;
 end;
 
