@@ -92,7 +92,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(92, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(94, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -3732,13 +3732,30 @@ begin
     Check(Game.PlayerModel.JointPosition('arm_r', P), 'the body has arm_r');
     CheckNear(P.X, Game.Weapon.WorldHolder.Translation.X, 'at the joint (x)', 0.01);
     CheckNear(P.Y, Game.Weapon.WorldHolder.Translation.Y, 'at the joint (height)', 0.01);
+    { the world model's muzzle flash: its flash surface, and the flash
+      light at its flash joint in third person }
+    Game.Weapon.FlashStart := Game.Time;
+    Step(1 / 60);
+    Check(Game.Weapon.World.MeshShapes[1].Visible, 'the world model''s flash surface shows');
+    Check(Game.MuzzleFlash(P, ViewPos, Old), 'third person: the flash light');
+    Check(Game.Weapon.World.JointPosition('flash', Angles), 'the world model has a flash joint');
+    Angles := Game.Weapon.World.Scene.LocalToWorld(Angles);
+    Check((P - Angles).Length < 20, 'the flash light at the world model''s flash joint');
+    Step(0.3);
+    Check(not Game.Weapon.World.MeshShapes[1].Visible, 'the flash surface is gone');
+    { crouch_down once, then the crouch loop }
     Game.PlayerCrouchHeld := True;
+    Step(3 / 60);
+    CheckEquals('crouch_down', Game.PlayerModel.PlayingAnim, 'crouching: crouch_down');
     Step(0.5);
     CheckEquals('crouch', Game.PlayerModel.PlayingAnim, 'crouched: the crouch anim');
     Check(Game.PlayerModel.JointPosition('body', P), 'the body joint');
     CheckNear(18, CgeToD3(P).Z, 'crouched: the body 22 lower', 1);
     Game.PlayerCrouchHeld := False;
+    Step(3 / 60);
+    CheckEquals('crouch_up', Game.PlayerModel.PlayingAnim, 'standing up: crouch_up');
     Step(1);
+    CheckEquals('idle', Game.PlayerModel.PlayingAnim, 'then idle');
     Game.ThirdPerson := False;
 
     { death: the eye goes down to 10 (pm_deadviewheight), the body plays

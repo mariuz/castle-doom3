@@ -577,6 +577,11 @@ type
       feet, easing to the crouched / standing / dead one (idPlayer::Think) }
     FCrouched: Boolean;
     FEyeHeight: Single;
+    { the body's crouch state (its crouch_down / crouch_up played), and a
+      transition anim playing }
+    FBodyCrouched, FBodyTransition: Boolean;
+    { the shot whose world model flash was logged }
+    FWorldFlashLogged: Single;
     { powerups' end times (game time; 0: off) }
     FPowerupEnd: array [0..3] of Single;
     FBlobs: array of TD3ScreenBlob;
@@ -635,6 +640,13 @@ type
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
       surfaces and light }
     procedure PresentWeapon(const W: TD3Weapon);
+    { show / hide a weapon model's flash surfaces: materials whose stage
+      has "if ( time + parm4 ) ..." (parm4 = -the time of the shot) }
+    procedure UpdateFlashSurfaces(const W: TD3Weapon; const Model: TD3Md5Instance);
+    { the muzzle flash light at the "flash" joint of a weapon model (CGE,
+      world), backed up from walls along Fwd to at least 8 away
+      (idWeapon::UpdateFlashPosition) }
+    function FlashPosition(const Model: TD3Md5Instance; const Fwd, Fallback: TVector3): TVector3;
     procedure UpdateWeaponView(const SecondsPassed: Single);
     procedure SetWeaponInvisible(const W: TD3Weapon; const Value: Boolean);
     function WeaponEvent(const W: TD3Weapon; const Thread: TD3ScriptThread; const N: String;
@@ -1790,6 +1802,9 @@ begin
   FStamina := StaminaMax;
   FRunFraction := 0;
   FCrouched := False;
+  FBodyCrouched := False;
+  FBodyTransition := False;
+  FWorldFlashLogged := -1000;
   FEyeHeight := PlayerEyeHeight;
   FKickFinish := 0;
   FBlobs := nil;
@@ -2611,13 +2626,10 @@ end;
 procedure TD3Game.PresentWeapon(const W: TD3Weapon);
 var
   ViewAxis, Axis: TMatrix3;
-  D, Origin, GunOfs, Fwd, Start: TVector3;
+  D, Origin, GunOfs, Fwd: TVector3;
   Angles, Current, Lag: TVector3;
-  Scale, FracSin, T, F, Left, Amount, Dist, Tau, K: Single;
+  Scale, FracSin, T, F, Left, Amount, Tau, K: Single;
   I: Integer;
-  Ctx: TD3ExprContext;
-  Mat: TD3Material;
-  JointPos: TVector3;
 begin
   ViewAxis := BobbedViewAxis;
   if PlayerViewDir.IsZero then
@@ -2683,34 +2695,47 @@ begin
   if W.Invisible <> PowerUpActive(PowerupInvisibility) then
     SetWeaponInvisible(W, not W.Invisible);
 
-  { flash surfaces: materials whose stage shows "if ( time + parm4 ) ..."
-    (parm4 = -the time of the shot) }
+  UpdateFlashSurfaces(W, W.View);
+  { the flash light at the view model's "flash" joint }
+  if (W.FlashRadius > 0) and (FTime < W.FlashStart + W.FlashTime) then
+  begin
+    Fwd := D3ToCge(Vector3(ViewAxis.Data[0, 0], ViewAxis.Data[0, 1], ViewAxis.Data[0, 2]));
+    FMuzzleFlashPos := FlashPosition(W.View, Fwd, FPlayerEye + Fwd * 24);
+  end;
+end;
+
+procedure TD3Game.UpdateFlashSurfaces(const W: TD3Weapon; const Model: TD3Md5Instance);
+var
+  I: Integer;
+  Ctx: TD3ExprContext;
+  Mat: TD3Material;
+begin
   FillChar(Ctx, SizeOf(Ctx), 0);
   Ctx.Time := FTime;
   for I := 0 to 3 do
     Ctx.Parms[I] := 1;
   Ctx.Parms[4] := -W.FlashStart;
-  for I := 0 to High(W.View.MeshShapes) do
+  for I := 0 to High(Model.MeshShapes) do
   begin
-    Mat := Decls.Material(W.View.MeshMaterials[I]);
+    Mat := Decls.Material(Model.MeshMaterials[I]);
     if Mat.StageCondition <> nil then
-      W.View.MeshShapes[I].Visible := Mat.StageCondition.Eval(Ctx) <> 0;
+      Model.MeshShapes[I].Visible := Mat.StageCondition.Eval(Ctx) <> 0;
   end;
+end;
 
-  { the flash light at the "flash" joint, backed up from walls to at least
-    8 units away (idWeapon::UpdateFlashPosition) }
-  if (W.FlashRadius > 0) and (FTime < W.FlashStart + W.FlashTime) then
-  begin
-    Fwd := D3ToCge(Vector3(ViewAxis.Data[0, 0], ViewAxis.Data[0, 1], ViewAxis.Data[0, 2]));
-    if W.View.JointPosition('flash', JointPos) then
-      FMuzzleFlashPos := W.View.Scene.LocalToWorld(JointPos)
-    else
-      FMuzzleFlashPos := FPlayerEye + Fwd * 24;
-    Start := FMuzzleFlashPos - Fwd * 16;
-    if FMap.World.WorldRayCast(Start, Fwd, Dist) = nil then
-      Dist := 24;
-    FMuzzleFlashPos := Start + Fwd * (Min(Dist, 24) - 8);
-  end;
+function TD3Game.FlashPosition(const Model: TD3Md5Instance; const Fwd, Fallback: TVector3): TVector3;
+var
+  JointPos, Start: TVector3;
+  Dist: Single;
+begin
+  if Model.JointPosition('flash', JointPos) then
+    Result := Model.Scene.LocalToWorld(JointPos)
+  else
+    Result := Fallback;
+  Start := Result - Fwd * 16;
+  if FMap.World.WorldRayCast(Start, Fwd, Dist) = nil then
+    Dist := 24;
+  Result := Start + Fwd * (Min(Dist, 24) - 8);
 end;
 
 function TD3Game.MuzzleFlash(out Position, Color: TVector3; out Radius: Single): Boolean;
@@ -4457,7 +4482,12 @@ begin
   FPlayerHolder.Exists := ThirdPersonActive and not CinematicActive;
   FPlayerModel.Shown := FPlayerHolder.Exists;
   if not FPlayerHolder.Exists then
+  begin
+    { unseen: no transition to play when it shows }
+    FBodyCrouched := FCrouched;
+    FBodyTransition := False;
     Exit;
+  end;
   FPlayerHolder.Translation := PlayerFeet;
   SetD3Rotation(FPlayerHolder, AnglesMatrix(Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0)));
   { the legs' anim by the speed (idPlayer's legs states: run over the
@@ -4471,6 +4501,24 @@ begin
       WritelnLog('Doom3World', 'Player body plays death');
     end;
   end else
+  begin
+    { crouching / standing up: crouch_down / crouch_up once (Doom 3's
+      player script Legs_Crouch / Legs_Uncrouch), then the loops }
+    if FBodyCrouched <> FCrouched then
+    begin
+      FBodyCrouched := FCrouched;
+      Anim := BoolToStr(FCrouched, 'crouch_down', 'crouch_up');
+      FBodyTransition := FPlayerModel.HasAnim(Anim) and FPlayerModel.PlayAnim(Anim, False);
+      if FBodyTransition then
+      begin
+        FPlayerAnim := Anim;
+        WritelnLog('Doom3World', 'Player body plays %s', [Anim]);
+      end;
+    end;
+    if FBodyTransition and FPlayerModel.AnimFinished then
+      FBodyTransition := False;
+  end;
+  if not PlayerDead and not FBodyTransition then
   begin
     if FCrouched and (FXYSpeed > 20) and FPlayerModel.HasAnim('crouch_walk') then
       Anim := 'crouch_walk'
@@ -4523,7 +4571,7 @@ end;
 procedure TD3Game.UpdateWorldWeapon;
 var
   M: TMatrix4;
-  T, Scale: TVector3;
+  T, Scale, Fwd: TVector3;
   R: TVector4;
 begin
   if (FWeapon = nil) or (FWeapon.WorldHolder = nil) then
@@ -4539,6 +4587,22 @@ begin
   MatrixDecompose(TranslationMatrix(FPlayerModel.Scene.Translation) * M, T, R, Scale);
   FWeapon.WorldHolder.Translation := T;
   FWeapon.WorldHolder.Rotation := R;
+  { its flash surfaces, and in third person the flash light at its "flash"
+    joint (idWeapon's worldMuzzleFlash, flashJointWorld), forward along
+    the gun }
+  UpdateFlashSurfaces(FWeapon, FWeapon.World);
+  if ThirdPersonActive and (FWeapon.FlashRadius > 0) and
+     (FTime < FWeapon.FlashStart + FWeapon.FlashTime) then
+  begin
+    Fwd := FWeapon.World.Scene.LocalToWorldDirection(D3ToCge(Vector3(1, 0, 0))).Normalize;
+    FMuzzleFlashPos := FlashPosition(FWeapon.World, Fwd, FWeapon.WorldHolder.WorldTranslation);
+    if FWorldFlashLogged <> FWeapon.FlashStart then
+    begin
+      FWorldFlashLogged := FWeapon.FlashStart;
+      WritelnLog('Doom3World', 'Muzzle flash of %s''s world model at %s', [FWeapon.DefName,
+        CgeToD3(FMuzzleFlashPos).ToString]);
+    end;
+  end;
 end;
 
 function TD3Game.ThirdPersonActive: Boolean;
