@@ -177,6 +177,9 @@ jobs:
           run_test throw testmap "W:1,O:god,G:420 -250 0,A:90,O:activate blob_thrower_1,W:1,S,W:1,Q"
           grep -q "blob_thrower_1 throws moveable_barrel_1" test_output/throw.log || { echo "::error::blob_thrower_1 should choose the barrel to throw (chooseObjectToThrow)"; exit 1; }
           grep -q "moveable_barrel_1 hits the player" test_output/throw.log || { echo "::error::the thrown barrel should hit the player (idMoveable damage)"; exit 1; }
+          run_test stepper testmap "W:1,O:notarget,G:-100 -200 0,A:0,O:activate test_stepper_1,W:2,O:actors,Q"
+          grep -q "Script: test_stepper_1 stepped" test_output/stepper.log || { echo "::error::test_stepper_1 should play its evade_left anim"; exit 1; }
+          awk '/test_stepper_1: / { x = $0; sub(/.* at /, "", x); split(x, p, " "); y = p[2] } END { exit !(y != "" && y + 0 > -40 && y + 0 < -32) }' test_output/stepper.log || { echo "::error::test_stepper_1 should move 64 left by its anim (characters move by their animations)"; exit 1; }
           run_test reverb testmap "W:1,O:notarget,O:reverb,G:420 -250 0,A:0,W:0.5,O:reverb,O:s_useEAXReverb 0,W:0.3,Q"
           grep -q "Found efxs/testmap.efx: 3 effects" test_output/reverb.log || { echo "::error::efxs/testmap.efx should be loaded"; exit 1; }
           grep -q 'Effect "room_a" (area 0, location "room_a")' test_output/reverb.log || { echo "::error::room A should get its reverb by location (info_location)"; exit 1; }

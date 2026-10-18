@@ -1251,6 +1251,7 @@ function TD3Md5Instance.PlayAnim(const AnimName: String; const Loop: Boolean): B
 var
   Path, Resolved: String;
   A: TD3Md5Anim;
+  First: TD3JointArray;
 begin
   Resolved := ResolveAnim(AnimName);
   Path := FAnims.Values[Resolved];
@@ -1265,7 +1266,12 @@ begin
   FAnimTime := 0;
   FLoop := Loop;
   Paused := False;
-  FHasPrevOrigin := False;
+  { its origin moves from the first frame }
+  First := nil;
+  FAnim.FramePose(0, First);
+  FHasPrevOrigin := Length(First) > 0;
+  if FHasPrevOrigin then
+    FPrevOrigin := First[0].Position;
   LastOriginDelta := TVector3.Zero;
   PlayingAnim := Resolved;
   Result := True;
