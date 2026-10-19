@@ -952,6 +952,16 @@ begin
     MainViewport.ShadowVolumesMaxLights := Map.ShadowLightsMax;
     Console.Print('r_shadowLights ' + IntToStr(Map.ShadowLightsMax));
   end else
+  if Cmd = 'r_usescissor' then
+  begin
+    { limit each shadow light's passes to its screen rectangle, like
+      Doom 3's r_useScissor (CGE change A follow-up) }
+    if Args <> '' then
+      InternalShadowVolumesLightScissor := StrToIntDef(Args, 1) <> 0
+    else
+      InternalShadowVolumesLightScissor := not InternalShadowVolumesLightScissor;
+    Console.Print('r_useScissor ' + BoolToStr(InternalShadowVolumesLightScissor, '1', '0'));
+  end else
   if Cmd = 'r_highdynamicrange' then
   begin
     { TCastleViewport.HighDynamicRange (CGE change I): light passes added
