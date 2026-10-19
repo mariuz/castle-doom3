@@ -46,7 +46,7 @@ Status of version 0.12.0 plus the unreleased changes in `docs/CHANGELOG.md`. "Do
     - Load time (about a minute per map), missing sound shader `guisounds_error`.
 
     Then the full game's maps with `smoke_maps.ps1`.
-2. **Shadows from several lights** (CGE change A, in `doom3-port`): started, unreleased: console `r_shadowLights N` makes the N strongest lights that are on cast shadow volumes (`UpdateShadowLights`; default 1, the old behavior). Next: measure the frame cost on the demo maps (each light is a pass of the receivers; the follow-up PR limits each to the light's screen rectangle) and pick the default; precomputed shadow volumes per light (CGE casts every caster for every shadow light); depth bounds per light.
+2. **Shadows from several lights** (CGE change A, in `doom3-port`): started, unreleased: console `r_shadowLights N` makes the N strongest lights that are on cast shadow volumes (`UpdateShadowLights`; default 1, the old behavior). Next: measure the frame cost on the demo maps (each light is a pass of the receivers; each is limited to the light's screen rectangle, `r_useScissor`) and pick the default; precomputed shadow volumes per light (CGE casts every caster for every shadow light); depth bounds per light.
 3. **Exact material stages** (partly needs CGE changes D and E below): `vertexColor`, `mirrorRenderMap`, heat haze on materials that also have plain stages (16 in the demo; heat haze and reflections on glass, and reflections everywhere, are done), `bumpyEnvironment` reflections, `deform tube` / `flare` / `turbulent`, stage `if` conditions, `polygonOffset` decals.
 4. **Interactive GUIs**: the GUI script (`onTime` transitions, `onAction`, `set` / `transition` / `resetTime` / `runScript`), the cursor where the player looks, Doom 3's fonts, re-rendering when the state changes.
 5. **Gameplay**, in subtasks (in the order to do them; counts are from the demo's three maps):
@@ -163,12 +163,12 @@ Proposed upstream: [castle-engine/castle-engine#740](https://github.com/castle-e
 - an example (`examples/viewport_and_scenes/shadow_volumes_several_lights`), API docs, and a rendering test in CGE's suite.
 
 It was checked with this port's test level (up to 8 lights, Phong materials with light volume effects, no artefacts). Still missing after it:
-- a scissor rectangle / depth bounds per light, so each pass only covers the light's screen area, as Doom 3 does (scissor: follow-up PR below);
+- a scissor rectangle / depth bounds per light, so each pass only covers the light's screen area, as Doom 3 does (scissor: done, follow-up below);
 - the gamma issue (change I);
 - the cge-www manual page `shadow_volumes.adoc` still says one light (to update if the PR is accepted);
 - here: done (unreleased), CI builds against `doom3-port`: `r_shadowLights N` (item 2).
 
-Follow-up in [mariuz/castle-engine#9](https://github.com/mariuz/castle-engine/pull/9) (into `doom3-port`): each light's passes (stencil clear, shadow volumes, additive pass) are limited by a scissor rectangle to where its radius reaches, and lights that reach nothing visible are skipped (`ShadowVolumeLightScissor`). The rendering is the same (checked in CGE's tests, and on the test map: no differences outside moving objects). Depth bounds (`EXT_depth_bounds_test`) are still missing.
+Follow-up merged into `doom3-port` ([mariuz/castle-engine#9](https://github.com/mariuz/castle-engine/pull/9)): each light's passes (stencil clear, shadow volumes, additive pass) are limited by a scissor rectangle to where its radius reaches, and lights that reach nothing visible are skipped (`ShadowVolumeLightScissor`; console `r_useScissor 0` here compares). The rendering is the same (checked in CGE's tests, and on the test map: no differences outside moving objects). Depth bounds (`EXT_depth_bounds_test`) are still missing.
 
 **B. Shadow maps for point lights.** `CastleInternalShadowMaps` computes projections only for spot and directional lights (`AutoCalculateProjectionForDirectionalLight`, spot cut-off angles): a point light needs a cube shadow map (6 faces, or a dual paraboloid map) and the shader lookup for it. Also, shadow map receivers are the shapes of the same scene as the light (`ProcessShadowMapsReceivers` per scene); the map's areas and lights are separate scenes here, so receivers in other scenes (or global lights casting into every scene) are needed too. Either A or B gives several shadow casting lights.
 
