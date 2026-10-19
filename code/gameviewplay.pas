@@ -121,7 +121,7 @@ var
 implementation
 
 uses
-  Math,
+  Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
   Doom3Sampler,
@@ -943,6 +943,20 @@ begin
       Map.Shadows := not Map.Shadows;
     MainViewport.ShadowVolumes := Map.Shadows;
     Console.Print('r_shadows ' + BoolToStr(Map.Shadows, '1', '0'));
+  end else
+  if Cmd = 'r_highdynamicrange' then
+  begin
+    { TCastleViewport.HighDynamicRange (CGE change I): light passes added
+      in linear colors. Set by name: older CGE versions don't have it. }
+    if IsPublishedProp(MainViewport, 'HighDynamicRange') then
+    begin
+      if Args <> '' then
+        SetOrdProp(MainViewport, 'HighDynamicRange', Ord(StrToIntDef(Args, 1) <> 0))
+      else
+        SetOrdProp(MainViewport, 'HighDynamicRange', 1 - GetOrdProp(MainViewport, 'HighDynamicRange'));
+      Console.Print('r_highDynamicRange ' + IntToStr(GetOrdProp(MainViewport, 'HighDynamicRange')));
+    end else
+      Console.Print('r_highDynamicRange: not supported by this CGE');
   end else
   if Cmd = 'r_sharedlighteffects' then
   begin
