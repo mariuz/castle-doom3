@@ -944,6 +944,14 @@ begin
     MainViewport.ShadowVolumes := Map.Shadows;
     Console.Print('r_shadows ' + BoolToStr(Map.Shadows, '1', '0'));
   end else
+  if Cmd = 'r_shadowlights' then
+  begin
+    { how many lights cast shadow volumes at once (CGE change A) }
+    if Args <> '' then
+      Map.ShadowLightsMax := Max(1, StrToIntDef(Args, 1));
+    MainViewport.ShadowVolumesMaxLights := Map.ShadowLightsMax;
+    Console.Print('r_shadowLights ' + IntToStr(Map.ShadowLightsMax));
+  end else
   if Cmd = 'r_highdynamicrange' then
   begin
     { TCastleViewport.HighDynamicRange (CGE change I): light passes added
@@ -1145,11 +1153,13 @@ begin
   end else
   if Cmd = 'g_stoptime' then
   begin
-    { freeze script threads and the entities they move }
+    { freeze script threads and the entities they move,
+      and the map's time (light shaders, animated surfaces) }
     if Args <> '' then
       FGame.ScriptsPaused := StrToIntDef(Args, 1) <> 0
     else
       FGame.ScriptsPaused := not FGame.ScriptsPaused;
+    Map.TimePaused := FGame.ScriptsPaused;
     Console.Print('g_stopTime ' + BoolToStr(FGame.ScriptsPaused, '1', '0'));
   end else
   if Cmd = 'lightsat' then
@@ -1177,7 +1187,7 @@ begin
       L := Map.Light(I);
       S := Format('%s %s color %.2f %.2f %.2f%s%s%s', [L.Entity.Name, L.Entity.Value('texture', '(default)'),
         L.Color.X, L.Color.Y, L.Color.Z, BoolToStr(L.Animated, ' animated', ''),
-        BoolToStr(L.Node.IsOn, '', ' off'), BoolToStr(I = Map.ShadowLight, ' shadows', '')]);
+        BoolToStr(L.Node.IsOn, '', ' off'), BoolToStr(L.Node.ShadowVolumesMain, ' shadows', '')]);
       Console.Print(S);
       WritelnLog('Lights', S);
     end;
@@ -1213,6 +1223,7 @@ procedure TViewPlay.CaptureScreenshot;
 var
   Path, ShadowName: String;
   Img: TCastleImage;
+  I: Integer;
 begin
   Inc(FShots);
   if AutoTestPrefix <> '' then
@@ -1225,9 +1236,14 @@ begin
   finally
     Img.Free;
   end;
-  if Map.ShadowLight >= 0 then
-    ShadowName := Map.Light(Map.ShadowLight).Entity.Name
-  else
+  ShadowName := '';
+  for I in Map.ShadowLights do
+  begin
+    if ShadowName <> '' then
+      ShadowName := ShadowName + ' ';
+    ShadowName := ShadowName + Map.Light(I).Entity.Name;
+  end;
+  if ShadowName = '' then
     ShadowName := 'none';
   WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, shadows %s%s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,

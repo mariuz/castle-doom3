@@ -1148,6 +1148,69 @@ begin
   Result := True;
 end;
 
+{ Several lights casting shadow volumes (r_shadowLights, CGE change A):
+  the strongest lights at the player, flags on exactly them. }
+procedure TestShadowLights;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  P: TVector3;
+  I, J, Casting: Integer;
+  InList: Boolean;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for shadow lights');
+    P := D3ToCge(Vector3(-160, -160, 40));
+    CheckEquals(1, Map.ShadowLightsMax, 'one shadow light by default');
+    Map.UpdateShadowLight(P);
+    CheckEquals(1, Length(Map.ShadowLights), 'one shadow light');
+    Check(Map.ShadowLight >= 0, 'a shadow light at the start');
+    if Map.ShadowLight >= 0 then
+      CheckEquals('light_1', Map.Light(Map.ShadowLight).Entity.Name, 'room A''s main light casts');
+
+    Map.ShadowLightsMax := 3;
+    Map.UpdateShadowLight(P);
+    CheckEquals(3, Length(Map.ShadowLights), 'three shadow lights');
+    if Length(Map.ShadowLights) = 3 then
+    begin
+      CheckEquals(Map.ShadowLights[0], Map.ShadowLight, 'ShadowLight is the first');
+      CheckEquals('light_1', Map.Light(Map.ShadowLights[0]).Entity.Name, 'the strongest at the player first');
+      Check((Map.ShadowLights[0] <> Map.ShadowLights[1]) and
+        (Map.ShadowLights[1] <> Map.ShadowLights[2]) and
+        (Map.ShadowLights[0] <> Map.ShadowLights[2]), 'three different lights');
+    end;
+    Casting := 0;
+    for I := 0 to Map.LightCount - 1 do
+    begin
+      InList := False;
+      for J in Map.ShadowLights do
+        if J = I then
+          InList := True;
+      if Map.Light(I).Node.ShadowVolumesMain then
+        Inc(Casting);
+      Check(Map.Light(I).Node.ShadowVolumesMain = InList,
+        'shadowVolumesMain exactly on the shadow lights: ' + Map.Light(I).Entity.Name);
+    end;
+    CheckEquals(3, Casting, 'three lights with shadowVolumesMain');
+
+    { back to one }
+    Map.ShadowLightsMax := 1;
+    Map.UpdateShadowLight(P);
+    CheckEquals(1, Length(Map.ShadowLights), 'back to one shadow light');
+    Casting := 0;
+    for I := 0 to Map.LightCount - 1 do
+      if Map.Light(I).Node.ShadowVolumesMain then
+        Inc(Casting);
+    CheckEquals(1, Casting, 'one light with shadowVolumesMain again');
+  finally
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestShadowCasters;
 var
   Brush: TD3CmBrush;
@@ -4275,6 +4338,7 @@ begin
   TestMaterialStages;
   TestGuis;
   TestShadowCasters;
+  TestShadowLights;
   TestTriggers;
   TestEfx;
   TestMovers;

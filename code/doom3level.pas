@@ -120,8 +120,13 @@ type
     FPortals: TD3PortalVisibility;
     FPortalCulling: Boolean;
     FTime: Single;
+    FTimePaused: Boolean;
     FShadows: Boolean;
     FShadowLight: Integer;
+    { All lights casting shadow volumes (FShadowLight first),
+      more than one when FShadowLightsMax > 1. }
+    FShadowLights: TD3IntArray;
+    FShadowLightsMax: Integer;
     FPrelightShadows: Boolean;
     FSkyMaterial: String;
     FCollision: TD3CollisionFile;
@@ -136,6 +141,8 @@ type
     FStaticModelCount: Integer;
     procedure CollectGuiTexture(Node: TX3DNode);
     procedure SetShadowLight(const I: Integer);
+    procedure SetShadowLights(const NewLights: TD3IntArray);
+    procedure UpdateShadowLights(const P: TVector3);
     procedure ApplyLightColor(const I: Integer; const C: TVector3);
     function LightShaderColor(const I: Integer): TVector3;
     function PrelightScene(const I: Integer): TCastleScene;
@@ -206,8 +213,17 @@ type
       +X, -X, +Y (up), -Y, +Z, -Z. False when there's no sky or an image is
       missing. }
     function SkyboxUrls(out Urls: TCastleStringArray6): Boolean;
-    { Index of the light casting shadows, -1 when none. }
+    { Index of the light casting shadows, -1 when none.
+      The first of ShadowLights when several lights cast. }
     property ShadowLight: Integer read FShadowLight;
+    { Indexes of all lights casting shadows (ShadowLight first). }
+    property ShadowLights: TD3IntArray read FShadowLights;
+    { How many lights cast shadow volumes at once
+      (TCastleViewport.ShadowVolumesMaxLights, CGE change A, doom3-port):
+      1 (the default) = the strongest light at the player, with its
+      precomputed shadow volume; more = the strongest lights that are on,
+      without the precomputed volumes (they would cast for every light). }
+    property ShadowLightsMax: Integer read FShadowLightsMax write FShadowLightsMax;
     { The light's strength (0..1, times its color) at a CGE point. }
     function LightStrengthAt(const I: Integer; const P: TVector3): Single;
     function VisibleAreaCount: Integer;
@@ -242,6 +258,9 @@ type
     { Seconds since the map was loaded (the "time" of material
       expressions). }
     property Time: Single read FTime;
+    { Stop the map's time: light shaders and animated surfaces
+      (console g_stopTime). }
+    property TimePaused: Boolean read FTimePaused write FTimePaused;
     { Doom 3's skill level (g_skill): 0 easy, 1 medium, 2 hard, 3 nightmare. }
     class var Skill: Integer;
     { Not spawned at the current skill (idGameLocal::InhibitEntitySpawn:
@@ -386,6 +405,7 @@ begin
   FShadows := True;
   FPrelightShadows := True;
   FShadowLight := -1;
+  FShadowLightsMax := 1;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
@@ -427,6 +447,7 @@ begin
   FSkyMaterial := '';
   ClearAnimatedSurfaces;
   FShadowLight := -1;
+  FShadowLights := nil;
   FStaticModelCount := 0;
   FModels.Clear;
   FHeadCount := 0;
@@ -1083,7 +1104,7 @@ var
   I: Integer;
   B: TD3BrushEntity;
   ME: TD3ModelEntity;
-  Area: Integer;
+  Area, L: Integer;
   On: Boolean;
 begin
   if FPortals = nil then
@@ -1124,10 +1145,11 @@ begin
     if FCasterScenes[I] <> nil then
     begin
       On := (I > High(FPortals.AreaVisible)) or FPortals.AreaVisible[I];
-      if (not On) and (FShadowLight >= 0) then
-        for Area in FLights[FShadowLight].Areas do
-          if Area = I then
-            On := True;
+      if not On then
+        for L in FShadowLights do
+          for Area in FLights[L].Areas do
+            if Area = I then
+              On := True;
       FCasterScenes[I].Exists := On and FShadows;
     end;
 end;
@@ -1144,7 +1166,16 @@ end;
 procedure TDoom3Map.SetShadowLight(const I: Integer);
 var
   Prelight: TCastleScene;
+  OneLight: TD3IntArray;
 begin
+  { from several shadow lights back to one }
+  if Length(FShadowLights) > 1 then
+  begin
+    OneLight := nil;
+    if I >= 0 then
+      OneLight := [I];
+    SetShadowLights(OneLight);
+  end;
   if I = FShadowLight then
     Exit;
   if (FShadowLight >= 0) and (FShadowLight <= High(FLights)) then
@@ -1155,8 +1186,10 @@ begin
       FPrelightScenes[FShadowLight].Exists := False;
   end;
   FShadowLight := I;
+  FShadowLights := nil;
   if I >= 0 then
   begin
+    FShadowLights := [I];
     FLights[I].Node.ShadowVolumes := True;
     FLights[I].Node.ShadowVolumesMain := True;
     { its precomputed shadow volume casts only for it }
@@ -1254,6 +1287,90 @@ begin
   Result := FPrelightScenes[I];
 end;
 
+procedure TDoom3Map.SetShadowLights(const NewLights: TD3IntArray);
+
+  function Contains(const A: TD3IntArray; const V: Integer): Boolean;
+  var
+    X: Integer;
+  begin
+    for X in A do
+      if X = V then
+        Exit(True);
+    Result := False;
+  end;
+
+var
+  L: Integer;
+begin
+  for L in FShadowLights do
+    if not Contains(NewLights, L) then
+    begin
+      FLights[L].Node.ShadowVolumes := False;
+      FLights[L].Node.ShadowVolumesMain := False;
+    end;
+  { precomputed shadow volumes would cast for every light: none }
+  if (FShadowLight >= 0) and (FShadowLight <= High(FPrelightScenes)) and
+     (FPrelightScenes[FShadowLight] <> nil) then
+    FPrelightScenes[FShadowLight].Exists := False;
+  for L in NewLights do
+  begin
+    FLights[L].Node.ShadowVolumes := True;
+    FLights[L].Node.ShadowVolumesMain := True;
+  end;
+  FShadowLights := Copy(NewLights);
+  if Length(FShadowLights) > 0 then
+    FShadowLight := FShadowLights[0]
+  else
+    FShadowLight := -1;
+end;
+
+procedure TDoom3Map.UpdateShadowLights(const P: TVector3);
+var
+  Candidates: TD3IntArray;
+  Scores: array of Single;
+  I, J, N, CandidateCount: Integer;
+  T: Single;
+  TI: Integer;
+  NewLights: TD3IntArray;
+  Same: Boolean;
+begin
+  { Lights that are on (their areas are visible), strongest at the player
+    first, then the nearest: each casts its own shadow volumes. }
+  SetLength(Candidates, Length(FLights));
+  SetLength(Scores, Length(FLights));
+  CandidateCount := 0;
+  for I := 0 to High(FLights) do
+  begin
+    if not FLights[I].Node.IsOn then
+      Continue;
+    if (FLights[I].Shader <> nil) and FLights[I].Shader.IsAmbientLight then
+      Continue;
+    if FLights[I].NoShadows then
+      Continue;
+    Candidates[CandidateCount] := I;
+    { strength dominates, distance (Doom 3 units) breaks ties }
+    Scores[CandidateCount] := LightStrengthAt(I, P) * 1e6 - PointsDistance(P, FLights[I].Location);
+    Inc(CandidateCount);
+  end;
+  { partial selection sort: the best FShadowLightsMax }
+  N := Min(CandidateCount, FShadowLightsMax);
+  for I := 0 to N - 1 do
+    for J := I + 1 to CandidateCount - 1 do
+      if Scores[J] > Scores[I] then
+      begin
+        T := Scores[I]; Scores[I] := Scores[J]; Scores[J] := T;
+        TI := Candidates[I]; Candidates[I] := Candidates[J]; Candidates[J] := TI;
+      end;
+  NewLights := Copy(Candidates, 0, N);
+  Same := Length(NewLights) = Length(FShadowLights);
+  if Same then
+    for I := 0 to High(NewLights) do
+      if NewLights[I] <> FShadowLights[I] then
+        Same := False;
+  if not Same then
+    SetShadowLights(NewLights);
+end;
+
 procedure TDoom3Map.UpdateShadowLight(const P: TVector3);
 var
   I, Best, Pass, PlayerArea: Integer;
@@ -1262,6 +1379,11 @@ begin
   if not FShadows then
   begin
     SetShadowLight(-1);
+    Exit;
+  end;
+  if FShadowLightsMax > 1 then
+  begin
+    UpdateShadowLights(P);
     Exit;
   end;
   PlayerArea := AreaAt(P);
@@ -1947,7 +2069,8 @@ var
   C: TVector3;
 begin
   inherited Update(SecondsPassed, RemoveMe);
-  FTime := FTime + SecondsPassed;
+  if not FTimePaused then
+    FTime := FTime + SecondsPassed;
   { scrolling / rotating textures, pulsing glows }
   if FProc <> nil then
     UpdateAnimatedSurfaces(FTime);

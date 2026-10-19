@@ -129,6 +129,10 @@ jobs:
           run_test shadows testmap "W:1,O:notarget,G:250 -40 0,A:-125,W:0.4,S,O:r_shadows 0,W:0.2,S,Q"
           grep "Screenshot" test_output/shadows.log | sed -n 1p | grep -q "shadows light_1" || { echo "::error::light_1 should cast the shadows"; exit 1; }
           grep "Screenshot" test_output/shadows.log | sed -n 2p | grep -q "shadows none" || { echo "::error::r_shadows 0 should turn shadows off"; exit 1; }
+          # several lights casting shadow volumes (CGE change A, TCastleViewport.ShadowVolumesMaxLights)
+          run_test shadowlights testmap "W:1,O:notarget,O:r_shadowLights 3,G:-160 -160 0,A:45,W:0.4,S,O:r_shadowLights 1,W:0.2,S,Q"
+          grep "Screenshot" test_output/shadowlights.log | sed -n 1p | grep -qE "shadows light_1 [a-z_0-9]+ [a-z_0-9]+\)" || { echo "::error::r_shadowLights 3 should make three lights cast shadows"; exit 1; }
+          grep "Screenshot" test_output/shadowlights.log | sed -n 2p | grep -qE "shadows light_1\)" || { echo "::error::r_shadowLights 1 should leave one shadow light"; exit 1; }
           run_test stages testmap "W:1,O:notarget,G:640 -150 0,A:90,P:45,W:0.4,S,G:740 -200 96,A:-45,W:0.3,S,W:1,S,Q"
           grep -q 'Sky "textures/test/sky"' test_output/stages.log || { echo "::error::the skybox should be set up"; exit 1; }
           cmp -s test_output/stages_2.png test_output/stages_3.png && { echo "::error::the terminal screen should scroll"; exit 1; } || true
