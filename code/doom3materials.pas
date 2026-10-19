@@ -348,9 +348,16 @@ const
     '#endif' + LineEnding +
     'uniform vec2 haze_scroll;' + LineEnding +
     'uniform float haze_magnitude;' + LineEnding +
+    { On OpenGLES the fragment shader parts are glued into one source (that
+      declares castle_vertex_eye and castle_TexCoord0), and a uniform of
+      both stages needs the vertex shader's precision (highp). }
+    '#ifdef GL_ES' + LineEnding +
+    'uniform highp mat4 castle_ProjectionMatrix;' + LineEnding +
+    '#else' + LineEnding +
     'uniform mat4 castle_ProjectionMatrix;' + LineEnding +
     'varying vec4 castle_vertex_eye;' + LineEnding +
     'varying vec4 castle_TexCoord0;' + LineEnding +
+    '#endif' + LineEnding +
     'void PLUG_fragment_modify(inout vec4 fragment_color)' + LineEnding +
     '{' + LineEnding +
     '  vec2 tex_coord = castle_TexCoord0.st;' + LineEnding +

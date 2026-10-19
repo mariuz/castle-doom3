@@ -10,7 +10,7 @@
 //
 // Each X3D light gets an Effect plugging PLUG_light_scale. It needs the
 // fragment's world position: castle_vertex_eye (the Phong shader's varying)
-// times castle_CameraInverseMatrix (CGE's EyeWorldSpace shader library).
+// through position_eye_to_world_space (CGE's EyeWorldSpace shader library).
 // Shader libraries are enabled by appearance / group effects only, so every
 // scene the map builds adds LightLibraryEffect to its root (AddLightLibrary).
 //
@@ -222,13 +222,22 @@ begin
   else
     FallCode := '  float falloff = 1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
 
+  { On OpenGLES all fragment shader parts are glued into one source: the
+    Phong shader declares castle_vertex_eye, the EyeWorldSpace library
+    castle_CameraInverseMatrix, and every light's effect is in it, so the
+    shared declarations are guarded (separate sources on desktop OpenGL). }
   Result :=
-    'uniform mat4 castle_CameraInverseMatrix;' + LineEnding +
+    '#ifndef D3_LIGHT_VOLUME_DECLARATIONS' + LineEnding +
+    '#define D3_LIGHT_VOLUME_DECLARATIONS' + LineEnding +
+    '#ifndef GL_ES' + LineEnding +
     'varying vec4 castle_vertex_eye;' + LineEnding +
+    '#endif' + LineEnding +
+    'vec4 position_eye_to_world_space(vec4 position_eye);' + LineEnding +
+    '#endif' + LineEnding +
     'uniform mat4 d3_light_matrix_' + N + ';' + LineEnding +
     'void PLUG_light_scale(inout float scale, const in vec3 normal_eye, const in vec3 light_dir)' + LineEnding +
     '{' + LineEnding +
-    '  vec4 p = d3_light_matrix_' + N + ' * (castle_CameraInverseMatrix * castle_vertex_eye);' + LineEnding +
+    '  vec4 p = d3_light_matrix_' + N + ' * position_eye_to_world_space(castle_vertex_eye);' + LineEnding +
     '  if (p.w <= 0.0) { scale = 0.0; return; }' + LineEnding +
     '  vec2 st = p.xy / p.w;' + LineEnding +
     '  if (st.x < 0.0 || st.x > 1.0 || st.y < 0.0 || st.y > 1.0 || p.z < 0.0 || p.z > 1.0)' + LineEnding +
