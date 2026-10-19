@@ -30,6 +30,30 @@ uses
   SysUtils,
   CastleVectors, X3DNodes, X3DFields, CastleRenderOptions;
 
+const
+  { Effect parts on OpenGL ES (and WebGL). Desktop OpenGL compiles every
+    effect part separately, so a part declares the CGE uniforms and
+    varyings it uses. OpenGL ES allows one shader per stage: CGE glues all
+    parts into one source (TGLSLProgram.AttachShader), where declaring
+    something CGE's code already declares fails to compile ("redeclared")
+    and the shape falls back to CGE's fallback shader. So such
+    declarations go between DesktopOnlyBegin and DesktopOnlyEnd (GL_ES is
+    predefined by GLSL ES compilers).
+    Also, CGE declares "precision mediump float" in fragment shaders on
+    OpenGL ES: world coordinates need D3_HIGHP (defined by EffectPrelude),
+    and a uniform also used by the vertex shader (highp there) must be
+    highp in the fragment shader too, or the program doesn't link. }
+  EffectPrelude =
+    '#ifndef D3_HIGHP' + LineEnding +
+    '#if defined(GL_ES) && defined(GL_FRAGMENT_PRECISION_HIGH)' + LineEnding +
+    '#define D3_HIGHP highp' + LineEnding +
+    '#else' + LineEnding +
+    '#define D3_HIGHP' + LineEnding +
+    '#endif' + LineEnding +
+    '#endif' + LineEnding;
+  DesktopOnlyBegin = '#ifndef GL_ES' + LineEnding;
+  DesktopOnlyEnd = '#endif' + LineEnding;
+
 { Texture space of a point light: a box of half sizes Radius around Origin
   rotated by Rot (Doom 3 coordinates). }
 function PointLightMatrix(const Origin: TVector3; const Rot: TMatrix3;
@@ -223,12 +247,21 @@ begin
     FallCode := '  float falloff = 1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
 
   Result :=
-    'uniform mat4 castle_CameraInverseMatrix;' + LineEnding +
+    EffectPrelude +
+    { on OpenGL ES, CGE glues the light parts before the EyeWorldSpace.glsl
+      library, which skips its declaration when this macro is defined
+      (the same precision as ours) }
+    '#ifndef CASTLE_CAMERA_INVERSE_MATRIX_DECLARED' + LineEnding +
+    '#define CASTLE_CAMERA_INVERSE_MATRIX_DECLARED' + LineEnding +
+    'uniform D3_HIGHP mat4 castle_CameraInverseMatrix;' + LineEnding +
+    '#endif' + LineEnding +
+    DesktopOnlyBegin +
     'varying vec4 castle_vertex_eye;' + LineEnding +
-    'uniform mat4 d3_light_matrix_' + N + ';' + LineEnding +
+    DesktopOnlyEnd +
+    'uniform D3_HIGHP mat4 d3_light_matrix_' + N + ';' + LineEnding +
     'void PLUG_light_scale(inout float scale, const in vec3 normal_eye, const in vec3 light_dir)' + LineEnding +
     '{' + LineEnding +
-    '  vec4 p = d3_light_matrix_' + N + ' * (castle_CameraInverseMatrix * castle_vertex_eye);' + LineEnding +
+    '  D3_HIGHP vec4 p = d3_light_matrix_' + N + ' * (castle_CameraInverseMatrix * castle_vertex_eye);' + LineEnding +
     '  if (p.w <= 0.0) { scale = 0.0; return; }' + LineEnding +
     '  vec2 st = p.xy / p.w;' + LineEnding +
     '  if (st.x < 0.0 || st.x > 1.0 || st.y < 0.0 || st.y > 1.0 || p.z < 0.0 || p.z > 1.0)' + LineEnding +

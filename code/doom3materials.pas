@@ -88,7 +88,7 @@ implementation
 
 uses
   Math, Generics.Collections, CastleVectors, CastleRenderOptions, X3DFields,
-  Doom3Decls, Doom3Images, Doom3Expressions, Doom3Files;
+  Doom3Decls, Doom3Images, Doom3Expressions, Doom3Files, Doom3LightEffects;
 
 type
   TColorExprs = array [0..3] of TD3Expr;
@@ -348,9 +348,12 @@ const
     '#endif' + LineEnding +
     'uniform vec2 haze_scroll;' + LineEnding +
     'uniform float haze_magnitude;' + LineEnding +
-    'uniform mat4 castle_ProjectionMatrix;' + LineEnding +
+    EffectPrelude +
+    'uniform D3_HIGHP mat4 castle_ProjectionMatrix;' + LineEnding +
+    DesktopOnlyBegin +
     'varying vec4 castle_vertex_eye;' + LineEnding +
     'varying vec4 castle_TexCoord0;' + LineEnding +
+    DesktopOnlyEnd +
     'void PLUG_fragment_modify(inout vec4 fragment_color)' + LineEnding +
     '{' + LineEnding +
     '  vec2 tex_coord = castle_TexCoord0.st;' + LineEnding +

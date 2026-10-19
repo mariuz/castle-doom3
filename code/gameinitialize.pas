@@ -165,6 +165,13 @@ initialization
     stay cached across map reloads, so compare in separate runs) }
   if GetEnvironmentVariable('CD3_SHARED_LIGHT_EFFECTS') = '0' then
     SharedLightEffects := False;
+  { OpenGL ES: highp fragment shaders (CGE change S, see ROADMAP.md). With
+    mediump (16-bit floats on Mesa and many GPUs) the squared distance to
+    a light overflows past 256 units and Doom 3's big rooms go dark.
+    CD3_FRAGMENT_HIGHP=0 compares. Desktop OpenGL ignores it. }
+  {$if declared(FragmentShaderHighPrecision)}
+  FragmentShaderHighPrecision := GetEnvironmentVariable('CD3_FRAGMENT_HIGHP') <> '0';
+  {$endif}
   Application.OnInitialize := @ApplicationInitialize;
 
   Window := TCastleWindow.Create(Application);

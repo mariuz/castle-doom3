@@ -804,6 +804,160 @@ begin
   end;
 end;
 
+{ The lines of GLSL code a compiler sees: a small preprocessor for
+  #ifdef / #ifndef / #if defined(A) && defined(B) / #else / #endif /
+  #define, starting with Defines (comma separated). }
+function ActiveGlslLines(const Code, Defines: String): TStringList;
+var
+  Lines, Defined: TStringList;
+  { per open #if: was the code around it active, is its branch taken }
+  Outer, Taken: array of Boolean;
+  I, N: Integer;
+  L, Rest, Name: String;
+  Cond: Boolean;
+
+  function Active: Boolean;
+  begin
+    Result := (N = 0) or (Outer[N - 1] and Taken[N - 1]);
+  end;
+
+  procedure Push(const C: Boolean);
+  begin
+    SetLength(Outer, N + 1);
+    SetLength(Taken, N + 1);
+    Outer[N] := Active;
+    Taken[N] := C;
+    Inc(N);
+  end;
+
+begin
+  Result := TStringList.Create;
+  Lines := TStringList.Create;
+  Defined := TStringList.Create;
+  try
+    Lines.Text := Code;
+    Defined.CommaText := Defines;
+    N := 0;
+    for I := 0 to Lines.Count - 1 do
+    begin
+      L := Trim(Lines[I]);
+      if Copy(L, 1, 8) = '#ifndef ' then
+        Push(Defined.IndexOf(Trim(Copy(L, 9, MaxInt))) < 0)
+      else
+      if Copy(L, 1, 7) = '#ifdef ' then
+        Push(Defined.IndexOf(Trim(Copy(L, 8, MaxInt))) >= 0)
+      else
+      if Copy(L, 1, 4) = '#if ' then
+      begin
+        { only defined(A) && defined(B)... }
+        Cond := True;
+        Rest := L;
+        while Pos('defined(', Rest) > 0 do
+        begin
+          Rest := Copy(Rest, Pos('defined(', Rest) + 8, MaxInt);
+          Name := Copy(Rest, 1, Pos(')', Rest) - 1);
+          Cond := Cond and (Defined.IndexOf(Name) >= 0);
+        end;
+        Push(Cond);
+      end else
+      if L = '#else' then
+        Taken[N - 1] := not Taken[N - 1]
+      else
+      if L = '#endif' then
+        Dec(N)
+      else
+      if Active then
+      begin
+        if Copy(L, 1, 8) = '#define ' then
+        begin
+          Rest := Trim(Copy(L, 9, MaxInt));
+          if Pos(' ', Rest) > 0 then
+            Rest := Copy(Rest, 1, Pos(' ', Rest) - 1);
+          Defined.Add(Rest);
+        end else
+          Result.Add(L);
+      end;
+    end;
+  finally
+    Lines.Free;
+    Defined.Free;
+  end;
+end;
+
+{ How many lines of Code declare Name (uniform or varying) for a compiler
+  with Defines. }
+function GlslDeclarations(const Code, Defines, Name: String): Integer;
+var
+  Active: TStringList;
+  I: Integer;
+begin
+  Result := 0;
+  Active := ActiveGlslLines(Code, Defines);
+  try
+    for I := 0 to Active.Count - 1 do
+      if ((Copy(Active[I], 1, 8) = 'uniform ') or (Copy(Active[I], 1, 8) = 'varying ')) and
+         (Pos(' ' + Name + ';', Active[I]) > 0) then
+        Inc(Result);
+  finally
+    Active.Free;
+  end;
+end;
+
+{ Effect code on OpenGL ES: CGE glues the effect parts and its own
+  fragment shader into one source, where declaring a varying or uniform
+  twice doesn't compile (the shapes then use CGE's fallback shader).
+  Desktop OpenGL compiles every part on its own: it must declare them. }
+procedure TestEffectsOnOpenGLES;
+const
+  GLES = 'GL_ES,GL_FRAGMENT_PRECISION_HIGH';
+var
+  M: TMatrix4;
+  E0, E1: TEffectNode;
+  Light0, Light1, Both, Haze: String;
+  App: TAppearanceNode;
+  Kind: TD3SpecialShape;
+begin
+  M := PointLightMatrix(Vector3(10, 20, 30), TMatrix3.Identity, Vector3(100, 200, 50));
+  E0 := CreateLightEffect(0, M, '', False);
+  E1 := CreateLightEffect(1, M, 'lights/squarelight1', True);
+  try
+    Light0 := (E0.FdParts[0] as TEffectPartNode).Contents;
+    Light1 := (E1.FdParts[0] as TEffectPartNode).Contents;
+  finally
+    E0.Free;
+    E1.Free;
+  end;
+  Both := Light0 + LineEnding + Light1;
+  CheckEquals(1, GlslDeclarations(Light0, '', 'castle_vertex_eye'), 'desktop: a light effect declares castle_vertex_eye');
+  CheckEquals(1, GlslDeclarations(Light0, '', 'castle_CameraInverseMatrix'), 'desktop: a light effect declares castle_CameraInverseMatrix');
+  CheckEquals(0, GlslDeclarations(Both, GLES, 'castle_vertex_eye'), 'OpenGL ES: light effects leave castle_vertex_eye to CGE');
+  CheckEquals(1, GlslDeclarations(Both, GLES, 'castle_CameraInverseMatrix'), 'OpenGL ES: two light effects declare castle_CameraInverseMatrix once');
+  { EyeWorldSpace.glsl, glued after them, skips its declaration }
+  CheckEquals(1, GlslDeclarations(Both + LineEnding +
+    '#ifndef CASTLE_CAMERA_INVERSE_MATRIX_DECLARED' + LineEnding +
+    'uniform highp mat4 castle_CameraInverseMatrix;' + LineEnding +
+    '#endif', GLES, 'castle_CameraInverseMatrix'), 'OpenGL ES: EyeWorldSpace.glsl does not declare it again');
+  CheckEquals(1, GlslDeclarations(Both, GLES, 'd3_light_matrix_1'), 'OpenGL ES: the second light keeps its own matrix');
+
+  App := GlassAppearance('textures/test/hazeglass', Kind);
+  try
+    Check(Kind = ssHaze, 'heat haze glass');
+    Check(App.FdEffects.Count = 1, 'heat haze has an effect');
+    if App.FdEffects.Count = 1 then
+    begin
+      Haze := ((App.FdEffects[0] as TEffectNode).FdParts[0] as TEffectPartNode).Contents;
+      CheckEquals(1, GlslDeclarations(Haze, '', 'castle_vertex_eye'), 'desktop: heat haze declares castle_vertex_eye');
+      CheckEquals(1, GlslDeclarations(Haze, '', 'castle_TexCoord0'), 'desktop: heat haze declares castle_TexCoord0');
+      CheckEquals(0, GlslDeclarations(Haze, GLES, 'castle_vertex_eye'), 'OpenGL ES: heat haze leaves castle_vertex_eye to CGE');
+      CheckEquals(0, GlslDeclarations(Haze, GLES, 'castle_TexCoord0'), 'OpenGL ES: heat haze leaves castle_TexCoord0 to CGE');
+      { also used by CGE's vertex shader, where floats are highp }
+      Check(Pos('uniform D3_HIGHP mat4 castle_ProjectionMatrix;', Haze) > 0, 'heat haze: castle_ProjectionMatrix is highp');
+    end;
+  finally
+    App.Free;
+  end;
+end;
+
 procedure TestLightVolumes;
 var
   M: TMatrix4;
@@ -4335,6 +4489,7 @@ begin
   TestExpressions;
   TestLightVolumes;
   TestSharedLightEffects;
+  TestEffectsOnOpenGLES;
   TestMaterialStages;
   TestGuis;
   TestShadowCasters;
