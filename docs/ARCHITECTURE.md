@@ -238,6 +238,7 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 - Lights are `Global` in the `Lights` scene with `CastGlobalLights`, so they light every area, brush entity and md5 model.
 - Brush entity, static model and md5 scenes are children of `TDoom3Map`. Static model entities are `TD3BrushEntity` items too, so `func_door` / `func_rotating` with LWO models move like brush ones; md5 scenes don't collide and aren't pickable (shots test monsters as cylinders).
 - Textures are referenced by URL (`d3fs:/...`, `d3img:/...`), so CGE's texture cache shares them between shapes and scenes. X3D nodes are never shared between scenes.
+- Temporal anti-aliasing (console `r_taa`, CGE change Q): `MainViewport.TemporalAntiAliasing`, set by name (`IsPublishedProp`). CGE jitters the projection and reprojects the history by the depth and the camera; the view model is `rlFront`, which CGE's TAA treats as moving with the camera. The HUD and console are not part of the viewport's world, so they stay sharp.
 
 ## Performance
 

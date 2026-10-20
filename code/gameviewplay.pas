@@ -1142,6 +1142,26 @@ begin
     end else
       Console.Print('r_highDynamicRange: not supported by this CGE');
   end else
+  if Cmd = 'r_taa' then
+  begin
+    { TCastleViewport.TemporalAntiAliasing (CGE change Q): each frame jittered
+      and blended with the previous ones (like RBDOOM-3-BFG's TAA).
+      Set by name: older CGE versions don't have it. }
+    if IsPublishedProp(MainViewport, 'TemporalAntiAliasing') then
+    begin
+      if Args <> '' then
+        SetOrdProp(MainViewport, 'TemporalAntiAliasing', Ord(StrToIntDef(Args, 1) <> 0))
+      else
+        SetOrdProp(MainViewport, 'TemporalAntiAliasing', 1 - GetOrdProp(MainViewport, 'TemporalAntiAliasing'));
+      Console.Print('r_taa ' + IntToStr(GetOrdProp(MainViewport, 'TemporalAntiAliasing')));
+      WritelnLog('GameViewPlay', 'Temporal anti-aliasing %s',
+        [BoolToStr(GetOrdProp(MainViewport, 'TemporalAntiAliasing') <> 0, 'on', 'off')]);
+    end else
+    begin
+      Console.Print('r_taa: not supported by this CGE');
+      WritelnLog('GameViewPlay', 'Temporal anti-aliasing: not supported by this CGE (needs TCastleViewport.TemporalAntiAliasing, CGE change Q)');
+    end;
+  end else
   if Cmd = 'r_sharedlighteffects' then
   begin
     { lights of a kind share one Effect with per-light uniforms (CGE change
