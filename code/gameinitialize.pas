@@ -30,6 +30,11 @@ var
   Pk4s: TStringList;
   LoadedGame: Boolean;
 begin
+  { OpenGLES: highp fragment shaders. With mediump (16-bit floats on Mesa
+    and many mobile GPUs) light distances overflow past 256 units, so
+    Doom 3's lights don't reach most walls. No effect on desktop OpenGL. }
+  FragmentShaderHighPrecision := True;
+
   AutoTestMap := '';
   CmdMap := '';
   BasePath := '';
