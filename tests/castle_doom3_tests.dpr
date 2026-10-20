@@ -13,7 +13,7 @@ uses
   CastleVectors, CastleLog, CastleImages,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
-  Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll,
+  Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -4309,6 +4309,83 @@ begin
   end;
 end;
 
+{ Environment probes' math (no OpenGL): cube map texel directions
+  agree with the capture cameras, spherical harmonics of a uniform
+  environment give its irradiance, the glossy blur keeps colors in place. }
+procedure TestEnvProbes;
+
+  function SolidFaces(const Size: Integer; const Colors: array of TVector3): TD3CubeImages;
+  var
+    Face: TD3CubeFace;
+    X, Y: Integer;
+  begin
+    for Face := Low(TD3CubeFace) to High(TD3CubeFace) do
+    begin
+      Result[Face] := TRGBImage.Create(Size, Size);
+      for Y := 0 to Size - 1 do
+        for X := 0 to Size - 1 do
+          Result[Face].Colors[X, Y, 0] := Vector4(Colors[Face], 1);
+    end;
+  end;
+
+const
+  Black: TVector3 = (X: 0; Y: 0; Z: 0);
+  White: TVector3 = (X: 1; Y: 1; Z: 1);
+  Red: TVector3 = (X: 1; Y: 0; Z: 0);
+var
+  Face: TD3CubeFace;
+  Direction, Up, Side: TVector3;
+  Faces, Blurred: TD3CubeImages;
+  SH: TD3SH9;
+begin
+  for Face := Low(TD3CubeFace) to High(TD3CubeFace) do
+  begin
+    CubeFaceCamera(Face, Direction, Up);
+    Side := TVector3.CrossProduct(Direction, Up);
+    Check(TVector3.DotProduct(CubeTexelDirection(Face, 8, 8, 16), Direction) > 0.99,
+      Format('env probes: face %d center is its camera direction', [Face]));
+    Check(TVector3.DotProduct(CubeTexelDirection(Face, 8, 15, 16) -
+      CubeTexelDirection(Face, 8, 0, 16), Up) > 1,
+      Format('env probes: face %d rows go up', [Face]));
+    Check(TVector3.DotProduct(CubeTexelDirection(Face, 15, 8, 16) -
+      CubeTexelDirection(Face, 0, 8, 16), Side) > 1,
+      Format('env probes: face %d columns go right', [Face]));
+  end;
+
+  { white all around: radiance 1, so the diffuse light is 1 for every normal }
+  Faces := SolidFaces(8, [White, White, White, White, White, White]);
+  try
+    SH := ProjectSH9(Faces);
+    CheckNear(4 * Pi * 0.282095, SH[0].X, 'env probes: SH band 0 of a white environment', 0.02);
+    CheckNear(0, SH[1].X, 'env probes: no SH band 1 in a white environment');
+    CheckVectorNear(White, SH9Irradiance(SH, Vector3(0, 1, 0)), 'env probes: white irradiance up', 0.02);
+    CheckVectorNear(White, SH9Irradiance(SH, Vector3(-1, 0, 0)), 'env probes: white irradiance -X', 0.02);
+  finally FreeCubeImages(Faces) end;
+
+  { only +Y (up) is lit: surfaces facing up get more light than facing down }
+  Faces := SolidFaces(8, [Black, Black, White, Black, Black, Black]);
+  try
+    SH := ProjectSH9(Faces);
+    Check(SH9Irradiance(SH, Vector3(0, 1, 0)).X > 0.4,
+      'env probes: a lit ceiling lights surfaces facing up');
+    Check(SH9Irradiance(SH, Vector3(0, -1, 0)).X < 0.05,
+      'env probes: a lit ceiling hardly lights surfaces facing down');
+  finally FreeCubeImages(Faces) end;
+
+  { a red +X face stays at +X after blurring }
+  Faces := SolidFaces(8, [Red, Black, Black, Black, Black, Black]);
+  try
+    Blurred := BlurredFaces(Faces, 4, 32);
+    try
+      Check(Blurred[0].Colors[2, 2, 0].X > 0.8, 'env probes: blurred +X stays red');
+      CheckNear(0, Blurred[0].Colors[2, 2, 0].Y, 'env probes: blurred +X has no green');
+      Check(Blurred[1].Colors[2, 2, 0].X < 0.05, 'env probes: blurred -X stays dark');
+      Check(Blurred[2].Colors[3, 2, 0].X > Blurred[2].Colors[0, 2, 0].X + 0.01,
+        'env probes: +Y is redder towards +X');
+    finally FreeCubeImages(Blurred) end;
+  finally FreeCubeImages(Faces) end;
+end;
+
 begin
   InitializeLog;
   D3Fs.RegisterProtocol;
@@ -4367,6 +4444,7 @@ begin
   TestMonsterRagdoll;
   TestAas;
   TestAasChase;
+  TestEnvProbes;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

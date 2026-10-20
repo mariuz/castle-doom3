@@ -38,6 +38,11 @@ type
     FDemoHeld: array of TKey;
     FShots: Integer;
     FQuitting: Boolean;
+    { environment probes (r_envProbes): one EnvironmentLight per area,
+      baked from the map; nil until baked for the current map }
+    FEnvProbes: TCastleScene;
+    FEnvProbesOn: Boolean;
+    FEnvProbeScale: Single;
     { a cinematic camera has the view: the player's view to go back to }
     FInCinematic: Boolean;
     { the camera before ApplyViewBob }
@@ -93,6 +98,9 @@ type
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
     procedure ReleaseDemoKeys;
+    procedure BakeEnvProbes;
+    procedure FreeEnvProbes;
+    procedure SetEnvProbeScale(const Value: Single);
     procedure UpdateCrouch(const SecondsPassed: Single);
     procedure CaptureScreenshot;
     function CameraYaw: Single;
@@ -126,7 +134,8 @@ uses
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
   Doom3Sampler,
   CastleShapes, CastleBoxes,
-  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu;
+  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu,
+  Doom3EnvProbes, CastleColors;
 
 constructor TViewPlay.Create(AOwner: TComponent);
 begin
@@ -135,6 +144,7 @@ begin
   FDemoCommands := TStringList.Create;
   MapName := 'testmap';
   FUseReverb := True;
+  FEnvProbeScale := 0.5;
 end;
 
 destructor TViewPlay.Destroy;
@@ -177,9 +187,134 @@ begin
   LoadLevel(ViewPlay.MapName);
 end;
 
+procedure TViewPlay.FreeEnvProbes;
+begin
+  if FEnvProbes <> nil then
+  begin
+    MainViewport.Items.Remove(FEnvProbes);
+    FreeAndNil(FEnvProbes);
+  end;
+end;
+
+procedure TViewPlay.BakeEnvProbes;
+const
+  FaceSize = 32;
+  IrradianceSize = 8;
+  { the reflection: blurred like a glossy (not mirror) surface reflects }
+  SpecularSize = 16;
+  SpecularExponent = 32;
+var
+  BakeViewport: TCastleViewport;
+  BakeCamera: TCastleCamera;
+  Hidden: TCastleTransformList;
+  Root: TX3DRootNode;
+  I, Count: Integer;
+  Box: TBox3D;
+  Faces, Irradiance, Specular: TD3CubeImages;
+  SH: TD3SH9;
+  SavedPortalCulling: Boolean;
+  Child: TCastleTransform;
+  StartTime: TTimerResult;
+begin
+  FreeEnvProbes;
+  if not EnvironmentProbesAvailable then
+  begin
+    Console.Print('r_envProbes: not supported by this CGE (needs EnvironmentLight.influenceSize)');
+    WritelnLog('GameViewPlay', 'Environment probes: not supported by this CGE (needs EnvironmentLight.influenceSize, CGE change P)');
+    Exit;
+  end;
+  StartTime := Timer;
+  { Bake the map alone: every area visible, its lights on,
+    without the weapon, the player's body, creatures and items. }
+  SavedPortalCulling := Map.PortalCulling;
+  Map.PortalCulling := False;
+  Map.UpdateVisibility(nil);
+  Hidden := TCastleTransformList.Create(false);
+  BakeViewport := TCastleViewport.Create(nil);
+  BakeCamera := TCastleCamera.Create(nil);
+  Root := TX3DRootNode.Create;
+  try
+    for I := 0 to MainViewport.Items.Count - 1 do
+    begin
+      Child := MainViewport.Items[I];
+      if (Child <> Map) and Child.Exists then
+      begin
+        Child.Exists := False;
+        Hidden.Add(Child);
+      end;
+    end;
+    BakeViewport.Items := MainViewport.Items;
+    MainViewport.Items.Add(BakeCamera);
+    BakeViewport.Camera := BakeCamera;
+    BakeViewport.BackgroundColor := Black;
+    BakeViewport.ShadowVolumes := MainViewport.ShadowVolumes;
+
+    Count := 0;
+    for I := 0 to Map.AreaCount - 1 do
+    begin
+      Box := TBox3D.Empty;
+      if Map.AreaScene(I) <> nil then
+        Box.Include(Map.AreaScene(I).BoundingBox);
+      if Map.AreaNonSolidScene(I) <> nil then
+        Box.Include(Map.AreaNonSolidScene(I).BoundingBox);
+      if Box.IsEmpty then
+        Continue;
+      { the probe at the area's center, used by the shapes inside its bounds }
+      Faces := CaptureCubeFaces(Container, BakeViewport, Box.Center, FaceSize);
+      try
+        SH := ProjectSH9(Faces);
+        Irradiance := IrradianceFaces(SH, IrradianceSize);
+        Specular := BlurredFaces(Faces, SpecularSize, SpecularExponent);
+        try
+          Root.AddChildren(CreateProbeLight(CubeMapTexture(Irradiance),
+            CubeMapTexture(Specular), Box.Center, Box.Size, FEnvProbeScale));
+        finally
+          FreeCubeImages(Irradiance);
+          FreeCubeImages(Specular);
+        end;
+      finally FreeCubeImages(Faces) end;
+      Inc(Count);
+    end;
+  finally
+    MainViewport.Items.Remove(BakeCamera);
+    FreeAndNil(BakeCamera);
+    FreeAndNil(BakeViewport);
+    for I := 0 to Hidden.Count - 1 do
+      Hidden[I].Exists := True;
+    FreeAndNil(Hidden);
+    Map.PortalCulling := SavedPortalCulling;
+  end;
+
+  FEnvProbes := TCastleScene.Create(nil);
+  FEnvProbes.Name := 'EnvProbes';
+  FEnvProbes.Load(Root, True);
+  FEnvProbes.CastGlobalLights := True;
+  FEnvProbes.Collides := False;
+  FEnvProbes.Pickable := False;
+  FEnvProbes.Exists := FEnvProbesOn;
+  MainViewport.Items.Add(FEnvProbes);
+  WritelnLog('GameViewPlay', 'Environment probes: %d areas baked in %.2f s (%d x %d faces)',
+    [Count, TimerSeconds(Timer, StartTime), FaceSize, FaceSize]);
+end;
+
+procedure TViewPlay.SetEnvProbeScale(const Value: Single);
+var
+  I: Integer;
+  Root: TX3DRootNode;
+begin
+  FEnvProbeScale := Value;
+  if FEnvProbes = nil then
+    Exit;
+  Root := FEnvProbes.RootNode;
+  for I := 0 to Root.FdChildren.Count - 1 do
+    if Root.FdChildren[I] is TEnvironmentLightNode then
+      TEnvironmentLightNode(Root.FdChildren[I]).Intensity := Value;
+end;
+
 procedure TViewPlay.Stop;
 begin
   ReleaseDemoKeys;
+  FreeEnvProbes;
   SetReverbEffect(nil, 'leaving the game');
   FreeAndNil(FGame);
   inherited Stop;
@@ -278,12 +413,15 @@ begin
     Exit;
   end;
   MapName := AMapName;
+  FreeEnvProbes;
   FGame.Health := 100;
   FGame.Armor := 0;
   FGame.Spawn;
   PlaceCamera(Map.SpawnOrigin, Map.SpawnAngle);
   LoadReverb;
   SetupSky;
+  if FEnvProbesOn then
+    BakeEnvProbes;
   Hud.ShowMessage(AMapName, 4);
   LoadProfileStep('sky');
   FProfileFrames := 1;
@@ -943,6 +1081,34 @@ begin
       Map.Shadows := not Map.Shadows;
     MainViewport.ShadowVolumes := Map.Shadows;
     Console.Print('r_shadows ' + BoolToStr(Map.Shadows, '1', '0'));
+  end else
+  if Cmd = 'r_envprobes' then
+  begin
+    { environment probes: baked image-based light per area (CGE change P);
+      only with physical materials it is the full effect, the classic
+      Phong look gets the diffuse and specular light too: off by default }
+    if Args <> '' then
+      FEnvProbesOn := StrToIntDef(Args, 1) <> 0
+    else
+      FEnvProbesOn := not FEnvProbesOn;
+    if FEnvProbesOn and (FEnvProbes = nil) then
+      BakeEnvProbes;
+    if FEnvProbes <> nil then
+      FEnvProbes.Exists := FEnvProbesOn;
+    Console.Print('r_envProbes ' + BoolToStr(FEnvProbesOn, '1', '0') +
+      BoolToStr(FEnvProbesOn and (FEnvProbes = nil), ' (not baked)', ''));
+  end else
+  if Cmd = 'r_envprobebake' then
+  begin
+    { bake again (e.g. after lights changed) }
+    BakeEnvProbes;
+    Console.Print('r_envProbeBake: ' + BoolToStr(FEnvProbes <> nil, 'baked', 'not baked'));
+  end else
+  if Cmd = 'r_envprobescale' then
+  begin
+    if Args <> '' then
+      SetEnvProbeScale(StrToFloatDefDot(Args, 1));
+    Console.Print('r_envProbeScale ' + FloatToStrDot(FEnvProbeScale));
   end else
   if Cmd = 'r_shadowlights' then
   begin
