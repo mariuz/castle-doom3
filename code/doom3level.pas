@@ -128,6 +128,9 @@ type
     FShadowLights: TD3IntArray;
     FShadowLightsMax: Integer;
     FPrelightShadows: Boolean;
+    { The shadow lights cast shadow maps instead of shadow volumes. }
+    FShadowMaps: Boolean;
+    FShadowMapSize: Cardinal;
     FSkyMaterial: String;
     FCollision: TD3CollisionFile;
     FUseCollisionModel: Boolean;
@@ -142,6 +145,9 @@ type
     procedure CollectGuiTexture(Node: TX3DNode);
     procedure SetShadowLight(const I: Integer);
     procedure SetShadowLights(const NewLights: TD3IntArray);
+    { Make the light I cast shadows (shadow volumes or shadow maps) or not. }
+    procedure SetLightCasts(const I: Integer; const Value: Boolean);
+    procedure SetShadowMaps(const Value: Boolean);
     procedure UpdateShadowLights(const P: TVector3);
     procedure ApplyLightColor(const I: Integer; const C: TVector3);
     function LightShaderColor(const I: Integer): TVector3;
@@ -284,6 +290,17 @@ type
       (shadowModel "_prelight_<light>") also cast it, with the other casters.
       Console r_prelightShadows. }
     property PrelightShadows: Boolean read FPrelightShadows write FPrelightShadows default True;
+    { The shadow lights (see Shadows, ShadowLightsMax) cast shadow maps
+      instead of shadow volumes: point lights with 6 views (cube faces)
+      in CGE's shadow map atlas (CGE changes B and R). Console r_shadowMaps.
+      Needs a CGE with them, see ShadowMapsAvailable. }
+    property ShadowMaps: Boolean read FShadowMaps write SetShadowMaps default False;
+    { Size of each view of the shadow maps (used for the lights of the next
+      LoadMap). Console r_shadowMapSize. }
+    property ShadowMapSize: Cardinal read FShadowMapSize write FShadowMapSize default 512;
+    { The CGE has shadow maps for point lights, cascades and the shared atlas
+      (CGE changes B and R): DirectionalLight has the shadowCascades field. }
+    class function ShadowMapsAvailable: Boolean;
     { Draw only what is visible through the portals (UpdateVisibility). }
     property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
@@ -406,6 +423,7 @@ begin
   FPrelightShadows := True;
   FShadowLight := -1;
   FShadowLightsMax := 1;
+  FShadowMapSize := 512;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
@@ -965,6 +983,8 @@ begin
   FLightScene := TD3Scene.Create(nil);
   FLightScene.SetTransient;
   FLightScene.Name := 'Lights';
+  { the shadow maps' views (when ShadowMaps) }
+  FLightScene.ShadowMapsDefaultSize := FShadowMapSize;
   FLightScene.Load(LightRoot, True);
   FLightScene.CastGlobalLights := True;
   FLightScene.Collides := False;
@@ -1180,8 +1200,7 @@ begin
     Exit;
   if (FShadowLight >= 0) and (FShadowLight <= High(FLights)) then
   begin
-    FLights[FShadowLight].Node.ShadowVolumes := False;
-    FLights[FShadowLight].Node.ShadowVolumesMain := False;
+    SetLightCasts(FShadowLight, False);
     if (FShadowLight <= High(FPrelightScenes)) and (FPrelightScenes[FShadowLight] <> nil) then
       FPrelightScenes[FShadowLight].Exists := False;
   end;
@@ -1190,16 +1209,60 @@ begin
   if I >= 0 then
   begin
     FShadowLights := [I];
-    FLights[I].Node.ShadowVolumes := True;
-    FLights[I].Node.ShadowVolumesMain := True;
+    SetLightCasts(I, True);
     { its precomputed shadow volume casts only for it }
-    if FPrelightShadows then
+    if FPrelightShadows and not FShadowMaps then
     begin
       Prelight := PrelightScene(I);
       if Prelight <> nil then
         Prelight.Exists := True;
     end;
   end;
+end;
+
+procedure TDoom3Map.SetLightCasts(const I: Integer; const Value: Boolean);
+begin
+  if FShadowMaps then
+  begin
+    FLights[I].Node.ShadowVolumes := False;
+    FLights[I].Node.ShadowVolumesMain := False;
+    { a global light with shadows casts shadow maps on all scenes (CGE change B) }
+    if FLights[I].Node.Shadows <> Value then
+      FLights[I].Node.Shadows := Value;
+  end else
+  begin
+    FLights[I].Node.ShadowVolumes := Value;
+    FLights[I].Node.ShadowVolumesMain := Value;
+  end;
+end;
+
+procedure TDoom3Map.SetShadowMaps(const Value: Boolean);
+var
+  L: Integer;
+begin
+  if FShadowMaps = Value then
+    Exit;
+  { stop the current shadow lights, the next UpdateShadowLight picks them again }
+  for L in FShadowLights do
+    if (L >= 0) and (L <= High(FLights)) then
+    begin
+      SetLightCasts(L, False);
+      if (L <= High(FPrelightScenes)) and (FPrelightScenes[L] <> nil) then
+        FPrelightScenes[L].Exists := False;
+    end;
+  FShadowLights := nil;
+  FShadowLight := -1;
+  FShadowMaps := Value;
+end;
+
+class function TDoom3Map.ShadowMapsAvailable: Boolean;
+var
+  Sun: TDirectionalLightNode;
+begin
+  Sun := TDirectionalLightNode.Create;
+  try
+    Result := Sun.Field('shadowCascades') <> nil;
+  finally FreeAndNil(Sun) end;
 end;
 
 function TDoom3Map.PrelightScene(const I: Integer): TCastleScene;
@@ -1304,19 +1367,13 @@ var
 begin
   for L in FShadowLights do
     if not Contains(NewLights, L) then
-    begin
-      FLights[L].Node.ShadowVolumes := False;
-      FLights[L].Node.ShadowVolumesMain := False;
-    end;
+      SetLightCasts(L, False);
   { precomputed shadow volumes would cast for every light: none }
   if (FShadowLight >= 0) and (FShadowLight <= High(FPrelightScenes)) and
      (FPrelightScenes[FShadowLight] <> nil) then
     FPrelightScenes[FShadowLight].Exists := False;
   for L in NewLights do
-  begin
-    FLights[L].Node.ShadowVolumes := True;
-    FLights[L].Node.ShadowVolumesMain := True;
-  end;
+    SetLightCasts(L, True);
   FShadowLights := Copy(NewLights);
   if Length(FShadowLights) > 0 then
     FShadowLight := FShadowLights[0]

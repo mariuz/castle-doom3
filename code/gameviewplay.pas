@@ -1110,6 +1110,31 @@ begin
       SetEnvProbeScale(StrToFloatDefDot(Args, 1));
     Console.Print('r_envProbeScale ' + FloatToStrDot(FEnvProbeScale));
   end else
+  if Cmd = 'r_shadowmaps' then
+  begin
+    { the shadow lights cast shadow maps instead of shadow volumes:
+      point lights with 6 views in CGE's shadow map atlas (CGE changes B, R) }
+    if not TDoom3Map.ShadowMapsAvailable then
+    begin
+      Console.Print('r_shadowMaps: not supported by this CGE');
+      WritelnLog('GameViewPlay', 'Shadow maps: not supported by this CGE (needs point light shadow maps, CGE changes B and R)');
+    end else
+    begin
+      if Args <> '' then
+        Map.ShadowMaps := StrToIntDef(Args, 1) <> 0
+      else
+        Map.ShadowMaps := not Map.ShadowMaps;
+      Console.Print('r_shadowMaps ' + BoolToStr(Map.ShadowMaps, '1', '0'));
+      WritelnLog('GameViewPlay', 'Shadow maps %s', [BoolToStr(Map.ShadowMaps, 'on', 'off')]);
+    end;
+  end else
+  if Cmd = 'r_shadowmapsize' then
+  begin
+    { size of each shadow map view, for the next map loaded }
+    if Args <> '' then
+      Map.ShadowMapSize := Max(16, StrToIntDef(Args, 512));
+    Console.Print('r_shadowMapSize ' + IntToStr(Map.ShadowMapSize) + ' (used by the next map loaded)');
+  end else
   if Cmd = 'r_shadowlights' then
   begin
     { how many lights cast shadow volumes at once (CGE change A) }
