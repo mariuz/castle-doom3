@@ -168,6 +168,7 @@ type
     procedure BuildModelEntities;
     procedure BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
     procedure BuildStaticModelEntities;
+    procedure UpdateShadowMapCasting;
   protected
     procedure Loaded; override;
   public
@@ -337,7 +338,7 @@ procedure SetD3Rotation(const T: TCastleTransform; const M: TMatrix3);
 implementation
 
 uses
-  Math,
+  Math, TypInfo,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
   Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels, Doom3Gui;
@@ -1253,6 +1254,36 @@ begin
   FShadowLights := nil;
   FShadowLight := -1;
   FShadowMaps := Value;
+  UpdateShadowMapCasting;
+end;
+
+procedure TDoom3Map.UpdateShadowMapCasting;
+
+  { CGE's TCastleTransform.CastShadowsWhenHidden (in doom3-port):
+    render into the shadow maps while portal culling hides it. }
+  procedure SetCastWhenHidden(const T: TCastleTransform);
+  begin
+    if (T <> nil) and IsPublishedProp(T, 'CastShadowsWhenHidden') then
+      SetOrdProp(T, 'CastShadowsWhenHidden', Ord(FShadowMaps));
+  end;
+
+var
+  I: Integer;
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+begin
+  for I := 0 to High(FAreaScenes) do
+    if FAreaScenes[I] <> nil then
+    begin
+      { The area geometry isn't closed: no shadow volumes,
+        but it casts shadow maps. }
+      FAreaScenes[I].CastShadows := FShadowMaps;
+      SetCastWhenHidden(FAreaScenes[I]);
+    end;
+  for B in FBrushes do
+    SetCastWhenHidden(B.Scene);
+  for ME in FModels do
+    SetCastWhenHidden(ME.Holder);
 end;
 
 class function TDoom3Map.ShadowMapsAvailable: Boolean;
@@ -1948,6 +1979,7 @@ begin
   if FSpawnModels then
     BuildModelEntities;
   LoadProfileStep('md5 models');
+  UpdateShadowMapCasting;
   WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models (%d with heads)',
     [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count - FStaticModelCount,
      FStaticModelCount, FModels.Count, FHeadCount]);
