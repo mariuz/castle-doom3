@@ -54,7 +54,8 @@ uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions, X3DNodes,
-  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll;
+  Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
+  Doom3Particles;
 
 type
   { A monster's route through the AAS (the path between the areas it was
@@ -341,6 +342,41 @@ type
     ExplodeSound: String;
     { a glowing ball (fireballs), nil for bullets }
     Visual: TCastleTransform;
+    { smoke_fly: the particles it trails (owned by the game's emitters;
+      stopped when it's gone) }
+    Trail: TD3ParticleEmitter;
+    { model_detonate / smoke_detonate: particles at the explosion }
+    DetonateModel, DetonateSmoke: String;
+    destructor Destroy; override;
+  end;
+
+  { A particle emitter entity (func_emitter, or any entity whose model is
+    a .prt): activation toggles it (idFuncEmitter). }
+  TD3EmitterEntity = class
+    Entity: TD3MapEntity;
+    Emitter: TD3ParticleEmitter;
+    On: Boolean;
+  end;
+
+  TD3FxActionState = record
+    { the action's delay plus its random part }
+    Delay: Single;
+    Started, Done: Boolean;
+    ActionStart: Single;
+    Emitter: TD3ParticleEmitter;
+    Light: TCastlePointLight;
+  end;
+
+  { An FX playing (idEntityFx): its decl's actions run from Start. }
+  TD3Fx = class
+    Decl: TD3FxDecl;
+    { the entity it plays on (nil: none) }
+    Entity: TD3MapEntity;
+    { Doom 3 coordinates }
+    Origin: TVector3;
+    Axis: TD3Axis;
+    Start: Single;
+    Actions: array of TD3FxActionState;
     destructor Destroy; override;
   end;
 
@@ -626,12 +662,29 @@ type
     FCounts: specialize TDictionary<String, Integer>;
     { classes whose activation is not supported yet (logged once) }
     FUnsupported: TStringList;
+    { particle systems: all emitters (owned), the emitter entities, the
+      FX playing }
+    FEmitters: specialize TObjectList<TD3ParticleEmitter>;
+    FEmitterEntities: specialize TObjectList<TD3EmitterEntity>;
+    FFx: specialize TObjectList<TD3Fx>;
     FTime: Single;
     FPlayerEye: TVector3;
     FOnMessage: TD3MessageEvent;
     FFireCooldown: Single;
     FDeadTime: Single;
     procedure Message(const S: String);
+    procedure SpawnEmitters;
+    function AddEmitter(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
+      const OneShot: Boolean; const Who: String): TD3ParticleEmitter;
+    function EmitterEntityOf(const E: TD3MapEntity): TD3EmitterEntity;
+    procedure UpdateParticles;
+    procedure StartFxAction(const Fx: TD3Fx; const Index: Integer);
+    procedure EndFxAction(const Fx: TD3Fx; const Index: Integer);
+    procedure RemoveFx(const Index: Integer);
+    procedure UpdateTrail(const P: TD3Projectile);
+    procedure ExplodeParticles(const P: TD3Projectile; const HitWorld: Boolean; const Normal: TVector3);
+    procedure EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
+    function EntityOriginNow(const E: TD3MapEntity): TVector3;
     function SoundFromShader(const ShaderName: String): TCastleSound;
     procedure SpawnMover(const B: TD3BrushEntity);
     procedure SpawnSpeaker(const E: TD3MapEntity);
@@ -997,6 +1050,17 @@ type
     property Animated: specialize TObjectList<TD3Animated> read FAnimated;
     property Actors: specialize TObjectList<TD3Actor> read FActors;
     property Projectiles: specialize TObjectList<TD3Projectile> read FProjectiles;
+    { Start an FX decl (fx/*.fx) at a Doom 3 origin and axis, for an
+      entity (nil: none); nil when the decl is missing. }
+    function StartFx(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
+      const E: TD3MapEntity): TD3Fx;
+    { A one-shot particle system (Doom 3's smoke) at a CGE position,
+      facing a Doom 3 axis. }
+    function EmitSmoke(const DeclName, Who: String; const Position: TVector3;
+      const Axis: TD3Axis): TD3ParticleEmitter;
+    property Emitters: specialize TObjectList<TD3ParticleEmitter> read FEmitters;
+    property EmitterEntities: specialize TObjectList<TD3EmitterEntity> read FEmitterEntities;
+    property Fx: specialize TObjectList<TD3Fx> read FFx;
     property Aas: TD3AasFile read FAas;
     property CombatNodes: specialize TObjectList<TD3CombatNode> read FCombatNodes;
     property Moveables: specialize TObjectList<TD3Moveable> read FMoveables;
@@ -1389,6 +1453,9 @@ begin
   FCounts := specialize TDictionary<String, Integer>.Create;
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
+  FEmitters := specialize TObjectList<TD3ParticleEmitter>.Create(True);
+  FEmitterEntities := specialize TObjectList<TD3EmitterEntity>.Create(True);
+  FFx := specialize TObjectList<TD3Fx>.Create(True);
   Health := 100;
   FIdealSlot := -1;
   ViewBobEnabled := True;
@@ -1420,6 +1487,9 @@ begin
   FBindings.Free;
   FCounts.Free;
   FUnsupported.Free;
+  FFx.Free;
+  FEmitterEntities.Free;
+  FEmitters.Free;
   FreeAndNil(FScript);
   FScriptHost.Free;
   FHandles.Free;
@@ -1489,6 +1559,10 @@ begin
   { before the VM goes (it owns the actors' threads) }
   FActors.Clear;
   FProjectiles.Clear;
+  { the FX before their emitters and lights go }
+  FFx.Clear;
+  FEmitterEntities.Clear;
+  FEmitters.Clear;
   ProjectilesLaunched := 0;
   ClearScriptSounds;
   FTime := 0;
@@ -3066,6 +3140,20 @@ begin
     W.KickEndTime := FTime;
   W.KickEndTime := Min(W.KickEndTime + W.KickTime, FTime + W.KickMaxTime);
   W.FlashStart := FTime;
+  { smoke_muzzle: a puff at the muzzle }
+  if W.Def.Values['smoke_muzzle'] <> '' then
+  begin
+    Axis := PlayerViewAxis;
+    Fwd := D3ToCge(Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]));
+    if ThirdPersonActive and (W.World <> nil) then
+      Up := FlashPosition(W.World, Fwd, W.WorldHolder.WorldTranslation)
+    else
+    if W.View <> nil then
+      Up := FlashPosition(W.View, Fwd, FPlayerEye + Fwd * 24)
+    else
+      Up := FPlayerEye + Fwd * 24;
+    EmitSmoke(W.Def.Values['smoke_muzzle'], W.DefName + ' smoke_muzzle', Up, Axis);
+  end;
   { idWeapon::Event_LaunchProjectiles: brass after ejectBrassDelay }
   if W.BrassDef <> '' then
     FBrassDue := FTime + W.BrassDelay;
@@ -3830,6 +3918,7 @@ begin
          (E.Value('spawnclass') = 'idMoveablePDAItem') or (E.Value('spawnclass') = 'idVideoCDItem') then
         SpawnItem(E);
     end;
+  SpawnEmitters;
   InitInventory;
   SpawnPlayerModel;
   SpreadLocations;
@@ -4034,10 +4123,33 @@ var
   S: TD3Speaker;
   Handled: Boolean;
   SpawnClass: String;
+  Em: TD3EmitterEntity;
 begin
   Inc(ActivationCount);
   Cls := LowerCase(E.ClassName_);
   Handled := False;
+
+  Em := EmitterEntityOf(E);
+  if Em <> nil then
+  begin
+    { idFuncEmitter::Event_Activate: on / off, the particles start over }
+    Em.On := not Em.On;
+    Em.Emitter.Enabled := Em.On;
+    if Em.On then
+    begin
+      Em.Emitter.StartTime := FTime;
+      Em.Emitter.Reset;
+    end;
+    WritelnLog('Doom3World', 'Emitter %s %s', [E.Name, BoolToStr(Em.On, 'on', 'off')]);
+    Exit;
+  end;
+  if (Cls = 'func_fx') or (E.Value('spawnclass') = 'idEntityFx') then
+  begin
+    { idEntityFx::Event_Trigger: plays its fx again, fires its targets }
+    StartFx(E.Value('fx'), EntityOriginNow(E), E.Rotation, E);
+    ActivateTargets(E, 0);
+    Exit;
+  end;
 
   if Cls = 'light' then
   begin
@@ -4499,6 +4611,7 @@ begin
   UpdateAnimated;
   UpdateProjectiles(SecondsPassed);
   UpdateBrass(SecondsPassed);
+  UpdateParticles;
   for Mon in FMonsters do
     UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
@@ -6243,6 +6356,361 @@ begin
   inherited Destroy;
 end;
 
+{ Particles and FX ---------------------------------------------------------- }
+
+destructor TD3Fx.Destroy;
+var
+  I: Integer;
+begin
+  for I := 0 to High(Actions) do
+    FreeAndNil(Actions[I].Light);
+  inherited;
+end;
+
+function TD3Game.AddEmitter(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
+  const OneShot: Boolean; const Who: String): TD3ParticleEmitter;
+var
+  Decl: TD3ParticleDecl;
+  Key: String;
+begin
+  Decl := ParticleDecl(DeclName);
+  if Decl = nil then
+  begin
+    Key := 'particle ' + LowerCase(DeclName);
+    if FUnsupported.IndexOf(Key) < 0 then
+    begin
+      FUnsupported.Add(Key);
+      WritelnWarning('Doom3World', 'Particle "%s" not found (%s)', [DeclName, Who]);
+    end;
+    Exit(nil);
+  end;
+  Result := TD3ParticleEmitter.Create(Decl, FTime);
+  Result.Origin := Origin;
+  Result.Axis := Axis;
+  Result.OneShot := OneShot;
+  Result.Name := Who;
+  FMap.Add(Result.Scene);
+  FEmitters.Add(Result);
+end;
+
+function TD3Game.EmitSmoke(const DeclName, Who: String; const Position: TVector3;
+  const Axis: TD3Axis): TD3ParticleEmitter;
+begin
+  Result := AddEmitter(DeclName, CgeToD3(Position), Axis, True, Who);
+end;
+
+function TD3Game.EmitterEntityOf(const E: TD3MapEntity): TD3EmitterEntity;
+begin
+  for Result in FEmitterEntities do
+    if Result.Entity = E then
+      Exit;
+  Result := nil;
+end;
+
+function TD3Game.EntityOriginNow(const E: TD3MapEntity): TVector3;
+var
+  T: TCastleTransform;
+begin
+  T := TransformOf(E.Name);
+  if T <> nil then
+    Result := CgeToD3(T.WorldTranslation)
+  else
+    Result := E.Origin;
+end;
+
+procedure TD3Game.SpawnEmitters;
+var
+  E: TD3MapEntity;
+  Def: TStringList;
+  ModelName, Cls: String;
+  Em: TD3EmitterEntity;
+  OnCount, FxCount, FxStarted: Integer;
+begin
+  OnCount := 0;
+  FxCount := 0;
+  FxStarted := 0;
+  if FMap.MapFile = nil then
+    Exit;
+  for E in FMap.MapFile.Entities do
+  begin
+    if TDoom3Map.EntityInhibited(E) then
+      Continue;
+    Def := Decls.EntityDef(E.ClassName_);
+    Cls := LowerCase(E.ClassName_);
+    if (Cls = 'func_fx') or (E.Value('spawnclass') = 'idEntityFx') then
+    begin
+      Inc(FxCount);
+      if E.BoolValue('start') and (StartFx(E.Value('fx'), E.Origin, E.Rotation, E) <> nil) then
+        Inc(FxStarted);
+      Continue;
+    end;
+    ModelName := E.Value('model');
+    if (ModelName = '') and (Def <> nil) then
+      ModelName := Def.Values['model'];
+    if not SameText(ExtractFileExt(ModelName), '.prt') then
+      Continue;
+    Em := TD3EmitterEntity.Create;
+    Em.Entity := E;
+    Em.Emitter := AddEmitter(ModelName, E.Origin, E.Rotation, False, E.Name);
+    if Em.Emitter = nil then
+    begin
+      Em.Free;
+      Continue;
+    end;
+    Em.Emitter.Persistent := True;
+    Em.Emitter.EntityColor := Vector4(E.VectorValue('_color', Vector3(1, 1, 1)), 1);
+    { idFuncEmitter: start_off, or hidden until shown }
+    Em.On := not E.BoolValue('start_off') and not E.BoolValue('hide');
+    Em.Emitter.Enabled := Em.On;
+    if Em.On then
+      Inc(OnCount);
+    FEmitterEntities.Add(Em);
+  end;
+  WritelnLog('Doom3World', 'Particles: %d emitter entities (%d on), %d fx entities (%d started)',
+    [FEmitterEntities.Count, OnCount, FxCount, FxStarted]);
+end;
+
+function TD3Game.StartFx(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
+  const E: TD3MapEntity): TD3Fx;
+var
+  Decl: TD3FxDecl;
+  Key, Who: String;
+  I: Integer;
+  A: TD3FxAction;
+begin
+  Result := nil;
+  if DeclName = '' then
+    Exit;
+  Decl := FxDecl(DeclName);
+  if E <> nil then
+    Who := E.Name
+  else
+    Who := '';
+  if Decl = nil then
+  begin
+    Key := 'fx ' + LowerCase(DeclName);
+    if FUnsupported.IndexOf(Key) < 0 then
+    begin
+      FUnsupported.Add(Key);
+      WritelnWarning('Doom3World', 'FX "%s" not found (%s)', [DeclName, Who]);
+    end;
+    Exit;
+  end;
+  Result := TD3Fx.Create;
+  Result.Decl := Decl;
+  Result.Entity := E;
+  Result.Origin := Origin;
+  Result.Axis := Axis;
+  Result.Start := FTime;
+  SetLength(Result.Actions, Decl.Actions.Count);
+  for I := 0 to Decl.Actions.Count - 1 do
+  begin
+    A := Decl.Actions[I];
+    Result.Actions[I].Delay := A.Delay;
+    if A.RandomMax > A.RandomMin then
+      Result.Actions[I].Delay := A.Delay + A.RandomMin + Random * (A.RandomMax - A.RandomMin);
+  end;
+  FFx.Add(Result);
+  WritelnLog('Doom3World', 'FX %s started (%s, %d actions)', [Decl.Name, Who, Decl.Actions.Count]);
+end;
+
+procedure TD3Game.StartFxAction(const Fx: TD3Fx; const Index: Integer);
+var
+  A: TD3FxAction;
+  Pos: TVector3;
+  Light: TCastlePointLight;
+begin
+  A := Fx.Decl.Actions[Index];
+  Pos := Fx.Origin + AxisToWorld(Fx.Axis, A.Offset);
+  case A.Kind of
+    fxLight:
+      begin
+        Light := TCastlePointLight.Create(nil);
+        Light.Translation := D3ToCge(Pos);
+        Light.Color := A.LightColor;
+        Light.Radius := Max(1, A.LightRadius);
+        if A.FadeIn > 0 then
+          Light.Intensity := 0
+        else
+          Light.Intensity := 1;
+        Light.CastShadows := False;
+        FMap.Add(Light);
+        Fx.Actions[Index].Light := Light;
+      end;
+    fxModel:
+      Fx.Actions[Index].Emitter := AddEmitter(A.Data, Pos, Fx.Axis, A.Duration <= 0, Fx.Decl.Name);
+    fxParticle:
+      Fx.Actions[Index].Emitter := AddEmitter(A.Data, Pos, Fx.Axis, True, Fx.Decl.Name);
+    fxSound:
+      PlaySoundAt(A.Data, D3ToCge(Pos));
+    fxDecal:
+      Unsupported('fx decal (' + Fx.Decl.Name + ')');
+    fxShake:
+      Unsupported('fx shake (' + Fx.Decl.Name + ')');
+    else
+      if A.Data <> '' then
+        Unsupported('fx model ' + A.Data + ' (' + Fx.Decl.Name + ')');
+  end;
+end;
+
+procedure TD3Game.EndFxAction(const Fx: TD3Fx; const Index: Integer);
+begin
+  FreeAndNil(Fx.Actions[Index].Light);
+  if (Fx.Actions[Index].Emitter <> nil) and (Fx.Decl.Actions[Index].Kind = fxModel) then
+  begin
+    { the model goes at once, a one-shot particle finishes by itself }
+    if Fx.Decl.Actions[Index].Duration > 0 then
+      FEmitters.Remove(Fx.Actions[Index].Emitter);
+    Fx.Actions[Index].Emitter := nil;
+  end;
+end;
+
+procedure TD3Game.RemoveFx(const Index: Integer);
+var
+  F: TD3Fx;
+  I: Integer;
+begin
+  F := FFx[Index];
+  for I := 0 to High(F.Actions) do
+    if F.Actions[I].Started and not F.Actions[I].Done then
+      EndFxAction(F, I);
+  FFx.Delete(Index);
+end;
+
+procedure TD3Game.UpdateParticles;
+var
+  ViewAxis: TD3Axis;
+  I, K: Integer;
+  Em: TD3ParticleEmitter;
+  F: TD3Fx;
+  A: TD3FxAction;
+  St: ^TD3FxActionState;
+  T: TCastleTransform;
+  AllDone, Ended: Boolean;
+  Elapsed, Intensity: Single;
+begin
+  ViewAxis := PlayerViewAxis;
+
+  { FX actions }
+  for I := FFx.Count - 1 downto 0 do
+  begin
+    F := FFx[I];
+    if F.Entity <> nil then
+    begin
+      T := TransformOf(F.Entity.Name);
+      if T <> nil then
+        F.Origin := CgeToD3(T.WorldTranslation);
+    end;
+    AllDone := True;
+    for K := 0 to High(F.Actions) do
+    begin
+      A := F.Decl.Actions[K];
+      St := @F.Actions[K];
+      if St^.Done then
+        Continue;
+      AllDone := False;
+      if not St^.Started then
+      begin
+        if FTime < F.Start + St^.Delay then
+          Continue;
+        St^.Started := True;
+        St^.ActionStart := FTime;
+        StartFxAction(F, K);
+      end;
+      Elapsed := FTime - St^.ActionStart;
+      if St^.Light <> nil then
+      begin
+        { idEntityFx: the light fades in, and out at the end }
+        Intensity := 1;
+        if (A.FadeIn > 0) and (Elapsed < A.FadeIn) then
+          Intensity := Elapsed / A.FadeIn;
+        if (A.FadeOut > 0) and (A.Duration > 0) and (A.Duration - Elapsed < A.FadeOut) then
+          Intensity := Min(Intensity, Max(0, (A.Duration - Elapsed) / A.FadeOut));
+        St^.Light.Intensity := Intensity;
+        if A.TrackOrigin then
+          St^.Light.Translation := D3ToCge(F.Origin + AxisToWorld(F.Axis, A.Offset));
+      end;
+      if (St^.Emitter <> nil) and A.TrackOrigin then
+        St^.Emitter.Origin := F.Origin + AxisToWorld(F.Axis, A.Offset);
+      if A.Duration > 0 then
+        Ended := Elapsed >= A.Duration
+      else
+      if A.Kind in [fxModel, fxParticle] then
+        Ended := (St^.Emitter = nil) or St^.Emitter.Finished(FTime)
+      else
+        Ended := True;
+      if Ended then
+      begin
+        EndFxAction(F, K);
+        if A.Restart <> 0 then
+        begin
+          { plays again }
+          St^.Started := False;
+          St^.Delay := FTime - F.Start;
+        end else
+          St^.Done := True;
+      end;
+    end;
+    if AllDone then
+      RemoveFx(I);
+  end;
+
+  { the emitters }
+  for I := FEmitters.Count - 1 downto 0 do
+  begin
+    Em := FEmitters[I];
+    if not Em.Enabled then
+      Continue;
+    Em.Update(FTime, ViewAxis);
+    if Em.Finished(FTime) and not Em.Persistent then
+      FEmitters.Delete(I);
+  end;
+end;
+
+procedure TD3Game.UpdateTrail(const P: TD3Projectile);
+begin
+  if P.Trail = nil then
+    Exit;
+  P.Trail.Origin := CgeToD3(P.Position);
+  if not P.Velocity.IsZero then
+    P.Trail.Axis := AxisFromDirection(CgeToD3(P.Velocity));
+end;
+
+procedure TD3Game.ExplodeParticles(const P: TD3Projectile; const HitWorld: Boolean; const Normal: TVector3);
+var
+  Axis: TD3Axis;
+begin
+  { idProjectile::Explode: the particles face the surface hit, else back
+    along the flight }
+  if HitWorld and not Normal.IsZero then
+    Axis := AxisFromDirection(CgeToD3(Normal))
+  else
+    Axis := AxisFromDirection(-CgeToD3(P.Velocity));
+  if P.DetonateModel <> '' then
+    EmitSmoke(P.DetonateModel, P.Owner + ' model_detonate', P.Position, Axis);
+  if P.DetonateSmoke <> '' then
+    EmitSmoke(P.DetonateSmoke, P.Owner + ' smoke_detonate', P.Position, Axis);
+end;
+
+procedure TD3Game.EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
+var
+  Key, Who: String;
+begin
+  { idAnimatedEntity::AddLocalDamageEffect: the hit entity's
+    smoke_wound_flesh (the material type is always flesh here) }
+  Key := '';
+  Who := 'player';
+  if E <> nil then
+  begin
+    Key := E.Value('smoke_wound_flesh');
+    Who := E.Name;
+  end;
+  if (Key = '') and (Def <> nil) then
+    Key := Def.Values['smoke_wound_flesh'];
+  if Key <> '' then
+    EmitSmoke(Key, Who + ' smoke_wound_flesh', Position, AxisFromDirection(CgeToD3(Direction)));
+end;
+
 procedure TD3Game.PlaySoundAt(const ShaderName: String; const Position: TVector3);
 var
   Snd: TCastleSound;
@@ -6527,6 +6995,11 @@ begin
   end;
   Result.Owner := Owner;
   Result.ExplodeSound := Def.Values['snd_explode'];
+  Result.DetonateModel := Def.Values['model_detonate'];
+  Result.DetonateSmoke := Def.Values['smoke_detonate'];
+  if Def.Values['smoke_fly'] <> '' then
+    Result.Trail := AddEmitter(Def.Values['smoke_fly'], CgeToD3(From),
+      AxisFromDirection(CgeToD3(Velocity)), False, Owner + ' smoke_fly');
   if DefFloat('light_radius', 0) > 0 then
   begin
     { a glowing ball in the light's color (the particles are item 7) }
@@ -6628,13 +7101,16 @@ var
   P: TD3Projectile;
   NewPos, Step, Feet, Normal, Pos, Seek, Nose, Dir, Vel: TVector3;
   Len, HitDist, Dist, Frac, DPitch, DYaw, MaxTurn: Single;
-  Detonate, HitPlayer, Bounced: Boolean;
+  Detonate, HitPlayer, Bounced, HitWorld: Boolean;
   HitMonster: TD3Monster;
 
   procedure Remove;
   begin
     if (P.HeldBy <> nil) and (P.HeldBy.Missile = P) then
       P.HeldBy.Missile := nil;
+    { its trail fades out by itself }
+    if P.Trail <> nil then
+      P.Trail.Stopped := True;
     FProjectiles.Delete(I);
   end;
 
@@ -6654,6 +7130,7 @@ begin
         P.Position := MuzzlePosition(P.HeldBy, P.HeldJoint);
         if P.Visual <> nil then
           P.Visual.Translation := P.Position;
+        UpdateTrail(P);
       end;
       Continue;
     end;
@@ -6665,6 +7142,7 @@ begin
         if P.ExplodeSound <> '' then
           PlaySoundAt(P.ExplodeSound, P.Position);
         SplashDamage(P);
+        ExplodeParticles(P, False, TVector3.Zero);
       end;
       Remove;
       Continue;
@@ -6712,6 +7190,7 @@ begin
     Detonate := False;
     HitPlayer := False;
     Bounced := False;
+    HitWorld := False;
     { a monster (the player's projectiles) }
     if P.FromPlayer and (Len > 0) then
     begin
@@ -6724,6 +7203,7 @@ begin
         WritelnLog('Doom3World', 'Projectile of the player hits %s (%d)', [HitMonster.Model.Entity.Name, P.Damage]);
         DamageMonster(HitMonster, P.Damage);
         NewPos := P.Position + Step * (Min(Dist, Len) / Len);
+        EmitWound(HitMonster.Model.Entity, HitMonster.Model.EntityDef, NewPos, -P.Velocity);
         Detonate := True;
         HitPlayer := True;
       end;
@@ -6736,6 +7216,7 @@ begin
       begin
         DamagePlayerByMonster(P.Damage, P.DamageDefName, P.Velocity);
         WritelnLog('Doom3World', 'Projectile of %s hits the player (%d)', [P.Owner, P.Damage]);
+        EmitWound(nil, FPlayerDef, P.Position, -P.Velocity);
         Detonate := True;
         HitPlayer := True;
       end else
@@ -6756,8 +7237,10 @@ begin
     begin
       NewPos := P.Position + Step * (HitDist / Len);
       if P.DetonateOnWorld then
-        Detonate := True
-      else
+      begin
+        Detonate := True;
+        HitWorld := True;
+      end else
       begin
         { idPhysics_RigidBody bounce: reflected, keeping Bounce of the speed }
         P.Velocity := (P.Velocity - Normal * (2 * TVector3.DotProduct(P.Velocity, Normal))) * P.Bounce;
@@ -6771,10 +7254,12 @@ begin
     P.Position := NewPos;
     if P.Visual <> nil then
       P.Visual.Translation := NewPos;
+    UpdateTrail(P);
     if Detonate then
     begin
       if P.ExplodeSound <> '' then
         PlaySoundAt(P.ExplodeSound, P.Position);
+      ExplodeParticles(P, HitWorld, Normal);
       { RadiusDamage ignores the one hit directly }
       if not HitPlayer then
         SplashDamage(P);
@@ -6859,6 +7344,13 @@ begin
     if Shader = '' then
       Shader := Arg;
     StartScriptSound(A.Handle, Shader, 0);
+  end else
+  if Cmd = 'fx' then
+  begin
+    { fx <fx decl> [joint]: an FX at the joint (else at the chest) }
+    Shader := Copy(Arg, 1, Pos(' ', Arg + ' ') - 1);
+    StartFx(Shader, CgeToD3(MuzzlePosition(A, Trim(Copy(Arg, Length(Shader) + 2, MaxInt)))),
+      A.Model.Entity.Rotation, A.Model.Entity);
   end else
   if Cmd = 'create_missile' then
     { a projectile in its hand until launch_missile (hell knights) }
@@ -8106,6 +8598,12 @@ begin
   if N = 'activate' then
     Activate(E)
   else
+  if N = 'startFx' then
+  begin
+    { idEntity::Event_StartFx: an FX at the entity (no FX entity here) }
+    StartFx(Args[0].S, EntityOriginNow(E), E.Rotation, E);
+    EventResult := D3EntityValue(0);
+  end else
   if (N = 'getKey') or (N = 'getFloatKey') or (N = 'getIntKey') or
      (N = 'getBoolKey') or (N = 'getVectorKey') or (N = 'getEntityKey') then
   begin
@@ -8194,6 +8692,11 @@ begin
     begin
       ME.Hidden := N = 'hide';
       ME.Holder.Exists := not ME.Hidden;
+    end;
+    if EmitterEntityOf(E) <> nil then
+    begin
+      EmitterEntityOf(E).On := N = 'show';
+      EmitterEntityOf(E).Emitter.Enabled := N = 'show';
     end;
   end else
 

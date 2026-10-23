@@ -123,6 +123,12 @@ jobs:
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -Eq "testmap.cm.: [0-9]+ models" test_output/clip.log || { echo "::error::collision model not loaded"; exit 1; }
           run_test portals testmap "W:1,S,G:200 0 0,A:0,W:2.2,S,A:180,W:0.2,S,Q"
+          run_test particles testmap "W:1,A:90,W:1,S,A:45,X,W:0.15,S,O:particles,G:420 -250 0,A:90,O:activate fx_test_1,W:0.15,S,O:activate emitter_ring_1,A:-20,W:0.5,S,O:particles,Q"
+          grep -q "Particles: 2 emitter entities (1 on), 1 fx entities" test_output/particles.log || { echo "::error::particle emitter entities not spawned"; exit 1; }
+          grep -q "emitter_steam_1: test_steam (2 stages, [1-9][0-9]* particles)" test_output/particles.log || { echo "::error::the steam vent has no live particles"; exit 1; }
+          grep -q "smoke_muzzle: test_muzzle" test_output/particles.log || { echo "::error::no muzzle smoke after a shot"; exit 1; }
+          grep -q "FX fx/test_blast started" test_output/particles.log || { echo "::error::func_fx activation did not start its fx"; exit 1; }
+          grep -q "Emitter emitter_ring_1 on" test_output/particles.log || { echo "::error::activating func_emitter did not switch it on"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 1p | grep -q "visible areas 1" || { echo "::error::closed door should hide room B"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 2p | grep -q "visible areas 2" || { echo "::error::room B should be visible through the open door"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 3p | grep -q "visible areas 1" || { echo "::error::room B should be hidden behind the camera"; exit 1; }

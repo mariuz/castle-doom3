@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles;
 
 type
   TViewPlay = class(TCastleView)
@@ -1127,6 +1127,35 @@ begin
       Console.Print('r_shadowMaps ' + BoolToStr(Map.ShadowMaps, '1', '0'));
       WritelnLog('GameViewPlay', 'Shadow maps %s', [BoolToStr(Map.ShadowMaps, 'on', 'off')]);
     end;
+  end else
+  if Cmd = 'r_skipparticles' then
+  begin
+    if Args <> '' then
+      SkipParticles := StrToIntDef(Args, 1) <> 0
+    else
+      SkipParticles := not SkipParticles;
+    Console.Print('r_skipParticles ' + BoolToStr(SkipParticles, '1', '0'));
+  end else
+  if Cmd = 'particles' then
+  begin
+    { every particle system: who, the decl, stages and live particles }
+    for I := 0 to FGame.Emitters.Count - 1 do
+    begin
+      S := Format('%s: %s (%d stages, %d particles)%s%s', [
+        FGame.Emitters[I].Name, FGame.Emitters[I].Decl.Name, FGame.Emitters[I].Decl.Stages.Count,
+        FGame.Emitters[I].Live, BoolToStr(FGame.Emitters[I].Enabled, '', ' off'),
+        BoolToStr(FGame.Emitters[I].Stopped, ' stopped', '')]);
+      Console.Print(S);
+      WritelnLog('Particles', S);
+    end;
+    for I := 0 to FGame.Fx.Count - 1 do
+    begin
+      S := Format('fx %s: %d actions, %.1f s', [FGame.Fx[I].Decl.Name,
+        Length(FGame.Fx[I].Actions), FGame.Time - FGame.Fx[I].Start]);
+      Console.Print(S);
+      WritelnLog('Particles', S);
+    end;
+    Console.Print(Format('%d particle systems, %d fx', [FGame.Emitters.Count, FGame.Fx.Count]));
   end else
   if Cmd = 'r_shadowmapsize' then
   begin

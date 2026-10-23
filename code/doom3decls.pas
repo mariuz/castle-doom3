@@ -17,7 +17,7 @@ uses
   Doom3Lexer, Doom3Expressions;
 
 type
-  TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtAF, dtOther);
+  TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtAF, dtParticle, dtFx, dtOther);
 
   TD3BlendMode = (bmOpaque, bmBlend, bmAdd, bmFilter);
 
@@ -158,6 +158,7 @@ type
   TD3DeclManager = class
   strict private
     FBodies: array [TD3DeclType] of specialize TDictionary<String, String>;
+    FClearHooks: array of TProcedure;
     FMaterials: specialize TObjectDictionary<String, TD3Material>;
     FModels: specialize TObjectDictionary<String, TD3ModelDecl>;
     FSkins: specialize TObjectDictionary<String, TD3Skin>;
@@ -180,6 +181,8 @@ type
     { the text between a decl's braces; False if there's no such decl }
     function DeclBody(const T: TD3DeclType; const Name: String; out Body: String): Boolean;
     function DeclNames(const T: TD3DeclType): TStringList;
+    { Called by Clear: other units drop their caches of parsed decls. }
+    procedure AddClearHook(const Proc: TProcedure);
 
     { Material by name; never nil (an implicit one when not declared). }
     function Material(const Name: String): TD3Material;
@@ -209,7 +212,7 @@ uses
 
 const
   DeclTypeNames: array [TD3DeclType] of String =
-    ('material', 'entitydef', 'model', 'skin', 'sound', 'table', 'articulatedfigure', '');
+    ('material', 'entitydef', 'model', 'skin', 'sound', 'table', 'articulatedfigure', 'particle', 'fx', '');
 
 function ReadImageProgram(const Lexer: TDoom3Lexer): String;
 var
@@ -505,10 +508,19 @@ begin
   inherited Destroy;
 end;
 
+procedure TD3DeclManager.AddClearHook(const Proc: TProcedure);
+begin
+  SetLength(FClearHooks, Length(FClearHooks) + 1);
+  FClearHooks[High(FClearHooks)] := Proc;
+end;
+
 procedure TD3DeclManager.Clear;
 var
   T: TD3DeclType;
+  Proc: TProcedure;
 begin
+  for Proc in FClearHooks do
+    Proc();
   for T := Low(T) to High(T) do
     FBodies[T].Clear;
   FMaterials.Clear;
@@ -588,10 +600,13 @@ begin
   IndexDir('skins/', '.skin', dtSkin);
   IndexDir('sound/', '.sndshd', dtSound);
   IndexDir('af/', '.af', dtAF);
+  IndexDir('particles/', '.prt', dtParticle);
+  IndexDir('fx/', '.fx', dtFx);
   FLoaded := True;
-  WritelnLog('Doom3Decls', 'Indexed %d materials, %d entityDefs, %d models, %d skins, %d sound shaders, %d articulated figures',
+  WritelnLog('Doom3Decls', 'Indexed %d materials, %d entityDefs, %d models, %d skins, %d sound shaders, %d articulated figures, %d particles, %d fx',
     [FBodies[dtMaterial].Count, FBodies[dtEntityDef].Count, FBodies[dtModel].Count,
-     FBodies[dtSkin].Count, FBodies[dtSound].Count, FBodies[dtAF].Count]);
+     FBodies[dtSkin].Count, FBodies[dtSound].Count, FBodies[dtAF].Count,
+     FBodies[dtParticle].Count, FBodies[dtFx].Count]);
 end;
 
 function TD3DeclManager.DeclCount(const T: TD3DeclType): Integer;
