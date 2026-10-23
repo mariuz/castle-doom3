@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(103, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(105, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -121,7 +121,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(37, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(40, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(43, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
@@ -173,7 +173,7 @@ begin
   begin
     CheckEquals('models/md5/test/blob.md5mesh', Model.Mesh, 'model mesh');
     CheckEquals('models/md5/test/blob_walk.md5anim', Model.AnimFile('walk'), 'model anim (with frame commands)');
-    CheckEquals(6, Model.Anims.Count, 'model anim count');
+    CheckEquals(7, Model.Anims.Count, 'model anim count');
   end;
 
   Snd := Decls.SoundShader('test_hum');
@@ -270,7 +270,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(63, MapFile.Entities.Count, 'entity count');
+    CheckEquals(64, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -509,7 +509,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(13, Cm.ModelCount, 'cm models (world + 10 brush entities + 2 triggers)');
+    CheckEquals(14, Cm.ModelCount, 'cm models (world + 10 brush entities + 3 triggers)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -1486,7 +1486,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for triggers');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(2, Game.Triggers.Count, 'two trigger volumes (trigger_once_1, trigger_once_cin)');
+    CheckEquals(3, Game.Triggers.Count, 'three trigger volumes (trigger_once_1, trigger_once_cin, trigger_hurt_1)');
     if Game.Triggers.Count <> 2 then
       Exit;
     { the volume comes from the .cm model at the entity origin (330 0 56):
@@ -4387,6 +4387,179 @@ begin
   finally FreeCubeImages(Faces) end;
 end;
 
+
+procedure TestDamageEffects;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  Blob1, Blob2, M: TD3Monster;
+  A: TD3Actor;
+  Info: TD3DamageInfo;
+  Health0, Debris0, I: Integer;
+  Hurt: TD3Trigger;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for damage effects');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    Blob1 := nil;
+    Blob2 := nil;
+    for M in Game.Monsters do
+    begin
+      M.Dormant := True;
+      if M.Model.Entity.Name = 'blob_1' then
+        Blob1 := M;
+      if M.Model.Entity.Name = 'blob_2' then
+        Blob2 := M;
+    end;
+    Check((Blob1 <> nil) and (Blob2 <> nil), 'blob_1 and blob_2 (the simple AI)');
+    if (Blob1 = nil) or (Blob2 = nil) then
+      Exit;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Step(0.2);
+
+    { damage defs }
+    Info := Game.DamageInfo('damage_test_gib');
+    Check(Info.Found, 'damage_test_gib found');
+    CheckEquals(200, Info.Damage, 'its damage');
+    Check(Info.Gib, 'it gibs');
+    CheckNear(60, Info.Knockback, 'its knockback');
+    Info := Game.DamageInfo('damage_test_hurt');
+    CheckEquals(5, Info.Damage, 'damage_test_hurt damage');
+    Check(not Info.Gib, 'does not gib');
+    CheckNear(20, Info.Knockback, 'knockback 20 when missing');
+    Info := Game.DamageInfo('no_such_damage', 7);
+    Check(not Info.Found, 'a missing def');
+    CheckEquals(7, Info.Damage, 'keeps the default damage');
+
+    { pain: a cry by the health left, the pain anim (the simple AI),
+      pain_delay apart }
+    Health0 := Blob1.Health;
+    Game.DamageMonster(Blob1, 10, 'damage_test_hurt', D3ToCge(Vector3(1, 0, 0)));
+    CheckEquals(Health0 - 10, Blob1.Health, 'blob_1 hurt by 10');
+    CheckEquals('snd_pain_medium', Blob1.LastSound, 'a medium cry (health 70)');
+    Check(Blob1.PainAnim, 'the pain anim plays');
+    CheckEquals('pain', Blob1.Model.Instance.PlayingAnim, 'the blob''s "pain" anim');
+    Blob1.LastSound := '';
+    Game.DamageMonster(Blob1, 10, 'damage_test_hurt', D3ToCge(Vector3(1, 0, 0)));
+    CheckEquals('', Blob1.LastSound, 'no second cry within pain_delay (0.3)');
+    Step(0.5);
+    Check(not Blob1.PainAnim, 'the pain anim is over');
+    Check(Blob1.Model.Instance.PlayingAnim <> 'pain', 'back to the state''s anim (idle: notarget)');
+    Game.DamageMonster(Blob1, 30, 'damage_test_hurt', D3ToCge(Vector3(1, 0, 0)));
+    CheckEquals('snd_pain_large', Blob1.LastSound, 'a large cry (health 30)');
+
+    { death without gibbing: snd_death, the ragdoll pushed along the hit }
+    Game.DamageMonster(Blob1, 40, 'damage_test_bullet', D3ToCge(Vector3(0, 1, 0)));
+    Check(Blob1.State = msDead, 'blob_1 dead (health -10, not past -20)');
+    Check(not Blob1.Gibbed, 'not gibbed');
+    CheckEquals('snd_death', Blob1.LastSound, 'its death sound');
+    Check(Blob1.Ragdoll <> nil, 'a ragdoll');
+    CheckEquals(1, Game.Kills, 'one kill');
+
+    { gibbing: a gibbing def (or past -20): no ragdoll, gibs fly, the body
+      shrivels away in a second }
+    Debris0 := Game.Brass.Count;
+    Game.DamageMonster(Blob2, 200, 'damage_test_gib', D3ToCge(Vector3(0, 1, 0)));
+    Check(Blob2.State = msDead, 'blob_2 dead');
+    Check(Blob2.Gibbed, 'gibbed');
+    CheckEquals('snd_gibbed', Blob2.LastSound, 'snd_gibbed');
+    Check(Blob2.Ragdoll = nil, 'no ragdoll for a gibbed body');
+    CheckEquals(Debris0 + 3, Game.Brass.Count, 'its 3 def_dropGibItems fly as debris');
+    for I := Debris0 to Game.Brass.Count - 1 do
+      Check(Game.Brass[I].Velocity.Length > 30, 'a gib flies');
+    Step(0.5);
+    Check(Blob2.Model.Holder.Exists, 'the body is still there after 0.5 s');
+    Check((Blob2.Model.Instance.SkinScale > 0.3) and (Blob2.Model.Instance.SkinScale < 0.7),
+      Format('the body shrivelled half way (%.2f)', [Blob2.Model.Instance.SkinScale]));
+    Step(0.6);
+    Check(not Blob2.Model.Holder.Exists, 'the body is gone after a second');
+    CheckEquals(2, Game.Kills, 'two kills');
+    Step(4);
+    CheckEquals(Debris0, Game.Brass.Count, 'the gibs are gone after their 4 s');
+
+    { trigger_hurt: the player and monsters in it take its def's damage
+      every "delay" }
+    Hurt := nil;
+    for I := 0 to Game.Triggers.Count - 1 do
+      if Game.Triggers[I].Entity.Name = 'trigger_hurt_1' then
+        Hurt := Game.Triggers[I];
+    Check(Hurt <> nil, 'trigger_hurt_1');
+    if Hurt = nil then
+      Exit;
+    Check(Hurt.Kind = tkHurt, 'a hurt trigger');
+    CheckEquals('damage_test_hurt', Hurt.DamageDefName, 'its def_damage');
+    CheckEquals(5, Hurt.Damage, 'its damage');
+    Health0 := Game.Health;
+    Eye := D3ToCge(Vector3(640, -260, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    CheckEquals(Health0 - 5, Game.Health, 'hurt by 5 on entering');
+    CheckEquals('snd_pain_small', Game.LastPlayerSound, 'with the def''s effects (a cry)');
+    Step(0.3);
+    CheckEquals(Health0 - 5, Game.Health, 'not again before its delay (0.5)');
+    Step(0.3);
+    CheckEquals(Health0 - 10, Game.Health, 'hurt again after it');
+    { a monster put in it }
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    M := nil;
+    for I := 0 to Game.Monsters.Count - 1 do
+      if (Game.Monsters[I].State <> msDead) and (Game.Monsters[I].Actor = nil) then
+        M := Game.Monsters[I];
+    if M = nil then
+      for I := 0 to Game.Monsters.Count - 1 do
+        if Game.Monsters[I].State <> msDead then
+          M := Game.Monsters[I];
+    Check(M <> nil, 'a live monster');
+    if M <> nil then
+    begin
+      Health0 := M.Health;
+      M.Model.Holder.Translation := D3ToCge(Vector3(640, -260, 0));
+      Step(0.6);
+      Check(M.Health < Health0, Format('%s is hurt in the trigger (%d of %d)', [M.Model.Entity.Name, M.Health, Health0]));
+    end;
+
+    { the player gibbed: no body, no ragdoll, gibs }
+    Game.God := False;
+    Debris0 := Game.Brass.Count;
+    Game.DamagePlayer(300, 'damage_test_gib', D3ToCge(Vector3(1, 0, 0)));
+    Check(Game.PlayerDead, 'the player died');
+    Check(Game.PlayerGibbed, 'gibbed (damage_test_gib)');
+    CheckEquals('snd_gibbed', Game.LastPlayerSound, 'snd_gibbed');
+    CheckEquals(Debris0 + 2, Game.Brass.Count, 'its 2 def_dropGibItems');
+    Step(0.3);
+    Check(Game.PlayerRagdoll = nil, 'no ragdoll');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 procedure TestParticles;
 var
   Decl: TD3ParticleDecl;
@@ -4810,6 +4983,7 @@ begin
   TestEnvProbes;
   TestParticles;
   TestParticleEntities;
+  TestDamageEffects;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

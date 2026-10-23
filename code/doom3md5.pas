@@ -66,7 +66,10 @@ type
     class procedure PoseMatrices(const Pose: TD3JointArray; var Matrices: TD3JointMatrixArray); static;
     { Skin a mesh with PoseMatrices into Dest (CGE coordinates, one per
       vertex). }
-    procedure SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3);
+    { Scale shrinks the vertices towards their joints (Doom 3's
+      SHADERPARM_MD5_SKINSCALE: gibbed bodies shrivel to nothing). }
+    procedure SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3;
+      const Scale: Single = 1);
     procedure SkinMesh(const MeshIndex: Integer; const Pose: TD3JointArray;
       var Positions: array of TVector3);
     { Is the mesh closed (2-manifold) in the bind pose: every edge between
@@ -168,6 +171,9 @@ type
     OnFrameCommand: TD3FrameCommandEvent;
     { The anim playing (its name in the decl, e.g. "idle2"). }
     PlayingAnim: String;
+    { The meshes shrink towards their joints (1: as modelled, 0: nothing),
+      Doom 3's SHADERPARM_MD5_SKINSCALE for gibbed bodies. }
+    SkinScale: Single;
     { A ragdoll owns the pose: animations still run (their time, frame
       commands, AnimFinished) but don't change it, nor do joint mods. }
     PoseLocked: Boolean;
@@ -551,11 +557,12 @@ begin
   end;
 end;
 
-procedure TD3Md5Model.SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3);
+procedure TD3Md5Model.SkinMeshTo(const MeshIndex: Integer; const Matrices: TD3JointMatrixArray; const Dest: PVector3;
+  const Scale: Single);
 var
   Mesh: TD3Md5Mesh;
   I, W, WEnd: Integer;
-  PX, PY, PZ, B: Single;
+  PX, PY, PZ, B, WX, WY, WZ: Single;
   Weight: ^TD3Md5Weight;
   M: ^TD3JointMatrix;
   D: PVector3;
@@ -575,12 +582,12 @@ begin
         Continue;
       M := @Matrices[Weight^.Joint];
       B := Weight^.Bias;
-      PX := PX + (M^.Rows[0].X * Weight^.Position.X + M^.Rows[0].Y * Weight^.Position.Y +
-        M^.Rows[0].Z * Weight^.Position.Z + M^.Rows[0].W) * B;
-      PY := PY + (M^.Rows[1].X * Weight^.Position.X + M^.Rows[1].Y * Weight^.Position.Y +
-        M^.Rows[1].Z * Weight^.Position.Z + M^.Rows[1].W) * B;
-      PZ := PZ + (M^.Rows[2].X * Weight^.Position.X + M^.Rows[2].Y * Weight^.Position.Y +
-        M^.Rows[2].Z * Weight^.Position.Z + M^.Rows[2].W) * B;
+      WX := Weight^.Position.X * Scale;
+      WY := Weight^.Position.Y * Scale;
+      WZ := Weight^.Position.Z * Scale;
+      PX := PX + (M^.Rows[0].X * WX + M^.Rows[0].Y * WY + M^.Rows[0].Z * WZ + M^.Rows[0].W) * B;
+      PY := PY + (M^.Rows[1].X * WX + M^.Rows[1].Y * WY + M^.Rows[1].Z * WZ + M^.Rows[1].W) * B;
+      PZ := PZ + (M^.Rows[2].X * WX + M^.Rows[2].Y * WY + M^.Rows[2].Z * WZ + M^.Rows[2].W) * B;
     end;
     { D3ToCge }
     D^ := Vector3(PX, PZ, -PY);
@@ -897,6 +904,7 @@ var
 begin
   inherited Create;
   FShown := True;
+  SkinScale := 1;
   FModel := AModel;
   AllClosed := True;
   MeshShapes := nil;
@@ -1040,7 +1048,7 @@ begin
       { straight into the coordinate node's list: no copies }
       FCoords[I].FdPoint.Items.Count := Length(FModel.Meshes[I].Verts);
       if FCoords[I].FdPoint.Items.Count > 0 then
-        FModel.SkinMeshTo(I, FMatrices, PVector3(FCoords[I].FdPoint.Items.L));
+        FModel.SkinMeshTo(I, FMatrices, PVector3(FCoords[I].FdPoint.Items.L), SkinScale);
       FCoords[I].FdPoint.Changed;
     end;
   for I := 0 to High(FHullTransforms) do
