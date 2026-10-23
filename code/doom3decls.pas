@@ -36,6 +36,11 @@ type
     ColorExpr: array [0..3] of TD3Expr; { nil means 1; owned by the material }
     TexOps: TD3TexOps;                  { owned by the material }
     AlphaTest: Single;
+    { the stage's "if" condition (nil: always drawn); owned }
+    Condition: TD3Expr;
+    { "vertexColor" / "inverseVertexColor": the stage is modulated by the
+      vertex colors (only particles and models with colors have any) }
+    VertexColor, InverseVertexColor: Boolean;
   end;
 
   { A parsed material (only what this port renders). Image fields hold image
@@ -93,8 +98,25 @@ type
     ReflectCubeMap: String;
     ReflectBlend: TD3BlendMode;
     ReflectColorExpr: array [0..3] of TD3Expr;
-    { "deform sprite", "deform tube"...: the deform kind, lowercase }
+    { "deform sprite", "deform tube"...: the deform kind, lowercase, and
+      its parameters: a flare's size ("deform flare 24"), turbulent's
+      table name, range, time offset and domain (expressions; owned) }
     Deform: String;
+    DeformTable: String;
+    DeformParms: array [0..3] of TD3Expr;
+    { "polygonOffset [value]": drawn a little towards the viewer in the
+      depth buffer (decals on walls), 0 without }
+    PolygonOffset: Single;
+    { "decalInfo stay fade ( r g b a ) ( r g b a )": a projected decal
+      stays DecalStay seconds, then fades over DecalFade from DecalStart to
+      DecalEnd; DecalStay < 0 without }
+    DecalStay, DecalFade: Single;
+    DecalStart, DecalEnd: TVector4;
+    { the diffuse stage's "if" condition (nil: always drawn); owned }
+    DiffuseCondition: TD3Expr;
+    { the first plain stage's and the diffuse stage's vertexColor }
+    StageVertexColor, StageInverseVertexColor: Boolean;
+    DiffuseVertexColor: Boolean;
     { Only stages we can't draw (reflections, heat haze, mirrors, videos):
       drawn as faint glass so windows stay visible }
     function DrawAsGlass: Boolean;
@@ -276,6 +298,7 @@ var
 begin
   for I := 0 to High(ExtraStages) do
   begin
+    FreeAndNil(ExtraStages[I].Condition);
     for J := 0 to 3 do
       FreeAndNil(ExtraStages[I].ColorExpr[J]);
     FreeTexOps(ExtraStages[I].TexOps);
@@ -287,7 +310,10 @@ begin
   end;
   for I := 0 to 1 do
     FreeAndNil(HazeScroll[I]);
+  for I := 0 to 3 do
+    FreeAndNil(DeformParms[I]);
   FreeAndNil(StageCondition);
+  FreeAndNil(DiffuseCondition);
   FreeTexOps(DiffuseTexOps);
   FreeTexOps(StageTexOps);
   inherited Destroy;
@@ -667,6 +693,55 @@ begin
 end;
 
 { Split "a, b, c" at top level commas (not inside brackets / parentheses). }
+{ Split a line of whitespace separated Doom 3 expressions (deform
+  turbulent's table, range, timeOfs, domain): an expression continues
+  through operators and inside parentheses / brackets, like Doom 3's
+  idMaterial::ParseExpression stops at a token that can't continue it. }
+function SplitExpressions(const S: String): TStringArray;
+var
+  I, Depth, Start: Integer;
+  Prev, Next: Char;
+
+  function NextNonSpace(From: Integer): Char;
+  begin
+    while (From <= Length(S)) and (S[From] in [' ', #9]) do
+      Inc(From);
+    if From <= Length(S) then
+      Result := S[From]
+    else
+      Result := #0;
+  end;
+
+begin
+  Result := nil;
+  Depth := 0;
+  Start := 1;
+  Prev := #0;
+  for I := 1 to Length(S) do
+  begin
+    if S[I] in ['(', '['] then
+      Inc(Depth)
+    else
+    if S[I] in [')', ']'] then
+      Dec(Depth)
+    else
+    if (S[I] in [' ', #9]) and (Depth = 0) then
+    begin
+      Next := NextNonSpace(I);
+      if not (Prev in ['*', '/', '+', '-', '%', #0]) and not (Next in ['*', '/', '+', '%', #0]) and
+         (Trim(Copy(S, Start, I - Start)) <> '') then
+      begin
+        Result := Concat(Result, [Trim(Copy(S, Start, I - Start))]);
+        Start := I + 1;
+      end;
+    end;
+    if not (S[I] in [' ', #9]) then
+      Prev := S[I];
+  end;
+  if Trim(Copy(S, Start, MaxInt)) <> '' then
+    Result := Concat(Result, [Trim(Copy(S, Start, MaxInt))]);
+end;
+
 function SplitTopLevel(const S: String): TStringArray;
 var
   I, Depth, Start: Integer;
@@ -705,7 +780,7 @@ var
   Lexer: TDoom3Lexer;
   Tok, L, Special, StageMap, Line: String;
   StageBlendMode: TD3BlendMode;
-  StageSpecial, HasBlend, HasStageColor, StageSkyTexGen: Boolean;
+  StageSpecial, HasBlend, HasStageColor, StageSkyTexGen, StageVC, StageInvVC: Boolean;
   StageCubeMap: String;
   StageCameraCubeMap, StageReflectTexGen: Boolean;
   StageProgram: String;
@@ -755,6 +830,7 @@ begin
   Result.Name := Name;
   Result.Defined := True;
   Result.AlphaTest := -1;
+  Result.DecalStay := -1;
   Result.StageColor := Vector4(1, 1, 1, 1);
   Lexer := TDoom3Lexer.Create(Body);
   try
@@ -779,6 +855,8 @@ begin
           StageVertexParms[I] := '';
         HasBlend := False;
         StageAlphaTest := -1;
+        StageVC := False;
+        StageInvVC := False;
         FreeAndNil(StageCond);
         for I := 0 to 3 do
           FreeAndNil(Regs[I]);
@@ -885,6 +963,20 @@ begin
             FreeAndNil(StageCond);
             StageCond := ParseD3ExpressionString(Lexer.RestOfLine, @Table);
           end else
+          if L = 'bumpyenvironment' then
+          begin
+            { a cube map reflection perturbed by the bump map: drawn as a
+              plain reflection }
+            StageCubeMap := Lexer.NextStr;
+            StageReflectTexGen := True;
+            StageSpecial := True;
+          end else
+          if L = 'vertexcolor' then
+            StageVC := True
+          else
+          if L = 'inversevertexcolor' then
+            StageInvVC := True
+          else
           if (L = 'cubemap') or (L = 'cameracubemap') or (L = 'videomap') or
              (L = 'soundmap') or (L = 'remoterendermap') or (L = 'mirrorrendermap') or
              (L = 'texgen') then
@@ -945,6 +1037,10 @@ begin
           end;
           Result.ExtraStages[High(Result.ExtraStages)].TexOps := StageOps;
           StageOps := nil;
+          Result.ExtraStages[High(Result.ExtraStages)].Condition := StageCond;
+          StageCond := nil;
+          Result.ExtraStages[High(Result.ExtraStages)].VertexColor := StageVC;
+          Result.ExtraStages[High(Result.ExtraStages)].InverseVertexColor := StageInvVC;
         end;
         { keep the color registers of the first plain stage }
         if (Special <> 'diffusemap') and (Special <> 'bumpmap') and
@@ -963,6 +1059,9 @@ begin
         begin
           Result.DiffuseTexOps := StageOps;
           StageOps := nil;
+          Result.DiffuseCondition := StageCond;
+          StageCond := nil;
+          Result.DiffuseVertexColor := StageVC;
         end;
         FreeTexOps(StageOps);
         if StageSpecial then
@@ -994,6 +1093,8 @@ begin
           Result.StageBlend := StageBlendMode;
           Result.StageCondition := StageCond;
           StageCond := nil;
+          Result.StageVertexColor := StageVC;
+          Result.StageInverseVertexColor := StageInvVC;
           if not HasBlend then
             Result.StageBlend := bmOpaque;
           if StageAlphaTest >= 0 then
@@ -1057,10 +1158,48 @@ begin
       if L = 'deform' then
       begin
         Result.Deform := LowerCase(Lexer.NextStr);
-        Lexer.SkipLine;
+        Line := Lexer.RestOfLine;
+        if Result.Deform = 'turbulent' then
+        begin
+          { deform turbulent <table> <range> <timeOfs> <domain> }
+          Parts := SplitExpressions(Line);
+          if Length(Parts) > 0 then
+            Result.DeformTable := LowerCase(Trim(Parts[0]));
+          for I := 1 to Min(3, High(Parts)) do
+            Result.DeformParms[I - 1] := ParseD3ExpressionString(Parts[I], @Table);
+        end else
+        if (Result.Deform = 'flare') or (Result.Deform = 'expand') or (Result.Deform = 'move') then
+        begin
+          { one expression: the flare's size, the amount }
+          if Trim(Line) <> '' then
+            Result.DeformParms[0] := ParseD3ExpressionString(Line, @Table);
+        end else
+          Result.DeformTable := LowerCase(Trim(Line));
       end else
-      if (L = 'description') or (L = 'renderbump') or (L = 'decalinfo') or
-         (L = 'sort') or (L = 'spectrum') or (L = 'polygonoffset') then
+      if L = 'polygonoffset' then
+      begin
+        Result.PolygonOffset := 1;
+        if (Lexer.Peek <> '') and (Lexer.Peek[1] in ['0'..'9', '-', '.']) then
+          Result.PolygonOffset := Lexer.ReadFloat;
+      end else
+      if L = 'decalinfo' then
+      begin
+        { decalInfo <stay> <fade> ( r g b a ) ( r g b a ) }
+        Result.DecalStay := Lexer.ReadFloat;
+        Result.DecalFade := Lexer.ReadFloat;
+        if Lexer.Check('(') then
+        begin
+          Lexer.ReadVector(@Result.DecalStart.X, 4);
+          Lexer.Check(')');
+        end;
+        if Lexer.Check('(') then
+        begin
+          Lexer.ReadVector(@Result.DecalEnd.X, 4);
+          Lexer.Check(')');
+        end;
+      end else
+      if (L = 'description') or (L = 'renderbump') or
+         (L = 'sort') or (L = 'spectrum') then
         Lexer.SkipLine;
     end;
   finally
@@ -1104,6 +1243,7 @@ begin
     Result := TD3Material.Create;
     Result.Name := Key;
     Result.AlphaTest := -1;
+    Result.DecalStay := -1;
     Result.StageColor := Vector4(1, 1, 1, 1);
     { The generic entity GUI screens ("guiSurf entity" .. "entity3" in
       Doom 3's materials/common.mtr), when the data doesn't define them

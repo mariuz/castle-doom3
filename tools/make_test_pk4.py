@@ -296,6 +296,17 @@ def stage_images():
             row.append((0.9 * v, 0.95 * v, 1.0 * v))
         rows.append(row)
     add('textures/test/flare.tga', tga(n, n, rows))
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            # a bullet hole: a black center, a grey rim, transparent outside
+            r = math.hypot(x - 31.5, y - 31.5) / 31.5
+            a = max(0.0, min(1.0, (0.9 - r) / 0.2))
+            v = 0.05 + 0.3 * max(0.0, min(1.0, (r - 0.45) / 0.1))
+            row.append((v, v, v, a))
+        rows.append(row)
+    add('textures/test/decal_hole.tga', tga(n, n, rows, alpha=True))
 
 
 def sky_and_screen_images():
@@ -563,7 +574,7 @@ UV_X_WALL = ((0, 1, 0), (0, 0, -1))   # wall facing +X or -X
 UV_Y_WALL = ((1, 0, 0), (0, 0, -1))
 
 
-def wall_rect(model, mat, axis, coord, normal_sign, u0, u1, v0, v1):
+def wall_rect(model, mat, axis, coord, normal_sign, u0, u1, v0, v1, uv_scale=1 / 128.0):
     """An axis-aligned rectangle on plane <axis> = coord, facing normal_sign
     along the axis. (u, v) are the other two axes in (x, y, z) order, v = z
     for walls, y for floors."""
@@ -586,7 +597,7 @@ def wall_rect(model, mat, axis, coord, normal_sign, u0, u1, v0, v1):
     cr = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
     if sum(cr[i] * normal[i] for i in range(3)) < 0:
         pts.reverse()
-    model.surf(mat).quad(pts, normal, uv)
+    model.surf(mat).quad(pts, normal, uv, uv_scale)
 
 
 def box(model, mat, mins, maxs, inward=False, skip=()):
@@ -635,6 +646,11 @@ GLASS = 'textures/test/glass'
 HAZE = 'textures/test/hazeglass'
 SHINY = 'textures/test/shinymetal'
 FLARE = 'textures/test/flare'
+DECAL = 'textures/test/decal_hole'
+POOL = 'textures/test/pool'
+HAZEWALL = 'textures/test/hazewall'
+FLARE2 = 'textures/test/flare2'
+CRATEGLOW = 'textures/test/crateglow'
 
 # Room A: x -256..256, y -256..256, z 0..192
 # Doorway tunnel (area 1): x 256..272, y -48..48, z 0..112
@@ -659,6 +675,9 @@ box(area0, SHINY, (-176, 136, 0), (-136, 176, 192))
 wall_rect(area0, GLASS, 'y', -220, 1, -40, 60, 16, 144)
 # a flare (deform sprite) under light_1
 wall_rect(area0, FLARE, 'z', 176, -1, -12, 12, -12, 12)
+# a decal (polygonOffset) in the floor's plane, west of the start: one
+# whole texture over the 32 x 32 rectangle
+wall_rect(area0, DECAL, 'z', 0, 1, -128, -96, -128, -96, uv_scale=1 / 32.0)
 
 # doorway tunnel
 wall_rect(area1, FLOOR, 'z', 0, 1, 256, 272, -48, 48)
@@ -684,6 +703,12 @@ wall_rect(area1, WALL, 'x', 272, 1, 48, 384, 0, 288)
 wall_rect(area1, WALL, 'x', 272, 1, -48, 48, 112, 288)
 # a free standing heat haze pane (two sided, not in the .cm)
 wall_rect(area1, HAZE, 'y', -300, 1, 330, 450, 8, 136)
+# a lit wall panel with a heat haze stage (not glass), on the west wall
+wall_rect(area1, HAZEWALL, 'x', 273, 1, 200, 300, 8, 100)
+# a rippling pool (deform turbulent) on the floor
+wall_rect(area1, POOL, 'z', 0.5, 1, 300, 380, 120, 200)
+# a flare (deform flare 24) under light_5
+wall_rect(area1, FLARE2, 'z', 196, -1, 816, 824, -4, 4)
 for (cx, cy) in ((448, -192), (448, 192), (640, 250)):
     wall_rect(area1, GLOW, 'z', 287, -1, cx - 32, cx + 32, cy - 32, cy + 32)
 # a status screen on the north wall of room B (y = 384, facing -Y: right is +X)
@@ -704,7 +729,7 @@ box(door, {'*': METAL, '+x': DOOR, '-x': DOOR}, (-4, -48, -56), (4, 48, 56))
 crate = Model('crate_1')
 box(crate, METAL, (-32, -32, -32), (32, 32, 32))
 crate2 = Model('crate_2')
-box(crate2, METAL, (-24, -24, -24), (24, 24, 24))
+box(crate2, CRATEGLOW, (-24, -24, -24), (24, 24, 24))
 panel = Model('panel_1')
 box(panel, METAL, (-2, -32, -24), (2, 32, 24), skip=('+x',))
 gui_quad(panel, GUISCREEN, [(2, -32, -24), (2, 32, -24), (2, 32, 24), (2, -32, 24)], (1, 0, 0))
@@ -1128,7 +1153,7 @@ def map_text():
         {'classname': 'func_static', 'name': 'crawl_bar_1', 'model': 'crawl_bar_1',
          'origin': '120 80 58'},
         {'classname': 'func_static', 'name': 'crate_2', 'model': 'crate_2',
-         'origin': '136 -150 88', 'angle': '-15'},
+         'origin': '136 -150 88', 'angle': '-15', 'shaderParm7': '1', '_color': '1 0.6 0.2'},
         {'classname': 'func_static', 'name': 'panel_1', 'model': 'panel_1',
          'origin': '-252 -60 100', 'gui': 'guis/test_panel.gui',
          'gui_parm1': 'AREA A', 'gui_parm2': 'Welcome to the Castle Doom 3 test level.\\nRoom B is through the door. Mind the creatures.'},
@@ -1375,6 +1400,82 @@ textures/test/flare
 	{
 		blend add
 		map textures/test/flare.tga
+	}
+}
+
+/* a decal: a bullet hole, stuck on surfaces with polygonOffset, fading
+   after 3 s over 1 s (decalInfo) */
+textures/test/decal_hole
+{
+	qer_editorimage textures/test/decal_hole.tga
+	noshadows
+	nonsolid
+	translucent
+	polygonOffset
+	decalInfo 3 1 ( 1 1 1 1 ) ( 0 0 0 0 )
+	{
+		blend blend
+		map textures/test/decal_hole.tga
+	}
+}
+
+/* a lit surface whose texture coordinates ripple (deform turbulent) */
+textures/test/pool
+{
+	qer_editorimage textures/test/metal_d.tga
+	deform turbulent sinTable 0.04 time * 0.2 0.02
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	specularmap	textures/test/metal_s.tga
+}
+
+/* a lit surface with a heat haze stage over it */
+textures/test/hazewall
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	nonsolid
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	{
+		program heatHaze.vfp
+		vertexParm 0 time * 0.1 , time * 0.05
+		vertexParm 1 1.5
+		fragmentMap 0 _currentRender
+		fragmentMap 1 textures/test/haze_local.tga
+	}
+}
+
+/* a flare of a fixed size (deform flare) */
+textures/test/flare2
+{
+	qer_editorimage textures/test/flare.tga
+	deform flare 24
+	noshadows
+	nonsolid
+	translucent
+	{
+		blend add
+		map textures/test/flare.tga
+	}
+}
+
+/* a lit crate with a glow stage drawn only when the entity's
+   shaderParm7 is set, tinted by its _color (vertexColor is a no-op
+   without vertex colors) */
+textures/test/crateglow
+{
+	qer_editorimage textures/test/metal_d.tga
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	specularmap	textures/test/metal_s.tga
+	{
+		if ( parm7 > 0 )
+		blend add
+		map textures/test/doorlights.tga
+		vertexColor
+		rgb 0.5 + 0.5 * sinTable[ time ]
+		red parm0 * 0.5 + 0.5 * sinTable[ time ]
 	}
 }
 
@@ -2090,6 +2191,8 @@ entityDef projectile_test_bullet {
 	"detonate_on_world"		"1"
 	"detonate_on_actor"		"1"
 	"smoke_detonate"		"test_sparks.prt"
+	"mtr_detonate"			"textures/test/decal_hole"
+	"decal_size"			"8"
 }
 
 entityDef damage_test_bullet {
@@ -2429,6 +2532,11 @@ fx fx/test_blast {
 		duration	2
 		model		"test_steam.prt"
 		offset		0 0 8
+	}
+	{
+		delay		0
+		decal		"textures/test/decal_hole"
+		size		32
 	}
 }
 '''

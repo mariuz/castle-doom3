@@ -24,7 +24,7 @@ interface
 
 uses
   SysUtils, Classes, Generics.Collections,
-  CastleVectors, X3DNodes;
+  CastleVectors, X3DNodes, Doom3Materials;
 
 type
   TD3StaticSurface = class
@@ -54,7 +54,8 @@ type
     function TriangleCount: Integer;
     { X3D shapes for the model (fresh nodes on every call). A skin remaps
       materials. }
-    function BuildNode(const SkinName: String = ''; const EntityKeys: TStrings = nil): TX3DRootNode;
+    function BuildNode(const SkinName: String = ''; const EntityKeys: TStrings = nil;
+      const Parms: TD3EntityParms = nil): TX3DRootNode;
     { Some surface is closed (TrianglesClosed): worth casting shadows. }
     function HasClosedSurface: Boolean;
   end;
@@ -84,7 +85,7 @@ implementation
 uses
   Math,
   CastleLog,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects, Doom3Gui,
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3LightEffects, Doom3Gui,
   Doom3Collision;
 
 function IsStaticModelPath(const Path: String): Boolean;
@@ -735,7 +736,8 @@ begin
   Result := FClosed;
 end;
 
-function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings): TX3DRootNode;
+function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings;
+  const Parms: TD3EntityParms): TX3DRootNode;
 var
   S: TD3StaticSurface;
   Coords: array of TVector3;
@@ -801,7 +803,10 @@ begin
       Shape.Appearance := GlassAppearance(MaterialName, Kind);
       SetupSpecialShape(Shape, Kind);
     end else
-      Shape.Appearance := MaterialAppearance(MaterialName);
+    begin
+      Shape.Appearance := MaterialAppearance(MaterialName, Parms);
+      RegisterConditionalShape(Shape, BaseStageCondition(M), Parms);
+    end;
     Result.AddChildren(Shape);
 
     { more stages: the same triangles (sharing coordinates, normals and
@@ -818,9 +823,31 @@ begin
         Geometry.Solid := not M.TwoSided;
         Shape := TShapeNode.Create;
         Shape.Geometry := Geometry;
-        Shape.Appearance := OverlayAppearance(MaterialName, J);
+        Shape.Appearance := OverlayAppearance(MaterialName, J, Parms);
+        RegisterConditionalShape(Shape, OverlayStageCondition(M, J), Parms);
         Result.AddChildren(Shape);
       end;
+
+    { a heat haze stage over a lit or plain surface }
+    if (GuiUrl = '') and not M.DrawAsGlass and (M.HazeNormalMap <> '') then
+    begin
+      App := HazeOverlayAppearance(MaterialName);
+      if App <> nil then
+      begin
+        Geometry := TIndexedTriangleSetNode.Create;
+        Geometry.Coord := Coord;
+        Geometry.TexCoord := TexCoord;
+        Geometry.Normal := NormalNode;
+        Geometry.SetIndex(S.Indexes);
+        Geometry.Ccw := True;
+        Geometry.Solid := not M.TwoSided;
+        Shape := TShapeNode.Create;
+        Shape.Geometry := Geometry;
+        Shape.Appearance := App;
+        SetupSpecialShape(Shape, ssHaze);
+        Result.AddChildren(Shape);
+      end;
+    end;
 
     { a cube map reflection stage over a lit or plain surface }
     if (GuiUrl = '') and not M.DrawAsGlass and (M.ReflectCubeMap <> '') then

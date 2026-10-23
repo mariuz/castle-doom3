@@ -132,6 +132,11 @@ jobs:
           grep -q "Particles: 2 emitter entities (1 on), 1 fx entities" test_output/particles.log || { echo "::error::particle emitter entities not spawned"; exit 1; }
           grep -q "emitter_steam_1: test_steam (2 stages, [1-9][0-9]* particles)" test_output/particles.log || { echo "::error::the steam vent has no live particles"; exit 1; }
           grep -q "smoke_muzzle: test_muzzle" test_output/particles.log || { echo "::error::no muzzle smoke after a shot"; exit 1; }
+          run_test exactstages testmap "W:1,O:notarget,G:40 -100 0,A:-30,P:15,W:0.5,S,G:340 100 0,A:90,P:-70,W:0.5,S,G:400 250 0,A:180,W:0.5,S,G:420 -250 0,A:0,X,W:0.4,S,G:420 -250 0,A:90,O:activate fx_test_1,W:0.3,G:400 -150 0,A:90,P:-35,W:0.2,S,Q"
+          grep -q 'Conditional stages: 1 shapes with an "if" condition' test_output/exactstages.log || { echo "::error::the crate_2 glow stage should be conditional (if parm7)"; exit 1; }
+          grep -q "Special stages: 2 heat haze" test_output/exactstages.log || { echo "::error::the lit heat haze wall should add a haze overlay"; exit 1; }
+          grep -q "Decal textures/test/decal_hole at 480 -250 68 (size 8" test_output/exactstages.log || { echo "::error::the bullet should leave a decal on the pillar"; exit 1; }
+          grep -q "Decal textures/test/decal_hole at 400 -60 0 (size 32" test_output/exactstages.log || { echo "::error::the FX decal action should leave a decal on the floor"; exit 1; }
           grep -q "FX fx/test_blast started" test_output/particles.log || { echo "::error::func_fx activation did not start its fx"; exit 1; }
           grep -q "Emitter emitter_ring_1 on" test_output/particles.log || { echo "::error::activating func_emitter did not switch it on"; exit 1; }
           grep "Screenshot" test_output/portals.log | sed -n 1p | grep -q "visible areas 1" || { echo "::error::closed door should hide room B"; exit 1; }

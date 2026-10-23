@@ -183,6 +183,8 @@ type
     Offset: TVector3;
     { the shake's time, amplitude, distance, falloff, impulse }
     ShakeParms: array [0..4] of Single;
+    { the decal's size (0: Doom 3's default, 8) }
+    Size: Single;
     { "trackorigin": follows the entity }
     TrackOrigin: Boolean;
     Name, Fire: String;
@@ -525,7 +527,10 @@ type
 
 procedure TParticleRandom.Seed(const A, B, C: Cardinal);
 begin
-  State := (A * 2654435761) xor (B * 40503 + 7919) xor (C * 104729 + 1);
+  { wrapping 32 bit arithmetic (also with range checks on) }
+  State := Cardinal((QWord(A) * 2654435761) and $FFFFFFFF) xor
+    Cardinal((QWord(B) * 40503 + 7919) and $FFFFFFFF) xor
+    Cardinal((QWord(C) * 104729 + 1) and $FFFFFFFF);
   if State = 0 then
     State := 1;
   Next;
@@ -1128,8 +1133,10 @@ begin
             Lexer.Check(',');
           end;
         end;
+      'size':
+        A.Size := Lexer.ReadFloat;
       { known keywords without an effect here }
-      'size', 'attenuate', 'axis', 'angle', 'shockwave', 'uselight', 'usemodel',
+      'attenuate', 'axis', 'angle', 'shockwave', 'uselight', 'usemodel',
       'attachlight', 'attachentity', 'launch', 'ignoremaster', 'shakestart',
       'shakeignoremaster', 'rotate', 'particletrackvelocity', 'bindto', 'nolightshadows':
         begin

@@ -55,7 +55,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
-  Doom3Particles;
+  Doom3Particles, Doom3Decals;
 
 type
   { A monster's route through the AAS (the path between the areas it was
@@ -367,6 +367,9 @@ type
     Trail: TD3ParticleEmitter;
     { model_detonate / smoke_detonate: particles at the explosion }
     DetonateModel, DetonateSmoke: String;
+    { mtr_detonate / decal_size: the decal left where it hits the world }
+    DetonateDecal: String;
+    DecalSize: Single;
     destructor Destroy; override;
   end;
 
@@ -691,6 +694,7 @@ type
     FEmitters: specialize TObjectList<TD3ParticleEmitter>;
     FEmitterEntities: specialize TObjectList<TD3EmitterEntity>;
     FFx: specialize TObjectList<TD3Fx>;
+    FDecals: TD3DecalSystem;
     FTime: Single;
     FPlayerEye: TVector3;
     FOnMessage: TD3MessageEvent;
@@ -1102,6 +1106,12 @@ type
     property Emitters: specialize TObjectList<TD3ParticleEmitter> read FEmitters;
     property EmitterEntities: specialize TObjectList<TD3EmitterEntity> read FEmitterEntities;
     property Fx: specialize TObjectList<TD3Fx> read FFx;
+    { Decals on the world (projectile hits, FX decal actions). }
+    property Decals: TD3DecalSystem read FDecals;
+    { Stick a decal at a Doom 3 point with a surface normal (console
+      decal, projectiles); the decal scene joins the map on the first. }
+    procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
+      const Size: Single);
     property Aas: TD3AasFile read FAas;
     property CombatNodes: specialize TObjectList<TD3CombatNode> read FCombatNodes;
     property Moveables: specialize TObjectList<TD3Moveable> read FMoveables;
@@ -1499,6 +1509,7 @@ begin
   FEmitters := specialize TObjectList<TD3ParticleEmitter>.Create(True);
   FEmitterEntities := specialize TObjectList<TD3EmitterEntity>.Create(True);
   FFx := specialize TObjectList<TD3Fx>.Create(True);
+  FDecals := TD3DecalSystem.Create;
   Health := 100;
   FIdealSlot := -1;
   ViewBobEnabled := True;
@@ -1533,6 +1544,7 @@ begin
   FFx.Free;
   FEmitterEntities.Free;
   FEmitters.Free;
+  FreeAndNil(FDecals);
   FreeAndNil(FScript);
   FScriptHost.Free;
   FHandles.Free;
@@ -1607,6 +1619,7 @@ begin
   FFx.Clear;
   FEmitterEntities.Clear;
   FEmitters.Clear;
+  FDecals.Clear;
   ProjectilesLaunched := 0;
   ClearScriptSounds;
   FTime := 0;
@@ -6794,6 +6807,8 @@ end;
 
 procedure TD3Game.StartFxAction(const Fx: TD3Fx; const Index: Integer);
 var
+  HitDist, DecalSize: Single;
+  HitNormal: TVector3;
   A: TD3FxAction;
   Pos: TVector3;
   Light: TCastlePointLight;
@@ -6822,7 +6837,18 @@ begin
     fxSound:
       PlaySoundAt(A.Data, D3ToCge(Pos));
     fxDecal:
-      Unsupported('fx decal (' + Fx.Decl.Name + ')');
+      begin
+        { idEntityFx::Run FX_DECAL: the decal projected down (along
+          gravity) from the action's origin onto the floor }
+        if WorldHit(D3ToCge(Pos) + Vector3(0, 1, 0), Vector3(0, -1, 0), 65, HitDist, HitNormal) then
+        begin
+          if A.Size > 0 then
+            DecalSize := A.Size
+          else
+            DecalSize := 8;
+          AddDecal(A.Data, CgeToD3(D3ToCge(Pos) + Vector3(0, 1 - HitDist, 0)), CgeToD3(HitNormal), DecalSize);
+        end;
+      end;
     fxShake:
       Unsupported('fx shake (' + Fx.Decl.Name + ')');
     else
@@ -6868,6 +6894,7 @@ var
   Elapsed, Intensity: Single;
 begin
   ViewAxis := PlayerViewAxis;
+  FDecals.Update(FTime);
 
   { FX actions }
   for I := FFx.Count - 1 downto 0 do
@@ -6968,6 +6995,22 @@ begin
     EmitSmoke(P.DetonateModel, P.Owner + ' model_detonate', P.Position, Axis);
   if P.DetonateSmoke <> '' then
     EmitSmoke(P.DetonateSmoke, P.Owner + ' smoke_detonate', P.Position, Axis);
+  { idProjectile::AddDefaultDamageEffect: mtr_detonate projected on the
+    surface hit, decal_size wide }
+  if HitWorld and (P.DetonateDecal <> '') then
+    AddDecal(P.DetonateDecal, CgeToD3(P.Position), CgeToD3(Normal), P.DecalSize);
+end;
+
+procedure TD3Game.AddDecal(const MaterialName: String; const Position, Normal: TVector3;
+  const Size: Single);
+begin
+  if FMap = nil then
+    Exit;
+  if FDecals.Scene.Parent = nil then
+    FMap.Add(FDecals.Scene);
+  if FDecals.Add(MaterialName, Position, Normal, Size, FTime) then
+    WritelnLog('Doom3World', 'Decal %s at %s (size %s, %d decals)',
+      [MaterialName, Position.ToString, FormatFloat('0.#', Size), FDecals.Decals.Count]);
 end;
 
 procedure TD3Game.EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
@@ -7275,6 +7318,8 @@ begin
   Result.ExplodeSound := Def.Values['snd_explode'];
   Result.DetonateModel := Def.Values['model_detonate'];
   Result.DetonateSmoke := Def.Values['smoke_detonate'];
+  Result.DetonateDecal := Def.Values['mtr_detonate'];
+  Result.DecalSize := DefFloat('decal_size', 6);
   if Def.Values['smoke_fly'] <> '' then
     Result.Trail := AddEmitter(Def.Values['smoke_fly'], CgeToD3(From),
       AxisFromDirection(CgeToD3(Velocity)), False, Owner + ' smoke_fly');
@@ -9020,6 +9065,27 @@ begin
   if (Light >= 0) and ((N = 'setShaderParm') or (N = 'setLightParm')) then
     FMap.SetLightParm(Light, Round(ArgF(0)), ArgF(1))
   else
+
+  { shader parameters of brush entities and static models: their
+    materials' stage colors (parm0..11) and "if" conditions read them }
+  if (Light < 0) and (FMap.FindBrush(E.Name) <> nil) and
+     ((N = 'setColor') or (N = 'setShaderParm') or (N = 'getShaderParm')) then
+  begin
+    B := FMap.FindBrush(E.Name);
+    if N = 'setColor' then
+    begin
+      B.Parms.Parms[0] := ArgF(0);
+      B.Parms.Parms[1] := ArgF(1);
+      B.Parms.Parms[2] := ArgF(2);
+    end else
+    if N = 'setShaderParm' then
+    begin
+      if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 11) then
+        B.Parms.Parms[Round(ArgF(0))] := ArgF(1);
+    end else
+    if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 11) then
+      EventResult := D3FloatValue(B.Parms.Parms[Round(ArgF(0))]);
+  end else
 
   { doors (idDoor) }
   if (DoorOf(E) <> nil) and ((N = 'open') or (N = 'close') or (N = 'lock') or
