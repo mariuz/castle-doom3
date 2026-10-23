@@ -107,9 +107,28 @@ type
     Scroll: array [0..1] of TD3Expr; { owned by the material }
   end;
 
+  { Forgets registered animated surfaces whose nodes are freed (a
+    scene with an animated material freed before the map: debris). }
+  TNodeWatcher = class
+    procedure NodeDestroyed(const Node: TX3DNode);
+  end;
+
 var
   AnimatedSurfaces: specialize TList<TAnimatedSurface>;
   HazeScrolls: specialize TList<THazeScroll>;
+  NodeWatcher: TNodeWatcher;
+
+procedure TNodeWatcher.NodeDestroyed(const Node: TX3DNode);
+var
+  I: Integer;
+begin
+  for I := AnimatedSurfaces.Count - 1 downto 0 do
+    if (AnimatedSurfaces[I].Transform = Node) or (AnimatedSurfaces[I].Unlit = Node) then
+      AnimatedSurfaces.Delete(I);
+  for I := HazeScrolls.Count - 1 downto 0 do
+    if HazeScrolls[I].Field.ParentNode = Node then
+      HazeScrolls.Delete(I);
+end;
 
 function SurfaceContext(const Time: Single): TD3ExprContext;
 begin
@@ -222,7 +241,13 @@ begin
   if (Unlit <> nil) and ColorAnimated(ColorExpr) then
     Anim.Unlit := Unlit;
   if (Anim.Transform <> nil) or (Anim.Unlit <> nil) then
+  begin
+    if Anim.Transform <> nil then
+      Anim.Transform.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+    if Anim.Unlit <> nil then
+      Anim.Unlit.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
     AnimatedSurfaces.Add(Anim);
+  end;
 end;
 
 function MakeTexture(const Url: String): TImageTextureNode;
@@ -419,6 +444,8 @@ begin
     Haze.Field := ScrollField;
     Haze.Scroll[0] := M.HazeScroll[0];
     Haze.Scroll[1] := M.HazeScroll[1];
+    if ScrollField.ParentNode is TX3DNode then
+      TX3DNode(ScrollField.ParentNode).AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
     HazeScrolls.Add(Haze);
   end;
 end;
@@ -615,7 +642,9 @@ end;
 initialization
   AnimatedSurfaces := specialize TList<TAnimatedSurface>.Create;
   HazeScrolls := specialize TList<THazeScroll>.Create;
+  NodeWatcher := TNodeWatcher.Create;
 finalization
   FreeAndNil(AnimatedSurfaces);
   FreeAndNil(HazeScrolls);
+  FreeAndNil(NodeWatcher);
 end.

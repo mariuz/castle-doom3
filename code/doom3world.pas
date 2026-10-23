@@ -103,6 +103,16 @@ type
   TD3Actor = class;
   TD3Projectile = class;
 
+  { A damage def (a damage_* entityDef, idGameLocal's damage decls). }
+  TD3DamageInfo = record
+    Found: Boolean;
+    Damage: Integer;
+    { knockback (20 when missing), gib (the victim is gibbed when killed),
+      noGod (hurts in god mode), noArmor, burn (a burning death) }
+    Knockback: Single;
+    Gib, NoGod, NoArmor, Burn: Boolean;
+  end;
+
   TD3Monster = class
     Model: TD3ModelEntity;
     { set when its AI script runs it (the simple AI is off) }
@@ -111,6 +121,14 @@ type
     Health: Integer;
     Yaw: Single;
     AttackTimer, StateTime, PainTime: Single;
+    { gibbed when killed: its body shrivels from GibTime, then goes }
+    Gibbed: Boolean;
+    GibTime: Single;
+    { no pain before (pain_delay), a pain anim is playing (the simple AI) }
+    PainDebounce: Single;
+    PainAnim: Boolean;
+    { its sound key last played (snd_pain_small, snd_death...), for tests }
+    LastSound: String;
     Radius, Height: Single;
     { "trigger" "1": doesn't wake up on sight, only when triggered (no
       triggers yet) or hurt }
@@ -145,6 +163,8 @@ type
     Kind: TD3TriggerKind;
     { Volume in CGE coordinates. }
     Box: TBox3D;
+    { trigger_hurt: its def_damage }
+    DamageDefName: String;
     { Seconds before firing the targets ("delay"), between firings ("wait",
       trigger_multiple) or damages (trigger_hurt). }
     Delay, Wait: Single;
@@ -408,6 +428,8 @@ type
   TD3Brass = class
     Holder: TCastleTransform;
     Scene: TCastleScene;
+    { "Brass" or "Gib" (logs) }
+    Kind: String;
     { CGE, world; Angles and AngularVelocity are Doom 3 degrees }
     Position, Velocity: TVector3;
     Angles, AngularVelocity: TVector3;
@@ -642,6 +664,8 @@ type
     FBrassDue: Single;
     { the dead body's ragdoll (nil: none) }
     FRagdoll: TD3Ragdoll;
+    { the dead player was gibbed: no body, no ragdoll }
+    FPlayerGibbed: Boolean;
     { the direction of the last hit's force (CGE, zero: none) }
     FLastDamageDir: TVector3;
     { the shot whose world model flash was logged }
@@ -721,7 +745,7 @@ type
       the key or with RagdollEnabled off }
     function CreateRagdoll(const Instance: TD3Md5Instance; const RagdollName: String): TD3Ragdoll;
     { idAI::Killed: StartRagdoll with the monster's "ragdoll" }
-    procedure MonsterRagdoll(const Mon: TD3Monster);
+    procedure MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
@@ -752,8 +776,15 @@ type
     { the nearest living monster on the ray, closer than MaxDist (CGE) }
     function RayMonster(const Origin, Dir: TVector3; const MaxDist: Single;
       out Dist: Single): TD3Monster;
-    procedure DamageMonster(const Mon: TD3Monster; const Amount: Integer);
-    procedure MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single);
+    procedure DamageMonster(const Mon: TD3Monster; const Amount: Integer); overload;
+    procedure MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single;
+      const DamageDefName: String);
+    function MonsterSound(const Mon: TD3Monster; const Key: String): Boolean;
+    function MonsterPain(const Mon: TD3Monster; const Damage: Integer): Boolean;
+    procedure GibMonster(const Mon: TD3Monster; const Direction: TVector3; const DamageDefName: String);
+    function SpawnGibs(const E: TD3MapEntity; const Def: TStringList; const Center, Direction: TVector3): Integer;
+    function SpawnDebris(const Def: TStringList; const Position, Velocity, AngularVelocity: TVector3;
+      const Yaw, Fuse: Single): TD3Brass;
     { the player's view axes (Doom 3 rows: forward, left, up) }
     function PlayerViewAxis: TMatrix3;
     procedure UpdateMoveables(const SecondsPassed: Single);
@@ -797,7 +828,7 @@ type
     procedure RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
       const Radius: Single; const Owner: String; const SplashDefName: String = '');
     procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
-    procedure ActorDamaged(const A: TD3Actor; const Killed: Boolean);
+    procedure ActorDamaged(const A: TD3Actor; const Killed, Pain: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
     function StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
     { a flying move (no floor following): each axis of Step that isn't
@@ -979,7 +1010,17 @@ type
       view model's), flying 40 along the view's forward + left + up. False
       without brass or joint. }
     function EjectBrass(const W: TD3Weapon): Boolean;
+    { brass and debris (gibs) flying around }
     property Brass: specialize TObjectList<TD3Brass> read FBrass;
+    { A damage def's values (damage_* entityDef): Found false when missing
+      (the Damage is then Default). }
+    function DamageInfo(const DefName: String; const DefaultDamage: Integer = 10): TD3DamageInfo;
+    { Hurt a monster with a damage def; Direction (CGE) is the force's
+      direction (zero: none): the ragdoll is pushed along it. }
+    procedure DamageMonster(const Mon: TD3Monster; const Amount: Integer; const DamageDefName: String;
+      const Direction: TVector3); overload;
+    { The dead player was gibbed (its body shows no more). }
+    property PlayerGibbed: Boolean read FPlayerGibbed;
     { the dead body's ragdoll, nil when it isn't one }
     property PlayerRagdoll: TD3Ragdoll read FRagdoll;
     { the world along a segment: whether it hits within MaxDist, how far
@@ -1223,6 +1264,8 @@ uses
 
 const
   MonsterWalkSpeed = 90;
+  { seconds a gibbed body takes to shrivel away }
+  GibShrivelTime = 1.0;
   MonsterSightRange = 1200;
   MonsterMeleeRange = 64;
   MonsterAttackDelay = 1.1;
@@ -1526,6 +1569,7 @@ begin
   FBrass.Clear;
   FBrassDue := -1;
   FreeAndNil(FRagdoll);
+  FPlayerGibbed := False;
   FItems.Clear;
   FMovers.Clear;
   FMonsters.Clear;
@@ -3078,36 +3122,255 @@ begin
 end;
 
 procedure TD3Game.DamageMonster(const Mon: TD3Monster; const Amount: Integer);
+begin
+  DamageMonster(Mon, Amount, '', TVector3.Zero);
+end;
+
+function TD3Game.DamageInfo(const DefName: String; const DefaultDamage: Integer): TD3DamageInfo;
+var
+  Def: TStringList;
+begin
+  Result := Default(TD3DamageInfo);
+  Result.Damage := DefaultDamage;
+  Result.Knockback := 20;
+  Def := nil;
+  if DefName <> '' then
+    Def := Decls.EntityDef(DefName);
+  if Def = nil then
+    Exit;
+  Result.Found := True;
+  Result.Damage := StrToIntDef(Def.Values['damage'], DefaultDamage);
+  Result.Knockback := StrToFloatDef(Def.Values['knockback'], 20, DefaultFormatSettings);
+  Result.Gib := StrToIntDef(Def.Values['gib'], 0) <> 0;
+  Result.NoGod := StrToIntDef(Def.Values['noGod'], 0) <> 0;
+  Result.NoArmor := StrToIntDef(Def.Values['noArmor'], 0) <> 0;
+  Result.Burn := StrToIntDef(Def.Values['burn'], 0) <> 0;
+end;
+
+function TD3Game.MonsterSound(const Mon: TD3Monster; const Key: String): Boolean;
+var
+  Shader: String;
+begin
+  Shader := Mon.Model.Entity.Value(Key);
+  if (Shader = '') and (Mon.Model.EntityDef <> nil) then
+    Shader := Mon.Model.EntityDef.Values[Key];
+  Result := Shader <> '';
+  if not Result then
+    Exit;
+  Mon.LastSound := Key;
+  WritelnLog('Doom3World', '%s sound %s (%s)', [Mon.Model.Entity.Name, Key, Shader]);
+  PlaySoundAt(Shader, Mon.Center);
+end;
+
+function TD3Game.MonsterPain(const Mon: TD3Monster; const Damage: Integer): Boolean;
+var
+  Def: TStringList;
+  Threshold: Integer;
+  Delay: Single;
+begin
+  { idActor::Pain: not under pain_threshold, pain_delay apart }
+  Result := False;
+  Def := Mon.Model.EntityDef;
+  Threshold := Mon.Model.Entity.IntValue('pain_threshold', -1);
+  if (Threshold < 0) and (Def <> nil) then
+    Threshold := StrToIntDef(Def.Values['pain_threshold'], 0);
+  if Damage < Max(0, Threshold) then
+    Exit;
+  if FTime < Mon.PainDebounce then
+    Exit;
+  Delay := 0;
+  if Def <> nil then
+    Delay := StrToFloatDef(Def.Values['pain_delay'], 0, DefaultFormatSettings);
+  Delay := Mon.Model.Entity.FloatValue('pain_delay', Delay);
+  Mon.PainDebounce := FTime + Delay;
+  Result := True;
+  { a cry by the health left; snd_pain when the def has no sizes }
+  if Mon.Health > 75 then
+    Result := MonsterSound(Mon, 'snd_pain_small')
+  else
+  if Mon.Health > 50 then
+    Result := MonsterSound(Mon, 'snd_pain_medium')
+  else
+  if Mon.Health > 25 then
+    Result := MonsterSound(Mon, 'snd_pain_large')
+  else
+    Result := MonsterSound(Mon, 'snd_pain_huge');
+  if not Result then
+    MonsterSound(Mon, 'snd_pain');
+  Result := True;
+  { the simple AI flinches with its pain anim (the scripts play their own) }
+  if (Mon.Actor = nil) and (Mon.Model.Instance <> nil) and Mon.Model.Instance.HasAnim('pain') and
+     Mon.Model.Instance.PlayAnim('pain', False) then
+  begin
+    Mon.PainAnim := True;
+    Mon.PainTime := Max(Mon.PainTime, Mon.Model.Instance.AnimLength);
+  end;
+end;
+
+procedure TD3Game.DamageMonster(const Mon: TD3Monster; const Amount: Integer; const DamageDefName: String;
+  const Direction: TVector3);
 var
   Damage: Integer;
+  Info: TD3DamageInfo;
+  Pain, Gib: Boolean;
 begin
   if Mon.State = msDead then
     Exit;
+  Info := DamageInfo(DamageDefName, Amount);
   { idPlayer::DamageFeedback multiplies the player's damage by
     PowerUpModifier( BERSERK ), which reads as SPEED: 1.7 with berserk }
   Damage := Amount;
   if PowerUpActive(PowerupBerserk) then
     Damage := Round(Damage * 1.7);
   Dec(Mon.Health, Damage);
-  Mon.PainTime := 0.2;
+  Mon.PainTime := Max(Mon.PainTime, 0.2);
   Mon.Dormant := False;
   if (Mon.State = msIdle) and (Mon.Actor = nil) then
   begin
     Mon.State := msChase;
     Mon.Model.Instance.PlayAnim('walk');
   end;
+  Pain := False;
   if Mon.Health <= 0 then
   begin
     Mon.State := msDead;
     Mon.StateTime := 0;
-    if Mon.Actor = nil then
-      Mon.Model.Instance.PlayAnim('idle', False);
-    MonsterRagdoll(Mon);
+    if Info.Burn then
+      Unsupported('burn death (' + DamageDefName + ')');
+    { idAFEntity_Gibbable: gibbed by a gibbing def, or by taking it past
+      -20, when the monster can be ("gib") }
+    Gib := (Info.Gib or (Mon.Health < -20)) and
+      Mon.Model.Entity.BoolValue('gib', (Mon.Model.EntityDef <> nil) and
+        (StrToIntDef(Mon.Model.EntityDef.Values['gib'], 0) <> 0));
+    if Gib then
+      GibMonster(Mon, Direction, DamageDefName)
+    else
+    begin
+      MonsterSound(Mon, 'snd_death');
+      if Mon.Actor = nil then
+        Mon.Model.Instance.PlayAnim('idle', False);
+      MonsterRagdoll(Mon, Direction);
+    end;
     Inc(Kills);
     Message('Killed ' + Mon.Model.Entity.Name);
-  end;
+  end else
+    Pain := MonsterPain(Mon, Damage);
   if Mon.Actor <> nil then
-    ActorDamaged(Mon.Actor, Mon.Health <= 0);
+    ActorDamaged(Mon.Actor, Mon.Health <= 0, Pain);
+end;
+
+procedure TD3Game.GibMonster(const Mon: TD3Monster; const Direction: TVector3; const DamageDefName: String);
+var
+  Count: Integer;
+begin
+  Mon.Gibbed := True;
+  Mon.GibTime := FTime;
+  MonsterSound(Mon, 'snd_gibbed');
+  Count := SpawnGibs(Mon.Model.Entity, Mon.Model.EntityDef, Mon.Center, Direction);
+  { the body shrivels away (UpdateMonster), nothing to shoot any more }
+  Mon.Model.Holder.Pickable := False;
+  Mon.Model.Instance.Scene.Pickable := False;
+  Mon.Model.Instance.PlayAnim('idle', False);
+  WritelnLog('Doom3World', 'Gibbed %s (%s): %d gibs', [Mon.Model.Entity.Name, DamageDefName, Count]);
+end;
+
+function TD3Game.SpawnGibs(const E: TD3MapEntity; const Def: TStringList; const Center, Direction: TVector3): Integer;
+var
+  I: Integer;
+  Key, ItemDefName: String;
+  ItemDef: TStringList;
+  Velocity, Dir: TVector3;
+  Gib: TD3Brass;
+begin
+  { idAFEntity_Gibbable::SpawnGibs: the def_dropGibItemN items fly from
+    the center, away from it and along / against the hit, at 75; gone in
+    4 seconds (the def_dropGibAF figures aren't done) }
+  Result := 0;
+  Dir := Direction;
+  if not Dir.IsZero then
+    Dir := Dir.Normalize;
+  for I := 1 to 32 do
+  begin
+    Key := 'def_dropGibItem' + IntToStr(I);
+    ItemDefName := '';
+    if E <> nil then
+      ItemDefName := E.Value(Key);
+    if (ItemDefName = '') and (Def <> nil) then
+      ItemDefName := Def.Values[Key];
+    if ItemDefName = '' then
+      Break;
+    ItemDef := Decls.EntityDef(ItemDefName);
+    if ItemDef = nil then
+    begin
+      Unsupported('gib item ' + ItemDefName + ' (no entityDef)');
+      Continue;
+    end;
+    Velocity := Vector3(RandomFloatRange(-1, 1), RandomFloatRange(0, 1), RandomFloatRange(-1, 1));
+    if Velocity.IsZero then
+      Velocity := Vector3(0, 1, 0);
+    Velocity := Velocity.Normalize;
+    if I and 1 = 1 then
+      Velocity := Velocity + Dir
+    else
+      Velocity := Velocity - Dir;
+    Gib := SpawnDebris(ItemDef, Center + Velocity * 4, Velocity * 75,
+      Vector3(RandomFloatRange(-1, 1), RandomFloatRange(-1, 1), RandomFloatRange(-1, 1)) * 360,
+      RandomFloatRange(0, 360), 4);
+    if Gib <> nil then
+    begin
+      Gib.Kind := 'Gib';
+      Inc(Result);
+    end;
+  end;
+  if (E <> nil) and (Result = 0) and (E.Value('def_dropGibAF1') <> '') then
+    Unsupported('gib articulated figures (def_dropGibAF)');
+end;
+
+function TD3Game.SpawnDebris(const Def: TStringList; const Position, Velocity, AngularVelocity: TVector3;
+  const Yaw, Fuse: Single): TD3Brass;
+const
+  { idDebris' at most (older ones go first) }
+  MaxDebris = 64;
+var
+  Model: TD3StaticModel;
+  B: TD3Brass;
+begin
+  Result := nil;
+  Model := nil;
+  if (Def <> nil) and IsStaticModelPath(Def.Values['model']) then
+    Model := StaticModels.Model(Def.Values['model']);
+  if Model = nil then
+    Exit;
+  B := TD3Brass.Create;
+  B.Kind := 'Brass';
+  B.Holder := TCastleTransform.Create(nil);
+  B.Holder.SetTransient;
+  B.Holder.Collides := False;
+  B.Holder.Pickable := False;
+  B.Scene := TD3Scene.Create(nil);
+  B.Scene.SetTransient;
+  B.Scene.Load(Model.BuildNode(Def.Values['skin'], nil), True);
+  B.Scene.Collides := False;
+  B.Scene.Pickable := False;
+  B.Scene.CastShadows := False;
+  B.Holder.Add(B.Scene);
+  FMap.Add(B.Holder);
+  B.Position := Position;
+  B.Velocity := Velocity;
+  B.Angles := Vector3(0, Yaw, 0);
+  B.AngularVelocity := AngularVelocity;
+  if Fuse > 0 then
+    B.FuseEnd := FTime + Fuse
+  else
+    B.FuseEnd := FTime + StrToFloatDef(Def.Values['fuse'], 3, DefaultFormatSettings);
+  B.Bounce := StrToFloatDef(Def.Values['bouncyness'], 0.6, DefaultFormatSettings);
+  B.BounceSound := Def.Values['snd_bounce'];
+  B.Holder.Translation := B.Position;
+  SetD3Rotation(B.Holder, AnglesMatrix(B.Angles));
+  if FBrass.Count >= MaxDebris then
+    FBrass.Delete(0);
+  FBrass.Add(B);
+  Result := B;
 end;
 
 procedure TD3Game.LaunchPlayerProjectiles(const W: TD3Weapon; const Count: Integer;
@@ -3218,7 +3481,8 @@ begin
     if PowerUpActive(PowerupBerserk) then
       Damage := Damage * 30;
     WritelnLog('Doom3World', 'Weapon %s hits %s (%d)', [W.DefName, Mon.Model.Entity.Name, Damage]);
-    DamageMonster(Mon, Damage);
+    DamageMonster(Mon, Damage, W.MeleeDef, Dir);
+    EmitWound(Mon.Model.Entity, Mon.Model.EntityDef, FPlayerEye + Dir * MonDist, -Dir);
     PlaySoundAt(Def.Values['snd_flesh'], FPlayerEye + Dir * MonDist);
     Result := True;
   end else
@@ -3853,8 +4117,9 @@ begin
   A.Monster.Health := 0;
   A.Monster.State := msDead;
   A.Monster.StateTime := 0;
-  MonsterRagdoll(A.Monster);
-  ActorDamaged(A, True);
+  MonsterSound(A.Monster, 'snd_death');
+  MonsterRagdoll(A.Monster, TVector3.Zero);
+  ActorDamaged(A, True, True);
 end;
 
 procedure TD3Game.SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
@@ -4008,7 +4273,8 @@ begin
     T.Wait := E.FloatValue('delay', 1);
     T.Disabled := not E.BoolValue('on', True);
     T.Damage := 10;
-    DamageDef := Decls.EntityDef(E.Value('def_damage', 'damage_painTrigger'));
+    T.DamageDefName := E.Value('def_damage', 'damage_painTrigger');
+    DamageDef := Decls.EntityDef(T.DamageDefName);
     if DamageDef <> nil then
       T.Damage := StrToIntDef(DamageDef.Values['damage'], T.Damage);
   end else
@@ -4388,6 +4654,7 @@ procedure TD3Game.UpdateTriggers(const Feet: TVector3);
 var
   PlayerBox: TBox3D;
   T: TD3Trigger;
+  Mon: TD3Monster;
   Steps: Integer;
   P: TD3PendingTargets;
   I: Integer;
@@ -4404,12 +4671,25 @@ begin
       begin
         if T.Kind = tkHurt then
         begin
+          { idTrigger_Hurt: its def's effects, no direction (no knockback) }
           T.NextTime := FTime + T.Wait;
-          DamagePlayer(T.Damage);
+          DamagePlayer(T.Damage, T.DamageDefName, TVector3.Zero);
         end else
           FireTrigger(T);
       end;
   end;
+  { trigger_hurt hurts the monsters in it too (every entity that takes
+    damage; one next time for all of them, like Doom 3) }
+  for T in FTriggers do
+    if (T.Kind = tkHurt) and not T.Disabled and (FTime >= T.NextTime) then
+      for Mon in FMonsters do
+        if (Mon.State <> msDead) and Mon.Model.Holder.Exists and
+           T.Box.Collision(Box3D(Mon.Position - Vector3(Mon.Radius, 0, Mon.Radius),
+             Mon.Position + Vector3(Mon.Radius, Mon.Height, Mon.Radius))) then
+        begin
+          T.NextTime := FTime + T.Wait;
+          DamageMonster(Mon, T.Damage, T.DamageDefName, TVector3.Zero);
+        end;
 
   { delayed target firings; a bounded number per frame, so a loop of relays
     can't hang the game }
@@ -4454,6 +4734,15 @@ begin
     Exit;
   if M.State = msDead then
   begin
+    { gibbed: the body shrivels to nothing in a second, then goes }
+    if M.Gibbed then
+    begin
+      if FTime - M.GibTime >= GibShrivelTime then
+        M.Model.Holder.Exists := False
+      else
+        M.Model.Instance.SkinScale := 1 - (FTime - M.GibTime) / GibShrivelTime;
+      Exit;
+    end;
     { a ragdoll falls on its own and stays (a corpse) }
     if M.Ragdoll <> nil then
     begin
@@ -4493,7 +4782,18 @@ begin
     Exit;
   end;
   if M.PainTime > 0 then
+  begin
     M.PainTime := M.PainTime - SecondsPassed;
+    { the pain anim over: back to the state's anim }
+    if (M.PainTime <= 0) and M.PainAnim then
+    begin
+      M.PainAnim := False;
+      if M.State = msChase then
+        M.Model.Instance.PlayAnim('walk')
+      else
+        M.Model.Instance.PlayAnim('idle');
+    end;
+  end;
 
   Eye := M.Position + Vector3(0, M.Height * 0.8, 0);
   ToPlayer := PlayerPos - M.Position;
@@ -4690,7 +4990,7 @@ begin
     WritelnLog('Doom3World', 'Player skin "%s"', [PlayerSkinName]);
     FPlayerModel.SetSkin(PlayerSkinName);
   end;
-  FPlayerHolder.Exists := ThirdPersonActive and not CinematicActive;
+  FPlayerHolder.Exists := ThirdPersonActive and not CinematicActive and not FPlayerGibbed;
   FPlayerModel.Shown := FPlayerHolder.Exists;
   if not FPlayerHolder.Exists then
   begin
@@ -4820,7 +5120,6 @@ const
   MaxBrass = 32;
 var
   Def: TStringList;
-  Model: TD3StaticModel;
   Joint, Fwd, Left, Up: TVector3;
   Axis: TMatrix3;
   Source: String;
@@ -4846,43 +5145,17 @@ begin
   Def := Decls.EntityDef(W.BrassDef);
   if Def = nil then
     Exit;
-  Model := nil;
-  if IsStaticModelPath(Def.Values['model']) then
-    Model := StaticModels.Model(Def.Values['model']);
-  if Model = nil then
-    Exit;
-  B := TD3Brass.Create;
-  B.Holder := TCastleTransform.Create(nil);
-  B.Holder.SetTransient;
-  B.Holder.Collides := False;
-  B.Holder.Pickable := False;
-  B.Scene := TD3Scene.Create(nil);
-  B.Scene.SetTransient;
-  B.Scene.Load(Model.BuildNode(Def.Values['skin'], nil), True);
-  B.Scene.Collides := False;
-  B.Scene.Pickable := False;
-  B.Scene.CastShadows := False;
-  B.Holder.Add(B.Scene);
-  FMap.Add(B.Holder);
   { idWeapon::Event_EjectBrass: 40 * (forward + left + up) of the view,
     spinning at random (idDebris: fuse, bouncyness, snd_bounce) }
   Axis := PlayerViewAxis;
   Fwd := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);
   Left := Vector3(Axis.Data[1, 0], Axis.Data[1, 1], Axis.Data[1, 2]);
   Up := Vector3(Axis.Data[2, 0], Axis.Data[2, 1], Axis.Data[2, 2]);
-  B.Position := Joint;
-  B.Velocity := D3ToCge((Fwd + Left + Up) * 40) + D3ToCge(FPlayerVelocity);
-  B.Angles := Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0);
-  B.AngularVelocity := Vector3(RandomFloatRange(-1, 1), RandomFloatRange(-1, 1),
-    RandomFloatRange(-1, 1)) * RadToDeg(10);
-  B.FuseEnd := FTime + StrToFloatDef(Def.Values['fuse'], 3, DefaultFormatSettings);
-  B.Bounce := StrToFloatDef(Def.Values['bouncyness'], 0.6, DefaultFormatSettings);
-  B.BounceSound := Def.Values['snd_bounce'];
-  B.Holder.Translation := B.Position;
-  SetD3Rotation(B.Holder, AnglesMatrix(B.Angles));
-  if FBrass.Count >= MaxBrass then
-    FBrass.Delete(0);
-  FBrass.Add(B);
+  B := SpawnDebris(Def, Joint, D3ToCge((Fwd + Left + Up) * 40) + D3ToCge(FPlayerVelocity),
+    Vector3(RandomFloatRange(-1, 1), RandomFloatRange(-1, 1), RandomFloatRange(-1, 1)) * RadToDeg(10),
+    D3DirYaw(CgeToD3(PlayerViewDir)), 0);
+  if B = nil then
+    Exit;
   WritelnLog('Doom3World', 'Brass of %s from the %s model at %s', [W.DefName, Source,
     CgeToD3(Joint).ToString]);
   Result := True;
@@ -4930,7 +5203,7 @@ begin
         B.Resting := True;
         V := TVector3.Zero;
         B.Angles := Vector3(0, B.Angles.Y, 90);
-        WritelnLog('Doom3World', 'Brass lands at %s', [CgeToD3(B.Position).ToString]);
+        WritelnLog('Doom3World', '%s lands at %s', [B.Kind, CgeToD3(B.Position).ToString]);
       end;
     end else
       B.Position := B.Position + Step;
@@ -4950,7 +5223,7 @@ begin
   Result := TD3Ragdoll.Create(Instance, ArticulatedFigure(RagdollName), @WorldHit);
 end;
 
-procedure TD3Game.MonsterRagdoll(const Mon: TD3Monster);
+procedure TD3Game.MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
 var
   Key: String;
   Def: TStringList;
@@ -4972,9 +5245,14 @@ begin
   { a corpse can't be shot, nor stop its own particles }
   Mon.Model.Holder.Pickable := False;
   Mon.Model.Instance.Scene.Pickable := False;
-  { pushed away from the player }
-  Push := Mon.Position - FPlayerEye;
+  { pushed along the killing hit, else away from the player }
+  Push := Direction;
   Push.Y := 0;
+  if Push.IsZero then
+  begin
+    Push := Mon.Position - FPlayerEye;
+    Push.Y := 0;
+  end;
   if not Push.IsZero then
     Push := Push.Normalize * 120;
   Mon.Ragdoll.Launch(TVector3.Zero, Push, Mon.Position.Y, Mon.Height);
@@ -7026,10 +7304,11 @@ begin
     Back := Back - P.Velocity.Normalize * 2;
   RadiusDamage(P.Position, Back, P.SplashDamage, P.SplashRadius, P.Owner, P.SplashDefName);
   if P.FromPlayer and (P.SplashDamage > 0) and (P.SplashRadius > 0) then
-    MonsterSplash(P.Position, P.SplashDamage, P.SplashRadius);
+    MonsterSplash(P.Position, P.SplashDamage, P.SplashRadius, P.SplashDefName);
 end;
 
-procedure TD3Game.MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single);
+procedure TD3Game.MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single;
+  const DamageDefName: String);
 var
   Mon: TD3Monster;
   Dist: Single;
@@ -7048,7 +7327,7 @@ begin
     if Amount > 0 then
     begin
       WritelnLog('Doom3World', 'Splash of the player hits %s (%d)', [Mon.Model.Entity.Name, Amount]);
-      DamageMonster(Mon, Amount);
+      DamageMonster(Mon, Amount, DamageDefName, Mon.Center - Position);
     end;
   end;
 end;
@@ -7201,7 +7480,7 @@ begin
       if HitMonster <> nil then
       begin
         WritelnLog('Doom3World', 'Projectile of the player hits %s (%d)', [HitMonster.Model.Entity.Name, P.Damage]);
-        DamageMonster(HitMonster, P.Damage);
+        DamageMonster(HitMonster, P.Damage, P.DamageDefName, P.Velocity);
         NewPos := P.Position + Step * (Min(Dist, Len) / Len);
         EmitWound(HitMonster.Model.Entity, HitMonster.Model.EntityDef, NewPos, -P.Velocity);
         Detonate := True;
@@ -7291,14 +7570,17 @@ begin
   Result := CanSee(Eye, FPlayerEye);
 end;
 
-procedure TD3Game.ActorDamaged(const A: TD3Actor; const Killed: Boolean);
+procedure TD3Game.ActorDamaged(const A: TD3Actor; const Killed, Pain: Boolean);
 begin
   if not A.Thinking then
     Exit;
   { the attacker becomes its enemy }
   A.HasEnemy := not NoTarget;
-  A.SetFlag('AI_PAIN', 1);
-  A.PainFrames := 1;
+  if Pain or Killed then
+  begin
+    A.SetFlag('AI_PAIN', 1);
+    A.PainFrames := 1;
+  end;
   if Killed then
   begin
     { idAI::Killed: AI_DEAD, then the state_Killed state }
@@ -8975,14 +9257,20 @@ var
   Local, D: TVector3;
   KickTime, Amp, BlobTime, Scale, DvTime, Knockback: Single;
   Blob: TD3ScreenBlob;
+  Info: TD3DamageInfo;
+  Gibs: Integer;
 begin
-  if God or PlayerDead then
+  Info := DamageInfo(DamageDefName, Amount);
+  if (God and not Info.NoGod) or PlayerDead then
     Exit;
   Def := nil;
   if DamageDefName <> '' then
     Def := Decls.EntityDef(DamageDefName);
-  { Doom 3 armor absorbs 1/3 of the damage }
-  Absorbed := Min(Armor, Amount div 3);
+  { Doom 3 armor absorbs 1/3 of the damage (noArmor defs none) }
+  if Info.NoArmor then
+    Absorbed := 0
+  else
+    Absorbed := Min(Armor, Amount div 3);
   Dec(Armor, Absorbed);
   if (Absorbed > 0) and (FTime > FLastArmorPulse + 0.2) then
     PlayerSound('snd_hitArmor');
@@ -9074,10 +9362,21 @@ begin
   Dec(Health, Amount - Absorbed);
   if Health <= 0 then
   begin
-    Health := 0;
     FDeadTime := 0;
     ClearPowerUps;
-    PlayerSound('snd_death');
+    { gibbed by a gibbing def when the player def says "gib" (a hard
+      hit alone keeps the body, so "kill" and the tests' big hits do): the
+      body goes to pieces, no ragdoll }
+    if Info.Gib and (FPlayerDef <> nil) and
+       (StrToIntDef(FPlayerDef.Values['gib'], 0) <> 0) then
+    begin
+      FPlayerGibbed := True;
+      Gibs := SpawnGibs(nil, FPlayerDef, PlayerFeet + Vector3(0, 32, 0), Direction);
+      PlayerSound('snd_gibbed');
+      WritelnLog('Doom3World', 'Player gibbed (%s): %d gibs', [DamageDefName, Gibs]);
+    end else
+      PlayerSound('snd_death');
+    Health := 0;
     Message('You died');
     Exit;
   end;

@@ -839,7 +839,7 @@ procedure TViewPlay.HandleConsoleCommand(const Cmd, Args: String);
 var
   Maps: TStringList;
   P: TVector3;
-  I: Integer;
+  I, J: Integer;
   L: TD3LightInfo;
   S: String;
   Words: TStringArray;
@@ -941,6 +941,29 @@ begin
         FGame.DamagePlayer(I, Words[0], Vector3(0, 1, 0))
       else
         FGame.DamagePlayer(I, Words[0], -Camera.Direction);
+    end;
+  end else
+  if Cmd = 'hurtmonster' then
+  begin
+    { hurtmonster <name> [damage def] [amount]: hit a monster from the
+      camera's direction (its pain, death, gibs) }
+    Words := Trim(Args).Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if Length(Words) = 0 then
+      Console.Print('hurtmonster <name> [damage def] [amount]')
+    else
+    begin
+      S := '';
+      if Length(Words) > 1 then
+        S := Words[1];
+      I := FGame.DamageInfo(S).Damage;
+      if Length(Words) > 2 then
+        I := StrToIntDef(Words[2], I);
+      for J := 0 to FGame.Monsters.Count - 1 do
+        if SameText(FGame.Monsters[J].Model.Entity.Name, Words[0]) then
+        begin
+          FGame.DamageMonster(FGame.Monsters[J], I, S, FGame.Monsters[J].Center - Camera.Translation);
+          Console.Print(Format('%s: health %d', [Words[0], FGame.Monsters[J].Health]));
+        end;
     end;
   end else
   if Cmd = 'stamina' then

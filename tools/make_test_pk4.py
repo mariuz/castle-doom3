@@ -966,6 +966,8 @@ def cm_text():
     out.append(cm_model('trigger_once_1', box_quads((-24, -80, -56), (24, 80, 56), TRIGONCE), []))
     # the volume of trigger_once_cin, which starts the cinematic
     out.append(cm_model('trigger_once_cin', box_quads((-24, -24, -56), (24, 24, 56), TRIGONCE), []))
+    # the volume of trigger_hurt_1
+    out.append(cm_model('trigger_hurt_1', box_quads((-24, -24, -56), (24, 24, 56), TRIGONCE), []))
     return '\n'.join(out) + '\n'
 
 
@@ -1157,6 +1159,10 @@ def map_text():
         # player is teleported to info_player_teleport_1
         {'classname': 'trigger_once', 'name': 'trigger_once_cin', 'model': 'trigger_once_cin',
          'origin': '340 -340 56', 'target': 'trigger_fade_out', 'target1': 'trigger_relay_cin'},
+        # a hurting volume (trigger_hurt: damage_test_hurt every 0.5 s to
+        # whoever stands in it, the player or monsters)
+        {'classname': 'trigger_hurt', 'name': 'trigger_hurt_1', 'model': 'trigger_hurt_1',
+         'origin': '640 -260 56', 'def_damage': 'damage_test_hurt', 'delay': '0.5'},
         {'classname': 'trigger_fade', 'name': 'trigger_fade_out', 'origin': '340 -340 150',
          'fadeColor': '0 0 0 1', 'fadeTime': '0.3'},
         {'classname': 'trigger_relay', 'name': 'trigger_relay_cin', 'origin': '360 -340 150',
@@ -1682,6 +1688,7 @@ model test_blob {
 		frame 3				launch_missile body
 	}
 	anim evade_left			models/md5/test/blob_evade.md5anim
+	anim pain				models/md5/test/blob_pain.md5anim
 	anim throw				models/md5/test/blob_walk.md5anim {
 		frame 1				create_missile body
 		frame 6				launch_missile body
@@ -1810,6 +1817,38 @@ entityDef damage_test_projectile {
 	"knockback"				"40"
 }
 
+// a gibbing hit (like the chainsaw's): the victim goes to pieces
+entityDef damage_test_gib {
+	"damage"				"200"
+	"gib"					"1"
+	"kick_time"				"400"
+	"kick_amplitude"		"1"
+	"knockback"				"60"
+}
+
+// trigger_hurt_1's damage: a burn every half second
+entityDef damage_test_hurt {
+	"damage"				"5"
+	"kick_time"				"300"
+	"kick_amplitude"		"1"
+	"blob_time"				"300"
+	"mtr_blob"				"textures/test/blood_blob"
+	"blob_x"				"220"
+	"blob_y"				"140"
+	"blob_width"			"200"
+	"blob_height"			"200"
+	"dv_time"				"200"
+}
+
+// a gib (def_dropGibItem of the blob and the player): a chunk flying
+// off, gone in 4 seconds
+entityDef item_test_gib {
+	"spawnclass"			"idMoveableItem"
+	"model"					"models/items/test/gib.lwo"
+	"bouncyness"			"0.3"
+	"fuse"					"4"
+}
+
 entityDef damage_test_splash {
 	"damage"				"6"
 	"radius"				"80"
@@ -1936,6 +1975,10 @@ entityDef damage_test_moveable {
 // the most ammo of each kind
 entityDef player_test {
 	"smoke_wound_flesh"		"test_blood.prt"
+	"gib"					"1"
+	"snd_gibbed"			"test_death"
+	"def_dropGibItem1"		"item_test_gib"
+	"def_dropGibItem2"		"item_test_gib"
 	"maxhealth"				"100"
 	"armor"					"0"
 	"maxarmor"				"100"
@@ -2160,6 +2203,19 @@ entityDef monster_test_blob {
 	"health"				"80"
 	"snd_footstep"			"test_step"
 	"smoke_wound_flesh"		"test_blood.prt"
+	// pain and death: cries by the health left (pain_delay apart), the
+	// pain anim; gibbed past -20 health or by a gibbing damage def
+	"pain_delay"			"0.3"
+	"snd_pain_small"		"test_pain"
+	"snd_pain_medium"		"test_pain"
+	"snd_pain_large"		"test_pain_large"
+	"snd_pain_huge"			"test_pain_large"
+	"snd_death"				"test_death"
+	"gib"					"1"
+	"snd_gibbed"			"test_death"
+	"def_dropGibItem1"		"item_test_gib"
+	"def_dropGibItem2"		"item_test_gib"
+	"def_dropGibItem3"		"item_test_gib"
 }
 '''
 
@@ -2806,7 +2862,7 @@ def quat_xyz(axis, angle):
 
 
 def md5anim_text(kind):
-    frames, rate = {'evade': 25, 'death': 24, 'crouch_down': 8, 'crouch_up': 8}.get(kind, 48), 24
+    frames, rate = {'evade': 25, 'death': 24, 'crouch_down': 8, 'crouch_up': 8, 'pain': 8}.get(kind, 48), 24
     rel = []
     for name, parent, p in JOINTS:
         pp = JOINTS[parent][2] if parent >= 0 else (0, 0, 0)
@@ -2860,6 +2916,16 @@ def md5anim_text(kind):
                 elif name in ('arm_l', 'arm_r'):
                     sign = 1 if name == 'arm_l' else -1
                     q = quat_xyz((1, 0, 0), sign * 0.8 * e)
+            elif kind == 'pain':
+                # a flinch (played once): the body jerks back and down, the
+                # arms fly up
+                u = math.sin(math.pi * f / (frames - 1))
+                if name == 'body':
+                    pos[2] -= 4.0 * u
+                    q = quat_xyz((0, 1, 0), 0.5 * u)
+                elif name in ('arm_l', 'arm_r'):
+                    sign = 1 if name == 'arm_l' else -1
+                    q = quat_xyz((1, 0, 0), sign * 1.2 * u)
             elif kind == 'evade':
                 # a sidestep: the origin moves 64 to the left (+y in model
                 # space), easing in and out; the body leans into it
@@ -4002,6 +4068,8 @@ def main():
     add('models/md5/test/blob_idle.md5anim', md5anim_text('idle'))
     add('models/md5/test/blob_walk.md5anim', md5anim_text('walk'))
     add('models/md5/test/blob_evade.md5anim', md5anim_text('evade'))
+    add('models/md5/test/blob_pain.md5anim', md5anim_text('pain'))
+    add('models/items/test/gib.lwo', box_lwo(6, 6, 6))
     for kind in ('crouch', 'crouch_walk', 'crouch_down', 'crouch_up', 'death'):
         add('models/md5/test/player_%s.md5anim' % kind, md5anim_text(kind))
     weapon_models()
