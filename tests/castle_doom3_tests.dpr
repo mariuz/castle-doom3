@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
-  Doom3Particles,
+  Doom3Particles, Doom3Decals,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(105, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(106, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,7 +120,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(37, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(42, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(43, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
@@ -4560,6 +4560,269 @@ begin
   end;
 end;
 
+
+procedure TestExactStages;
+var
+  M: TD3Material;
+  Ctx: TD3ExprContext;
+  Parms: TD3EntityParms;
+  Keys: TStringList;
+  DecalSys: TD3DecalSystem;
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  B: TD3BrushEntity;
+  Root: TX3DRootNode;
+  I, Shapes, Hidden, Before: Integer;
+  D: TD3Decal;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+  procedure CountShapes(const Node: TX3DRootNode; out Shapes, Hidden: Integer);
+  var
+    I: Integer;
+  begin
+    Shapes := 0;
+    Hidden := 0;
+    for I := 0 to Node.FdChildren.Count - 1 do
+      if Node.FdChildren[I] is TShapeNode then
+      begin
+        Inc(Shapes);
+        if not TShapeNode(Node.FdChildren[I]).Visible then
+          Inc(Hidden);
+      end;
+  end;
+
+begin
+  { the parser: polygonOffset, decalInfo }
+  M := Decls.Material('textures/test/decal_hole');
+  CheckNear(1, M.PolygonOffset, 'polygonOffset without a value is 1');
+  CheckNear(3, M.DecalStay, 'decalInfo stay');
+  CheckNear(1, M.DecalFade, 'decalInfo fade');
+  CheckVec3(Vector3(1, 1, 1), M.DecalStart.XYZ, 'decalInfo start color');
+  CheckNear(0, M.DecalEnd.W, 'decalInfo end alpha');
+  Check(M.Translucent, 'decal is translucent');
+  M := Decls.Material('textures/test/floor');
+  CheckNear(0, M.PolygonOffset, 'no polygonOffset by default');
+  CheckNear(-1, M.DecalStay, 'no decalInfo by default');
+
+  { deform turbulent: a table and three expressions, whitespace separated }
+  M := Decls.Material('textures/test/pool');
+  CheckEquals('turbulent', M.Deform, 'pool deform');
+  CheckEquals('sintable', M.DeformTable, 'pool deform table');
+  Check((M.DeformParms[0] <> nil) and (M.DeformParms[1] <> nil) and (M.DeformParms[2] <> nil),
+    'turbulent: range, timeOfs and domain');
+  Ctx := DefaultExprContext;
+  Ctx.Time := 2;
+  if M.DeformParms[2] <> nil then
+  begin
+    CheckNear(0.04, M.DeformParms[0].Eval(Ctx), 'turbulent range');
+    CheckNear(0.4, M.DeformParms[1].Eval(Ctx), 'turbulent timeOfs (time * 0.2)');
+    CheckNear(0.02, M.DeformParms[2].Eval(Ctx), 'turbulent domain');
+  end;
+  CheckEquals('textures/test/metal_d.tga', M.DiffuseImage, 'the pool is lit');
+
+  { deform flare <size> }
+  M := Decls.Material('textures/test/flare2');
+  CheckEquals('flare', M.Deform, 'flare deform');
+  Check(M.DeformParms[0] <> nil, 'flare size parsed');
+  if M.DeformParms[0] <> nil then
+    CheckNear(24, M.DeformParms[0].Eval(Ctx), 'flare size');
+
+  { heat haze on a lit material: not glass, drawn as an overlay }
+  M := Decls.Material('textures/test/hazewall');
+  Check(not M.DrawAsGlass, 'hazewall has a diffuse stage: not glass');
+  CheckEquals('textures/test/haze_local.tga', M.HazeNormalMap, 'hazewall heat haze normal map');
+  CheckEquals('textures/test/metal_d.tga', M.DiffuseImage, 'hazewall diffuse');
+
+  { stage "if" conditions and vertexColor }
+  M := Decls.Material('textures/test/crateglow');
+  CheckEquals(1, M.OverlayCount, 'crateglow: the glow is an overlay');
+  Check(BaseStageCondition(M) = nil, 'crateglow base stage: no condition');
+  Check(OverlayStageCondition(M, 0) <> nil, 'crateglow glow stage: an if condition');
+  Check(M.StageVertexColor, 'crateglow glow stage: vertexColor');
+  if OverlayStageCondition(M, 0) <> nil then
+  begin
+    Ctx := DefaultExprContext;
+    Ctx.Parms[7] := 0;
+    CheckNear(0, OverlayStageCondition(M, 0).Eval(Ctx), 'if ( parm7 > 0 ) with parm7 0');
+    Ctx.Parms[7] := 1;
+    CheckNear(1, OverlayStageCondition(M, 0).Eval(Ctx), 'if ( parm7 > 0 ) with parm7 1');
+  end;
+  M := Decls.ParseMaterial('test/inline_if',
+    '{ if ( parm5 > 0.5 )' + LineEnding + 'blend add map a.tga }' + LineEnding +
+    '{ blend add map b.tga inverseVertexColor }');
+  try
+    Check(BaseStageCondition(M) <> nil, 'plain material: the first stage''s if');
+    CheckEquals(1, Length(M.ExtraStages), 'inline_if: an extra stage');
+    if Length(M.ExtraStages) = 1 then
+    begin
+      Check(M.ExtraStages[0].Condition = nil, 'extra stage without an if');
+      Check(M.ExtraStages[0].InverseVertexColor, 'extra stage inverseVertexColor');
+    end;
+  finally
+    M.Free;
+  end;
+  M := Decls.ParseMaterial('test/inline_turb', 'deform turbulent testStrobeTable 0.1 time 5' + LineEnding +
+    '{ blend add map a.tga }');
+  try
+    CheckEquals('teststrobetable', M.DeformTable, 'turbulent table (single tokens)');
+    Check(M.DeformParms[2] <> nil, 'turbulent: three single token expressions');
+    if M.DeformParms[2] <> nil then
+      CheckNear(5, M.DeformParms[2].Eval(Ctx), 'turbulent domain 5');
+  finally
+    M.Free;
+  end;
+
+  { entity parms }
+  Parms := TD3EntityParms.Create;
+  Keys := TStringList.Create;
+  try
+    CheckNear(1, Parms.Parms[0], 'default parm0 (red) is 1');
+    CheckNear(1, Parms.Parms[3], 'default parm3 (alpha) is 1');
+    CheckNear(0, Parms.Parms[7], 'default parm7 is 0');
+    Keys.Values['_color'] := '1 0.6 0.2';
+    Keys.Values['shaderParm7'] := '1';
+    Keys.Values['shaderParm11'] := '2.5';
+    Parms.FromKeys(Keys);
+    CheckNear(0.6, Parms.Parms[1], '_color green');
+    CheckNear(0.2, Parms.Parms[2], '_color blue');
+    CheckNear(1, Parms.Parms[7], 'shaderParm7');
+    CheckNear(2.5, Parms.Parms[11], 'shaderParm11');
+  finally
+    Keys.Free;
+    Parms.Free;
+  end;
+
+  { the decal system }
+  DecalSys := TD3DecalSystem.Create;
+  try
+    Check(DecalSys.Add('textures/test/decal_hole', Vector3(10, 20, 0), Vector3(0, 0, 1), 8, 0), 'decal added');
+    CheckEquals(1, DecalSys.Decals.Count, 'one decal');
+    D := DecalSys.Decals[0];
+    CheckNear(3, D.Stay, 'decal stay from decalInfo');
+    CheckNear(1, D.Fade, 'decal fade from decalInfo');
+    CheckNear(1, D.Color(2).W, 'opaque while staying');
+    CheckNear(0.5, D.Color(3.5).W, 'half faded');
+    Check(not D.Expired(3.9), 'not expired while fading');
+    Check(D.Expired(4.1), 'expired after stay + fade');
+    DecalSys.Update(0);
+    CheckNear(8, DecalSys.Scene.BoundingBox.Size.X, 'the quad is size wide');
+    CheckNear(8, DecalSys.Scene.BoundingBox.Size.Z, 'the quad is size deep');
+    CheckNear(0.5, DecalSys.Scene.BoundingBox.Center.Y, 'the quad is half a unit above the surface');
+    DecalSys.Update(3.5);
+    CheckEquals(1, DecalSys.Decals.Count, 'still there while fading');
+    DecalSys.Update(4.1);
+    CheckEquals(0, DecalSys.Decals.Count, 'removed when faded');
+    Check(DecalSys.Scene.BoundingBox.IsEmpty, 'nothing drawn after the removal');
+    for I := 0 to MaxDecals + 9 do
+      DecalSys.Add('textures/test/decal_hole', Vector3(I, 0, 0), Vector3(0, 0, 1), 4, 10);
+    CheckEquals(MaxDecals, DecalSys.Decals.Count, 'at most MaxDecals: the oldest go');
+    CheckNear(10, DecalSys.Decals[0].Position.X, 'the oldest decals went');
+    D := DecalSys.Decals[0];
+    { a material without decalInfo: Doom 3's defaults }
+    Check(DecalSys.Add('textures/test/metal', Vector3(0, 0, 0), Vector3(0, 0, 1), 4, 10), 'any material decals');
+    D := DecalSys.Decals[DecalSys.Decals.Count - 1];
+    CheckNear(10, D.Stay, 'default stay 10 s');
+    CheckNear(4, D.Fade, 'default fade 4 s');
+    CheckNear(0, D.Color(30).W, 'default end color: faded to nothing');
+  finally
+    DecalSys.Free;
+  end;
+
+  { in the map: conditional shapes, entity parms, projectile and FX decals }
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for exact stages');
+    Check(ConditionalShapeCount >= 1, 'conditional shapes registered (crate_2 glow)');
+    B := Map.FindBrush('crate_2');
+    Check(B <> nil, 'crate_2 is a brush entity');
+    if B <> nil then
+    begin
+      Check(B.Parms <> nil, 'crate_2 has parms');
+      CheckNear(1, B.Parms.Parms[7], 'crate_2 shaderParm7 from the map');
+      CheckNear(0.6, B.Parms.Parms[1], 'crate_2 _color green');
+      Root := B.Scene.RootNode;
+      UpdateAnimatedSurfaces(1);
+      CountShapes(Root, Shapes, Hidden);
+      CheckEquals(2, Shapes, 'crate_2: the lit box and its glow overlay');
+      CheckEquals(0, Hidden, 'glow shown with parm7 1');
+      B.Parms.Parms[7] := 0;
+      UpdateAnimatedSurfaces(1.1);
+      CountShapes(Root, Shapes, Hidden);
+      CheckEquals(1, Hidden, 'glow hidden with parm7 0 (setShaderParm)');
+      B.Parms.Parms[7] := 1;
+      UpdateAnimatedSurfaces(1.2);
+      CountShapes(Root, Shapes, Hidden);
+      CheckEquals(0, Hidden, 'glow back with parm7 1');
+    end;
+    B := Map.FindBrush('crate_1');
+    if B <> nil then
+    begin
+      CountShapes(B.Scene.RootNode, Shapes, Hidden);
+      CheckEquals(1, Shapes, 'crate_1 (metal): only the lit box');
+    end;
+
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    CheckEquals(0, Game.Decals.Decals.Count, 'no decals at the start');
+    { a bullet east from room B's south: it hits the pillar at x = 480 }
+    Before := Game.Projectiles.Count;
+    Check(Game.SpawnProjectile('projectile_test_bullet', 'test', Eye + Vector3(60, 0, 0), Vector3(7200, 0, 0)) <> nil,
+      'bullet spawned');
+    Check(Game.Projectiles.Count = Before + 1, 'bullet launched');
+    Step(0.3);
+    CheckEquals(1, Game.Decals.Decals.Count, 'the bullet left a decal (mtr_detonate)');
+    if Game.Decals.Decals.Count = 1 then
+    begin
+      D := Game.Decals.Decals[0];
+      CheckEquals('textures/test/decal_hole', D.Material.Name, 'bullet decal material');
+      CheckNear(8, D.Size, 'decal_size 8');
+      { room B's south pillar (x 480..528, y -280..-232) is in the way }
+      CheckNear(480, D.Position.X, 'on the pillar''s west face', 1);
+      CheckNear(-1, D.Normal.X, 'the face''s normal');
+      Check(Game.Decals.Scene.Parent = Map, 'the decal scene joined the map');
+    end;
+    { the FX's decal action: projected down onto the floor }
+    Game.Activate(Game.FindEntity('fx_test_1'));
+    Step(0.1);
+    CheckEquals(2, Game.Decals.Decals.Count, 'the FX left a decal');
+    if Game.Decals.Decals.Count = 2 then
+    begin
+      D := Game.Decals.Decals[1];
+      CheckNear(32, D.Size, 'fx decal size');
+      CheckNear(0, D.Position.Z, 'fx decal on the floor', 0.1);
+      CheckNear(400, D.Position.X, 'fx decal under the fx', 0.1);
+      CheckNear(1, D.Normal.Z, 'the floor''s normal');
+    end;
+    Step(4.5);
+    CheckEquals(0, Game.Decals.Decals.Count, 'decals faded after 4 s');
+  finally
+    Game.Free;
+    World.Free;
+  end;
+end;
+
 procedure TestParticles;
 var
   Decl: TD3ParticleDecl;
@@ -4630,7 +4893,7 @@ begin
   Check(Fx <> nil, 'fx/test_blast found');
   if Fx <> nil then
   begin
-    CheckEquals(4, Fx.Actions.Count, 'fx: 4 actions');
+    CheckEquals(5, Fx.Actions.Count, 'fx: 5 actions');
     Check(Fx.Actions[0].Kind = fxLight, 'action 0: a light');
     CheckNear(1.2, Fx.Actions[0].Duration, 'light duration');
     CheckNear(0.7, Fx.Actions[0].LightColor.Y, 'light color');
@@ -4984,6 +5247,7 @@ begin
   TestParticles;
   TestParticleEntities;
   TestDamageEffects;
+  TestExactStages;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

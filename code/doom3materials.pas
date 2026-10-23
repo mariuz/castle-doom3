@@ -19,18 +19,53 @@ unit Doom3Materials;
 interface
 
 uses
-  SysUtils, X3DNodes;
+  SysUtils, Classes, X3DNodes, Doom3Decls, Doom3Expressions;
+
+type
+  { An entity's shader parameters (its _color, shaderParm0..11): the stage
+    colors and "if" conditions of its materials read them (parm0..11).
+    Owned by the entity; the registered surfaces read it every frame, so
+    changing it (setShaderParm, setColor) shows at once. }
+  TD3EntityParms = class
+    Parms: array [0..11] of Single;
+    constructor Create;
+    { _color (parms 0..2) and shaderParmN keys. }
+    procedure FromKeys(const Keys: TStrings);
+  end;
 
 { A new appearance for a material (nodes must not be shared between scenes;
-  textures are still shared through CGE's URL cache). }
-function MaterialAppearance(const MaterialName: String): TAppearanceNode;
+  textures are still shared through CGE's URL cache). Parms: the entity's
+  shader parameters (nil: Doom 3's world defaults, 1 1 1 1). }
+function MaterialAppearance(const MaterialName: String; const Parms: TD3EntityParms = nil): TAppearanceNode;
+
+{ Register a shape drawn only while its stage's "if" condition holds
+  (evaluated every frame by UpdateAnimatedSurfaces with the entity's
+  parameters). }
+procedure RegisterConditionalShape(const Shape: TShapeNode; const Condition: TD3Expr;
+  const Parms: TD3EntityParms);
+{ The "if" condition of a material's base shape (nil: none), and of its
+  overlay stage Index (see OverlayAppearance). }
+function BaseStageCondition(const M: TD3Material): TD3Expr;
+function OverlayStageCondition(const M: TD3Material; const Index: Integer): TD3Expr;
+{ Conditional shapes registered (for the log). }
+function ConditionalShapeCount: Integer;
 
 { A texture node for a texture URL. }
 function MakeTexture(const Url: String): TImageTextureNode;
 
+{ The expression context of a world surface at a time (shader parameters
+  1, like Doom 3's defaults). }
+function SurfaceContext(const Time: Single): TD3ExprContext;
+
 { The appearance of an overlay stage (0..TD3Material.OverlayCount - 1),
   drawn over the base surface (Doom3Level offsets its geometry a little). }
-function OverlayAppearance(const MaterialName: String; const Index: Integer): TAppearanceNode;
+function OverlayAppearance(const MaterialName: String; const Index: Integer;
+  const Parms: TD3EntityParms = nil): TAppearanceNode;
+
+{ The heat haze stage of a lit or plain material (HazeNormalMap set, not
+  DrawAsGlass) as an overlay on the same triangles (DepthMode "lequal");
+  set up its shape with SetupSpecialShape(ssHaze). }
+function HazeOverlayAppearance(const MaterialName: String): TAppearanceNode;
 
 type
   { How a special shape (glass, reflection) must be set up: see SetupSpecialShape. }
@@ -87,8 +122,8 @@ var
 implementation
 
 uses
-  Math, Generics.Collections, CastleVectors, CastleRenderOptions, X3DFields,
-  Doom3Decls, Doom3Images, Doom3Expressions, Doom3Files;
+  Math, Generics.Collections, CastleVectors, CastleRenderOptions, CastleImages, X3DFields,
+  Doom3Images, Doom3Files;
 
 type
   TColorExprs = array [0..3] of TD3Expr;
@@ -99,6 +134,21 @@ type
     Ops: TD3TexOps;
     Unlit: TUnlitMaterialNode; { nil when the color is constant }
     Blend: TD3BlendMode;
+    Parms: TD3EntityParms; { nil: the world's }
+  end;
+
+  { A shape drawn while a stage condition holds. }
+  TConditionalShape = record
+    Shape: TShapeNode;
+    Condition: TD3Expr;
+    Parms: TD3EntityParms;
+  end;
+
+  { A "deform turbulent" effect whose range / time offset / domain change. }
+  TTurbulentSurface = record
+    Fields: array [0..2] of TSFFloat;
+    Exprs: array [0..2] of TD3Expr; { owned by the material }
+    Parms: TD3EntityParms;
   end;
 
   { A heat haze appearance whose scroll changes with time. }
@@ -116,7 +166,57 @@ type
 var
   AnimatedSurfaces: specialize TList<TAnimatedSurface>;
   HazeScrolls: specialize TList<THazeScroll>;
+  ConditionalShapes: specialize TList<TConditionalShape>;
+  TurbulentSurfaces: specialize TList<TTurbulentSurface>;
   NodeWatcher: TNodeWatcher;
+
+{ TD3EntityParms }
+
+constructor TD3EntityParms.Create;
+var
+  I: Integer;
+begin
+  inherited Create;
+  { Doom 3's defaults: white, alpha 1, the rest 0 }
+  for I := 0 to 3 do
+    Parms[I] := 1;
+  for I := 4 to 11 do
+    Parms[I] := 0;
+end;
+
+procedure TD3EntityParms.FromKeys(const Keys: TStrings);
+var
+  I: Integer;
+  V: String;
+  Parts: TStringArray;
+begin
+  if Keys = nil then
+    Exit;
+  V := Keys.Values['_color'];
+  if V <> '' then
+  begin
+    Parts := Trim(V).Split([' '], TStringSplitOptions.ExcludeEmpty);
+    for I := 0 to Min(2, High(Parts)) do
+      Parms[I] := StrToFloatDef(Parts[I], 1, DefaultFormatSettings);
+  end;
+  for I := 0 to 11 do
+  begin
+    V := Keys.Values['shaderParm' + IntToStr(I)];
+    if V <> '' then
+      Parms[I] := StrToFloatDef(Trim(V), Parms[I], DefaultFormatSettings);
+  end;
+end;
+
+function ContextFor(const Parms: TD3EntityParms; const Time: Single): TD3ExprContext;
+var
+  I: Integer;
+begin
+  Result := DefaultExprContext;
+  Result.Time := Time;
+  if Parms <> nil then
+    for I := 0 to 11 do
+      Result.Parms[I] := Parms.Parms[I];
+end;
 
 procedure TNodeWatcher.NodeDestroyed(const Node: TX3DNode);
 var
@@ -128,6 +228,12 @@ begin
   for I := HazeScrolls.Count - 1 downto 0 do
     if HazeScrolls[I].Field.ParentNode = Node then
       HazeScrolls.Delete(I);
+  for I := ConditionalShapes.Count - 1 downto 0 do
+    if ConditionalShapes[I].Shape = Node then
+      ConditionalShapes.Delete(I);
+  for I := TurbulentSurfaces.Count - 1 downto 0 do
+    if TurbulentSurfaces[I].Fields[0].ParentNode = Node then
+      TurbulentSurfaces.Delete(I);
 end;
 
 function SurfaceContext(const Time: Single): TD3ExprContext;
@@ -148,12 +254,14 @@ begin
       Result.Data[I] := 1;
 end;
 
-function ColorAnimated(const ColorExpr: TColorExprs): Boolean;
+{ Changes with time, or with an entity's parameters. }
+function ColorAnimated(const ColorExpr: TColorExprs; const Parms: TD3EntityParms): Boolean;
 var
   I: Integer;
 begin
   for I := 0 to 3 do
-    if (ColorExpr[I] <> nil) and ColorExpr[I].UsesTime then
+    if (ColorExpr[I] <> nil) and
+       (ColorExpr[I].UsesTime or ((Parms <> nil) and not ColorExpr[I].IsConstant)) then
       Exit(True);
   Result := False;
 end;
@@ -181,31 +289,102 @@ end;
 
 procedure UpdateAnimatedSurfaces(const Time: Single);
 var
-  I: Integer;
+  I, K: Integer;
   S: TAnimatedSurface;
   H: THazeScroll;
-  Ctx: TD3ExprContext;
+  C: TConditionalShape;
+  T: TTurbulentSurface;
+  Ctx, ECtx: TD3ExprContext;
+  Visible: Boolean;
 begin
   Ctx := SurfaceContext(Time);
   for I := 0 to AnimatedSurfaces.Count - 1 do
   begin
     S := AnimatedSurfaces[I];
+    if S.Parms <> nil then
+      ECtx := ContextFor(S.Parms, Time)
+    else
+      ECtx := Ctx;
     if S.Transform <> nil then
-      S.Transform.Matrix := TD3Material.TexMatrix(S.Ops, Ctx);
+      S.Transform.Matrix := TD3Material.TexMatrix(S.Ops, ECtx);
     if S.Unlit <> nil then
-      ApplyStageColor(S.ColorExpr, S.Unlit, S.Blend, Ctx);
+      ApplyStageColor(S.ColorExpr, S.Unlit, S.Blend, ECtx);
   end;
   for I := 0 to HazeScrolls.Count - 1 do
   begin
     H := HazeScrolls[I];
     H.Field.Send(EvalScroll(H.Scroll, Ctx));
   end;
+  { stage "if" conditions: shown while they hold }
+  for I := 0 to ConditionalShapes.Count - 1 do
+  begin
+    C := ConditionalShapes[I];
+    Visible := C.Condition.Eval(ContextFor(C.Parms, Time)) <> 0;
+    if C.Shape.Visible <> Visible then
+      C.Shape.Visible := Visible;
+  end;
+  { deform turbulent: its range, time offset and domain }
+  for I := 0 to TurbulentSurfaces.Count - 1 do
+  begin
+    T := TurbulentSurfaces[I];
+    ECtx := ContextFor(T.Parms, Time);
+    for K := 0 to 2 do
+      if (T.Exprs[K] <> nil) and not T.Exprs[K].IsConstant then
+        T.Fields[K].Send(T.Exprs[K].Eval(ECtx));
+  end;
+end;
+
+procedure RegisterConditionalShape(const Shape: TShapeNode; const Condition: TD3Expr;
+  const Parms: TD3EntityParms);
+var
+  C: TConditionalShape;
+begin
+  if (Shape = nil) or (Condition = nil) then
+    Exit;
+  C.Shape := Shape;
+  C.Condition := Condition;
+  C.Parms := Parms;
+  Shape.Visible := Condition.Eval(ContextFor(Parms, 0)) <> 0;
+  Shape.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+  ConditionalShapes.Add(C);
+end;
+
+function BaseStageCondition(const M: TD3Material): TD3Expr;
+begin
+  if M.DiffuseImage <> '' then
+    Result := M.DiffuseCondition
+  else
+    Result := M.StageCondition;
+end;
+
+function OverlayStageCondition(const M: TD3Material; const Index: Integer): TD3Expr;
+var
+  I: Integer;
+begin
+  I := Index;
+  if (M.DiffuseImage <> '') and (M.StageImage <> '') then
+  begin
+    if I = 0 then
+      Exit(M.StageCondition);
+    Dec(I);
+  end;
+  if (I >= 0) and (I <= High(M.ExtraStages)) then
+    Result := M.ExtraStages[I].Condition
+  else
+    Result := nil;
+end;
+
+function ConditionalShapeCount: Integer;
+begin
+  Result := ConditionalShapes.Count;
 end;
 
 procedure ClearAnimatedSurfaces;
 begin
   AnimatedSurfaces.Clear;
   HazeScrolls.Clear;
+  ConditionalShapes.Clear;
+  TurbulentSurfaces.Clear;
 end;
 
 function AnimatedSurfaceCount: Integer;
@@ -215,13 +394,14 @@ end;
 
 { Texture matrix and animated colors of an appearance. }
 procedure SetupStage(const App: TAppearanceNode; const ColorExpr: TColorExprs;
-  const Blend: TD3BlendMode; const Ops: TD3TexOps; const Unlit: TUnlitMaterialNode);
+  const Blend: TD3BlendMode; const Ops: TD3TexOps; const Unlit: TUnlitMaterialNode;
+  const Parms: TD3EntityParms = nil);
 var
   Ctx: TD3ExprContext;
   Anim: TAnimatedSurface;
   Transform: TTextureTransformMatrix3DNode;
 begin
-  Ctx := SurfaceContext(0);
+  Ctx := ContextFor(Parms, 0);
   Transform := nil;
   if Length(Ops) > 0 then
   begin
@@ -236,9 +416,10 @@ begin
   Anim.Blend := Blend;
   Anim.Transform := nil;
   Anim.Unlit := nil;
+  Anim.Parms := Parms;
   if (Transform <> nil) and TD3Material.TexOpsAnimated(Ops) then
     Anim.Transform := Transform;
-  if (Unlit <> nil) and ColorAnimated(ColorExpr) then
+  if (Unlit <> nil) and ColorAnimated(ColorExpr, Parms) then
     Anim.Unlit := Unlit;
   if (Anim.Transform <> nil) or (Anim.Unlit <> nil) then
   begin
@@ -277,7 +458,8 @@ end;
 
 { An unlit stage: emissive texture, blend mode, texture matrix and color. }
 procedure StageInto(const App: TAppearanceNode; const Image: String; const BlendMode: TD3BlendMode;
-  const ColorExpr: TColorExprs; const Ops: TD3TexOps; const AlphaTest: Single);
+  const ColorExpr: TColorExprs; const Ops: TD3TexOps; const AlphaTest: Single;
+  const Parms: TD3EntityParms = nil);
 var
   Unlit: TUnlitMaterialNode;
   Url: String;
@@ -289,7 +471,7 @@ begin
   if Url <> '' then
     Unlit.EmissiveTexture := MakeTexture(Url);
   App.Material := Unlit;
-  SetupStage(App, ColorExpr, BlendMode, Ops, Unlit);
+  SetupStage(App, ColorExpr, BlendMode, Ops, Unlit, Parms);
   case BlendMode of
     bmOpaque:
       if AlphaTest >= 0 then
@@ -324,18 +506,158 @@ end;
   all opaque shapes, so "lequal" is enough; opaque (alpha-tested) stages
   may be rendered before their surface, so they are also moved towards
   the camera in the depth buffer (polygon offset), one step per stage. }
-procedure StageDepthMode(const App: TAppearanceNode; const Index: Integer);
+procedure StageDepthMode(const App: TAppearanceNode; const Index: Integer; const M: TD3Material);
 var
   DepthMode: TDepthModeNode;
 begin
   DepthMode := TDepthModeNode.Create;
   DepthMode.DepthFunc := dmfLessEqual;
   if App.AlphaMode <> amBlend then
-    DepthMode.PolygonOffset := Vector2(-1, -(Index + 1));
+    DepthMode.PolygonOffset := Vector2(-1, -(Index + 1))
+  else
+  if M.PolygonOffset <> 0 then
+    DepthMode.PolygonOffset := Vector2(-1, -2 * M.PolygonOffset - Index);
   App.DepthMode := DepthMode;
 end;
 
-function OverlayAppearance(const MaterialName: String; const Index: Integer): TAppearanceNode;
+{ "polygonOffset": the whole surface is moved a little towards the viewer
+  in the depth buffer (decals over walls), like Doom 3's
+  glPolygonOffset( -1, -2 * value ). }
+procedure ApplyPolygonOffset(const App: TAppearanceNode; const M: TD3Material);
+var
+  DepthMode: TDepthModeNode;
+begin
+  if M.PolygonOffset = 0 then
+    Exit;
+  DepthMode := TDepthModeNode.Create;
+  DepthMode.DepthFunc := dmfLessEqual;
+  DepthMode.PolygonOffset := Vector2(-1, -2 * M.PolygonOffset);
+  App.DepthMode := DepthMode;
+end;
+
+const
+  { "deform turbulent": Doom 3's R_TurbulentDeform moves every vertex's
+    texture coordinates by the table of a value made from its position,
+    the time offset and the domain; here per fragment (the table is a
+    texture, read with wrapping like TableLookup) }
+  TurbulentVertexCode =
+    'varying float d3_turb_f;' + LineEnding +
+    'void PLUG_vertex_object_space(const in vec4 vertex_object, const in vec3 normal_object)' + LineEnding +
+    '{' + LineEnding +
+    '  /* Doom 3 x, y, z are CGE x, -z, y */' + LineEnding +
+    '  d3_turb_f = vertex_object.x * 0.003 - vertex_object.z * 0.007 + vertex_object.y * 0.011;' + LineEnding +
+    '}';
+  TurbulentFragmentCode =
+    'uniform sampler2D d3_turb_table;' + LineEnding +
+    'uniform float d3_turb_range;' + LineEnding +
+    'uniform float d3_turb_timeofs;' + LineEnding +
+    'uniform float d3_turb_domain;' + LineEnding +
+    'uniform float d3_turb_scale;' + LineEnding +
+    'uniform float d3_turb_min;' + LineEnding +
+    'uniform float d3_turb_half;' + LineEnding +
+    'varying float d3_turb_f;' + LineEnding +
+    'float d3_turb_lookup(float f)' + LineEnding +
+    '{' + LineEnding +
+    '  return texture2D(d3_turb_table, vec2(f + d3_turb_half, 0.5)).r * d3_turb_scale + d3_turb_min;' + LineEnding +
+    '}' + LineEnding +
+    'void PLUG_texture_coord_shift(inout vec2 tex_coord)' + LineEnding +
+    '{' + LineEnding +
+    '  float f = d3_turb_timeofs + d3_turb_domain * d3_turb_f + d3_turb_timeofs;' + LineEnding +
+    '  tex_coord.x += d3_turb_range * d3_turb_lookup(f);' + LineEnding +
+    '  /* CGE''s v is 1 - t */' + LineEnding +
+    '  tex_coord.y -= d3_turb_range * d3_turb_lookup(f + 0.5);' + LineEnding +
+    '}';
+
+procedure ApplyTurbulentDeform(const App: TAppearanceNode; const M: TD3Material;
+  const Parms: TD3EntityParms);
+var
+  Table: TD3Table;
+  Effect: TEffectNode;
+  Vert, Frag: TEffectPartNode;
+  Image: TGrayscaleImage;
+  Texture: TPixelTextureNode;
+  Props: TTexturePropertiesNode;
+  I, N: Integer;
+  MinV, MaxV: Single;
+  T: TTurbulentSurface;
+  Ctx: TD3ExprContext;
+  Values: array [0..2] of Single;
+begin
+  if M.Deform <> 'turbulent' then
+    Exit;
+  Table := Decls.Table(M.DeformTable);
+  if (Table = nil) or (Length(Table.Values) < 2) then
+    Exit;
+  N := Length(Table.Values) - 1;
+  MinV := Table.Values[0];
+  MaxV := Table.Values[0];
+  for I := 0 to N - 1 do
+  begin
+    MinV := Min(MinV, Table.Values[I]);
+    MaxV := Max(MaxV, Table.Values[I]);
+  end;
+  if MaxV - MinV < 0.0001 then
+    MaxV := MinV + 1;
+  Image := TGrayscaleImage.Create(N, 1);
+  for I := 0 to N - 1 do
+    Image.Pixels[I] := Round(EnsureRange((Table.Values[I] - MinV) / (MaxV - MinV), 0, 1) * 255);
+  Texture := TPixelTextureNode.Create;
+  Texture.FdImage.Value := Image;
+  Texture.RepeatS := True;
+  Texture.RepeatT := True;
+  Props := TTexturePropertiesNode.Create;
+  if Table.Snap then
+  begin
+    Props.MagnificationFilter := magNearest;
+    Props.MinificationFilter := minNearest;
+  end else
+  begin
+    Props.MagnificationFilter := magLinear;
+    Props.MinificationFilter := minLinear;
+  end;
+  Props.GuiTexture := True;
+  Texture.TextureProperties := Props;
+
+  Ctx := ContextFor(Parms, 0);
+  for I := 0 to 2 do
+    if M.DeformParms[I] <> nil then
+      Values[I] := M.DeformParms[I].Eval(Ctx)
+    else
+      Values[I] := 0;
+  Effect := TEffectNode.Create;
+  Effect.Language := slGLSL;
+  Effect.AddCustomField(TSFNode.Create(Effect, True, 'd3_turb_table', [TAbstractTextureNode], Texture));
+  T.Fields[0] := TSFFloat.Create(Effect, True, 'd3_turb_range', Values[0]);
+  T.Fields[1] := TSFFloat.Create(Effect, True, 'd3_turb_timeofs', Values[1]);
+  T.Fields[2] := TSFFloat.Create(Effect, True, 'd3_turb_domain', Values[2]);
+  for I := 0 to 2 do
+    Effect.AddCustomField(T.Fields[I]);
+  Effect.AddCustomField(TSFFloat.Create(Effect, True, 'd3_turb_scale', MaxV - MinV));
+  Effect.AddCustomField(TSFFloat.Create(Effect, True, 'd3_turb_min', MinV));
+  Effect.AddCustomField(TSFFloat.Create(Effect, True, 'd3_turb_half', 0.5 / N));
+  Vert := TEffectPartNode.Create;
+  Vert.ShaderType := stVertex;
+  Vert.Contents := TurbulentVertexCode;
+  Frag := TEffectPartNode.Create;
+  Frag.ShaderType := stFragment;
+  Frag.Contents := TurbulentFragmentCode;
+  Effect.SetParts([Vert, Frag]);
+  App.SetEffects([Effect]);
+
+  for I := 0 to 2 do
+    T.Exprs[I] := M.DeformParms[I];
+  T.Parms := Parms;
+  if ((T.Exprs[0] <> nil) and not T.Exprs[0].IsConstant) or
+     ((T.Exprs[1] <> nil) and not T.Exprs[1].IsConstant) or
+     ((T.Exprs[2] <> nil) and not T.Exprs[2].IsConstant) then
+  begin
+    Effect.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+    TurbulentSurfaces.Add(T);
+  end;
+end;
+
+function OverlayAppearance(const MaterialName: String; const Index: Integer;
+  const Parms: TD3EntityParms): TAppearanceNode;
 var
   M: TD3Material;
   I: Integer;
@@ -348,16 +670,34 @@ begin
   begin
     if I = 0 then
     begin
-      StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest);
-      StageDepthMode(Result, Index);
+      StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest, Parms);
+      StageDepthMode(Result, Index, M);
+      ApplyTurbulentDeform(Result, M, Parms);
       Exit;
     end;
     Dec(I);
   end;
   if (I >= 0) and (I <= High(M.ExtraStages)) then
     StageInto(Result, M.ExtraStages[I].Image, M.ExtraStages[I].Blend, M.ExtraStages[I].ColorExpr,
-      M.ExtraStages[I].TexOps, M.ExtraStages[I].AlphaTest);
-  StageDepthMode(Result, Index);
+      M.ExtraStages[I].TexOps, M.ExtraStages[I].AlphaTest, Parms);
+  StageDepthMode(Result, Index, M);
+  ApplyTurbulentDeform(Result, M, Parms);
+end;
+
+function HazeAppearance(const M: TD3Material): TAppearanceNode; forward;
+
+function HazeOverlayAppearance(const MaterialName: String): TAppearanceNode;
+var
+  M: TD3Material;
+  DepthMode: TDepthModeNode;
+begin
+  M := Decls.Material(MaterialName);
+  if M.HazeNormalMap = '' then
+    Exit(nil);
+  Result := HazeAppearance(M);
+  DepthMode := TDepthModeNode.Create;
+  DepthMode.DepthFunc := dmfLessEqual;
+  Result.DepthMode := DepthMode;
 end;
 
 const
@@ -587,13 +927,12 @@ begin
   Result.ShadowCaster := False;
 end;
 
-function MaterialAppearance(const MaterialName: String): TAppearanceNode;
+function MaterialAppearance(const MaterialName: String; const Parms: TD3EntityParms): TAppearanceNode;
 var
   M: TD3Material;
   Url: String;
   Mat: TMaterialNode;
   Unlit: TUnlitMaterialNode;
-  Blend: TBlendModeNode;
 begin
   M := Decls.Material(MaterialName);
   Result := TAppearanceNode.Create;
@@ -622,7 +961,7 @@ begin
     end else
       Mat.SpecularColor := Vector3(DefaultSpecular, DefaultSpecular, DefaultSpecular);
     Result.Material := Mat;
-    SetupStage(Result, M.StageColorExpr, M.StageBlend, M.DiffuseTexOps, nil);
+    SetupStage(Result, M.StageColorExpr, M.StageBlend, M.DiffuseTexOps, nil, Parms);
     if M.AlphaTest >= 0 then
     begin
       Result.AlphaMode := amMask;
@@ -632,10 +971,14 @@ begin
       Result.AlphaMode := amBlend
     else
       Result.AlphaMode := amOpaque;
+    ApplyPolygonOffset(Result, M);
+    ApplyTurbulentDeform(Result, M, Parms);
   end else
   if M.StageImage <> '' then
   begin
-    StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest);
+    StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest, Parms);
+    ApplyPolygonOffset(Result, M);
+    ApplyTurbulentDeform(Result, M, Parms);
   end else
   begin
     { not drawn; callers normally skip invisible materials }
@@ -649,9 +992,13 @@ end;
 initialization
   AnimatedSurfaces := specialize TList<TAnimatedSurface>.Create;
   HazeScrolls := specialize TList<THazeScroll>.Create;
+  ConditionalShapes := specialize TList<TConditionalShape>.Create;
+  TurbulentSurfaces := specialize TList<TTurbulentSurface>.Create;
   NodeWatcher := TNodeWatcher.Create;
 finalization
   FreeAndNil(AnimatedSurfaces);
   FreeAndNil(HazeScrolls);
+  FreeAndNil(ConditionalShapes);
+  FreeAndNil(TurbulentSurfaces);
   FreeAndNil(NodeWatcher);
 end.

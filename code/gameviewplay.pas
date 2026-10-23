@@ -848,6 +848,8 @@ var
   Gui: TD3Gui;
   GuiImage: TCastleImage;
   Hit: TRayCollision;
+  HitDistance: Single;
+  HitNormal: TVector3;
 begin
   if Cmd = 'help' then
   begin
@@ -1323,6 +1325,25 @@ begin
       end;
     Console.Print(S);
     WritelnLog('Ent', S);
+  end else
+  if Cmd = 'decal' then
+  begin
+    { decal <material> [size]: stick a decal where the view's center ray
+      hits the world (roadmap item 3) }
+    Words := Trim(Args).Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if Length(Words) = 0 then
+      Console.Print('decal <material> [size]')
+    else
+    if FGame.WorldHit(Camera.Translation, Camera.Direction, 4096, HitDistance, HitNormal) then
+    begin
+      I := 16;
+      if Length(Words) > 1 then
+        I := StrToIntDef(Words[1], I);
+      FGame.AddDecal(Words[0], CgeToD3(Camera.Translation + Camera.Direction * HitDistance),
+        CgeToD3(HitNormal), I);
+      Console.Print(Format('Decal %s, %d decals', [Words[0], FGame.Decals.Decals.Count]));
+    end else
+      Console.Print('decal: nothing hit');
   end else
   if Cmd = 'pick' then
   begin

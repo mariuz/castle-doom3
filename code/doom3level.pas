@@ -26,6 +26,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
   CastleCameras, Doom3Scene,
   Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions,
+  Doom3Materials,
   Doom3LightEffects;
 
 type
@@ -42,6 +43,9 @@ type
     Areas: TD3IntArray;
     { "hide": not shown (nor colliding) until activated }
     Hidden: Boolean;
+    { The entity's shader parameters (_color, shaderParmN), read by its
+      materials' stage colors and "if" conditions (setColor, setShaderParm). }
+    Parms: TD3EntityParms;
     procedure SetHidden(const Value: Boolean);
     destructor Destroy; override;
   end;
@@ -189,6 +193,9 @@ type
 
     { Shapes of a .proc model as an X3D group, Doom 3 coordinates converted.
       Solid / non-solid surfaces go to separate groups (either may be nil). }
+    class procedure BuildProcModel(const Model: TD3ProcModel;
+      const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
+      const Entity: TD3MapEntity; const Parms: TD3EntityParms); overload;
     class procedure BuildProcModel(const Model: TD3ProcModel;
       const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
       const Entity: TD3MapEntity = nil);
@@ -341,7 +348,7 @@ uses
   Math, TypInfo,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
-  Doom3Files, Doom3Images, Doom3Materials, Doom3StaticModels, Doom3Gui;
+  Doom3Files, Doom3Images, Doom3StaticModels, Doom3Gui;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -379,6 +386,7 @@ end;
 destructor TD3BrushEntity.Destroy;
 begin
   FreeAndNil(Scene);
+  FreeAndNil(Parms);
   inherited Destroy;
 end;
 
@@ -524,8 +532,11 @@ begin
 end;
 
 { "deform sprite": every 4 vertexes are a quad, drawn as a camera facing
-  billboard of the same size at its center. }
-procedure AddSprites(const Surf: TD3ProcSurface; const Group: TAbstractGroupingNode);
+  billboard of the same size at its center. "deform flare size": the same
+  (Doom 3 draws a flare of that size at the surface's center), the quad
+  size/2 around it. }
+procedure AddSprites(const Surf: TD3ProcSurface; const Group: TAbstractGroupingNode;
+  const Parms: TD3EntityParms; const FlareSize: Single = 0);
 var
   Q, K: Integer;
   Center: TVector3;
@@ -543,7 +554,10 @@ begin
     for K := 0 to 3 do
       Center := Center + D3ToCge(Surf.Vertexes[Q * 4 + K].Position);
     Center := Center / 4;
-    R := PointsDistance(D3ToCge(Surf.Vertexes[Q * 4].Position), Center) * 0.7071;
+    if FlareSize > 0 then
+      R := FlareSize / 2
+    else
+      R := PointsDistance(D3ToCge(Surf.Vertexes[Q * 4].Position), Center) * 0.7071;
     Coord := TCoordinateNode.Create;
     Coord.SetPoint([Vector3(-R, -R, 0), Vector3(R, -R, 0), Vector3(R, R, 0), Vector3(-R, R, 0)]);
     TexCoord := TTextureCoordinateNode.Create;
@@ -555,8 +569,9 @@ begin
     Quad.Solid := False;
     Shape := TShapeNode.Create;
     Shape.Geometry := Quad;
-    Shape.Appearance := MaterialAppearance(Surf.Material);
+    Shape.Appearance := MaterialAppearance(Surf.Material, Parms);
     Shape.Appearance.ShadowCaster := False;
+    RegisterConditionalShape(Shape, BaseStageCondition(Decls.Material(Surf.Material)), Parms);
     { axis (0, 0, 0): local +Z always points at the viewer }
     Billboard := TBillboardNode.Create;
     Billboard.AxisOfRotation := TVector3.Zero;
@@ -572,6 +587,13 @@ end;
 class procedure TDoom3Map.BuildProcModel(const Model: TD3ProcModel;
   const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
   const Entity: TD3MapEntity);
+begin
+  BuildProcModel(Model, SolidGroup, NonSolidGroup, Entity, nil);
+end;
+
+class procedure TDoom3Map.BuildProcModel(const Model: TD3ProcModel;
+  const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
+  const Entity: TD3MapEntity; const Parms: TD3EntityParms);
 var
   Surf: TD3ProcSurface;
   M: TD3Material;
@@ -583,12 +605,16 @@ var
   App: TAppearanceNode;
   Kind: TD3SpecialShape;
   Shape: TShapeNode;
+  FlareSize: Single;
 begin
   for Surf in Model.Surfaces do
   begin
     if (Length(Surf.Indexes) < 3) or (Length(Surf.Vertexes) = 0) then
       Continue;
     M := Decls.Material(Surf.Material);
+    FlareSize := 0;
+    if (M.Deform = 'flare') and (M.DeformParms[0] <> nil) then
+      FlareSize := M.DeformParms[0].Eval(SurfaceContext(0));
     GuiUrl := '';
     if M.GuiSurf <> '' then
     begin
@@ -601,15 +627,15 @@ begin
     if M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass then
       Continue;
     if M.NonSolid or M.Translucent or M.DrawAsGlass or (M.Deform = 'sprite') or
-       (M.StageImage <> '') and (M.DiffuseImage = '') then
+       (FlareSize > 0) or (M.StageImage <> '') and (M.DiffuseImage = '') then
       Group := NonSolidGroup
     else
       Group := SolidGroup;
     if Group = nil then
       Continue;
-    if M.Deform = 'sprite' then
+    if (M.Deform = 'sprite') or (FlareSize > 0) then
     begin
-      AddSprites(Surf, Group);
+      AddSprites(Surf, Group, Parms, FlareSize);
       Continue;
     end;
     SetLength(Coords, Length(Surf.Vertexes));
@@ -637,20 +663,38 @@ begin
         Inc(ReflectionCount);
     end
     else
-      App := MaterialAppearance(Surf.Material);
+      App := MaterialAppearance(Surf.Material, Parms);
     Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
     SetupSpecialShape(Shape, Kind);
     Group.AddChildren(Shape);
+    if (GuiUrl = '') and not M.DrawAsGlass then
+      RegisterConditionalShape(Shape, BaseStageCondition(M), Parms);
 
     { more stages: the same triangles, with a "lequal" depth test
       (OverlayAppearance) }
     if (GuiUrl = '') and not M.DrawAsGlass then
       for J := 0 to M.OverlayCount - 1 do
       begin
-        Group.AddChildren(ProcShape(Coords, Normals, UVs, Surf.Indexes,
-          not M.TwoSided, OverlayAppearance(Surf.Material, J)));
+        Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes,
+          not M.TwoSided, OverlayAppearance(Surf.Material, J, Parms));
+        Group.AddChildren(Shape);
+        RegisterConditionalShape(Shape, OverlayStageCondition(M, J), Parms);
         Inc(OverlayShapeCount);
       end;
+
+    { a heat haze stage over a lit or plain surface (the glass case is
+      above): the screen behind, distorted, on the same triangles }
+    if (GuiUrl = '') and not M.DrawAsGlass and (M.HazeNormalMap <> '') then
+    begin
+      App := HazeOverlayAppearance(Surf.Material);
+      if App <> nil then
+      begin
+        Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
+        SetupSpecialShape(Shape, ssHaze);
+        NonSolidGroup.AddChildren(Shape);
+        Inc(HazeCount);
+      end;
+    end;
 
     { a cube map reflection stage over a lit or plain surface }
     if (GuiUrl = '') and not M.DrawAsGlass and (M.ReflectCubeMap <> '') then
@@ -1634,7 +1678,9 @@ begin
       end;
     Root := TX3DRootNode.Create;
     Sprites := SpriteCount;
-    BuildProcModel(Model, Root, Root, E);
+    B.Parms := TD3EntityParms.Create;
+    B.Parms.FromKeys(E.Pairs);
+    BuildProcModel(Model, Root, Root, E, B.Parms);
     AddLightLibrary(Root);
     B.Scene := TD3Scene.Create(nil);
     B.Scene.SetTransient;
@@ -1723,7 +1769,9 @@ begin
     B.Scene := TD3Scene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
-    B.Scene.Load(Model.BuildNode(SkinName, E.Pairs), True);
+    B.Parms := TD3EntityParms.Create;
+    B.Parms.FromKeys(E.Pairs);
+    B.Scene.Load(Model.BuildNode(SkinName, E.Pairs, B.Parms), True);
     { map geometry (func_static, doors...) collides, unless "noclipmodel";
       lights' fixtures, items and other props don't }
     Cls := LowerCase(E.ClassName_);
@@ -1921,7 +1969,7 @@ var
   Base: String;
   E: TD3MapEntity;
   B: TD3BrushEntity;
-  Overlays, Sprites, Glass, Haze, Reflections: Integer;
+  Overlays, Conditionals, Sprites, Glass, Haze, Reflections: Integer;
 begin
   ClearMap;
   if FMapName = '' then
@@ -1958,6 +2006,7 @@ begin
     end;
 
   Overlays := OverlayShapeCount;
+  Conditionals := ConditionalShapeCount;
   Sprites := SpriteCount;
   Glass := GlassCount;
   Haze := HazeCount;
@@ -1974,6 +2023,8 @@ begin
     [HazeCount - Haze, ReflectionCount - Reflections]);
   BuildStaticModelEntities;
   LoadProfileStep('static models');
+  WritelnLog('Doom3Level', 'Conditional stages: %d shapes with an "if" condition',
+    [ConditionalShapeCount - Conditionals]);
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
   if FSpawnModels then
