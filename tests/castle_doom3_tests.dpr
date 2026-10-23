@@ -14,6 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
+  Doom3Particles,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -92,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(98, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(103, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -119,7 +120,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(34, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(37, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(40, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
@@ -269,7 +270,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(60, MapFile.Entities.Count, 'entity count');
+    CheckEquals(63, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -4386,6 +4387,368 @@ begin
   finally FreeCubeImages(Faces) end;
 end;
 
+procedure TestParticles;
+var
+  Decl: TD3ParticleDecl;
+  S: TD3ParticleStage;
+  Fx: TD3FxDecl;
+  Em: TD3ParticleEmitter;
+  Holder: TCastleTransform;
+  Box: TBox3D;
+  Axis: TD3Axis;
+begin
+  CheckEquals(7, Decls.DeclCount(dtParticle), 'particle decls indexed (particles/*.prt)');
+  CheckEquals(1, Decls.DeclCount(dtFx), 'fx decls indexed (fx/*.fx)');
+
+  { the steam vent: two stages }
+  Decl := ParticleDecl('test_steam.prt');
+  Check(Decl <> nil, 'test_steam.prt found (the extension is stripped)');
+  if Decl = nil then
+    Exit;
+  Check(Decl = ParticleDecl('test_steam'), 'the same decl without the extension (cached)');
+  CheckEquals(2, Decl.Stages.Count, 'test_steam: 2 stages');
+  S := Decl.Stages[0];
+  CheckEquals(20, S.Count, 'stage 0 count');
+  CheckEquals('textures/particles/test_smoke', S.Material, 'stage 0 material');
+  CheckNear(1.5, S.Time, 'stage 0 time');
+  CheckEquals(0, S.Cycles, 'stage 0 cycles (forever)');
+  Check(S.Distribution = pdCylinder, 'stage 0 cylinder distribution');
+  CheckNear(4, S.DistParms[0], 'cylinder size x');
+  CheckNear(0, S.DistParms[2], 'cylinder size z');
+  Check(S.Direction = pdirCone, 'stage 0 cone direction');
+  CheckNear(20, S.DirParm, 'cone angle');
+  Check(S.Orientation = poView, 'stage 0 view oriented');
+  CheckNear(50, S.Speed.From, 'speed from');
+  CheckNear(20, S.Speed.To_, 'speed to');
+  CheckNear(6, S.Size.From, 'size from');
+  CheckNear(16, S.Size.To_, 'size to');
+  CheckNear(30, S.Rotation.From, 'rotation from');
+  CheckNear(-12, S.Gravity, 'gravity (negative: rising)');
+  Check(not S.WorldGravity, 'local gravity');
+  CheckNear(0.2, S.FadeIn, 'fadeIn');
+  CheckNear(0.5, S.FadeOut, 'fadeOut');
+  CheckNear(0.85, S.Color.Y, 'color green');
+  CheckNear(0.6, S.Color.W, 'color alpha');
+  CheckNear(2, S.Offset.Z, 'offset z');
+  S := Decl.Stages[1];
+  Check(S.Orientation = poAimed, 'stage 1 aimed');
+  CheckNear(1, S.OrientParms[0], 'aimed trails');
+  CheckNear(0.1, S.OrientParms[1], 'aimed trail time');
+  Check(S.WorldGravity, 'stage 1 world gravity');
+  CheckNear(200, S.Gravity, 'stage 1 gravity');
+  CheckNear(1.5, S.Size.From, 'a plain size ("1.5"): from = to');
+  CheckNear(1.5, S.Size.To_, 'a plain size: to');
+
+  Decl := ParticleDecl('test_ring');
+  Check(Decl <> nil, 'test_ring found');
+  if Decl <> nil then
+  begin
+    S := Decl.Stages[0];
+    Check(S.Orientation = poZ, 'test_ring: z oriented');
+    CheckEquals(4, S.AnimationFrames, 'animationFrames');
+    CheckNear(8, S.AnimationRate, 'animationRate');
+    CheckNear(90, S.InitialAngle, 'initialAngle');
+    CheckNear(0, S.Bunching, 'bunching 0');
+  end;
+  Check(ParticleDecl('no_such.prt') = nil, 'a missing particle decl is nil');
+
+  { the FX }
+  Fx := FxDecl('fx/test_blast');
+  Check(Fx <> nil, 'fx/test_blast found');
+  if Fx <> nil then
+  begin
+    CheckEquals(4, Fx.Actions.Count, 'fx: 4 actions');
+    Check(Fx.Actions[0].Kind = fxLight, 'action 0: a light');
+    CheckNear(1.2, Fx.Actions[0].Duration, 'light duration');
+    CheckNear(0.7, Fx.Actions[0].LightColor.Y, 'light color');
+    CheckNear(200, Fx.Actions[0].LightRadius, 'light radius');
+    CheckNear(0.8, Fx.Actions[0].FadeOut, 'light fadeOut');
+    Check(Fx.Actions[1].Kind = fxParticle, 'action 1: a particle');
+    CheckEquals('test_explosion.prt', Fx.Actions[1].Data, 'the particle');
+    Check(Fx.Actions[2].Kind = fxSound, 'action 2: a sound');
+    CheckNear(0.05, Fx.Actions[2].Delay, 'sound delay');
+    Check(Fx.Actions[3].Kind = fxModel, 'action 3: a particle model');
+    CheckNear(0.3, Fx.Actions[3].Delay, 'model delay');
+    CheckNear(2, Fx.Actions[3].Duration, 'model duration');
+    CheckNear(8, Fx.Actions[3].Offset.Z, 'model offset');
+  end;
+
+  { evaluation: a stage made here, one particle at a time }
+  Holder := TCastleTransform.Create(nil);
+  try
+    Decl := TD3ParticleDecl.Create;
+    try
+      Decl.Parse('{ count 1 time 1 cycles 1 bunching 0 distribution rect 0 0 0 ' +
+        'direction cone 0 speed "100" size "2" fadeIn 0 fadeOut 0 gravity 0 orientation z ' +
+        'initialAngle 90 material "textures/particles/test_spark" }');
+      CheckEquals(1, Decl.Stages.Count, 'parsed stage');
+      Em := TD3ParticleEmitter.Create(Decl, 0);
+      try
+        Holder.Add(Em.Scene);
+        Em.Origin := Vector3(100, 200, 0);
+        Axis := IdentityAxis;
+        Em.Axis := Axis;
+        { age 0.5: the integrated speed is 100 * 0.5 along +z (Doom 3 up) }
+        Em.Update(0.5, Axis);
+        CheckEquals(1, Em.Live, 'one particle alive at 0.5 s');
+        Box := Em.Scene.BoundingBox;
+        CheckNear(100, Box.Center.X, 'particle x (the emitter origin)');
+        CheckNear(-200, Box.Center.Z, 'particle z (CGE: minus Doom 3 y)');
+        CheckNear(50, Box.Center.Y, 'particle height (speed * age)');
+        CheckNear(4, Box.Size.X, 'a z-oriented quad 2 * size wide');
+        CheckNear(0, Box.Size.Y, 'and flat');
+        Em.Update(1.5, Axis);
+        CheckEquals(0, Em.Live, 'dead after its time (one cycle)');
+        Check(Em.Finished(1.5), 'finished');
+        Check(not Em.Finished(0.5), 'not finished while alive');
+      finally
+        Em.Free;
+      end;
+      { gravity: z -= g * age * age }
+      Decl.Parse('{ count 1 time 1 cycles 0 bunching 0 distribution rect 0 0 0 ' +
+        'direction cone 0 speed "0" size "1" fadeIn 0 fadeOut 0 gravity 100 orientation view ' +
+        'material "textures/particles/test_spark" }');
+      Em := TD3ParticleEmitter.Create(Decl, 0);
+      try
+        Holder.Add(Em.Scene);
+        Em.Update(0.5, Axis);
+        CheckNear(-25, Em.Scene.BoundingBox.Center.Y, 'fallen by gravity * age^2');
+        { cycles 0: alive again in the next cycle }
+        Em.Update(2.25, Axis);
+        CheckEquals(1, Em.Live, 'alive in the third cycle');
+        CheckNear(-6.25, Em.Scene.BoundingBox.Center.Y, 'the cycle restarts the fall');
+        Check(not Em.Finished(100), 'never finished (cycles 0)');
+        Em.OneShot := True;
+        Em.Update(2.25, Axis);
+        CheckEquals(0, Em.Live, 'a one-shot plays one cycle');
+        Check(Em.Finished(2.25), 'and is finished after it');
+      finally
+        Em.Free;
+      end;
+      { a trail: particles stay where the emitter was when they spawned }
+      Decl.Parse('{ count 10 time 1 cycles 0 bunching 1 distribution rect 0 0 0 ' +
+        'direction cone 0 speed "0" size "1" fadeIn 0 fadeOut 0 gravity 0 orientation view ' +
+        'material "textures/particles/test_spark" }');
+      Em := TD3ParticleEmitter.Create(Decl, 0);
+      try
+        Holder.Add(Em.Scene);
+        Em.Origin := Vector3(0, 0, 0);
+        Em.Update(0.25, Axis);
+        CheckEquals(3, Em.Live, 'bunching: 3 of 10 spawned in the first quarter');
+        Em.Origin := Vector3(500, 0, 0);
+        Em.Update(0.55, Axis);
+        CheckEquals(6, Em.Live, '6 spawned after half the time');
+        Box := Em.Scene.BoundingBox;
+        { view-oriented quads (the view along +x) have no x extent }
+        CheckNear(0, Box.Data[0].X, 'the first particles stayed at the old origin');
+        CheckNear(500, Box.Data[1].X, 'the new ones are at the new origin');
+        Em.Stopped := True;
+        Em.Update(1.5, Axis);
+        CheckEquals(0, Em.Live, 'stopped: the old particles died, no new ones');
+        Check(Em.Finished(1.5), 'a stopped emitter with no particles is finished');
+      finally
+        Em.Free;
+      end;
+      { entity color and fades }
+      Decl.Parse('{ count 1 time 1 cycles 0 bunching 0 distribution rect 0 0 0 direction cone 0 ' +
+        'speed "0" size "1" fadeIn 0.5 fadeOut 0 entityColor 1 orientation view ' +
+        'material "textures/particles/test_spark" }');
+      Em := TD3ParticleEmitter.Create(Decl, 0);
+      try
+        Holder.Add(Em.Scene);
+        Em.Update(0.0, Axis);
+        CheckEquals(0, Em.Live, 'fully faded (fadeIn, frac 0): not drawn');
+        Em.Update(0.25, Axis);
+        CheckEquals(1, Em.Live, 'half faded in: drawn');
+        SkipParticles := True;
+        Em.Update(0.25, Axis);
+        CheckEquals(0, Em.Live, 'r_skipParticles: nothing');
+        Check(not Em.Scene.Exists, 'the scene hidden');
+        SkipParticles := False;
+        Em.Enabled := False;
+        Em.Update(0.25, Axis);
+        CheckEquals(0, Em.Live, 'disabled: nothing');
+        Em.Enabled := True;
+        Em.Update(0.25, Axis);
+        CheckEquals(1, Em.Live, 'enabled again');
+      finally
+        Em.Free;
+      end;
+    finally
+      Decl.Free;
+    end;
+  finally
+    Holder.Free;
+  end;
+end;
+
+procedure TestParticleEntities;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  Steam, Ring: TD3EmitterEntity;
+  FxEntity: TD3MapEntity;
+  Em: TD3ParticleEmitter;
+  I, Trails, Wounds: Integer;
+  M: TD3Monster;
+  A: TD3Actor;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+  function EmitterNamed(const Part: String): TD3ParticleEmitter;
+  begin
+    for Result in Game.Emitters do
+      if Pos(Part, Result.Name) > 0 then
+        Exit;
+    Result := nil;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for particles');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+
+    CheckEquals(2, Game.EmitterEntities.Count, 'two emitter entities (func_emitter with .prt models)');
+    if Game.EmitterEntities.Count <> 2 then
+      Exit;
+    Steam := Game.EmitterEntities[0];
+    Ring := Game.EmitterEntities[1];
+    CheckEquals('emitter_steam_1', Steam.Entity.Name, 'the steam vent');
+    CheckEquals('emitter_ring_1', Ring.Entity.Name, 'the ring');
+    Check(Steam.On, 'the steam is on');
+    Check(not Ring.On, 'the ring is start_off');
+    Check(Steam.Emitter.Persistent, 'entity emitters are kept');
+    CheckVectorNear(Vector3(-180, -20, 4), Steam.Emitter.Origin, 'the steam at its entity origin (Doom 3)');
+    Check(Steam.Emitter.Scene.Parent = Map, 'the emitter scene is in the map');
+    Step(1);
+    Check(Steam.Emitter.Live > 0, Format('steam particles alive (%d)', [Steam.Emitter.Live]));
+    CheckEquals(0, Ring.Emitter.Live, 'no ring particles while off');
+    { activation toggles it (idFuncEmitter) }
+    Game.Activate(Ring.Entity);
+    Check(Ring.On, 'activated: on');
+    Step(0.5);
+    CheckEquals(1, Ring.Emitter.Live, 'the ring (count 1) shows');
+    CheckNear(560, Ring.Emitter.Scene.BoundingBox.Center.X, 'the ring over its entity');
+    Game.Activate(Ring.Entity);
+    Check(not Ring.On, 'activated again: off');
+    Step(0.1);
+    CheckEquals(0, Ring.Emitter.Live, 'and gone');
+
+    { the FX entity }
+    FxEntity := nil;
+    for I := 0 to Map.MapFile.Entities.Count - 1 do
+      if Map.MapFile.Entities[I].Name = 'fx_test_1' then
+        FxEntity := Map.MapFile.Entities[I];
+    Check(FxEntity <> nil, 'fx_test_1 exists');
+    if FxEntity = nil then
+      Exit;
+    CheckEquals(0, Game.Fx.Count, 'no fx playing at first');
+    Game.Activate(FxEntity);
+    CheckEquals(1, Game.Fx.Count, 'activating func_fx plays its fx');
+    Step(0.1);
+    Check(Game.Fx[0].Actions[0].Started, 'the light action started');
+    Check(Game.Fx[0].Actions[0].Light <> nil, 'a light in the map');
+    Check(Game.Fx[0].Actions[0].Light.Parent = Map, 'added to the map');
+    CheckVectorNear(D3ToCge(Vector3(400, -60, 40)), Game.Fx[0].Actions[0].Light.Translation, 'at the entity');
+    Check(Game.Fx[0].Actions[0].Light.Intensity > 0.9, 'faded in (fadeIn 0.05)');
+    Check(EmitterNamed('fx/test_blast') <> nil, 'the explosion particles emitted');
+    Check(not Game.Fx[0].Actions[3].Started, 'the steam model waits for its delay (0.3)');
+    Step(0.3);
+    Check(Game.Fx[0].Actions[3].Started, 'the steam model started');
+    Check(Game.Fx[0].Actions[3].Emitter <> nil, 'as an emitter');
+    Check(not Game.Fx[0].Actions[3].Emitter.OneShot, 'that repeats for its duration');
+    Step(0.5);
+    Check(Game.Fx[0].Actions[0].Light.Intensity < 0.9, Format('the light fades out over its last 0.8 s (%.2f)',
+      [Game.Fx[0].Actions[0].Light.Intensity]));
+    Step(0.5);
+    Check(Game.Fx[0].Actions[0].Done, 'the light action is done after 1.2 s');
+    Check(Game.Fx[0].Actions[0].Light = nil, 'the light removed');
+    Step(1.2);
+    CheckEquals(0, Game.Fx.Count, 'the fx is over after its last action (0.3 + 2 s)');
+    Check(EmitterNamed('fx/test_blast') = nil, 'its emitters are gone');
+
+    { the pistol's muzzle smoke }
+    Step(0.6);
+    Check((Game.Weapon <> nil) and (Game.Weapon.Status = wsReady), 'the pistol is ready');
+    Check(EmitterNamed('smoke_muzzle') = nil, 'no muzzle smoke before a shot');
+    Game.AttackOnce;
+    Step(0.2);
+    Em := EmitterNamed('smoke_muzzle');
+    Check(Em <> nil, 'a shot emits smoke_muzzle');
+    if Em <> nil then
+    begin
+      Check(Em.OneShot, 'a one-shot smoke');
+      Check(Em.Live > 0, 'with particles');
+      Check((Em.Origin - Vector3(420, -250, PlayerEyeHeight)).Length < 60, 'near the muzzle');
+    end;
+    { the bullet hit the east wall: sparks (smoke_detonate) }
+    Check(EmitterNamed('smoke_detonate') <> nil, 'the bullet''s smoke_detonate on the wall');
+    Step(1.5);
+    Check(EmitterNamed('smoke_muzzle') = nil, 'the smoke is freed when done');
+
+    { a monster's projectile trails smoke_fly: a fresh game, the player
+      on room B's floor below blob_scripted_1's balcony (like TestProjectiles) }
+    FreeAndNil(Game);
+    FreeAndNil(World);
+    World := TCastleRootTransform.Create(nil);
+    Map := TDoom3Map.Create(World);
+    World.Add(Map);
+    Check(Map.LoadMap('testmap'), 'load testmap again');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    for M in Game.Monsters do
+      if M.Actor = nil then
+        M.Dormant := True;
+    Eye := D3ToCge(Vector3(560, 300, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Trails := 0;
+    Wounds := 0;
+    for I := 1 to 40 do
+    begin
+      Game.Update(0.1, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.1, RemoveMe);
+      if EmitterNamed('smoke_fly') <> nil then
+        Inc(Trails);
+      if EmitterNamed('smoke_wound_flesh') <> nil then
+        Inc(Wounds);
+    end;
+    Check(Game.ProjectilesLaunched > 0, 'a projectile was thrown');
+    Check(Trails > 0, 'a thrown ball trails smoke_fly particles');
+    Check(Game.Health < 100, 'the ball hit the player');
+    Check(Wounds > 0, 'the hit emitted the player''s smoke_wound_flesh (a short one-shot)');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 begin
   InitializeLog;
   D3Fs.RegisterProtocol;
@@ -4445,6 +4808,8 @@ begin
   TestAas;
   TestAasChase;
   TestEnvProbes;
+  TestParticles;
+  TestParticleEntities;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
