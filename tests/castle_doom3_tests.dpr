@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(106, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(113, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -270,7 +270,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(64, MapFile.Entities.Count, 'entity count');
+    CheckEquals(65, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1055,7 +1055,7 @@ begin
   State := TStringList.Create;
   try
     Check(Gui.LoadFromVfs('guis/test_panel.gui'), 'load test_panel.gui');
-    CheckEquals(5, Gui.WindowCount, 'panel windows (definevec4 and events skipped)');
+    CheckEquals(8, Gui.WindowCount, 'panel windows (definevec4 and events are not windows)');
     W := Gui.FindWindow('header');
     Check(W <> nil, 'find header window');
     if W <> nil then
@@ -1078,15 +1078,16 @@ begin
       C := PixelAt(Img, 5, 5);
       Check((C.X > 0.4) and (C.Y < 0.2), Format('header is red, got %s', [C.ToString]));
       Check(BrightPixels(Img, 200, 10, 440, 100) > 50, 'header text drawn (gui::gui_parm1)');
-      C := PixelAt(Img, 320, 400);
-      Check(C.X < 0.5, 'the hidden red window is not drawn');
+      C := PixelAt(Img, 100, 420);
+      Check(C.X < 0.5, Format('the hidden red window is not drawn, got %s', [C.ToString]));
       C := PixelAt(Img, 31, 300);
       Check(C.Z > 0.4, 'body border drawn');
     finally
       Img.Free;
     end;
-    { no state: the header has no text }
-    Img := RenderGui(Gui, nil);
+    { an empty state: the header has no text }
+    State.Clear;
+    Img := RenderGui(Gui, State);
     try
       Check(BrightPixels(Img, 200, 10, 440, 100) < 5, 'empty gui:: text');
     finally
@@ -1770,7 +1771,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(39, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(40, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -4823,6 +4824,248 @@ begin
   end;
 end;
 
+
+procedure TestGuiScripts;
+var
+  Gui: TD3Gui;
+  W, Btn, Body, Hidden: TD3GuiWindow;
+  V: TVector4;
+  Img: TRGBAlphaImage;
+  C: TVector4;
+  F: TD3Font;
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  S, Panel, Status: TD3GuiSurface;
+  L, Renders: Integer;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromVfs('guis/test_panel.gui'), 'load test_panel.gui for scripts');
+    Check(Gui.Interactive, 'the panel has onAction windows: interactive');
+    Btn := Gui.FindWindow('button');
+    Body := Gui.FindWindow('body');
+    Hidden := Gui.FindWindow('hidden');
+    W := Gui.FindWindow('blink');
+    Check((Btn <> nil) and (Body <> nil) and (Hidden <> nil) and (W <> nil), 'panel windows found');
+    if (Btn = nil) or (Body = nil) or (Hidden = nil) or (W = nil) then
+      Exit;
+    Check(Btn.OnAction <> nil, 'button onAction parsed');
+    if Btn.OnAction <> nil then
+    begin
+      CheckEquals(4, Btn.OnAction.Count, 'button onAction: 4 commands');
+      CheckEquals('set', Btn.OnAction[0].Name, 'first command');
+      CheckEquals('transition', Btn.OnAction[2].Name, 'third command');
+      CheckEquals(4, Length(Btn.OnAction[2].Args), 'transition arguments');
+    end;
+    Check((Btn.OnMouseEnter <> nil) and (Btn.OnMouseExit <> nil), 'mouse enter / exit scripts');
+    CheckEquals(3, Length(W.TimeEvents), 'blink: 3 onTime events');
+    if Length(W.TimeEvents) = 3 then
+    begin
+      CheckEquals(500, W.TimeEvents[1].Time, 'onTime 500');
+      CheckEquals('resettime', W.TimeEvents[2].Script[0].Name, 'resetTime at 1000');
+    end;
+    Check(Gui.FindWindow('bg').NoEvents, 'bg noevents');
+    CheckEquals('fonts/test', Gui.Desktop.Font, 'desktop font');
+    CheckEquals('fonts/test', Btn.FontName, 'children inherit the font');
+    CheckEquals('$buttoncolor', Btn.Exprs.Values['backcolor'], 'backcolor is a variable reference');
+    V := Gui.PropVec4(Btn, 'backcolor');
+    CheckNear(0.3, V.Y, 'backcolor from the buttoncolor variable (definevec4)');
+    CheckEquals(1, Length(Gui.Desktop.TimeEvents), 'desktop onTime 0');
+
+    { time lines and transitions }
+    Gui.SetState('gui_parm1', 'X');
+    Gui.Activate(0);
+    Gui.Update(0);
+    Check(Gui.PropVisible(W), 'blink visible at 0 ms');
+    CheckEquals(1, Gui.TransitionCount, 'the body forecolor transition started at 0 ms');
+    V := Gui.PropVec4(Body, 'forecolor');
+    CheckNear(0, V.X, 'transition start: black');
+    Gui.Update(250);
+    V := Gui.PropVec4(Body, 'forecolor');
+    CheckNear(0.3, V.X, 'transition half way (linear)', 0.03);
+    Gui.Update(600);
+    Check(not Gui.PropVisible(W), 'blink hidden after 500 ms');
+    CheckEquals(0, Gui.TransitionCount, 'transition done after 500 ms');
+    V := Gui.PropVec4(Body, 'forecolor');
+    CheckNear(0.6, V.X, 'transition end value kept');
+    { resetTime at 1000 ms: the onTime 0 fires on the next update }
+    Gui.Update(1100);
+    Gui.Update(1150);
+    Check(Gui.PropVisible(W), 'blink visible again after resetTime');
+    Gui.Update(1600);
+    Check(not Gui.PropVisible(W), 'blink keeps blinking');
+    Check(Gui.Dirty, 'changes mark the GUI dirty');
+
+    { the cursor: mouse enter / exit }
+    Gui.SetCursor(320, 430);
+    Check(Gui.CursorShown, 'cursor shown');
+    V := Gui.PropVec4(Btn, 'backcolor');
+    CheckNear(0.5, V.Y, 'onMouseEnter color');
+    Gui.SetCursor(320, 200);
+    V := Gui.PropVec4(Btn, 'backcolor');
+    CheckNear(0.3, V.Y, 'onMouseExit restores the variable color');
+
+    { clicks }
+    Gui.SetCursor(320, 430);
+    Check(Gui.Click, 'click on the button runs its onAction');
+    CheckEquals('activate ; runScript test_gui_clicked', Gui.TakeCmd, 'commands for the entity');
+    CheckEquals('CLICKED', Gui.StateValue('gui_clicked'), 'set "gui::gui_clicked"');
+    CheckEquals('CLICKED', Gui.PropText(Gui.FindWindow('status')), 'the status text shows the state');
+    CheckEquals(1, Gui.TransitionCount, 'the header transition started');
+    CheckEquals('', Gui.TakeCmd, 'commands taken once');
+    Gui.SetCursor(320, 200);
+    Check(Gui.Click, 'a click over noevents windows reaches the desktop');
+    CheckEquals('activate', Gui.TakeCmd, 'the desktop onAction');
+    Gui.ClearCursor;
+    Check(not Gui.Click, 'no click without the cursor');
+
+    { expressions }
+    CheckNear(1, Gui.Eval(nil, '1 + 2 * 3 == 7'), 'arithmetic and comparison');
+    CheckNear(0, Gui.Eval(nil, '(1 + 2) * 3 == 7'), 'parentheses');
+    Gui.SetState('x', '2');
+    CheckNear(1, Gui.Eval(nil, 'gui::x > 1 && gui::x < 3'), 'gui:: variables and &&');
+    CheckNear(0, Gui.Eval(nil, '!gui::x'), 'not');
+    CheckNear(0.1, Gui.Eval(Btn, '$buttoncolor'), 'a vec4 variable gives its first component');
+    CheckNear(0, Gui.Eval(nil, 'button::visible == 0 || gui::x == 3'), 'window properties and ||');
+    Hidden.SetProp('visible', 'gui::x == 2');
+    Check(Gui.PropVisible(Hidden), 'visible expression true');
+    Gui.SetState('x', '5');
+    Check(not Gui.PropVisible(Hidden), 'visible expression false');
+    Hidden.SetProp('visible', '0');
+    CheckEquals('', Hidden.Exprs.Values['visible'], 'a constant replaces the expression');
+
+    { rendering: the cursor and the Doom 3 font }
+    Gui.SetCursor(100, 100);
+    Img := RenderGui(Gui, nil);
+    try
+      Check(not Gui.Dirty, 'rendered: clean');
+      C := PixelAt(Img, 104, 113);
+      Check(C.X > 0.9, Format('cursor arrow drawn (white), got %s', [C.ToString]));
+      Check(BrightPixels(Img, 200, 10, 440, 100) > 50, 'header text drawn with the Doom 3 font');
+      C := PixelAt(Img, 10, 5);
+      Check((C.X > 0.9) and (C.Y > 0.9), Format('header flashes yellow (the click''s transition), got %s', [C.ToString]));
+    finally
+      Img.Free;
+    end;
+    Gui.ClearCursor;
+    Gui.Update(1700);
+    Gui.FindWindow('status').SetProp('visible', '1');
+    Img := RenderGui(Gui, nil);
+    try
+      Check(BrightPixels(Img, 30, 440, 190, 470) > 20, 'the status text (CLICKED) drawn at textscale 0.3 (12 pt font)');
+    finally
+      Img.Free;
+    end;
+  finally
+    Gui.Free;
+  end;
+
+  F := D3Font('fonts/test');
+  Check(F <> nil, 'fonts/test loaded (fonts/english/test/fontImage_NN.dat)');
+  if F <> nil then
+  begin
+    Check((F.Sizes[0] <> nil) and (F.Sizes[1] <> nil) and (F.Sizes[2] <> nil), 'three font sizes');
+    CheckEquals(12, F.Sizes[0].PointSize, 'small font 12 pt');
+    Check(F.SizeFor(0.25) = F.Sizes[0], 'textscale 0.25: the 12 pt font');
+    Check(F.SizeFor(0.5) = F.Sizes[1], 'textscale 0.5: the 24 pt font');
+    Check(F.SizeFor(1) = F.Sizes[2], 'textscale 1: the 48 pt font');
+    CheckNear(1, F.Sizes[2].GlyphScale, 'glyphScale of 48 pt');
+    CheckNear(4, F.Sizes[0].GlyphScale, 'glyphScale of 12 pt (48 / 12)');
+    Check(F.Sizes[2].Glyphs[Ord('A')].Page <> nil, 'glyph page loaded');
+    Check(F.Sizes[2].Glyphs[Ord('A')].XSkip > 20, 'glyph advance');
+    Check(F.TextWidth('AREA', 1) > 80, 'text width at textscale 1');
+    CheckNear(F.TextWidth('AREA', 1) * 0.5, F.TextWidth('AREA', 0.5), 'text width scales', 4);
+    Check(F.LineHeight(1) > 40, 'line height');
+  end;
+  Check(D3Font('fonts/missing') = nil, 'a missing font: nil (CGE font fallback)');
+  Check(D3Font('fonts/test') = F, 'fonts are cached');
+
+  { in the map: live GUI surfaces, the player's focus, clicks }
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for GUIs');
+    CheckEquals(2, Map.GuiSurfaces.Count, 'two live GUIs: the panel and the status screen');
+    Panel := nil;
+    Status := nil;
+    for S in Map.GuiSurfaces do
+      if SameText(S.EntityName, 'panel_1') then
+        Panel := S
+      else
+        Status := S;
+    Check(Panel <> nil, 'the panel GUI surface');
+    Check(Status <> nil, 'the status screen GUI surface');
+    if (Panel = nil) or (Status = nil) then
+      Exit;
+    Check(Panel.Gui.Interactive, 'the panel is interactive');
+    Check(not Status.Gui.Interactive, 'the status screen has no events');
+    CheckEquals('AREA A', Panel.Gui.StateValue('gui_parm1'), 'the entity keys are the state');
+    CheckEquals(1, Panel.Nodes.Count, 'one texture node shows the panel');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-190, -60, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(-1, 0, 0.21)).Normalize;
+    Step(0.2);
+    Check(Panel.Renders >= 1, 'the panel was redrawn (its transition)');
+    Check(Panel.Url <> '', 'the panel has its own texture URL');
+    Check(Game.GuiFocus = Panel, 'looking at the panel from 60 units: focus');
+    if Game.GuiFocus = Panel then
+    begin
+      CheckNear(320, Panel.Gui.CursorX, 'cursor x at the panel center', 20);
+      CheckNear(430, Panel.Gui.CursorY, 'cursor y on the button', 30);
+    end;
+    L := Map.FindLight('light_panel_1');
+    Check(L >= 0, 'light_panel_1 exists');
+    if L >= 0 then
+      Check(not Map.Light(L).StartOn, 'the panel light starts off');
+    { the weapon rises for a second after the spawn, then lowers for the
+      focused GUI }
+    Step(1.2);
+    Renders := Panel.Renders;
+    Game.AttackOnce;
+    Step(0.3);
+    CheckEquals(1, Game.GuiClicks, 'the attack button clicked the GUI');
+    CheckEquals('CLICKED', Panel.Gui.StateValue('gui_clicked'), 'the button''s onAction ran');
+    if L >= 0 then
+      Check(Map.Light(L).StartOn, 'the GUI''s activate command switched the panel''s light on');
+    Check(Panel.Renders > Renders, 'redrawn after the click');
+    Check((Game.Weapon <> nil) and (Game.Weapon.Status in [wsLowering, wsHolstered]), 'the weapon lowers while a GUI has the focus');
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Step(0.1);
+    Check(Game.GuiFocus = nil, 'looking away: no focus');
+    Check(not Panel.Gui.CursorShown, 'the cursor is gone');
+    Check(Map.SetGuiParm(Game.FindEntity('panel_1'), 'gui_parm1', 'HELLO') >= 1, 'setGuiParm reaches the live GUI');
+    CheckEquals('HELLO', Panel.Gui.StateValue('gui_parm1'), 'the state changed');
+    Check(Panel.Gui.Dirty, 'the state change redraws it');
+    { the status screen in room B is out of sight: it doesn't run }
+    Check(Status.Renders <= 1, 'a GUI out of sight is not redrawn');
+  finally
+    Game.Free;
+    World.Free;
+  end;
+end;
+
 procedure TestParticles;
 var
   Decl: TD3ParticleDecl;
@@ -5248,6 +5491,7 @@ begin
   TestParticleEntities;
   TestDamageEffects;
   TestExactStages;
+  TestGuiScripts;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);

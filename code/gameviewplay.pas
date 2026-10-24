@@ -856,7 +856,7 @@ begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount] [up], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
-    Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, scripts, g_stopTime [0|1],');
+    Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, guis, scripts, g_stopTime [0|1],');
     Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1], pm_thirdPersonDeath [0|1], crouch [0|1], ragdoll [0|1], g_showBrass [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
   end else
@@ -1160,6 +1160,27 @@ begin
     else
       SkipParticles := not SkipParticles;
     Console.Print('r_skipParticles ' + BoolToStr(SkipParticles, '1', '0'));
+  end else
+  if Cmd = 'guis' then
+  begin
+    { every live GUI: its file, entity, windows, redraws, interactivity,
+      the cursor and transitions }
+    for I := 0 to Map.GuiSurfaces.Count - 1 do
+    begin
+      S := Format('%s (%s): %d windows, %d redraws%s%s%s', [
+        Map.GuiSurfaces[I].Gui.Name, Map.GuiSurfaces[I].EntityName, Map.GuiSurfaces[I].Gui.WindowCount,
+        Map.GuiSurfaces[I].Renders, BoolToStr(Map.GuiSurfaces[I].Gui.Interactive, ', interactive', ''),
+        BoolToStr(Map.GuiSurfaces[I].Gui.CursorShown, Format(', cursor %d %d', [Round(Map.GuiSurfaces[I].Gui.CursorX),
+          Round(Map.GuiSurfaces[I].Gui.CursorY)]), ''),
+        BoolToStr(Map.GuiSurfaces[I].Gui.TransitionCount > 0, Format(', %d transitions', [Map.GuiSurfaces[I].Gui.TransitionCount]), '')]);
+      Console.Print(S);
+      WritelnLog('Guis', S);
+    end;
+    S := Format('GUIs: %d live, %d redraws, %d clicks', [Map.GuiSurfaces.Count, Map.GuiRenders, FGame.GuiClicks]);
+    if FGame.GuiFocus <> nil then
+      S := S + ', focus ' + FGame.GuiFocus.Gui.Name;
+    Console.Print(S);
+    WritelnLog('Guis', S);
   end else
   if Cmd = 'particles' then
   begin
