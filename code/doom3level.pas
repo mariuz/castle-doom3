@@ -587,11 +587,10 @@ begin
     Shape.Geometry := Quad;
     Shape.Appearance := MaterialAppearance(Surf.Material, Parms);
     Shape.Appearance.ShadowCaster := False;
-    RegisterConditionalShape(Shape, BaseStageCondition(Decls.Material(Surf.Material)), Parms);
     { axis (0, 0, 0): local +Z always points at the viewer }
     Billboard := TBillboardNode.Create;
     Billboard.AxisOfRotation := TVector3.Zero;
-    Billboard.AddChildren(Shape);
+    Billboard.AddChildren(ConditionalShapeNode(Shape, BaseStageCondition(Decls.Material(Surf.Material)), Parms));
     Transform := TTransformNode.Create;
     Transform.Translation := Center;
     Transform.AddChildren(Billboard);
@@ -682,9 +681,10 @@ begin
       App := MaterialAppearance(Surf.Material, Parms);
     Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
     SetupSpecialShape(Shape, Kind);
-    Group.AddChildren(Shape);
     if (GuiUrl = '') and not M.DrawAsGlass then
-      RegisterConditionalShape(Shape, BaseStageCondition(M), Parms);
+      Group.AddChildren(ConditionalShapeNode(Shape, BaseStageCondition(M), Parms))
+    else
+      Group.AddChildren(Shape);
 
     { more stages: the same triangles, with a "lequal" depth test
       (OverlayAppearance) }
@@ -693,8 +693,7 @@ begin
       begin
         Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes,
           not M.TwoSided, OverlayAppearance(Surf.Material, J, Parms));
-        Group.AddChildren(Shape);
-        RegisterConditionalShape(Shape, OverlayStageCondition(M, J), Parms);
+        Group.AddChildren(ConditionalShapeNode(Shape, OverlayStageCondition(M, J), Parms));
         Inc(OverlayShapeCount);
       end;
 

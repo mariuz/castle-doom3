@@ -55,7 +55,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
-  Doom3Particles, Doom3Decals, Doom3Gui;
+  Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda;
 
 type
   { A monster's route through the AAS (the path between the areas it was
@@ -69,6 +69,22 @@ type
   end;
 
   TD3MessageEvent = procedure (const Msg: String) of object;
+  TD3BoolEvent = procedure (const Value: Boolean) of object;
+
+  { An objective the player was given (idObjective / idPlayer::GiveObjective). }
+  TD3Objective = record
+    Title, Text, Screenshot: String;
+    Complete: Boolean;
+  end;
+
+  TD3MapEntityArray = array of TD3MapEntity;
+
+  { A target_fadeentity fade of an entity's color (shader parms 0..3). }
+  TD3EntityFade = record
+    EntityName: String;
+    From, To_: TVector4;
+    Start, Duration: Single;
+  end;
 
   TD3MoverKind = (mkDoor, mkRotating);
   TD3DoorState = (dsClosed, dsOpening, dsOpen, dsClosing);
@@ -324,6 +340,9 @@ type
       stays at HeldJoint of HeldBy, harmless }
     HeldBy: TD3Actor;
     HeldJoint: String;
+    { created by the player's weapon (createProjectile) and not launched
+      yet: at its view model's barrel joint (a TD3Weapon) }
+    HeldByWeapon: TObject;
     { detonate_on_world / detonate_on_actor (idProjectile reads them as
       bools, missing = false): without them it bounces off (Bounce is the
       speed kept) instead of exploding }
@@ -528,6 +547,8 @@ type
     WorldHolder: TCastleTransform;
     World: TD3Md5Instance;
     AttachJoint: String;
+    { createProjectile: the projectile held until launchProjectiles }
+    HeldProjectile: TD3Projectile;
     { def_ejectBrass and ejectBrassDelay (s): brass after each launch }
     BrassDef: String;
     BrassDelay: Single;
@@ -695,6 +716,23 @@ type
     FEmitterEntities: specialize TObjectList<TD3EmitterEntity>;
     FFx: specialize TObjectList<TD3Fx>;
     FDecals: TD3DecalSystem;
+    { player information (PDAs, objectives, tips, radio chatter, fades) }
+    FPdas, FEmails, FVideos: TStringList;
+    FObjectives: array of TD3Objective;
+    FMissionObjective: String;
+    FTipTitle, FTipText: String;
+    FTipTime: Single;
+    FTipPos: TVector3;
+    FObjectiveNotice, FObjectiveNoticeTitle, FObjectiveNoticeText: String;
+    FObjectiveNoticeTime: Single;
+    FObjectiveNoticePos: TVector3;
+    FRadioUntil: Single;
+    FRadioEntity: TD3MapEntity;
+    FFovFrom, FFovTo, FFovStart, FFovTime: Single;
+    FEntityFades: specialize TList<TD3EntityFade>;
+    FEndLevelMap: String;
+    FOnFlashlight: TD3BoolEvent;
+    FOnEndLevel: TD3MessageEvent;
     { the interactive GUI the player looks at (idPlayer::focusUI) }
     FGuiFocus: TD3GuiSurface;
     FGuiAttackDown: Boolean;
@@ -741,6 +779,11 @@ type
     procedure UpdateGuiFocus;
     procedure UpdateGuiCommands;
     procedure HandleGuiCommands(const S: TD3GuiSurface; const Cmd: String);
+    procedure UpdatePlayerInfo;
+    function ActivatePlayerInfo(const E: TD3MapEntity; const Cls: String): Boolean;
+    function TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;
+    function BarrelPosition(const W: TD3Weapon): TVector3;
+    procedure DropHeldProjectile(const W: TD3Weapon);
     { the player's speed, bob cycle and movement changes }
     procedure UpdatePlayerMotion(const SecondsPassed: Single);
     { idPlayer::CrashLand after a fall: the view's dip, falling damage }
@@ -1120,6 +1163,46 @@ type
       the weapon is lowered. }
     property GuiFocus: TD3GuiSurface read FGuiFocus;
     property GuiClicks: Integer read FGuiClicks;
+
+    { Player information (roadmap 5f). PDAs carried (pda decl names; the
+      "personal" one from the start), emails given to the personal PDA
+      (target_giveemail), videos (item_videocd). }
+    property Pdas: TStringList read FPdas;
+    property Emails: TStringList read FEmails;
+    property Videos: TStringList read FVideos;
+    procedure GivePDA(const AName: String; const Quiet: Boolean = False);
+    procedure GiveEmail(const AName: String);
+    procedure GiveVideo(const AName: String);
+    { Objectives (item_objective / item_objectivecomplete) and the mission
+      objective (target_primaryobjective). }
+    function ObjectiveCount: Integer;
+    function Objective(const I: Integer): TD3Objective;
+    property MissionObjective: String read FMissionObjective;
+    procedure GiveObjective(const Title, Text, Screenshot: String);
+    procedure CompleteObjective(const Title, Text: String);
+    { The notice on the HUD: 'New Objective' / 'Objective Complete' with
+      its title and text, until the player walks 64 units (2 s later). }
+    property ObjectiveNotice: String read FObjectiveNotice;
+    property ObjectiveNoticeTitle: String read FObjectiveNoticeTitle;
+    property ObjectiveNoticeText: String read FObjectiveNoticeText;
+    { A tip (target_tip, idPlayer::ShowTip) until the player walks 96 units. }
+    property TipTitle: String read FTipTitle;
+    property TipText: String read FTipText;
+    procedure ShowTip(const Title, Tip: String);
+    procedure HideTip;
+    { func_radiochatter playing (the HUD's radio indicator) }
+    function RadioChatter: Boolean;
+    { Give an item entityDef (target_give): its inv_ keys, powerup or PDA. }
+    function GiveItemDef(const DefName: String): Boolean;
+    { The view's field of view set by target_setfov (degrees; 0: the
+      default). }
+    function ViewFov: Single;
+    function EntityFadeCount: Integer;
+    { target_endlevel: the next map it named ('' until then). }
+    property EndLevelMap: String read FEndLevelMap;
+    { the weapon's flashlight event (weapon scripts) }
+    property OnFlashlight: TD3BoolEvent read FOnFlashlight write FOnFlashlight;
+    property OnEndLevel: TD3MessageEvent read FOnEndLevel write FOnEndLevel;
     { Stick a decal at a Doom 3 point with a surface normal (console
       decal, projectiles); the decal scene joins the map on the first. }
     procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
@@ -1523,6 +1606,10 @@ begin
   FEmitterEntities := specialize TObjectList<TD3EmitterEntity>.Create(True);
   FFx := specialize TObjectList<TD3Fx>.Create(True);
   FDecals := TD3DecalSystem.Create;
+  FPdas := TStringList.Create;
+  FEmails := TStringList.Create;
+  FVideos := TStringList.Create;
+  FEntityFades := specialize TList<TD3EntityFade>.Create;
   Health := 100;
   FIdealSlot := -1;
   ViewBobEnabled := True;
@@ -1558,6 +1645,10 @@ begin
   FEmitterEntities.Free;
   FEmitters.Free;
   FreeAndNil(FDecals);
+  FreeAndNil(FPdas);
+  FreeAndNil(FEmails);
+  FreeAndNil(FVideos);
+  FreeAndNil(FEntityFades);
   FreeAndNil(FScript);
   FScriptHost.Free;
   FHandles.Free;
@@ -1635,6 +1726,20 @@ begin
   FDecals.Clear;
   FGuiFocus := nil;
   FGuiAttackDown := False;
+  FPdas.Clear;
+  FEmails.Clear;
+  FVideos.Clear;
+  FObjectives := nil;
+  FMissionObjective := '';
+  FTipTitle := '';
+  FTipText := '';
+  FObjectiveNotice := '';
+  FRadioUntil := 0;
+  FRadioEntity := nil;
+  FFovTo := 0;
+  FFovTime := 0;
+  FEntityFades.Clear;
+  FEndLevelMap := '';
   ProjectilesLaunched := 0;
   ClearScriptSounds;
   FTime := 0;
@@ -2213,6 +2318,12 @@ begin
      (E.Value('spawnclass') = 'idMoveablePDAItem') or (E.Value('spawnclass') = 'idVideoCDItem') then
   begin
     FCarried.Add(ItemName);
+    { idPDAItem::GiveToPlayer: pda_name; idVideoCDItem: video }
+    if (E.Value('spawnclass') = 'idPDAItem') or (E.Value('spawnclass') = 'idMoveablePDAItem') then
+      GivePDA(E.Value('pda_name', 'personal'))
+    else
+    if E.Value('spawnclass') = 'idVideoCDItem' then
+      GiveVideo(E.Value('video'));
     Result := True;
   end else
     for I := 0 to E.Pairs.Count - 1 do
@@ -2531,6 +2642,7 @@ begin
     begin
       if FWeapon <> nil then
       begin
+        DropHeldProjectile(FWeapon);
         if (FScript <> nil) and (FWeapon.Thread <> nil) then
           FScript.FreeThread(FWeapon.Thread);
         FreeAndNil(FWeapon);
@@ -3102,10 +3214,44 @@ begin
     'isInvisible': EventResult := D3FloatValue(Ord(PowerUpActive(PowerupInvisibility)));
     'getLightParm': EventResult := D3FloatValue(1);
     'getName': EventResult := D3StringValue(W.DefName);
-    'createProjectile', 'getWorldModel': EventResult := D3EntityValue(0);
+    'createProjectile':
+      begin
+        { idWeapon::Event_CreateProjectile: the projectile is made now and
+          held at the barrel until launchProjectiles (grenades) }
+        if (W.HeldProjectile = nil) and (W.ProjectileDef <> '') then
+        begin
+          W.HeldProjectile := SpawnProjectile(W.ProjectileDef, 'player', BarrelPosition(W), TVector3.Zero);
+          if W.HeldProjectile <> nil then
+          begin
+            W.HeldProjectile.HeldByWeapon := W;
+            WritelnLog('Doom3World', 'Weapon %s holds %s', [W.DefName, W.ProjectileDef]);
+          end;
+        end;
+        EventResult := D3EntityValue(0);
+      end;
+    'getWorldModel': EventResult := D3EntityValue(0);
     'ejectBrass': EjectBrass(W);
-    'flashlight', 'allowDrop', 'netReload', 'netEndReload', 'setSkin',
-    'setLightParm', 'setLightParms', 'setShaderParm', 'setShaderParms', 'setColor':
+    'flashlight':
+      begin
+        { idWeapon::Event_Flashlight: the weapon's light (the flashlight
+          weapon): ours is the view's flashlight }
+        WritelnLog('Doom3World', 'Weapon %s flashlight %d', [W.DefName, Round(ArgF(0))]);
+        if Assigned(FOnFlashlight) then
+          FOnFlashlight(ArgF(0) <> 0);
+      end;
+    'setSkin':
+      begin
+        if W.View <> nil then
+          W.View.SetSkin(Args[0].S);
+        if W.World <> nil then
+          W.World.SetSkin(Args[0].S);
+      end;
+    'setLightParm':
+      { the muzzle flash light's color }
+      if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 2) then
+        W.FlashColor.Data[Round(ArgF(0))] := ArgF(1);
+    'setLightParms': W.FlashColor := Vector3(ArgF(0), ArgF(1), ArgF(2));
+    'allowDrop', 'netReload', 'netEndReload', 'setShaderParm', 'setShaderParms', 'setColor':
       ; { no effect here yet }
     'hide':
       if W.Holder <> nil then
@@ -3470,7 +3616,20 @@ begin
     Ang := Sin(DegToRad(Spread) * Random);
     Spin := 2 * Pi * Random;
     Dir := (Fwd + Up * (Ang * Sin(Spin)) - Left * (Ang * Cos(Spin))).Normalize;
-    P := SpawnProjectile(W.ProjectileDef, 'player', FPlayerEye + D3ToCge(Fwd) * 2, D3ToCge(Dir) * Speed);
+    if (I = 1) and (W.HeldProjectile <> nil) then
+    begin
+      { the projectile made by createProjectile flies now }
+      P := W.HeldProjectile;
+      W.HeldProjectile := nil;
+      P.HeldByWeapon := nil;
+      P.Position := FPlayerEye + D3ToCge(Fwd) * 2;
+      P.Velocity := D3ToCge(Dir) * Speed;
+      P.Speed := Speed;
+      P.Pitch := D3DirPitch(Dir);
+      P.Yaw := D3DirYaw(Dir);
+      WritelnLog('Doom3World', 'Weapon %s launches its held %s', [W.DefName, W.ProjectileDef]);
+    end else
+      P := SpawnProjectile(W.ProjectileDef, 'player', FPlayerEye + D3ToCge(Fwd) * 2, D3ToCge(Dir) * Speed);
     if P = nil then
       Continue;
     P.FromPlayer := True;
@@ -4220,6 +4379,9 @@ begin
     end;
   SpawnEmitters;
   InitInventory;
+  { Doom 3 gives the player the "personal" PDA }
+  if PdaDecl('personal') <> nil then
+    GivePDA('personal', True);
   SpawnPlayerModel;
   SpreadLocations;
   SpawnBindings;
@@ -4565,6 +4727,10 @@ begin
   end;
 
   if (Cls = 'target_null') or (Copy(Cls, 1, 5) = 'path_') then
+    Exit;
+
+  { tips, objectives, radio chatter, target_* effects (roadmap 5f) }
+  if ActivatePlayerInfo(E, Cls) then
     Exit;
 
   { a speaker whose sound didn't load: nothing to start or stop }
@@ -4954,6 +5120,7 @@ begin
     UpdateActors(SecondsPassed);
   UpdateGuiFocus;
   UpdateGuiCommands;
+  UpdatePlayerInfo;
   UpdateWeapon(SecondsPassed);
   if (FScript <> nil) and not ScriptsPaused then
     FScript.Update(FTime);
@@ -7199,6 +7366,543 @@ begin
   end;
 end;
 
+{ Player information (roadmap 5f) ------------------------------------------- }
+
+function TD3Game.TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;
+var
+  I: Integer;
+  T: TD3MapEntity;
+begin
+  Result := nil;
+  for I := 0 to E.Pairs.Count - 1 do
+    if Copy(LowerCase(E.Pairs.Names[I]), 1, 6) = 'target' then
+    begin
+      T := FindEntity(E.Pairs.ValueFromIndex[I]);
+      if T <> nil then
+        Result := Concat(Result, [T]);
+    end;
+end;
+
+procedure TD3Game.GivePDA(const AName: String; const Quiet: Boolean);
+var
+  N: String;
+  D: TD3PdaDecl;
+begin
+  N := LowerCase(Trim(AName));
+  if N = '' then
+    N := 'personal';
+  if FPdas.IndexOf(N) >= 0 then
+    Exit;
+  FPdas.Add(N);
+  D := PdaDecl(N);
+  if D = nil then
+  begin
+    WritelnWarning('Doom3World', 'PDA decl "%s" not found', [N]);
+    Exit;
+  end;
+  WritelnLog('Doom3World', 'PDA acquired: %s (%s, %d emails)', [N, D.FullName, D.Emails.Count]);
+  if not Quiet then
+    Message('PDA: ' + D.FullName);
+end;
+
+procedure TD3Game.GiveEmail(const AName: String);
+var
+  N: String;
+  D: TD3EmailDecl;
+begin
+  N := LowerCase(Trim(AName));
+  if (N = '') or (FEmails.IndexOf(N) >= 0) then
+    Exit;
+  FEmails.Add(N);
+  D := EmailDecl(N);
+  if D = nil then
+  begin
+    WritelnWarning('Doom3World', 'Email decl "%s" not found', [N]);
+    Exit;
+  end;
+  WritelnLog('Doom3World', 'Email received: %s ("%s")', [N, D.Subject]);
+  Message('New email: ' + D.Subject);
+end;
+
+procedure TD3Game.GiveVideo(const AName: String);
+var
+  N: String;
+  D: TD3VideoDecl;
+begin
+  N := LowerCase(Trim(AName));
+  if (N = '') or (FVideos.IndexOf(N) >= 0) then
+    Exit;
+  FVideos.Add(N);
+  D := VideoDecl(N);
+  if D <> nil then
+    WritelnLog('Doom3World', 'Video acquired: %s (%s)', [N, D.VideoName])
+  else
+    WritelnWarning('Doom3World', 'Video decl "%s" not found', [N]);
+end;
+
+function TD3Game.ObjectiveCount: Integer;
+begin
+  Result := Length(FObjectives);
+end;
+
+function TD3Game.Objective(const I: Integer): TD3Objective;
+begin
+  Result := FObjectives[I];
+end;
+
+procedure TD3Game.GiveObjective(const Title, Text, Screenshot: String);
+var
+  I: Integer;
+begin
+  { idPlayer::GiveObjective: once per title }
+  for I := 0 to High(FObjectives) do
+    if SameText(FObjectives[I].Title, Title) then
+      Exit;
+  SetLength(FObjectives, Length(FObjectives) + 1);
+  FObjectives[High(FObjectives)].Title := Title;
+  FObjectives[High(FObjectives)].Text := Text;
+  FObjectives[High(FObjectives)].Screenshot := Screenshot;
+  FObjectives[High(FObjectives)].Complete := False;
+  FObjectiveNotice := 'New Objective';
+  FObjectiveNoticeTitle := Title;
+  FObjectiveNoticeText := Text;
+  FObjectiveNoticeTime := FTime;
+  FObjectiveNoticePos := PlayerFeet;
+  WritelnLog('Doom3World', 'New objective: %s (%s)', [Title, Text]);
+end;
+
+procedure TD3Game.CompleteObjective(const Title, Text: String);
+var
+  I: Integer;
+begin
+  for I := 0 to High(FObjectives) do
+    if SameText(FObjectives[I].Title, Title) then
+      FObjectives[I].Complete := True;
+  FObjectiveNotice := 'Objective Complete';
+  FObjectiveNoticeTitle := Title;
+  FObjectiveNoticeText := Text;
+  FObjectiveNoticeTime := FTime;
+  FObjectiveNoticePos := PlayerFeet;
+  WritelnLog('Doom3World', 'Objective complete: %s', [Title]);
+end;
+
+procedure TD3Game.ShowTip(const Title, Tip: String);
+begin
+  FTipTitle := Title;
+  FTipText := Tip;
+  FTipTime := FTime;
+  FTipPos := PlayerFeet;
+  WritelnLog('Doom3World', 'Tip: %s: %s', [Title, Tip]);
+end;
+
+procedure TD3Game.HideTip;
+begin
+  if FTipText = '' then
+    Exit;
+  FTipTitle := '';
+  FTipText := '';
+  WritelnLog('Doom3World', 'Tip hidden');
+end;
+
+function TD3Game.RadioChatter: Boolean;
+begin
+  Result := FRadioUntil > FTime;
+end;
+
+function TD3Game.ViewFov: Single;
+var
+  F, FromFov: Single;
+begin
+  if (FFovTime <= 0) or (FTime >= FFovStart + FFovTime) then
+    Exit(FFovTo);
+  F := (FTime - FFovStart) / FFovTime;
+  FromFov := FFovFrom;
+  if FromFov <= 0 then
+    FromFov := 90;
+  if FFovTo <= 0 then
+    Result := FromFov + (90 - FromFov) * F
+  else
+    Result := FromFov + (FFovTo - FromFov) * F;
+end;
+
+function TD3Game.EntityFadeCount: Integer;
+begin
+  Result := FEntityFades.Count;
+end;
+
+function TD3Game.GiveItemDef(const DefName: String): Boolean;
+var
+  Def: TStringList;
+  I: Integer;
+  K, ItemName: String;
+begin
+  Result := False;
+  Def := Decls.EntityDef(DefName);
+  if Def = nil then
+  begin
+    WritelnWarning('Doom3World', 'target_give: no entityDef "%s"', [DefName]);
+    Exit;
+  end;
+  ItemName := LangString(Def.Values['inv_name']);
+  if ItemName = '' then
+    ItemName := DefName;
+  if Def.Values['spawnclass'] = 'idItemPowerup' then
+    Result := GivePowerUp(StrToIntDef(Def.Values['type'], 0), StrToFloatDef(Def.Values['time'], 30, DefaultFormatSettings))
+  else
+  if (Def.Values['inv_carry'] <> '') or (Def.Values['spawnclass'] = 'idPDAItem') then
+  begin
+    FCarried.Add(ItemName);
+    if Def.Values['spawnclass'] = 'idPDAItem' then
+      GivePDA(Def.Values['pda_name']);
+    Result := True;
+  end else
+    for I := 0 to Def.Count - 1 do
+    begin
+      K := LowerCase(Def.Names[I]);
+      if (Copy(K, 1, 4) = 'inv_') and (K <> 'inv_carry') then
+        if Give(Copy(K, 5, MaxInt), Def.ValueFromIndex[I]) then
+          Result := True;
+    end;
+  if Result then
+  begin
+    WritelnLog('Doom3World', 'Given %s (%s)', [DefName, ItemName]);
+    Message(ItemName);
+  end;
+end;
+
+function TD3Game.ActivatePlayerInfo(const E: TD3MapEntity; const Cls: String): Boolean;
+var
+  SC, Key, Value, Def: String;
+  Targets: TD3MapEntityArray;
+  T: TD3MapEntity;
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+  Mon: TD3Monster;
+  L, I, N, P: Integer;
+  V: Single;
+  C: TVector3;
+  Fade: TD3EntityFade;
+  Color: TVector4;
+
+  function IsClass(const AClass, ASpawnClass: String): Boolean;
+  begin
+    Result := (Cls = AClass) or SameText(SC, ASpawnClass);
+  end;
+
+begin
+  Result := True;
+  SC := E.Value('spawnclass');
+  if IsClass('target_tip', 'idTarget_Tip') then
+    ShowTip(LangString(E.Value('text_title')), LangString(E.Value('text_tip')))
+  else
+  if IsClass('target_primaryobjective', 'idTarget_SetPrimaryObjective') then
+  begin
+    FMissionObjective := LangString(E.Value('text'));
+    WritelnLog('Doom3World', 'Mission objective: %s', [FMissionObjective]);
+  end else
+  if IsClass('item_objective', 'idObjective') then
+    GiveObjective(LangString(E.Value('objectivetitle')), LangString(E.Value('objectivetext')),
+      E.Value('screenshot'))
+  else
+  if IsClass('item_objectivecomplete', 'idObjectiveComplete') then
+    CompleteObjective(LangString(E.Value('objectivetitle')), LangString(E.Value('objectivetext')))
+  else
+  if IsClass('func_radiochatter', 'idFuncRadioChatter') then
+  begin
+    { idFuncRadioChatter: the sound at the player, the HUD's radio for
+      "time" seconds (Doom 3: the sound's length), then its targets }
+    Value := E.Value('snd_radiochatter');
+    if Value <> '' then
+      PlaySoundAt(Value, FPlayerEye);
+    FRadioUntil := FTime + E.FloatValue('time', 5);
+    FRadioEntity := E;
+    WritelnLog('Doom3World', 'Radio chatter %s (%s) for %s s', [E.Name, Value, FormatFloat('0.#', E.FloatValue('time', 5))]);
+  end else
+  if IsClass('target_setshaderparm', 'idTarget_SetShaderParm') then
+  begin
+    { idTarget_SetShaderParm: _color and shaderParmN on its targets;
+      "toggle" flips 0 / 1 values for the next activation }
+    Targets := TargetsOf(E);
+    for T in Targets do
+    begin
+      B := FMap.FindBrush(T.Name);
+      L := FMap.FindLight(T.Name);
+      if E.HasKey('_color') then
+      begin
+        C := ParseVector3(E.Value('_color'), Vector3(1, 1, 1));
+        if (B <> nil) and (B.Parms <> nil) then
+        begin
+          B.Parms.Parms[0] := C.X;
+          B.Parms.Parms[1] := C.Y;
+          B.Parms.Parms[2] := C.Z;
+        end;
+        if L >= 0 then
+          for I := 0 to 2 do
+            FMap.SetLightParm(L, I, C.Data[I]);
+      end;
+      for N := 0 to 11 do
+      begin
+        Key := 'shaderParm' + IntToStr(N);
+        if not E.HasKey(Key) then
+          Continue;
+        V := E.FloatValue(Key, 0);
+        if (B <> nil) and (B.Parms <> nil) then
+          B.Parms.Parms[N] := V;
+        if L >= 0 then
+          FMap.SetLightParm(L, N, V);
+        WritelnLog('Doom3World', '%s: %s shaderParm%d = %s', [E.Name, T.Name, N, FormatFloat('0.##', V)]);
+        if E.BoolValue('toggle') and ((V = 0) or (V = 1)) then
+          E.SetValue(Key, IntToStr(1 - Round(V)));
+      end;
+    end;
+  end else
+  if IsClass('target_setshadertime', 'idTarget_SetShaderTime') then
+  begin
+    for T in TargetsOf(E) do
+    begin
+      B := FMap.FindBrush(T.Name);
+      if (B <> nil) and (B.Parms <> nil) then
+        B.Parms.Parms[4] := -FTime;
+      L := FMap.FindLight(T.Name);
+      if L >= 0 then
+        FMap.SetLightParm(L, 4, -FTime);
+    end;
+  end else
+  if IsClass('target_fadeentity', 'idTarget_FadeEntity') then
+  begin
+    { idTarget_FadeEntity: its targets' color fades to its own _color
+      over fadetime }
+    C := ParseVector3(E.Value('_color'), Vector3(1, 1, 1));
+    for T in TargetsOf(E) do
+    begin
+      B := FMap.FindBrush(T.Name);
+      L := FMap.FindLight(T.Name);
+      if ((B = nil) or (B.Parms = nil)) and (L < 0) then
+        Continue;
+      Fade.EntityName := T.Name;
+      if (B <> nil) and (B.Parms <> nil) then
+        Fade.From := Vector4(B.Parms.Parms[0], B.Parms.Parms[1], B.Parms.Parms[2], B.Parms.Parms[3])
+      else
+        Fade.From := Vector4(FMap.Light(L).Parms.Parms[0], FMap.Light(L).Parms.Parms[1], FMap.Light(L).Parms.Parms[2], 1);
+      Fade.To_ := Vector4(C.X, C.Y, C.Z, Fade.From.W);
+      Fade.Start := FTime;
+      Fade.Duration := E.FloatValue('fadetime', 0);
+      for I := FEntityFades.Count - 1 downto 0 do
+        if SameText(FEntityFades[I].EntityName, T.Name) then
+          FEntityFades.Delete(I);
+      FEntityFades.Add(Fade);
+      WritelnLog('Doom3World', '%s: %s fades to %s in %s s', [E.Name, T.Name, C.ToString,
+        FormatFloat('0.#', Fade.Duration)]);
+    end;
+  end else
+  if IsClass('target_give', 'idTarget_Give') then
+  begin
+    { idTarget_Give: every "item*" key names an entityDef to give }
+    for I := 0 to E.Pairs.Count - 1 do
+      if Copy(LowerCase(E.Pairs.Names[I]), 1, 4) = 'item' then
+        GiveItemDef(E.Pairs.ValueFromIndex[I]);
+  end else
+  if IsClass('target_remove', 'idTarget_Remove') then
+  begin
+    for T in TargetsOf(E) do
+    begin
+      RemoveEntity(T);
+      WritelnLog('Doom3World', '%s removes %s', [E.Name, T.Name]);
+    end;
+  end else
+  if IsClass('target_show', 'idTarget_Show') then
+  begin
+    for T in TargetsOf(E) do
+    begin
+      B := FMap.FindBrush(T.Name);
+      if B <> nil then
+        B.SetHidden(False);
+      ME := FMap.FindModelEntity(T.Name);
+      if ME <> nil then
+      begin
+        ME.Hidden := False;
+        ME.Holder.Exists := True;
+      end;
+      WritelnLog('Doom3World', '%s shows %s', [E.Name, T.Name]);
+    end;
+  end else
+  if IsClass('target_setkeyval', 'idTarget_SetKeyVal') then
+  begin
+    { idTarget_SetKeyVal: "keyval*" keys hold "key;value" for the targets
+      (gui_ keys reach their GUIs) }
+    for I := 0 to E.Pairs.Count - 1 do
+      if Copy(LowerCase(E.Pairs.Names[I]), 1, 6) = 'keyval' then
+      begin
+        Value := E.Pairs.ValueFromIndex[I];
+        P := Pos(';', Value);
+        if P <= 0 then
+          Continue;
+        Key := Copy(Value, 1, P - 1);
+        Value := Copy(Value, P + 1, MaxInt);
+        for T in TargetsOf(E) do
+        begin
+          if Copy(LowerCase(Key), 1, 4) = 'gui_' then
+            FMap.SetGuiParm(T, Key, Value)
+          else
+            T.SetValue(Key, Value);
+          WritelnLog('Doom3World', '%s: %s %s = "%s"', [E.Name, T.Name, Key, Value]);
+        end;
+      end;
+  end else
+  if IsClass('target_setfov', 'idTarget_SetFov') then
+  begin
+    FFovFrom := ViewFov;
+    FFovTo := E.FloatValue('fov', 0);
+    FFovTime := E.FloatValue('time', 0);
+    FFovStart := FTime;
+    WritelnLog('Doom3World', '%s: fov %s in %s s', [E.Name, FormatFloat('0.#', FFovTo), FormatFloat('0.#', FFovTime)]);
+  end else
+  if IsClass('target_damage', 'idTarget_Damage') then
+  begin
+    Def := E.Value('def_damage', 'damage_generic');
+    for T in TargetsOf(E) do
+      for Mon in FMonsters do
+        if SameText(Mon.Model.Entity.Name, T.Name) then
+        begin
+          WritelnLog('Doom3World', '%s hurts %s (%s)', [E.Name, T.Name, Def]);
+          DamageMonster(Mon, DamageInfo(Def).Damage, Def, Vector3(0, -1, 0));
+        end;
+  end else
+  if IsClass('target_endlevel', 'idTarget_EndLevel') then
+  begin
+    FEndLevelMap := E.Value('nextMap');
+    if E.BoolValue('endOfGame') then
+      Message('The end')
+    else
+      Message('Level complete: ' + FEndLevelMap);
+    WritelnLog('Doom3World', 'End of level: next map "%s"', [FEndLevelMap]);
+    if Assigned(FOnEndLevel) then
+      FOnEndLevel(FEndLevelMap);
+  end else
+  if IsClass('target_giveemail', 'idTarget_GiveEmail') then
+  begin
+    if FPdas.Count > 0 then
+      GiveEmail(E.Value('email'))
+    else
+      ShowTip(LangString(E.Value('text_infoTitle')), LangString(E.Value('text_PDANeeded')));
+  end else
+  if IsClass('target_lightfadein', 'idTarget_LightFadeIn') or IsClass('target_lightfadeout', 'idTarget_LightFadeOut') then
+  begin
+    for T in TargetsOf(E) do
+    begin
+      L := FMap.FindLight(T.Name);
+      if L >= 0 then
+      begin
+        if IsClass('target_lightfadein', 'idTarget_LightFadeIn') then
+        begin
+          if not FMap.Light(L).StartOn then
+          begin
+            FMap.SetLightFade(L, 0);
+            FMap.SetLightOn(L, True);
+          end;
+          FadeLight(L, 1, E.FloatValue('fadetime', 0));
+        end else
+          FadeLight(L, 0, E.FloatValue('fadetime', 0));
+      end;
+    end;
+  end else
+  if IsClass('target_enablelevelweapons', 'idTarget_EnableLevelWeapons') or
+     IsClass('target_removeweapons', 'idTarget_RemoveWeapons') or
+     IsClass('target_setinfluence', 'idTarget_SetInfluence') or
+     IsClass('target_sessioncommand', 'idTarget_SessionCommand') or
+     IsClass('target_levelsp', 'idTarget_LevelTrigger') then
+    Unsupported('activating ' + Cls)
+  else
+    Result := False;
+end;
+
+procedure TD3Game.UpdatePlayerInfo;
+var
+  I: Integer;
+  Fade: TD3EntityFade;
+  F: Single;
+  Color: TVector4;
+  B: TD3BrushEntity;
+  L: Integer;
+  E: TD3MapEntity;
+begin
+  { idTarget_Tip: hidden once the player walks 96 units, 2 s on }
+  if (FTipText <> '') and (FTime - FTipTime >= 2) and (PointsDistance(PlayerFeet, FTipPos) > 96) then
+    HideTip;
+  { idObjective::Event_HideObjective: 64 units after 2 s }
+  if (FObjectiveNotice <> '') and (FTime - FObjectiveNoticeTime >= 2) and
+     (PointsDistance(PlayerFeet, FObjectiveNoticePos) > 64) then
+  begin
+    FObjectiveNotice := '';
+    WritelnLog('Doom3World', 'Objective notice hidden');
+  end;
+  { the radio chatter ends: the entity's targets }
+  if (FRadioUntil > 0) and (FTime >= FRadioUntil) then
+  begin
+    FRadioUntil := 0;
+    E := FRadioEntity;
+    FRadioEntity := nil;
+    if E <> nil then
+    begin
+      WritelnLog('Doom3World', 'Radio chatter %s ends', [E.Name]);
+      ActivateTargetsNow(E);
+    end;
+  end;
+  { target_fadeentity fades }
+  for I := FEntityFades.Count - 1 downto 0 do
+  begin
+    Fade := FEntityFades[I];
+    if Fade.Duration <= 0 then
+      F := 1
+    else
+      F := EnsureRange((FTime - Fade.Start) / Fade.Duration, 0, 1);
+    Color := Fade.From + (Fade.To_ - Fade.From) * F;
+    B := FMap.FindBrush(Fade.EntityName);
+    if (B <> nil) and (B.Parms <> nil) then
+    begin
+      B.Parms.Parms[0] := Color.X;
+      B.Parms.Parms[1] := Color.Y;
+      B.Parms.Parms[2] := Color.Z;
+      B.Parms.Parms[3] := Color.W;
+    end;
+    L := FMap.FindLight(Fade.EntityName);
+    if L >= 0 then
+    begin
+      FMap.SetLightParm(L, 0, Color.X);
+      FMap.SetLightParm(L, 1, Color.Y);
+      FMap.SetLightParm(L, 2, Color.Z);
+    end;
+    if F >= 1 then
+      FEntityFades.Delete(I);
+  end;
+end;
+
+function TD3Game.BarrelPosition(const W: TD3Weapon): TVector3;
+var
+  JointPos: TVector3;
+begin
+  if (W <> nil) and (W.View <> nil) and W.View.JointPosition('barrel', JointPos) then
+    Result := W.View.Scene.LocalToWorld(JointPos)
+  else
+    Result := FPlayerEye + PlayerViewDir * 20;
+end;
+
+procedure TD3Game.DropHeldProjectile(const W: TD3Weapon);
+var
+  I: Integer;
+begin
+  if (W = nil) or (W.HeldProjectile = nil) then
+    Exit;
+  for I := FProjectiles.Count - 1 downto 0 do
+    if FProjectiles[I] = W.HeldProjectile then
+    begin
+      if FProjectiles[I].Trail <> nil then
+        FProjectiles[I].Trail.Stopped := True;
+      FProjectiles.Delete(I);
+    end;
+  W.HeldProjectile := nil;
+end;
+
 procedure TD3Game.AddDecal(const MaterialName: String; const Position, Normal: TVector3;
   const Size: Single);
 begin
@@ -7641,6 +8345,18 @@ begin
   for I := FProjectiles.Count - 1 downto 0 do
   begin
     P := FProjectiles[I];
+    { held by the player's weapon (createProjectile) until launched }
+    if P.HeldByWeapon <> nil then
+    begin
+      if (P.HeldByWeapon <> FWeapon) or (FWeapon.Holder = nil) or not FWeapon.Holder.Exists then
+        P.Position := FPlayerEye
+      else
+        P.Position := BarrelPosition(FWeapon);
+      if P.Visual <> nil then
+        P.Visual.Translation := P.Position;
+      UpdateTrail(P);
+      Continue;
+    end;
     { held in a monster's hand (create_missile) until launched }
     if P.HeldBy <> nil then
     begin

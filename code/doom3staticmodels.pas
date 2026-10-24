@@ -803,11 +803,11 @@ begin
       Shape.Appearance := GlassAppearance(MaterialName, Kind);
       SetupSpecialShape(Shape, Kind);
     end else
-    begin
       Shape.Appearance := MaterialAppearance(MaterialName, Parms);
-      RegisterConditionalShape(Shape, BaseStageCondition(M), Parms);
-    end;
-    Result.AddChildren(Shape);
+    if (GuiUrl = '') and not M.DrawAsGlass then
+      Result.AddChildren(ConditionalShapeNode(Shape, BaseStageCondition(M), Parms))
+    else
+      Result.AddChildren(Shape);
 
     { more stages: the same triangles (sharing coordinates, normals and
       texture coordinates), with a "lequal" depth test (OverlayAppearance) }
@@ -824,8 +824,7 @@ begin
         Shape := TShapeNode.Create;
         Shape.Geometry := Geometry;
         Shape.Appearance := OverlayAppearance(MaterialName, J, Parms);
-        RegisterConditionalShape(Shape, OverlayStageCondition(M, J), Parms);
-        Result.AddChildren(Shape);
+        Result.AddChildren(ConditionalShapeNode(Shape, OverlayStageCondition(M, J), Parms));
       end;
 
     { a heat haze stage over a lit or plain surface }

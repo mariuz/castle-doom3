@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda;
 
 type
   TViewPlay = class(TCastleView)
@@ -65,6 +65,15 @@ type
     FPlayerEye, FPlayerDir: TVector3;
     FPlayerFov: Single;
     FPlayerFovAxis: TFieldOfViewAxis;
+    { the camera's own field of view (target_setfov changes it) }
+    FDefaultFov: Single;
+    FDefaultFovAxis: TFieldOfViewAxis;
+    FFovApplied: Boolean;
+    { the PDA screen (Tab): PDAs, emails, objectives }
+    FPdaPanel: TCastleRectangleControl;
+    FPdaLabel: TCastleLabel;
+    FPdaOpen: Boolean;
+    FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
     { the map's efxs/<map>.efx (nil when missing), the effect in
@@ -81,6 +90,10 @@ type
     procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
+    procedure HandleFlashlight(const Value: Boolean);
+    procedure HandleEndLevel(const Msg: String);
+    procedure SetPdaOpen(const Value: Boolean);
+    procedure UpdatePdaText;
     procedure HandleConsoleCommand(const Cmd, Args: String);
     { fire the weapon: Once from a demo script, else the button is held }
     procedure Fire(const Once: Boolean);
@@ -159,6 +172,25 @@ begin
   inherited Start;
   FGame := TD3Game.Create(Map);
   FGame.OnMessage := @HandleMessage;
+  FGame.OnFlashlight := @HandleFlashlight;
+  FGame.OnEndLevel := @HandleEndLevel;
+  FDefaultFov := Camera.Perspective.FieldOfView;
+  FDefaultFovAxis := Camera.Perspective.FieldOfViewAxis;
+  { the PDA screen }
+  FPdaPanel := TCastleRectangleControl.Create(FreeAtStop);
+  FPdaPanel.Color := Vector4(0.02, 0.08, 0.12, 0.94);
+  FPdaPanel.Width := 1000;
+  FPdaPanel.Height := 680;
+  FPdaPanel.Anchor(hpMiddle);
+  FPdaPanel.Anchor(vpMiddle);
+  FPdaPanel.Exists := False;
+  InsertFront(FPdaPanel);
+  FPdaLabel := TCastleLabel.Create(FreeAtStop);
+  FPdaLabel.Color := Vector4(0.75, 0.9, 1, 1);
+  FPdaLabel.MaxWidth := 960;
+  FPdaLabel.Anchor(hpLeft, 20);
+  FPdaLabel.Anchor(vpTop, -20);
+  FPdaPanel.InsertFront(FPdaLabel);
   Console.OnCommand := @HandleConsoleCommand;
   FNoclip := False;
   FShots := 0;
@@ -452,6 +484,117 @@ procedure TViewPlay.HandleMessage(const Msg: String);
 begin
   Hud.ShowMessage(Msg);
   Console.Print(Msg);
+end;
+
+procedure TViewPlay.HandleFlashlight(const Value: Boolean);
+begin
+  SetFlashlight(Value);
+end;
+
+procedure TViewPlay.HandleEndLevel(const Msg: String);
+begin
+  { idTarget_EndLevel: Doom 3 loads the next map; here the message and
+    the log (console "map <name>" loads it) }
+  Hud.ShowMessage('End of level: next map ' + Msg, 6);
+end;
+
+procedure TViewPlay.SetPdaOpen(const Value: Boolean);
+begin
+  FPdaOpen := Value and (FGame <> nil);
+  FPdaPanel.Exists := FPdaOpen;
+  if FPdaOpen then
+    UpdatePdaText;
+  WritelnLog('GameViewPlay', 'PDA screen %s', [BoolToStr(FPdaOpen, 'open', 'closed')]);
+end;
+
+procedure TViewPlay.UpdatePdaText;
+var
+  T: String;
+  I: Integer;
+  Pda: TD3PdaDecl;
+  Email: TD3EmailDecl;
+  Audio: TD3AudioDecl;
+  Video: TD3VideoDecl;
+  PdaName: String;
+begin
+  T := 'PDA   (Tab closes, [ and ] switch PDAs)' + LineEnding;
+  if FGame.MissionObjective <> '' then
+    T := T + LineEnding + 'MISSION OBJECTIVE: ' + FGame.MissionObjective + LineEnding;
+  if FGame.ObjectiveCount > 0 then
+  begin
+    T := T + LineEnding + 'OBJECTIVES' + LineEnding;
+    for I := 0 to FGame.ObjectiveCount - 1 do
+      T := T + Format('  [%s] %s: %s', [BoolToStr(FGame.Objective(I).Complete, 'x', ' '),
+        FGame.Objective(I).Title, FGame.Objective(I).Text]) + LineEnding;
+  end;
+  T := T + LineEnding + 'PDAs' + LineEnding;
+  if FGame.Pdas.Count = 0 then
+    T := T + '  (none)' + LineEnding;
+  FPdaIndex := EnsureRange(FPdaIndex, 0, Max(0, FGame.Pdas.Count - 1));
+  for I := 0 to FGame.Pdas.Count - 1 do
+  begin
+    Pda := PdaDecl(FGame.Pdas[I]);
+    if Pda <> nil then
+      PdaName := Pda.FullName
+    else
+      PdaName := FGame.Pdas[I];
+    T := T + Format('  %s %s', [BoolToStr(I = FPdaIndex, '>', ' '), PdaName]) + LineEnding;
+  end;
+  if FGame.Pdas.Count > 0 then
+  begin
+    Pda := PdaDecl(FGame.Pdas[FPdaIndex]);
+    if Pda <> nil then
+    begin
+      T := T + LineEnding + Format('%s   %s, %s   security: %s   id %s', [Pda.FullName, Pda.Post, Pda.Title,
+        Pda.Security, Pda.Id]) + LineEnding;
+      T := T + LineEnding + 'EMAILS' + LineEnding;
+      for I := 0 to Pda.Emails.Count - 1 do
+      begin
+        Email := EmailDecl(Pda.Emails[I]);
+        if Email = nil then
+          Continue;
+        T := T + Format('  %s   from %s, %s', [Email.Subject, Email.From, Email.Date]) + LineEnding +
+          '    ' + StringReplace(Email.Text, #10, LineEnding + '    ', [rfReplaceAll]) + LineEnding;
+      end;
+      { the personal PDA also holds the emails given by target_giveemail }
+      if FPdaIndex = 0 then
+        for I := 0 to FGame.Emails.Count - 1 do
+        begin
+          Email := EmailDecl(FGame.Emails[I]);
+          if (Email = nil) or (Pda.Emails.IndexOf(FGame.Emails[I]) >= 0) then
+            Continue;
+          T := T + Format('  %s   from %s, %s', [Email.Subject, Email.From, Email.Date]) + LineEnding +
+            '    ' + StringReplace(Email.Text, #10, LineEnding + '    ', [rfReplaceAll]) + LineEnding;
+        end;
+      if Pda.Audios.Count > 0 then
+      begin
+        T := T + LineEnding + 'AUDIO LOGS' + LineEnding;
+        for I := 0 to Pda.Audios.Count - 1 do
+        begin
+          Audio := AudioDecl(Pda.Audios[I]);
+          if Audio <> nil then
+            T := T + Format('  %s: %s', [Audio.AudioName, Audio.Info]) + LineEnding;
+        end;
+      end;
+      if (Pda.Videos.Count > 0) or (FGame.Videos.Count > 0) then
+      begin
+        T := T + LineEnding + 'VIDEOS' + LineEnding;
+        for I := 0 to Pda.Videos.Count - 1 do
+        begin
+          Video := VideoDecl(Pda.Videos[I]);
+          if Video <> nil then
+            T := T + Format('  %s: %s', [Video.VideoName, Video.Info]) + LineEnding;
+        end;
+        for I := 0 to FGame.Videos.Count - 1 do
+        begin
+          Video := VideoDecl(FGame.Videos[I]);
+          if (Video <> nil) and (Pda.Videos.IndexOf(FGame.Videos[I]) < 0) then
+            T := T + Format('  %s: %s', [Video.VideoName, Video.Info]) + LineEnding;
+        end;
+      end;
+    end;
+  end;
+  FPdaLabel.Caption := T;
 end;
 
 procedure TViewPlay.SetFlashlight(const Value: Boolean);
@@ -753,6 +896,29 @@ var
 begin
   Hud.DamageAge := FGame.SinceDamage;
   Hud.ArmorPulse := FGame.ArmorPulse;
+  Hud.TipTitle := FGame.TipTitle;
+  Hud.TipText := FGame.TipText;
+  Hud.ObjectiveNotice := FGame.ObjectiveNotice;
+  Hud.ObjectiveTitle := FGame.ObjectiveNoticeTitle;
+  Hud.ObjectiveText := FGame.ObjectiveNoticeText;
+  Hud.RadioChatter := FGame.RadioChatter;
+  Hud.RadioTime := Hud.RadioTime + Container.Fps.SecondsPassed;
+  { target_setfov: Doom 3's fov is horizontal }
+  if not FInCinematic then
+  begin
+    if FGame.ViewFov > 0 then
+    begin
+      Camera.Perspective.FieldOfViewAxis := faHorizontal;
+      Camera.Perspective.FieldOfView := DegToRad(EnsureRange(FGame.ViewFov, 1, 170));
+      FFovApplied := True;
+    end else
+    if FFovApplied then
+    begin
+      Camera.Perspective.FieldOfViewAxis := FDefaultFovAxis;
+      Camera.Perspective.FieldOfView := FDefaultFov;
+      FFovApplied := False;
+    end;
+  end;
   { berserk (idPlayerView: textures/decals/berserk over the screen, fading
     over its last 10 s); the HUD's own red tint without the material }
   if FGame.PowerUpActive(PowerupBerserk) then
@@ -856,7 +1022,7 @@ begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount] [up], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
-    Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, guis, scripts, g_stopTime [0|1],');
+    Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, guis, objectives, pda [name], scripts, g_stopTime [0|1],');
     Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1], pm_thirdPersonDeath [0|1], crouch [0|1], ragdoll [0|1], g_showBrass [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
   end else
@@ -1160,6 +1326,35 @@ begin
     else
       SkipParticles := not SkipParticles;
     Console.Print('r_skipParticles ' + BoolToStr(SkipParticles, '1', '0'));
+  end else
+  if Cmd = 'objectives' then
+  begin
+    { the mission objective, the objectives given, PDAs, emails }
+    S := Format('Objectives: %d (mission: "%s"), PDAs: %s, emails: %s, videos: %s', [FGame.ObjectiveCount,
+      FGame.MissionObjective, FGame.Pdas.CommaText, FGame.Emails.CommaText, FGame.Videos.CommaText]);
+    Console.Print(S);
+    WritelnLog('Objectives', S);
+    for I := 0 to FGame.ObjectiveCount - 1 do
+    begin
+      S := Format('  [%s] %s: %s', [BoolToStr(FGame.Objective(I).Complete, 'x', ' '), FGame.Objective(I).Title,
+        FGame.Objective(I).Text]);
+      Console.Print(S);
+      WritelnLog('Objectives', S);
+    end;
+  end else
+  if Cmd = 'pda' then
+  begin
+    { pda [name]: toggle the PDA screen (or show a PDA by its decl name) }
+    if Args <> '' then
+    begin
+      I := FGame.Pdas.IndexOf(LowerCase(Trim(Args)));
+      if I >= 0 then
+        FPdaIndex := I
+      else
+        Console.Print('pda: not carried: ' + Args);
+      SetPdaOpen(True);
+    end else
+      SetPdaOpen(not FPdaOpen);
   end else
   if Cmd = 'guis' then
   begin
@@ -1740,7 +1935,7 @@ begin
   end;
   LabelFps.Caption := 'FPS: ' + Container.Fps.ToString;
 
-  WalkNavigation.Exists := not Console.IsOpen and not FGame.PlayerDead and not FInCinematic;
+  WalkNavigation.Exists := not Console.IsOpen and not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
 
   if (AutoTestPrefix = '') and not Console.IsOpen then
   begin
@@ -1818,6 +2013,20 @@ begin
   if Event.IsKey(keyF) then
   begin
     SetFlashlight(not Flashlight.Exists);
+    Exit(True);
+  end;
+  if Event.IsKey(keyTab) then
+  begin
+    SetPdaOpen(not FPdaOpen);
+    Exit(True);
+  end;
+  if FPdaOpen and (Event.IsKey('[') or Event.IsKey(']')) then
+  begin
+    if Event.IsKey('[') then
+      Dec(FPdaIndex)
+    else
+      Inc(FPdaIndex);
+    UpdatePdaText;
     Exit(True);
   end;
   if Event.IsKey(keyE) then

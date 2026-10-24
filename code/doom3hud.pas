@@ -46,6 +46,14 @@ type
     { invisibility: a cold rim on the screen's edges }
     Invisible: Boolean;
     Blobs: array of TD3HudBlob;
+    { a tip (target_tip): a box at the top center }
+    TipTitle, TipText: String;
+    { 'New Objective' / 'Objective Complete' with the objective (bottom
+      center) }
+    ObjectiveNotice, ObjectiveTitle, ObjectiveText: String;
+    { the radio indicator (func_radiochatter) }
+    RadioChatter: Boolean;
+    RadioTime: Single;
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
     procedure ShowMessage(const S: String; const Seconds: Single = 3);
@@ -284,6 +292,34 @@ begin
   for I := 0 to FMessages.Count - 1 do
     UIFont.Print(R.Left + 20 * S, R.Top - (40 + 26 * I) * S, Vector4(1, 1, 1, Min(1, FMessageTimes[I])),
       FMessages[I]);
+
+  { a tip: a panel at the top center with its title and text }
+  if TipText <> '' then
+  begin
+    Strength := Max(UIFont.TextWidth(TipTitle), UIFont.TextWidth(TipText)) + 48 * S;
+    DrawRectangle(FloatRectangle(CX - Strength / 2, R.Top - 150 * S, Strength, 72 * S), PanelColor);
+    DrawRectangle(FloatRectangle(CX - Strength / 2, R.Top - 150 * S, Strength, 2 * S), Cyan);
+    DrawRectangle(FloatRectangle(CX - Strength / 2, R.Top - 80 * S, Strength, 2 * S), Cyan);
+    UIFont.Print(CX - UIFont.TextWidth(TipTitle) / 2, R.Top - 108 * S, Cyan, TipTitle);
+    UIFont.Print(CX - UIFont.TextWidth(TipText) / 2, R.Top - 138 * S, Vector4(1, 1, 1, 1), TipText);
+  end;
+
+  { an objective notice at the bottom center: the notice, the title, the text }
+  if ObjectiveNotice <> '' then
+  begin
+    Strength := Max(UIFont.TextWidth(ObjectiveNotice), Max(UIFont.TextWidth(ObjectiveTitle),
+      UIFont.TextWidth(ObjectiveText))) + 48 * S;
+    DrawRectangle(FloatRectangle(CX - Strength / 2, R.Bottom + 110 * S, Strength, 96 * S), PanelColor);
+    UIFont.Print(CX - UIFont.TextWidth(ObjectiveNotice) / 2, R.Bottom + 178 * S, Vector4(1, 0.85, 0.3, 1),
+      ObjectiveNotice);
+    UIFont.Print(CX - UIFont.TextWidth(ObjectiveTitle) / 2, R.Bottom + 150 * S, Cyan, ObjectiveTitle);
+    UIFont.Print(CX - UIFont.TextWidth(ObjectiveText) / 2, R.Bottom + 122 * S, Vector4(1, 1, 1, 1), ObjectiveText);
+  end;
+
+  { radio chatter: a blinking indicator at the top right }
+  if RadioChatter then
+    UIFont.Print(R.Right - 20 * S - UIFont.TextWidth('RADIO ...'), R.Top - 40 * S,
+      Vector4(1, 0.9, 0.5, 0.6 + 0.4 * Sin(RadioTime * 8)), 'RADIO ...');
 
   if InfoText <> '' then
     UIFont.Print(R.Left + 20 * S, R.Bottom + 100 * S, Vector4(0.7, 0.7, 0.7, 0.8), InfoText);

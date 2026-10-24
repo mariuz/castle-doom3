@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
-  Doom3Particles, Doom3Decals,
+  Doom3Particles, Doom3Decals, Doom3Pda,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(113, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(114, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -121,7 +121,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(42, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(43, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(64, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
@@ -270,7 +270,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(65, MapFile.Entities.Count, 'entity count');
+    CheckEquals(85, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1771,7 +1771,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(40, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(44, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -2856,7 +2856,7 @@ begin
     CheckEquals(24, Game.AmmoCount('ammo_test_bullets'), 'starting ammo');
     CheckEquals(60, Game.MaxAmmo('ammo_test_bullets'), 'max_ammo_test_bullets');
     CheckEquals(-1, Game.Clip[1], 'clips start at -1 (full when first used)');
-    CheckEquals(8, Game.Items.Count, 'items spawned');
+    CheckEquals(9, Game.Items.Count, 'items spawned');
 
     { Give, like idPlayer::Give }
     Check(not Game.Give('health', '25'), 'full health takes no health');
@@ -4564,6 +4564,7 @@ end;
 
 procedure TestExactStages;
 var
+  App: TAppearanceNode;
   M: TD3Material;
   Ctx: TD3ExprContext;
   Parms: TD3EntityParms;
@@ -4593,6 +4594,8 @@ var
     end;
   end;
 
+  { shapes, and conditional ones (a Switch holding the shape) that are
+    hidden (whichChoice -1) }
   procedure CountShapes(const Node: TX3DRootNode; out Shapes, Hidden: Integer);
   var
     I: Integer;
@@ -4601,9 +4604,12 @@ var
     Hidden := 0;
     for I := 0 to Node.FdChildren.Count - 1 do
       if Node.FdChildren[I] is TShapeNode then
+        Inc(Shapes)
+      else
+      if Node.FdChildren[I] is TSwitchNode then
       begin
         Inc(Shapes);
-        if not TShapeNode(Node.FdChildren[I]).Visible then
+        if TSwitchNode(Node.FdChildren[I]).WhichChoice < 0 then
           Inc(Hidden);
       end;
   end;
@@ -4765,6 +4771,19 @@ begin
       CountShapes(Root, Shapes, Hidden);
       CheckEquals(2, Shapes, 'crate_2: the lit box and its glow overlay');
       CheckEquals(0, Hidden, 'glow shown with parm7 1');
+      { the conditional shape is the overlay: unlit, additive, blended }
+      for I := 0 to Root.FdChildren.Count - 1 do
+        if Root.FdChildren[I] is TSwitchNode then
+        begin
+          Check(TSwitchNode(Root.FdChildren[I]).FdChildren.Count = 1, 'the switch holds one shape');
+          if TSwitchNode(Root.FdChildren[I]).FdChildren[0] is TShapeNode then
+          begin
+            App := TShapeNode(TSwitchNode(Root.FdChildren[I]).FdChildren[0]).Appearance;
+            Check(App.Material is TUnlitMaterialNode, 'the conditional shape is the unlit overlay');
+            Check(App.AlphaMode = amBlend, 'the overlay blends');
+            Check((App.BlendMode <> nil) and (App.BlendMode.DestFactor = bdOne), 'the overlay adds');
+          end;
+        end;
       B.Parms.Parms[7] := 0;
       UpdateAnimatedSurfaces(1.1);
       CountShapes(Root, Shapes, Hidden);
@@ -5060,6 +5079,255 @@ begin
     Check(Panel.Gui.Dirty, 'the state change redraws it');
     { the status screen in room B is out of sight: it doesn't run }
     Check(Status.Renders <= 1, 'a GUI out of sight is not redrawn');
+  finally
+    Game.Free;
+    World.Free;
+  end;
+end;
+
+
+procedure TestPlayerInfo;
+var
+  Pda: TD3PdaDecl;
+  Email: TD3EmailDecl;
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  B: TD3BrushEntity;
+  L, Armor, Health: Integer;
+  Mon: TD3Monster;
+  P: TD3Projectile;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+  procedure Activate(const AName: String);
+  begin
+    Check(Game.FindEntity(AName) <> nil, 'entity ' + AName + ' exists');
+    if Game.FindEntity(AName) <> nil then
+      Game.Activate(Game.FindEntity(AName));
+  end;
+
+begin
+  { the PDA decls }
+  CheckEquals(2, Decls.DeclCount(dtPda), 'pda decls (pdas/test.pda)');
+  CheckEquals(4, Decls.DeclCount(dtEmail), 'email decls');
+  CheckEquals(1, Decls.DeclCount(dtAudio), 'audio decls');
+  CheckEquals(1, Decls.DeclCount(dtVideo), 'video decls');
+  Pda := PdaDecl('pda_test_admin');
+  Check(Pda <> nil, 'pda_test_admin parsed');
+  if Pda <> nil then
+  begin
+    CheckEquals('A. Administrator', Pda.FullName, 'pda fullname');
+    CheckEquals('Facilities', Pda.Post, 'pda post');
+    CheckEquals('Admin', Pda.Security, 'pda security');
+    CheckEquals(2, Pda.Emails.Count, 'pda emails');
+    CheckEquals('test_email_pump', Pda.Emails[0], 'pda first email');
+    CheckEquals(1, Pda.Audios.Count, 'pda audio logs');
+    CheckEquals(1, Pda.Videos.Count, 'pda videos');
+  end;
+  Check(PdaDecl('PDA_TEST_ADMIN') = Pda, 'pda decls are cached, case-insensitive');
+  Email := EmailDecl('test_email_welcome');
+  Check(Email <> nil, 'email parsed');
+  if Email <> nil then
+  begin
+    CheckEquals('Welcome', Email.Subject, 'email subject');
+    CheckEquals('Castle Doom 3', Email.From, 'email from');
+    Check(Pos('Press Tab', Email.Text) > 0, 'email text lines joined');
+    Check(Pos(#10, Email.Text) > 0, 'email text newline');
+  end;
+  Check(AudioDecl('test_audio_log') <> nil, 'audio parsed');
+  if AudioDecl('test_audio_log') <> nil then
+    CheckEquals('test_hum', AudioDecl('test_audio_log').Audio, 'audio shader');
+  Check((VideoDecl('test_video_intro') <> nil) and (VideoDecl('test_video_intro').VideoName = 'Intro'), 'video parsed');
+  Check(PdaDecl('missing') = nil, 'missing pda');
+
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for player info');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    { the personal PDA from the start }
+    CheckEquals(1, Game.Pdas.Count, 'the personal PDA at the start');
+    CheckEquals('personal', Game.Pdas[0], 'personal PDA');
+
+    { tips }
+    Activate('target_tip_1');
+    CheckEquals('TIP', Game.TipTitle, 'tip title');
+    CheckEquals('Press E to use panels and doors', Game.TipText, 'tip text');
+    Step(1);
+    Eye := D3ToCge(Vector3(-160, 0, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    CheckEquals('Press E to use panels and doors', Game.TipText, 'the tip stays in the first 2 s');
+    Step(1.1);
+    CheckEquals('', Game.TipText, 'the tip hides once the player walked 96 units after 2 s');
+
+    { objectives }
+    Activate('target_primaryobjective_1');
+    CheckEquals('Reach room B', Game.MissionObjective, 'the mission objective');
+    Activate('item_objective_1');
+    CheckEquals(1, Game.ObjectiveCount, 'an objective given');
+    CheckEquals('Find the keycard', Game.Objective(0).Title, 'objective title');
+    Check(not Game.Objective(0).Complete, 'not complete yet');
+    CheckEquals('New Objective', Game.ObjectiveNotice, 'the new objective notice');
+    Activate('item_objective_1');
+    CheckEquals(1, Game.ObjectiveCount, 'an objective is given once');
+    Activate('item_objectivecomplete_1');
+    Check(Game.Objective(0).Complete, 'objective completed');
+    CheckEquals('Objective Complete', Game.ObjectiveNotice, 'the completion notice');
+    CheckEquals('The locker is open.', Game.ObjectiveNoticeText, 'the completion text');
+    Step(2.1);
+    Eye := D3ToCge(Vector3(-160, 100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    CheckEquals('', Game.ObjectiveNotice, 'the notice hides once the player walked 64 units');
+
+    { radio chatter: 2 s, then its target (light_trig) }
+    L := Map.FindLight('light_trig');
+    Check((L >= 0) and not Map.Light(L).StartOn, 'light_trig off before the chatter');
+    Activate('func_radiochatter_1');
+    Check(Game.RadioChatter, 'radio chatter on');
+    Step(1);
+    Check(Game.RadioChatter, 'radio chatter still on after 1 s');
+    Step(1.2);
+    Check(not Game.RadioChatter, 'radio chatter over after 2 s');
+    if L >= 0 then
+      Check(Map.Light(L).StartOn, 'the chatter activated its target when it ended');
+
+    { shader parms and fades of brush entities }
+    B := Map.FindBrush('crate_2');
+    Check((B <> nil) and (B.Parms <> nil), 'crate_2 with parms');
+    if (B <> nil) and (B.Parms <> nil) then
+    begin
+      CheckNear(1, B.Parms.Parms[7], 'crate_2 shaderParm7 1 at the start');
+      Activate('target_setshaderparm_1');
+      CheckNear(0, B.Parms.Parms[7], 'target_setshaderparm set shaderParm7 0');
+      Activate('target_setshaderparm_1');
+      CheckNear(1, B.Parms.Parms[7], 'toggle: the next activation sets 1');
+      Activate('target_setshadertime_1');
+      Check(B.Parms.Parms[4] < 0, 'target_setshadertime: parm4 is minus the time');
+      CheckNear(0.6, B.Parms.Parms[1], 'crate_2 _color green at the start');
+      Activate('target_fadeentity_1');
+      CheckEquals(1, Game.EntityFadeCount, 'a fade started');
+      Step(0.5);
+      CheckNear(0.6, B.Parms.Parms[2], 'half way through the fade (blue 0.2 -> 1)', 0.1);
+      Step(0.6);
+      CheckNear(1, B.Parms.Parms[2], 'fade end: blue 1');
+      CheckNear(0.2, B.Parms.Parms[0], 'fade end: red 0.2');
+      CheckEquals(0, Game.EntityFadeCount, 'the fade is over');
+    end;
+
+    { give, remove, show, keyval }
+    Armor := Game.Armor;
+    Activate('target_give_1');
+    Check(Game.Armor > Armor, 'target_give gave the armor');
+    Check(Game.Pdas.IndexOf('pda_test_admin') < 0, 'item_pda without pda_name gives no PDA');
+    Check(Game.Carried.IndexOf('PDA') >= 0, 'target_give gave the PDA item');
+    B := Map.FindBrush('crate_1');
+    Check((B <> nil) and not B.Hidden, 'crate_1 shown before target_remove');
+    Activate('target_remove_1');
+    Check((B <> nil) and B.Hidden, 'target_remove hid crate_1');
+    Activate('target_show_1');
+    Check((B <> nil) and not B.Hidden, 'target_show showed it again');
+    Activate('target_setkeyval_1');
+    CheckEquals('KEYVAL', Game.FindEntity('panel_1').Value('gui_parm1'), 'target_setkeyval set the key');
+    Check(Map.GuiSurfaces.Count > 0, 'live GUIs');
+    if Map.GuiSurfaces.Count > 0 then
+      CheckEquals('KEYVAL', Map.GuiSurfaces[Map.GuiSurfaces.Count - 1].Gui.StateValue('gui_parm1'),
+        'the panel GUI shows the new key');
+
+    { fov }
+    CheckNear(0, Game.ViewFov, 'the default fov (0)');
+    Activate('target_setfov_1');
+    Step(0.5);
+    CheckNear(75, Game.ViewFov, 'fov half way from 90 to 60', 2);
+    Step(0.6);
+    CheckNear(60, Game.ViewFov, 'fov 60');
+    Activate('target_setfov_2');
+    Step(0.6);
+    CheckNear(0, Game.ViewFov, 'back to the default');
+
+    { damage }
+    Mon := nil;
+    for Mon in Game.Monsters do
+      if SameText(Mon.Model.Entity.Name, 'blob_1') then
+        Break;
+    Check((Mon <> nil) and SameText(Mon.Model.Entity.Name, 'blob_1'), 'blob_1');
+    if Mon <> nil then
+    begin
+      Health := Mon.Health;
+      Activate('target_damage_1');
+      Check(Mon.Health < Health, 'target_damage hurt blob_1');
+    end;
+
+    { emails, PDAs, the end of the level }
+    Activate('target_giveemail_1');
+    CheckEquals(1, Game.Emails.Count, 'target_giveemail with a PDA');
+    CheckEquals('test_email_extra', Game.Emails[0], 'the email');
+    Eye := D3ToCge(Vector3(-220, -120, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.2);
+    Check(Game.Pdas.IndexOf('pda_test_admin') >= 0, 'picking up item_pda_1 gives its pda_name');
+    CheckEquals('', Game.EndLevelMap, 'no end level yet');
+    Activate('target_endlevel_1');
+    CheckEquals('testmap', Game.EndLevelMap, 'target_endlevel names the next map');
+    L := Map.FindLight('light_1');
+    Check(L >= 0, 'light_1');
+    if L >= 0 then
+    begin
+      Activate('target_lightfadeout_1');
+      Step(0.5);
+      Check((Map.Light(L).Fade > 0.2) and (Map.Light(L).Fade < 0.8), 'light_1 fading out');
+      Step(0.6);
+      CheckNear(0, Map.Light(L).Fade, 'light_1 faded out', 0.05);
+      Activate('target_lightfadein_1');
+      Step(1.1);
+      CheckNear(1, Map.Light(L).Fade, 'light_1 faded back in', 0.05);
+    end;
+
+    { the thrown weapon: createProjectile holds the grenade until a throw }
+    Check(Game.Give('weapon', 'weapon_test_grenade'), 'the grenade weapon given');
+    Check(Game.Give('ammo_test_grenades', '3'), 'grenades given');
+    Game.SelectWeapon(3);
+    Step(1.5);
+    Check((Game.Weapon <> nil) and (Game.Weapon.DefName = 'weapon_test_grenade'), 'the grenade weapon raised');
+    if (Game.Weapon <> nil) and (Game.Weapon.DefName = 'weapon_test_grenade') then
+    begin
+      Check(Game.Weapon.HeldProjectile <> nil, 'createProjectile holds a grenade');
+      P := Game.Weapon.HeldProjectile;
+      if P <> nil then
+      begin
+        Check(P.HeldByWeapon = Game.Weapon, 'held by the weapon');
+        CheckNear(0, P.Velocity.Length, 'the held grenade does not move');
+      end;
+      Game.AttackOnce;
+      Step(0.3);
+      Check((P <> nil) and (P.HeldByWeapon = nil) and (P.Velocity.Length > 100), 'launchProjectiles threw the held grenade');
+      Check(Game.Weapon.HeldProjectile = nil, 'nothing held right after the throw');
+      Step(0.6);
+      Check(Game.Weapon.HeldProjectile <> nil, 'the next grenade is held once idle again');
+      { the switch drops the held grenade }
+      Game.SelectWeapon(1);
+      Step(1.5);
+      Check((Game.Weapon <> nil) and (Game.Weapon.DefName = 'weapon_test_pistol'), 'back to the pistol');
+    end;
   finally
     Game.Free;
     World.Free;
@@ -5492,6 +5760,7 @@ begin
   TestDamageEffects;
   TestExactStages;
   TestGuiScripts;
+  TestPlayerInfo;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));
   if Failed > 0 then
     Halt(1);
