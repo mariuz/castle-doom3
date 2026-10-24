@@ -166,9 +166,12 @@ jobs:
           grep "Screenshot" test_output/shadows.log | sed -n 1p | grep -q "shadows light_1" || { echo "::error::light_1 should cast the shadows"; exit 1; }
           grep "Screenshot" test_output/shadows.log | sed -n 2p | grep -q "shadows none" || { echo "::error::r_shadows 0 should turn shadows off"; exit 1; }
           # several lights casting shadow volumes (CGE change A, TCastleViewport.ShadowVolumesMaxLights)
-          run_test shadowlights testmap "W:1,O:notarget,O:r_shadowLights 3,G:-160 -160 0,A:45,W:0.4,S,O:r_shadowLights 1,W:0.2,S,Q"
+          run_test shadowlights testmap "W:1,O:notarget,O:r_shadowLights 3,G:-160 -160 0,A:45,W:0.4,S,O:r_useDepthBounds 0,W:0.2,S,O:r_useDepthBounds 1,O:r_shadowLights 1,W:0.2,S,Q"
           grep "Screenshot" test_output/shadowlights.log | sed -n 1p | grep -qE "shadows light_1 [a-z_0-9]+ [a-z_0-9]+\)" || { echo "::error::r_shadowLights 3 should make three lights cast shadows"; exit 1; }
-          grep "Screenshot" test_output/shadowlights.log | sed -n 2p | grep -qE "shadows light_1\)" || { echo "::error::r_shadowLights 1 should leave one shadow light"; exit 1; }
+          grep "Screenshot" test_output/shadowlights.log | sed -n 3p | grep -qE "shadows light_1\)" || { echo "::error::r_shadowLights 1 should leave one shadow light"; exit 1; }
+          # the precomputed shadow volumes cast with several lights, each for its light (CGE change S); the depth bounds test per light is switchable
+          grep -qE "Shadow lights: light_1 [a-z_0-9]+ [a-z_0-9]+ \(1 precomputed volumes, each for its light\)" test_output/shadowlights.log || { echo "::error::light_1's precomputed shadow volume should cast with three shadow lights"; exit 1; }
+          grep -q "Depth bounds per shadow light off" test_output/shadowlights.log || { echo "::error::r_useDepthBounds 0 should be logged"; exit 1; }
           run_test stages testmap "W:1,O:notarget,G:640 -150 0,A:90,P:45,W:0.4,S,G:740 -200 96,A:-45,W:0.3,S,W:1,S,Q"
           grep -q 'Sky "textures/test/sky"' test_output/stages.log || { echo "::error::the skybox should be set up"; exit 1; }
           cmp -s test_output/stages_2.png test_output/stages_3.png && { echo "::error::the terminal screen should scroll"; exit 1; } || true

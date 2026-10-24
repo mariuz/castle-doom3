@@ -144,7 +144,7 @@ implementation
 uses
   Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
-  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX,
+  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
   Doom3Sampler,
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu,
@@ -1021,7 +1021,7 @@ begin
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
     Console.Print('give [all|weapons|<weapon>|<stat> <amount>], inventory, weapon <slot>, weapnext, weapprev, reload, pm_bob [0|1], hurt <damage def> [amount] [up], pos, setviewpos x y z [yaw], fps, lightscale <f>, decls,');
-    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1],');
+    Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1], r_shadowLights <n>, r_useScissor [0|1], r_useDepthBounds [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, guis, objectives, pda [name], scripts, g_stopTime [0|1],');
     Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1], pm_thirdPersonDeath [0|1], crouch [0|1], ragdoll [0|1], g_showBrass [0|1],');
     Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
@@ -1411,7 +1411,22 @@ begin
     if Args <> '' then
       Map.ShadowLightsMax := Max(1, StrToIntDef(Args, 1));
     MainViewport.ShadowVolumesMaxLights := Map.ShadowLightsMax;
-    Console.Print('r_shadowLights ' + IntToStr(Map.ShadowLightsMax));
+    Console.Print('r_shadowLights ' + IntToStr(Map.ShadowLightsMax) +
+      ' (depth bounds test: ' + Iff(GLFeatures.DepthBoundsTest, 'supported', 'not supported by this OpenGL') + ')');
+  end else
+  if Cmd = 'r_usedepthbounds' then
+  begin
+    { limit each shadow light's passes to the depth range of its sphere,
+      like Doom 3's r_useDepthBounds (CGE change S) }
+    if Args <> '' then
+      InternalShadowVolumesLightDepthBounds := StrToIntDef(Args, 1) <> 0
+    else
+      InternalShadowVolumesLightDepthBounds := not InternalShadowVolumesLightDepthBounds;
+    Console.Print('r_useDepthBounds ' + BoolToStr(InternalShadowVolumesLightDepthBounds, '1', '0') +
+      Iff(GLFeatures.DepthBoundsTest, '', ' (GL_EXT_depth_bounds_test not supported by this OpenGL: no effect)'));
+    WritelnLog('GameViewPlay', 'Depth bounds per shadow light %s (GL_EXT_depth_bounds_test %s)',
+      [Iff(InternalShadowVolumesLightDepthBounds, 'on', 'off'),
+       Iff(GLFeatures.DepthBoundsTest, 'supported', 'not supported')]);
   end else
   if Cmd = 'r_usescissor' then
   begin

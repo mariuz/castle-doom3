@@ -1162,8 +1162,9 @@ var
   World: TCastleRootTransform;
   Map: TDoom3Map;
   P: TVector3;
-  I, J, Casting: Integer;
+  I, J, Casting, Volumes: Integer;
   InList: Boolean;
+  Prelight: TCastleScene;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -1204,6 +1205,24 @@ begin
     end;
     CheckEquals(3, Casting, 'three lights with shadowVolumesMain');
 
+    { The precomputed shadow volumes cast with several lights too, each
+      for its light only (CGE change S, CastShadowVolumesLight). The test
+      level has one, for light_1. }
+    Prelight := Map.PrelightScene(Map.ShadowLights[0]);
+    Check(Prelight <> nil, 'light_1 has a precomputed shadow volume');
+    if Prelight <> nil then
+    begin
+      Check(Prelight.Exists, 'the precomputed volume casts with several shadow lights');
+      Check(Prelight.CastShadowVolumesLight = Map.Light(Map.ShadowLights[0]).Node,
+        'the precomputed volume casts for its light only');
+      Check(Prelight.CastShadows, 'the precomputed volume is a caster');
+    end;
+    Volumes := 0;
+    for I := 0 to Map.LightCount - 1 do
+      if (Map.PrelightScene(I) <> nil) and Map.PrelightScene(I).Exists then
+        Inc(Volumes);
+    CheckEquals(1, Volumes, 'one precomputed volume exists (the other shadow lights have none)');
+
     { back to one }
     Map.ShadowLightsMax := 1;
     Map.UpdateShadowLight(P);
@@ -1213,6 +1232,18 @@ begin
       if Map.Light(I).Node.ShadowVolumesMain then
         Inc(Casting);
     CheckEquals(1, Casting, 'one light with shadowVolumesMain again');
+    if Prelight <> nil then
+      Check(Prelight.Exists, 'the precomputed volume still casts for the single shadow light');
+
+    { without shadow lights the volumes don't exist }
+    Map.ShadowLightsMax := 3;
+    Map.UpdateShadowLight(P);
+    Map.Shadows := False;
+    Map.UpdateShadowLight(P);
+    CheckEquals(0, Length(Map.ShadowLights), 'no shadow lights without shadows');
+    if Prelight <> nil then
+      Check(not Prelight.Exists, 'the precomputed volume is hidden without shadow lights');
+    Map.Shadows := True;
   finally
     FreeAndNil(World);
   end;
