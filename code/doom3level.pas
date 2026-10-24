@@ -26,7 +26,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
   CastleCameras, Doom3Scene,
   Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions,
-  Doom3Materials,
+  Doom3Materials, Doom3Gui,
   Doom3LightEffects;
 
 type
@@ -142,11 +142,16 @@ type
     FModels: specialize TObjectList<TD3ModelEntity>;
     FHeadCount: Integer;
     FGuiTextures: TX3DNodeList;
+    { live GUIs (one per scene and GUI texture), updated every frame }
+    FGuiSurfaces: specialize TObjectList<TD3GuiSurface>;
+    FGuiRenders: Integer;
     FLights: array of TD3LightInfo;
     FSpawnOrigin: TVector3;
     FSpawnAngle: Single;
     FStaticModelCount: Integer;
     procedure CollectGuiTexture(Node: TX3DNode);
+    procedure CollectGuiSurfaces(const Scene: TCastleScene; const EntityName: String; const Keys: TStrings);
+    procedure UpdateGuis;
     procedure SetShadowLight(const I: Integer);
     procedure SetShadowLights(const NewLights: TD3IntArray);
     { Make the light I cast shadows (shadow volumes or shadow maps) or not. }
@@ -246,6 +251,13 @@ type
     property Collision: TD3CollisionFile read FCollision;
     property WorldCollision: TCastleScene read FWorldCollision;
     property Brushes: specialize TObjectList<TD3BrushEntity> read FBrushes;
+    { The live GUIs of the level's surfaces (brush entities, static models,
+      world surfaces), with their entity names. }
+    property GuiSurfaces: specialize TObjectList<TD3GuiSurface> read FGuiSurfaces;
+    { GUI textures redrawn so far (for the log and tests). }
+    property GuiRenders: Integer read FGuiRenders;
+    { The live GUI drawn by a texture URL (nil: none). }
+    function GuiSurfaceOf(const Url: String): TD3GuiSurface;
     property Models: specialize TObjectList<TD3ModelEntity> read FModels;
     { Player start in CGE coordinates (feet) and Doom 3 yaw. }
     property SpawnOrigin: TVector3 read FSpawnOrigin;
@@ -348,7 +360,7 @@ uses
   Math, TypInfo,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleFrustum,
-  Doom3Files, Doom3Images, Doom3StaticModels, Doom3Gui;
+  Doom3Files, Doom3Images, Doom3StaticModels;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -435,6 +447,7 @@ begin
   FShadowMapSize := 512;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
+  FGuiSurfaces := specialize TObjectList<TD3GuiSurface>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
 end;
 
@@ -442,6 +455,7 @@ destructor TDoom3Map.Destroy;
 begin
   ClearMap;
   FreeAndNil(FBrushes);
+  FreeAndNil(FGuiSurfaces);
   FreeAndNil(FModels);
   inherited Destroy;
 end;
@@ -478,6 +492,8 @@ begin
   FStaticModelCount := 0;
   FModels.Clear;
   FHeadCount := 0;
+  FGuiSurfaces.Clear;
+  FGuiRenders := 0;
   FBrushes.Clear;
   FLights := nil;
   for I := 0 to High(FAreaScenes) do
@@ -1966,6 +1982,7 @@ end;
 
 procedure TDoom3Map.Rebuild;
 var
+  GuiArea: Integer;
   Base: String;
   E: TD3MapEntity;
   B: TD3BrushEntity;
@@ -2027,6 +2044,16 @@ begin
     [ConditionalShapeCount - Conditionals]);
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
+  { the GUIs on the surfaces become live (events, transitions, the cursor) }
+  for GuiArea := 0 to High(FAreaScenes) do
+  begin
+    CollectGuiSurfaces(FAreaScenes[GuiArea], '', nil);
+    CollectGuiSurfaces(FAreaNonSolid[GuiArea], '', nil);
+  end;
+  for B in FBrushes do
+    CollectGuiSurfaces(B.Scene, B.Entity.Name, B.Entity.Pairs);
+  if FGuiSurfaces.Count > 0 then
+    WritelnLog('Doom3Level', 'GUIs: %d live GUI surfaces', [FGuiSurfaces.Count]);
   if FSpawnModels then
     BuildModelEntities;
   LoadProfileStep('md5 models');
@@ -2137,15 +2164,121 @@ begin
     FGuiTextures.Add(Node);
 end;
 
+procedure TDoom3Map.CollectGuiSurfaces(const Scene: TCastleScene; const EntityName: String;
+  const Keys: TStrings);
+var
+  I, J: Integer;
+  Tex: TImageTextureNode;
+  Url, Path: String;
+  Gui: TD3Gui;
+  Surface: TD3GuiSurface;
+begin
+  if (Scene = nil) or (Scene.RootNode = nil) then
+    Exit;
+  FGuiTextures := TX3DNodeList.Create(False);
+  try
+    Scene.RootNode.EnumerateNodes(TImageTextureNode, @CollectGuiTexture, False);
+    for I := 0 to FGuiTextures.Count - 1 do
+    begin
+      Tex := TImageTextureNode(FGuiTextures[I]);
+      Url := Tex.FdUrl.Items[0];
+      { the same GUI on several surfaces of the scene: one live GUI }
+      Surface := nil;
+      for J := 0 to FGuiSurfaces.Count - 1 do
+        if (FGuiSurfaces[J].Scene = Scene) and (FGuiSurfaces[J].Nodes.Count > 0) and
+           (TImageTextureNode(FGuiSurfaces[J].Nodes[0]).FdUrl.Items[0] = Url) then
+        begin
+          Surface := FGuiSurfaces[J];
+          Break;
+        end;
+      if Surface = nil then
+      begin
+        Path := GuiUrlPath(Url);
+        if Path = '' then
+          Continue;
+        Gui := TD3Gui.Create;
+        if not Gui.LoadFromVfs(Path) then
+        begin
+          Gui.Free;
+          Continue;
+        end;
+        Gui.StateFromKeys(Keys);
+        Gui.Activate(Round(FTime * 1000));
+        Surface := TD3GuiSurface.Create(Gui);
+        Surface.Scene := Scene;
+        Surface.EntityName := EntityName;
+        FGuiSurfaces.Add(Surface);
+      end;
+      Surface.Nodes.Add(Tex);
+    end;
+  finally
+    FreeAndNil(FGuiTextures);
+  end;
+end;
+
+function TDoom3Map.GuiSurfaceOf(const Url: String): TD3GuiSurface;
+begin
+  Result := GuiSurfaceByUrl(Url);
+  if (Result <> nil) and (FGuiSurfaces.IndexOf(Result) < 0) then
+    Result := nil;
+end;
+
+procedure TDoom3Map.UpdateGuis;
+const
+  { redraws per frame, and how often one GUI redraws while it keeps
+    changing (transitions, the cursor moving) }
+  MaxRenders = 4;
+  MinInterval = 0.04;
+var
+  S: TD3GuiSurface;
+  Renders: Integer;
+  TimeMs: Integer;
+begin
+  TimeMs := Round(FTime * 1000);
+  Renders := 0;
+  for S in FGuiSurfaces do
+  begin
+    { GUIs out of sight (portal visibility) sleep, like Doom 3's that
+      only run when drawn; the one the player looks at always runs }
+    if not (S.Gui.CursorShown or (S.Scene = nil) or (S.Scene.Visible and S.Scene.Exists)) then
+      Continue;
+    S.Gui.Update(TimeMs);
+    if S.Gui.Dirty and (Renders < MaxRenders) and
+       ((S.Renders = 0) or (FTime - S.LastRender >= MinInterval) or S.Gui.CursorShown) then
+    begin
+      S.Render(False);
+      S.LastRender := FTime;
+      Inc(Renders);
+      Inc(FGuiRenders);
+    end;
+  end;
+end;
+
 function TDoom3Map.SetGuiParm(const E: TD3MapEntity; const Key, Value: String): Integer;
 var
   B: TD3BrushEntity;
   I: Integer;
   Tex: TImageTextureNode;
   Path, NewUrl: String;
+  S: TD3GuiSurface;
+  Live: Boolean;
 begin
   Result := 0;
   E.SetValue(Key, Value);
+  { live GUIs: their gui:: state (redrawn by UpdateGuis) }
+  Live := False;
+  for S in FGuiSurfaces do
+    if SameText(S.EntityName, E.Name) then
+    begin
+      Live := True;
+      if S.Gui.StateValue(Key) <> Value then
+      begin
+        S.Gui.SetState(Key, Value);
+        Inc(Result);
+      end;
+    end;
+  if Live then
+    Exit;
   B := FindBrush(E.Name);
   if (B = nil) or (B.Scene.RootNode = nil) then
     Exit;
@@ -2214,6 +2347,8 @@ begin
   { scrolling / rotating textures, pulsing glows }
   if FProc <> nil then
     UpdateAnimatedSurfaces(FTime);
+  { GUI time lines, transitions and redraws }
+  UpdateGuis;
   { light shaders: strobes, flickers, pulses }
   for I := 0 to High(FLights) do
     if FLights[I].Animated and FLights[I].Node.IsOn then

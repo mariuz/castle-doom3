@@ -55,7 +55,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
-  Doom3Particles, Doom3Decals;
+  Doom3Particles, Doom3Decals, Doom3Gui;
 
 type
   { A monster's route through the AAS (the path between the areas it was
@@ -695,6 +695,10 @@ type
     FEmitterEntities: specialize TObjectList<TD3EmitterEntity>;
     FFx: specialize TObjectList<TD3Fx>;
     FDecals: TD3DecalSystem;
+    { the interactive GUI the player looks at (idPlayer::focusUI) }
+    FGuiFocus: TD3GuiSurface;
+    FGuiAttackDown: Boolean;
+    FGuiClicks: Integer;
     FTime: Single;
     FPlayerEye: TVector3;
     FOnMessage: TD3MessageEvent;
@@ -734,6 +738,9 @@ type
     procedure InitInventory;
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
     procedure UpdateWeapon(const SecondsPassed: Single);
+    procedure UpdateGuiFocus;
+    procedure UpdateGuiCommands;
+    procedure HandleGuiCommands(const S: TD3GuiSurface; const Cmd: String);
     { the player's speed, bob cycle and movement changes }
     procedure UpdatePlayerMotion(const SecondsPassed: Single);
     { idPlayer::CrashLand after a fall: the view's dip, falling damage }
@@ -1108,6 +1115,11 @@ type
     property Fx: specialize TObjectList<TD3Fx> read FFx;
     { Decals on the world (projectile hits, FX decal actions). }
     property Decals: TD3DecalSystem read FDecals;
+    { The interactive GUI the player's view is on (within
+      GuiFocusDistance): the cursor shows on it, the attack button clicks,
+      the weapon is lowered. }
+    property GuiFocus: TD3GuiSurface read FGuiFocus;
+    property GuiClicks: Integer read FGuiClicks;
     { Stick a decal at a Doom 3 point with a surface normal (console
       decal, projectiles); the decal scene joins the map on the first. }
     procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
@@ -1269,6 +1281,7 @@ uses
   Math,
   CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
+  CastleShapes,
   Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
   Doom3AF;
 
@@ -1620,6 +1633,8 @@ begin
   FEmitterEntities.Clear;
   FEmitters.Clear;
   FDecals.Clear;
+  FGuiFocus := nil;
+  FGuiAttackDown := False;
   ProjectilesLaunched := 0;
   ClearScriptSounds;
   FTime := 0;
@@ -2537,7 +2552,14 @@ begin
       W.StateName := W.IdealName;
       FScript.RestartThread(W.Thread, W.IdealFunction, WeaponHandle);
     end;
-    W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead);
+    { looking at a GUI, the attack button clicks it (idPlayer::Weapon_GUI) }
+    W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil));
+    { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus }
+    if (FGuiFocus <> nil) and (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
+      W.SetFlag('WEAPON_LOWERWEAPON', True)
+    else
+    if (FGuiFocus = nil) and (W.Status = wsHolstered) and (W.Slot = FIdealSlot) and not PlayerDead then
+      W.SetFlag('WEAPON_RAISEWEAPON', True);
     W.SetFlag('WEAPON_RELOAD', FReloadRequested);
   end;
   FReloadRequested := False;
@@ -4930,6 +4952,8 @@ begin
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
     UpdateActors(SecondsPassed);
+  UpdateGuiFocus;
+  UpdateGuiCommands;
   UpdateWeapon(SecondsPassed);
   if (FScript <> nil) and not ScriptsPaused then
     FScript.Update(FTime);
@@ -6999,6 +7023,180 @@ begin
     surface hit, decal_size wide }
   if HitWorld and (P.DetonateDecal <> '') then
     AddDecal(P.DetonateDecal, CgeToD3(P.Position), CgeToD3(Normal), P.DecalSize);
+end;
+
+procedure TD3Game.UpdateGuiFocus;
+var
+  Hit: TRayCollision;
+  Shape: TShape;
+  Tex: TAbstractTextureNode;
+  S: TD3GuiSurface;
+  TC: TVector2;
+  Down: Boolean;
+  E: TD3MapEntity;
+  B: TD3BrushEntity;
+begin
+  { idPlayer::UpdateFocus: the view ray within 80 units on an interactive
+    GUI surface; the cursor goes where it hits, through the surface's
+    texture coordinates (GuiTrace) }
+  S := nil;
+  if (FMap <> nil) and not PlayerDead and not PlayerViewDir.IsZero then
+  begin
+    Hit := FMap.World.WorldRay(FPlayerEye, PlayerViewDir);
+    try
+      if (Hit <> nil) and (Hit.Count > 0) and (Hit.Distance <= GuiFocusDistance) and
+         (Hit[0].Triangle <> nil) and (Hit[0].Triangle^.InternalShape is TShape) then
+      begin
+        Shape := TShape(Hit[0].Triangle^.InternalShape);
+        { GuiAppearance: the GUI image is the unlit material's emissive
+          texture }
+        Tex := nil;
+        if (Shape.Node <> nil) and (Shape.Node.Appearance <> nil) then
+        begin
+          Tex := Shape.Node.Appearance.Texture;
+          if (Tex = nil) and (Shape.Node.Appearance.Material is TUnlitMaterialNode) then
+            Tex := TUnlitMaterialNode(Shape.Node.Appearance.Material).EmissiveTexture;
+        end;
+        if (Tex is TImageTextureNode) and (TImageTextureNode(Tex).FdUrl.Count > 0) then
+          S := FMap.GuiSurfaceOf(TImageTextureNode(Tex).FdUrl.Items[0]);
+        if (S <> nil) and S.Gui.Interactive then
+        begin
+          { a hidden entity's GUI can't be used }
+          B := FMap.FindBrush(S.EntityName);
+          if (B <> nil) and B.Hidden then
+            S := nil;
+        end else
+          S := nil;
+        if S <> nil then
+        begin
+          { the triangle's texture coordinates at the hit (the point is in
+            world space, the triangle in the scene's) }
+          TC := Hit[0].Triangle^.ITexCoord2D(Hit[0].Item.WorldToLocal(Hit[0].Point));
+          { Doom 3's t goes down the GUI (our v = 1 - t) }
+          S.Gui.SetCursor(Clamped(TC.X * GuiWidth, 0, GuiWidth), Clamped((1 - TC.Y) * GuiHeight, 0, GuiHeight));
+        end;
+      end;
+    finally
+      FreeAndNil(Hit);
+    end;
+  end;
+  if S <> FGuiFocus then
+  begin
+    if FGuiFocus <> nil then
+      FGuiFocus.Gui.ClearCursor;
+    FGuiFocus := S;
+    FGuiAttackDown := False;
+    if S <> nil then
+      WritelnLog('Doom3World', 'GUI focus: %s (%s)', [S.Gui.Name, S.EntityName])
+    else
+      WritelnLog('Doom3World', 'GUI focus lost');
+  end;
+  if FGuiFocus = nil then
+    Exit;
+  { the attack button clicks (idPlayer::Weapon_GUI) }
+  Down := (Attack or (FAttackPulse > 0)) and not PlayerDead;
+  if Down and not FGuiAttackDown then
+  begin
+    Inc(FGuiClicks);
+    E := FindEntity(FGuiFocus.EntityName);
+    if FGuiFocus.Gui.Click then
+      WritelnLog('Doom3World', 'GUI %s (%s): click at %d %d', [FGuiFocus.Gui.Name, FGuiFocus.EntityName,
+        Round(FGuiFocus.Gui.CursorX), Round(FGuiFocus.Gui.CursorY)])
+    else
+      WritelnLog('Doom3World', 'GUI %s (%s): click at %d %d (no onAction there)', [FGuiFocus.Gui.Name,
+        FGuiFocus.EntityName, Round(FGuiFocus.Gui.CursorX), Round(FGuiFocus.Gui.CursorY)]);
+    FAttackPulse := 0;
+    if E = nil then
+      ;
+  end else
+  if not Down and FGuiAttackDown then
+    FGuiFocus.Gui.ClickRelease;
+  FGuiAttackDown := Down;
+end;
+
+procedure TD3Game.UpdateGuiCommands;
+var
+  S: TD3GuiSurface;
+  Cmd: String;
+begin
+  if FMap = nil then
+    Exit;
+  for S in FMap.GuiSurfaces do
+  begin
+    Cmd := S.Gui.TakeCmd;
+    if Cmd <> '' then
+      HandleGuiCommands(S, Cmd);
+  end;
+end;
+
+procedure TD3Game.HandleGuiCommands(const S: TD3GuiSurface; const Cmd: String);
+var
+  E, Other: TD3MapEntity;
+  Part: String;
+  Words: TStringArray;
+  B: TD3BrushEntity;
+  T: TCastleTransform;
+  Pos: TVector3;
+begin
+  { idEntity::HandleGuiCommands: "activate [entity] ; runScript f ; play
+    sound ; setkeyval ent key val ; setshaderparm n v ; print ..." }
+  E := FindEntity(S.EntityName);
+  WritelnLog('Doom3World', 'GUI %s (%s): "%s"', [S.Gui.Name, S.EntityName, Cmd]);
+  for Part in Cmd.Split([';']) do
+  begin
+    Words := Trim(Part).Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+    if Length(Words) = 0 then
+      Continue;
+    case LowerCase(Words[0]) of
+      'activate':
+        begin
+          if Length(Words) > 1 then
+          begin
+            Other := FindEntity(Words[1]);
+            if Other <> nil then
+              Activate(Other)
+            else
+              WritelnWarning('Doom3World', 'GUI %s: activate: no entity "%s"', [S.Gui.Name, Words[1]]);
+          end else
+          if E <> nil then
+            ActivateTargetsNow(E);
+        end;
+      'runscript':
+        if Length(Words) > 1 then
+          CallScript(Words[1], 'GUI ' + S.Gui.Name);
+      'play':
+        if Length(Words) > 1 then
+        begin
+          Pos := FPlayerEye;
+          T := nil;
+          if E <> nil then
+            T := TransformOf(E.Name);
+          if T <> nil then
+            Pos := T.WorldTranslation;
+          PlaySoundAt(Words[1], Pos);
+        end;
+      'setkeyval':
+        if Length(Words) > 3 then
+        begin
+          Other := FindEntity(Words[1]);
+          if Other <> nil then
+            Other.SetValue(Words[2], Words[3]);
+        end;
+      'setshaderparm':
+        if (Length(Words) > 2) and (E <> nil) then
+        begin
+          B := FMap.FindBrush(E.Name);
+          if (B <> nil) and (B.Parms <> nil) and (StrToIntDef(Words[1], -1) >= 0) and (StrToIntDef(Words[1], -1) <= 11) then
+            B.Parms.Parms[StrToIntDef(Words[1], 0)] := StrToFloatDef(Words[2], 0, DefaultFormatSettings);
+        end;
+      'print':
+        WritelnLog('Doom3World', 'GUI %s print: %s', [S.Gui.Name, Trim(Copy(Trim(Part), 6, MaxInt))]);
+      'close':
+        ;
+      else
+        Unsupported('GUI command "' + Words[0] + '" (' + S.Gui.Name + ')');
+    end;
+  end;
 end;
 
 procedure TD3Game.AddDecal(const MaterialName: String; const Position, Normal: TVector3;
