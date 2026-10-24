@@ -160,7 +160,6 @@ type
     procedure UpdateShadowLights(const P: TVector3);
     procedure ApplyLightColor(const I: Integer; const C: TVector3);
     function LightShaderColor(const I: Integer): TVector3;
-    function PrelightScene(const I: Integer): TCastleScene;
     procedure SetMapName(const Value: String);
     procedure SetSpawnModels(const Value: Boolean);
     function GetAreaCount: Integer;
@@ -237,6 +236,12 @@ type
     property ShadowLight: Integer read FShadowLight;
     { Indexes of all lights casting shadows (ShadowLight first). }
     property ShadowLights: TD3IntArray read FShadowLights;
+    { The invisible caster scene of light I's precomputed shadow volume
+      (the .proc's "_prelight_<light>" model), built on demand; nil when
+      the light has none. It Exists while the light is a shadow light and
+      PrelightShadows is on (and not ShadowMaps); with several shadow lights
+      it casts for its light only (CastShadowVolumesLight). }
+    function PrelightScene(const I: Integer): TCastleScene;
     { How many lights cast shadow volumes at once
       (TCastleViewport.ShadowVolumesMaxLights, CGE change A, doom3-port):
       1 (the default) = the strongest light at the player, with its
@@ -1481,6 +1486,12 @@ begin
     Scene.Pickable := False;
     Scene.CastShadows := True;
     Scene.Exists := False;
+    { With several shadow lights (ShadowLightsMax > 1) CGE renders each
+      light's shadow volumes in turn: this volume is for its light only
+      (CGE change S, CastShadowVolumesLight), the other casters cast for
+      every light. With one shadow light the light isn't known and only
+      the current light's volume exists (SetShadowLight). }
+    Scene.CastShadowVolumesLight := FLights[I].Node;
     Add(Scene);
     FPrelightScenes[I] := Scene;
     FPrelightState[I] := 1;
@@ -1503,17 +1514,43 @@ procedure TDoom3Map.SetShadowLights(const NewLights: TD3IntArray);
   end;
 
 var
-  L: Integer;
+  L, Volumes: Integer;
+  Prelight: TCastleScene;
+  Names: String;
 begin
   for L in FShadowLights do
     if not Contains(NewLights, L) then
+    begin
       SetLightCasts(L, False);
-  { precomputed shadow volumes would cast for every light: none }
-  if (FShadowLight >= 0) and (FShadowLight <= High(FPrelightScenes)) and
-     (FPrelightScenes[FShadowLight] <> nil) then
-    FPrelightScenes[FShadowLight].Exists := False;
+      if (L <= High(FPrelightScenes)) and (FPrelightScenes[L] <> nil) then
+        FPrelightScenes[L].Exists := False;
+    end;
+  Names := '';
+  Volumes := 0;
   for L in NewLights do
+  begin
     SetLightCasts(L, True);
+    { each light's precomputed shadow volume casts for that light only
+      (CGE change S, see PrelightScene) }
+    if FPrelightShadows and not FShadowMaps then
+    begin
+      Prelight := PrelightScene(L);
+      if Prelight <> nil then
+      begin
+        Prelight.Exists := True;
+        Inc(Volumes);
+      end;
+    end;
+    if Names <> '' then
+      Names := Names + ' ';
+    if FLights[L].Entity <> nil then
+      Names := Names + FLights[L].Entity.Name
+    else
+      Names := Names + IntToStr(L);
+  end;
+  if Length(NewLights) > 0 then
+    WritelnLog('Doom3Level', 'Shadow lights: %s (%d precomputed volumes, each for its light)',
+      [Names, Volumes]);
   FShadowLights := Copy(NewLights);
   if Length(FShadowLights) > 0 then
     FShadowLight := FShadowLights[0]
