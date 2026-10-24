@@ -13,7 +13,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleQuaternions, CastleTransform, CastleScene, X3DNodes,
-  Doom3Lexer, Doom3Scene;
+  Doom3Lexer, Doom3Scene, Doom3Materials;
 
 type
   TD3Joint = record
@@ -123,11 +123,21 @@ type
     FromJoint, ToJoint: Integer;
   end;
 
+  { A "deform eyeball" mesh of an instance: its texture coordinates are
+    projected again from the skinned positions every pose (the eye follows
+    the focus triangle's joint). }
+  TD3Md5Eyeball = record
+    MeshIndex: Integer;
+    Islands: TD3EyeIslands;
+    TexCoord: TTextureCoordinateNode;
+  end;
+
   TD3Md5Instance = class
   strict private
     FModel: TD3Md5Model;
     FScene: TCastleScene;
     FCoords: array of TCoordinateNode;
+    FEyeballs: array of TD3Md5Eyeball;
     FMatrices: TD3JointMatrixArray;
     { the pose changed since the meshes were last skinned }
     FSkinPending, FShown: Boolean;
@@ -297,8 +307,8 @@ implementation
 
 uses
   Math,
-  CastleLog,
-  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Materials, Doom3LightEffects,
+  CastleLog, CastleUtils,
+  Doom3Files, Doom3Decls, Doom3MapFile, Doom3LightEffects,
   Doom3Collision;
 
 { Doom 3 stores unit quaternions as x y z, w = -sqrt(1 - x2 - y2 - z2). }
@@ -901,6 +911,8 @@ var
   SkinDecl: TD3Skin;
   MaterialName: String;
   AllClosed, UseHulls: Boolean;
+  Eye: TD3Md5Eyeball;
+  EyeIndexes: TInt32List;
 begin
   inherited Create;
   FShown := True;
@@ -938,6 +950,23 @@ begin
     Geometry.Coord := FCoords[I];
     Geometry.TexCoord := TexCoord;
     Geometry.SetIndex(Mesh.Tris);
+    { "deform eyeball": only the eye triangles are drawn, their texture
+      coordinates projected from the origin through the focus triangle
+      every pose (ApplyPose) }
+    if (Decls.Material(MaterialName).Deform = 'eyeball') and
+       EyeballIslands(Mesh.Tris, Length(Mesh.Verts), Eye.Islands, FModel.Name + ' ' + Mesh.Shader) then
+    begin
+      EyeIndexes := EyeballIndexes(Eye.Islands, Mesh.Tris);
+      try
+        Geometry.SetIndex(EyeIndexes);
+      finally
+        EyeIndexes.Free;
+      end;
+      Eye.MeshIndex := I;
+      Eye.TexCoord := TexCoord;
+      FEyeballs := Concat(FEyeballs, [Eye]);
+      Inc(EyeballSurfaceCount);
+    end;
     { Doom 3 triangles are clockwise from the front }
     Geometry.Ccw := False;
     Geometry.NormalPerVertex := True;
@@ -947,7 +976,8 @@ begin
     MeshShapes := Concat(MeshShapes, [Shape]);
     MeshMaterials := Concat(MeshMaterials, [MaterialName]);
     FMeshShaders := Concat(FMeshShaders, [Mesh.Shader]);
-    if not FModel.MeshClosed(I) then
+    { meshes that don't cast (noshadows: eyes, glows) needn't be closed }
+    if not FModel.MeshClosed(I) and not Decls.Material(MaterialName).NoShadows then
       AllClosed := False;
     Root.AddChildren(Shape);
   end;
@@ -1032,6 +1062,8 @@ end;
 procedure TD3Md5Instance.ApplyPose;
 var
   I: Integer;
+  Points: TVector3List;
+  UVs: TVector2List;
 begin
   FinishPose;
   { out of sight: skin it when it shows again }
@@ -1050,6 +1082,20 @@ begin
       if FCoords[I].FdPoint.Items.Count > 0 then
         FModel.SkinMeshTo(I, FMatrices, PVector3(FCoords[I].FdPoint.Items.L), SkinScale);
       FCoords[I].FdPoint.Changed;
+    end;
+  { the eyes' texture coordinates follow the skinned origin and focus }
+  for I := 0 to High(FEyeballs) do
+    if FCoords[FEyeballs[I].MeshIndex] <> nil then
+    begin
+      Points := FCoords[FEyeballs[I].MeshIndex].FdPoint.Items;
+      UVs := FEyeballs[I].TexCoord.FdPoint.Items;
+      if (Points.Count > 0) and (UVs.Count = Points.Count) then
+      begin
+        EyeballTexCoords(FEyeballs[I].Islands,
+          Slice(TVector3List.PTypeList(Points.L)^, Points.Count),
+          Slice(TVector2List.PTypeList(UVs.L)^, UVs.Count));
+        FEyeballs[I].TexCoord.FdPoint.Changed;
+      end;
     end;
   for I := 0 to High(FHullTransforms) do
     FHullTransforms[I].Matrix := JointMatrix(FFinalPose[FHullJoints[I]]);

@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(114, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(116, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,7 +120,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(42, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(49, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(64, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
@@ -231,7 +231,7 @@ begin
   Proc := TD3ProcFile.Create;
   try
     Check(Proc.LoadFromVfs('maps/testmap.proc'), 'load testmap.proc');
-    CheckEquals(12, Proc.ModelCount, 'proc model count');
+    CheckEquals(14, Proc.ModelCount, 'proc model count');
     CheckEquals(2, Proc.NumAreas, 'proc areas');
     CheckEquals(1, Length(Proc.Portals), 'proc portals');
     CheckEquals(1, Length(Proc.Nodes), 'proc nodes');
@@ -270,7 +270,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(85, MapFile.Entities.Count, 'entity count');
+    CheckEquals(88, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -318,8 +318,13 @@ begin
   if Model = nil then
     Exit;
   CheckEquals(7, Length(Model.Joints), 'md5 joints');
-  CheckEquals(1, Model.Meshes.Count, 'md5 meshes');
+  CheckEquals(2, Model.Meshes.Count, 'md5 meshes (the body and the eye)');
   CheckEquals(144, Length(Model.Meshes[0].Verts), 'md5 verts');
+  if Model.Meshes.Count > 1 then
+  begin
+    CheckEquals('models/test/blob_eye', Model.Meshes[1].Shader, 'the eye mesh''s shader');
+    CheckEquals(4 * 3, Length(Model.Meshes[1].Tris), 'the eye: its quad, the origin and focus triangles');
+  end;
   CheckEquals(72 * 3, Length(Model.Meshes[0].Tris), 'md5 triangle indexes');
   CheckEquals('models/test/blob', Model.Meshes[0].Shader, 'md5 shader');
   Body := Model.JointIndex('body');
@@ -509,7 +514,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(14, Cm.ModelCount, 'cm models (world + 10 brush entities + 3 triggers)');
+    CheckEquals(16, Cm.ModelCount, 'cm models (world + 12 brush entities + 3 triggers)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -4716,7 +4721,7 @@ begin
   end;
 
   { the decal system }
-  DecalSys := TD3DecalSystem.Create;
+  DecalSys := TD3DecalSystem.Create(nil);
   try
     Check(DecalSys.Add('textures/test/decal_hole', Vector3(10, 20, 0), Vector3(0, 0, 1), 8, 0), 'decal added');
     CheckEquals(1, DecalSys.Decals.Count, 'one decal');
@@ -4843,6 +4848,416 @@ begin
   end;
 end;
 
+
+{ Roadmap item 3's leftovers: mirrors, deform tube / expand / move /
+  eyeball, bumpy reflections, vertex colors, projected decals. }
+procedure TestMirrorsDeformsDecals;
+var
+  M: TD3Material;
+  Ctx: TD3ExprContext;
+  Positions, Turned: array of TVector3;
+  Indexes: array of Int32;
+  UVs: array of TVector2;
+  Islands: TD3EyeIslands;
+  EyeIdx: TInt32List;
+  SM: TD3StaticModel;
+  S: TD3StaticSurface;
+  Inverse: Boolean;
+  Colors: TColorRGBANode;
+  Root: TX3DRootNode;
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  RemoveMe: TRemoveType;
+  I, Found, Before: Integer;
+  Shape: TShapeNode;
+  Tex: TRenderedTextureNode;
+  Geometry: TIndexedTriangleSetNode;
+  D: TD3Decal;
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+  EyesBefore: Integer;
+  Coord: TCoordinateNode;
+
+  { The I-th shape of a root (looking inside a Switch); nil for other nodes. }
+  function ShapeAt(const Root: TX3DRootNode; const I: Integer): TShapeNode;
+  var
+    N: TX3DNode;
+  begin
+    Result := nil;
+    N := Root.FdChildren[I];
+    if N is TSwitchNode then
+      if TSwitchNode(N).FdChildren.Count > 0 then
+        N := TSwitchNode(N).FdChildren[0];
+    if N is TShapeNode then
+      Result := TShapeNode(N);
+  end;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      RemoveMe := rtNone;
+      Map.Update(0.05, RemoveMe);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  { the parser }
+  M := Decls.Material('textures/test/mirror');
+  Check(M.HasMirror, 'mirrorRenderMap stage parsed');
+  CheckEquals(256, M.MirrorWidth, 'mirror width');
+  CheckEquals(256, M.MirrorHeight, 'mirror height');
+  Check(M.MirrorBlend = bmOpaque, 'the mirror stage is opaque');
+  Check(M.DrawAsGlass, 'a material of only a mirror stage is drawn by GlassAppearance');
+  M := Decls.Material('textures/test/beam');
+  CheckEquals('tube', M.Deform, 'deform tube parsed');
+  M := Decls.Material('textures/test/expand');
+  CheckEquals('expand', M.Deform, 'deform expand parsed');
+  Ctx := DefaultExprContext;
+  Ctx.Time := 0;
+  Check(M.DeformParms[0] <> nil, 'expand amount parsed');
+  if M.DeformParms[0] <> nil then
+  begin
+    CheckNear(2, M.DeformParms[0].Eval(Ctx), 'expand amount at time 0 (2 + 2 * sin 0)');
+    Ctx.Time := 0.5;
+    CheckNear(4, M.DeformParms[0].Eval(Ctx), 'expand amount at time 0.5 (sinTable 0.25 = 1)');
+  end;
+  M := Decls.Material('textures/test/move');
+  CheckEquals('move', M.Deform, 'deform move parsed');
+  Ctx.Time := 1;
+  if M.DeformParms[0] <> nil then
+    CheckNear(16, M.DeformParms[0].Eval(Ctx), 'move amount at time 1');
+  CheckEquals('eyeball', Decls.Material('textures/test/eyeball').Deform, 'deform eyeball parsed');
+  CheckEquals('eyeball', Decls.Material('models/test/blob_eye').Deform, 'the blob eye material');
+  Check(ReflectionKind(Decls.Material('textures/test/shinymetal')) = ssBumpyReflection,
+    'a reflection stage of a material with a bump map is perturbed by it');
+  Check(ReflectionKind(Decls.Material('textures/test/glass')) = ssReflection,
+    'glass without a bump map reflects plainly');
+  M := Decls.Material('textures/test/sign');
+  Check(StageUsesVertexColors(M, -1, Inverse) and not Inverse, 'the sign''s stage uses vertex colors');
+  M := Decls.Material('models/mapobjects/test/barrel');
+  Check(M.DiffuseVertexColor, 'the barrel''s diffuse stage has vertexColor');
+  Check(StageUsesVertexColors(M, -1, Inverse) and not Inverse, 'the barrel''s base stage uses vertex colors');
+  Check(not StageUsesVertexColors(Decls.Material('textures/test/metal'), -1, Inverse), 'metal: no vertex colors');
+  M := Decls.ParseMaterial('test/inline_inv', '{ blend diffusemap map a.tga inverseVertexColor }');
+  try
+    Check(M.DiffuseInverseVertexColor, 'inverseVertexColor on a diffuse stage');
+    Check(StageUsesVertexColors(M, -1, Inverse) and Inverse, 'inverse vertex colors reported');
+  finally
+    M.Free;
+  end;
+
+  { deform tube: a vertical quad 16 wide (x) and 180 high (z) at y = 0 }
+  SetLength(Positions, 4);
+  Positions[0] := Vector3(0, 0, 0);
+  Positions[1] := Vector3(16, 0, 0);
+  Positions[2] := Vector3(16, 0, 180);
+  Positions[3] := Vector3(0, 0, 180);
+  Indexes := [0, 2, 1, 0, 3, 2];
+  SetLength(Turned, 4);
+  TubePositions(Positions, Indexes, Vector3(8, -100, 90), Turned);
+  { seen from the front it keeps its plane (the short edges' points swap,
+    as in Doom 3: tubes are two sided) }
+  CheckVectorNear(Vector3(16, 0, 0), Turned[0], 'tube from the front: first point');
+  CheckVectorNear(Vector3(0, 0, 0), Turned[1], 'tube from the front: second point');
+  CheckVectorNear(Vector3(0, 0, 180), Turned[2], 'tube from the front: third point');
+  CheckVectorNear(Vector3(16, 0, 180), Turned[3], 'tube from the front: fourth point');
+  { seen from the side (+x) it turns to the y axis, still 16 wide }
+  TubePositions(Positions, Indexes, Vector3(100, 0, 90), Turned);
+  CheckVectorNear(Vector3(8, 8, 0), Turned[0], 'tube from the side: first point');
+  CheckVectorNear(Vector3(8, -8, 0), Turned[1], 'tube from the side: second point');
+  CheckVectorNear(Vector3(8, -8, 180), Turned[2], 'tube from the side: third point');
+  CheckVectorNear(Vector3(8, 8, 180), Turned[3], 'tube from the side: fourth point');
+
+  { deform eyeball: an eye quad at y = 0 facing -y, its origin triangle 4
+    behind, its focus triangle 20 in front and 6 to the right }
+  SetLength(Positions, 10);
+  Positions[0] := Vector3(-16, 0, -16);
+  Positions[1] := Vector3(16, 0, -16);
+  Positions[2] := Vector3(16, 0, 16);
+  Positions[3] := Vector3(-16, 0, 16);
+  Positions[4] := Vector3(-2, 4, -2);
+  Positions[5] := Vector3(2, 4, -2);
+  Positions[6] := Vector3(0, 4, 2);
+  Positions[7] := Vector3(4, -20, -2);
+  Positions[8] := Vector3(8, -20, -2);
+  Positions[9] := Vector3(6, -20, 2);
+  Indexes := [0, 2, 1, 0, 3, 2, 4, 6, 5, 7, 9, 8];
+  Check(EyeballIslands(Indexes, 10, Islands, 'test eye'), 'the eye surface has three islands');
+  if Length(Islands) = 3 then
+  begin
+    CheckEquals(2, Length(Islands[0].Tris), 'the eye island: two triangles');
+    CheckEquals(4, Length(Islands[0].Verts), 'the eye island: four vertexes');
+    EyeIdx := EyeballIndexes(Islands, Indexes);
+    try
+      CheckEquals(6, EyeIdx.Count, 'only the eye triangles are drawn');
+      Check((EyeIdx[0] = 0) and (EyeIdx[1] = 2) and (EyeIdx[2] = 1), 'the eye triangles keep their order');
+    finally
+      EyeIdx.Free;
+    end;
+    SetLength(UVs, 10);
+    for I := 0 to 9 do
+      UVs[I] := Vector2(7, 7);
+    EyeballTexCoords(Islands, Positions, UVs);
+    { one texture unit per world unit from the origin; the pupil (s, t =
+      0.5) where the origin -> focus line crosses the eye: 1 unit right of
+      its center }
+    CheckNear(-15.99, UVs[0].X, 'eye corner (-16, -16) s', 0.1);
+    CheckNear(-15.5, UVs[0].Y, 'eye corner (-16, -16) v (1 - t)', 0.1);
+    CheckNear(15.05, UVs[2].X, 'eye corner (16, 16) s', 0.1);
+    CheckNear(16.5, UVs[2].Y, 'eye corner (16, 16) v', 0.1);
+    CheckNear(-0.47, (UVs[0].X + UVs[1].X + UVs[2].X + UVs[3].X) / 4, 'the pupil is 1 unit right of the eye center', 0.05);
+    CheckNear(7, UVs[4].X, 'the origin triangle''s texture coordinates are left alone');
+  end;
+  Indexes := [0, 2, 1, 0, 3, 2];
+  Check(not EyeballIslands(Indexes, 4, Islands, 'test eye'), 'one island is not an eye');
+
+  { vertex colors of static models: the barrel's RGBA map, the sign's
+    ASE color vertexes }
+  SM := StaticModels.Model('models/mapobjects/test/barrel.lwo');
+  Check(SM <> nil, 'barrel loads');
+  if SM <> nil then
+  begin
+    S := FindSurface(SM, 'models/mapobjects/test/barrel');
+    Check((S <> nil) and S.HasColors, 'the barrel sides have vertex colors');
+    if (S <> nil) and S.HasColors then
+    begin
+      { the side quads are written top ring first (reversed, clockwise) }
+      CheckNear(1, S.Colors[0].X, 'top ring color (LWO RGBA map)');
+      CheckNear(0.4, S.Colors[2].X, 'bottom ring color');
+      CheckNear(1, S.Colors[0].W, 'RGBA alpha');
+    end;
+  end;
+  SM := StaticModels.Model('models/mapobjects/test/sign.ase');
+  Check(SM <> nil, 'sign.ase loads');
+  if SM <> nil then
+  begin
+    S := FindSurface(SM, 'textures/test/sign');
+    Check(S <> nil, 'the sign''s surface');
+    if S <> nil then
+    begin
+      CheckEquals(2, S.TriangleCount, 'the sign is a quad');
+      Check(S.HasColors, 'ASE color vertexes loaded');
+      if S.HasColors then
+      begin
+        CheckVec3(Vector3(1, 0, 0), S.Colors[0].XYZ, 'bottom corner red (MESH_CFACELIST)');
+        CheckVec3(Vector3(0, 1, 0), S.Colors[2].XYZ, 'top corner green');
+      end;
+    end;
+    Root := SM.BuildNode;
+    try
+      Found := 0;
+      for I := 0 to Root.FdChildren.Count - 1 do
+      begin
+        Shape := ShapeAt(Root, I);
+        if (Shape <> nil) and (Shape.Geometry is TIndexedTriangleSetNode) and
+           (TIndexedTriangleSetNode(Shape.Geometry).Color is TColorRGBANode) then
+        begin
+          Inc(Found);
+          CheckEquals(6, TColorRGBANode(TIndexedTriangleSetNode(Shape.Geometry).Color).FdColor.Count,
+            'a color per vertex on the sign''s shape');
+          Check(TColorRGBANode(TIndexedTriangleSetNode(Shape.Geometry).Color).Mode = cmModulate,
+            'vertex colors modulate the stage');
+        end;
+      end;
+      CheckEquals(1, Found, 'the sign''s vertexColor stage got the colors');
+    finally
+      Root.Free;
+    end;
+  end;
+  Colors := VertexColorNode([Vector4(1, 0, 0, 1)], True);
+  try
+    CheckNear(0, Colors.FdColor.Items[0].X, 'inverseVertexColor: 1 - red');
+    CheckNear(1, Colors.FdColor.Items[0].Y, 'inverseVertexColor: 1 - green');
+    CheckNear(0, Colors.FdColor.Items[0].W, 'inverseVertexColor: 1 - alpha');
+  finally
+    Colors.Free;
+  end;
+
+  { in the map }
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    EyesBefore := EyeballSurfaceCount;
+    Check(Map.LoadMap('testmap'), 'load testmap for mirrors and deforms');
+    CheckEquals(1, TubeSurfaceCount, 'the beam is the one tube surface');
+    Check(EyeballSurfaceCount - EyesBefore >= 2, 'the wall eye and the blobs'' eyes are eyeball surfaces');
+    { the mirror: a RenderedTexture with a ViewpointMirror on the mirror
+      quad, with MIRROR-PLANE texture coordinates }
+    Found := 0;
+    if Map.AreaNonSolidScene(0) <> nil then
+      for I := 0 to Map.AreaNonSolidScene(0).RootNode.FdChildren.Count - 1 do
+      begin
+        Shape := ShapeAt(Map.AreaNonSolidScene(0).RootNode, I);
+        if (Shape = nil) or not (Shape.Appearance.Material is TUnlitMaterialNode) then
+          Continue;
+        if TUnlitMaterialNode(Shape.Appearance.Material).EmissiveTexture is TRenderedTextureNode then
+        begin
+          Inc(Found);
+          Tex := TRenderedTextureNode(TUnlitMaterialNode(Shape.Appearance.Material).EmissiveTexture);
+          Check(Tex.Viewpoint is TViewpointMirrorNode, 'the mirror texture renders from the mirrored camera');
+          Check(Tex.Update = upAlways, 'the mirror renders every frame');
+          CheckEquals(256, Tex.FdDimensions.Items[0], 'mirrorRenderMap width');
+          Check((Shape.Geometry is TIndexedTriangleSetNode) and
+            (TIndexedTriangleSetNode(Shape.Geometry).TexCoord is TTextureCoordinateGeneratorNode) and
+            (TTextureCoordinateGeneratorNode(TIndexedTriangleSetNode(Shape.Geometry).TexCoord).Mode = 'MIRROR-PLANE'),
+            'mirror plane texture coordinates');
+        end;
+      end;
+    CheckEquals(1, Found, 'room A has one mirror');
+    { the wall eye: a shape of 6 indexes over 10 vertexes, texture
+      coordinates projected }
+    Found := 0;
+    if Map.AreaNonSolidScene(0) <> nil then
+      for I := 0 to Map.AreaNonSolidScene(0).RootNode.FdChildren.Count - 1 do
+      begin
+        Shape := ShapeAt(Map.AreaNonSolidScene(0).RootNode, I);
+        if (Shape <> nil) and (Shape.Geometry is TIndexedTriangleSetNode) then
+        begin
+          Geometry := TIndexedTriangleSetNode(Shape.Geometry);
+          if (Geometry.FdIndex.Count = 6) and (Geometry.Coord is TCoordinateNode) and
+             (TCoordinateNode(Geometry.Coord).FdPoint.Count = 10) then
+          begin
+            Inc(Found);
+            Check(Geometry.TexCoord is TTextureCoordinateNode, 'eye texture coordinates');
+            if Geometry.TexCoord is TTextureCoordinateNode then
+              Check(Abs(TTextureCoordinateNode(Geometry.TexCoord).FdPoint.Items[0].X) > 5,
+                'the eye''s texture coordinates are projected (one unit per world unit)');
+          end;
+        end;
+      end;
+    CheckEquals(1, Found, 'the wall eye draws its eye triangles only');
+    { the bumpy reflection: an effect with the EyeWorldSpace library }
+    Found := 0;
+    if Map.AreaScene(0) <> nil then
+      for I := 0 to Map.AreaScene(0).RootNode.FdChildren.Count - 1 do
+      begin
+        Shape := ShapeAt(Map.AreaScene(0).RootNode, I);
+        if (Shape <> nil) and (Shape.Appearance.FdEffects.Count > 0) and
+           (Shape.Appearance.FdEffects[0] is TEffectNode) and
+           (TEffectNode(Shape.Appearance.FdEffects[0]).FdShaderLibraries.Count = 1) then
+        begin
+          Inc(Found);
+          Check(Shape.Appearance.Material is TMaterialNode, 'the bumpy reflection is a lit material (for the bump map)');
+          Check(Shape.Shading = shPhong, 'the bumpy reflection needs Phong shading');
+        end;
+      end;
+    Check(Found >= 1, 'the shiny pillar''s reflection is bumpy');
+    { the tube turns to the view: from room B's west the beam (x 552..568
+      at y = 100) faces +x }
+    UpdateViewDeforms(D3ToCge(Vector3(400, 100, 68)));
+    Found := 0;
+    if Map.AreaNonSolidScene(1) <> nil then
+      for I := 0 to Map.AreaNonSolidScene(1).RootNode.FdChildren.Count - 1 do
+      begin
+        Shape := ShapeAt(Map.AreaNonSolidScene(1).RootNode, I);
+        if (Shape <> nil) and (Shape.Geometry is TIndexedTriangleSetNode) and
+           (TIndexedTriangleSetNode(Shape.Geometry).Coord is TCoordinateNode) then
+        begin
+          Coord := TCoordinateNode(TIndexedTriangleSetNode(Shape.Geometry).Coord);
+          if (Coord.FdPoint.Count = 4) and (Abs(Coord.FdPoint.Items[0].X - 560) < 0.01) and
+             (Abs(Coord.FdPoint.Items[0].Z + 100) < 8.01) then
+          begin
+            Inc(Found);
+            CheckNear(8, Abs(Coord.FdPoint.Items[0].Z + 100), 'the beam turned across the view, 16 wide');
+            CheckNear(8, Abs(Coord.FdPoint.Items[2].Z + 100), 'the beam''s far end too');
+          end;
+        end;
+      end;
+    CheckEquals(1, Found, 'the beam faces the camera');
+    { the blob's eye follows its head: its texture coordinates are
+      projected from the skinned positions }
+    ME := Map.FindModelEntity('blob_1');
+    Check(ME <> nil, 'blob_1 has a model');
+    if ME <> nil then
+    begin
+      Found := 0;
+      for I := 0 to ME.Instance.Scene.RootNode.FdChildren.Count - 1 do
+      begin
+        Shape := ShapeAt(ME.Instance.Scene.RootNode, I);
+        if (Shape <> nil) and (Shape.Geometry is TIndexedTriangleSetNode) and
+           (TIndexedTriangleSetNode(Shape.Geometry).FdIndex.Count = 6) then
+        begin
+          Inc(Found);
+          Geometry := TIndexedTriangleSetNode(Shape.Geometry);
+          if Geometry.TexCoord is TTextureCoordinateNode then
+          begin
+            CheckNear(-6.43, TTextureCoordinateNode(Geometry.TexCoord).FdPoint.Items[0].X,
+              'the blob eye''s s from the origin through the focus', 0.1);
+            CheckNear(-5.5, TTextureCoordinateNode(Geometry.TexCoord).FdPoint.Items[0].Y,
+              'the blob eye''s v', 0.1);
+          end else
+            Check(False, 'the blob eye has texture coordinates');
+        end;
+      end;
+      CheckEquals(1, Found, 'the blob draws its eye quad');
+    end;
+
+    { projected decals: onto crate_1's top (an entity scene) and across
+      the south wall and the floor (the world) }
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Step(0.1);
+    B := Map.FindBrush('crate_1');
+    Check(B <> nil, 'crate_1');
+    Before := 0;
+    if B <> nil then
+      Before := B.Scene.RootNode.FdChildren.Count;
+    Game.AddDecal('textures/test/decal_hole', Vector3(128, -160, 64), Vector3(0, 0, 1), 8);
+    CheckEquals(1, Game.Decals.Decals.Count, 'a decal on the crate');
+    if Game.Decals.Decals.Count = 1 then
+    begin
+      D := Game.Decals.Decals[0];
+      Check(D.Target > 0, 'the decal is on an entity scene');
+      { the box across the top face's two triangles (its diagonal splits
+        it): two to six triangles, nothing from the sides }
+      Check((D.TriangleCount >= 2) and (D.TriangleCount <= 6),
+        Format('the crate''s top face, clipped (%d triangles)', [D.TriangleCount]));
+      CheckEquals(1, Game.Decals.TargetCount, 'one entity scene holds decals');
+      if Length(D.Vertexes) >= 3 then
+      begin
+        CheckNear(32, D.Vertexes[0].Position.Y, 'the decal is in the crate''s local coordinates (its top at 32)');
+        CheckNear(1, D.Vertexes[0].Fade, 'on the surface: no depth fade');
+        Check((D.Vertexes[0].TexCoord.X >= -0.01) and (D.Vertexes[0].TexCoord.X <= 1.01), 'texture coordinates across the box');
+      end;
+    end;
+    Step(0.1);
+    if B <> nil then
+      CheckEquals(Before + 1, B.Scene.RootNode.FdChildren.Count, 'the crate''s scene got a group of decal shapes');
+    Game.AddDecal('textures/test/decal_hole', Vector3(-200, -256, 4), Vector3(0, 1, 0), 16);
+    CheckEquals(2, Game.Decals.Decals.Count, 'a decal on the south wall near the floor');
+    if Game.Decals.Decals.Count = 2 then
+    begin
+      D := Game.Decals.Decals[1];
+      CheckEquals(0, D.Target, 'the wall decal is on the world');
+      Check(D.TriangleCount > 2, Format('the wall and the floor both got pieces (%d triangles)', [D.TriangleCount]));
+      Found := 0;
+      for I := 0 to High(D.Vertexes) do
+        if D.Vertexes[I].Fade < 0.99 then
+          Inc(Found);
+      Check(Found > 0, 'the floor piece fades with the depth');
+    end;
+    Step(0.1);
+    Check(not Game.Decals.Scene.BoundingBox.IsEmpty, 'the world decal is drawn');
+    Step(4.5);
+    CheckEquals(0, Game.Decals.Decals.Count, 'the decals faded');
+    CheckEquals(0, Game.Decals.TargetCount, 'the crate''s decals went with them');
+  finally
+    Game.Free;
+    World.Free;
+  end;
+end;
 
 procedure TestGuiScripts;
 var
@@ -5759,6 +6174,7 @@ begin
   TestParticleEntities;
   TestDamageEffects;
   TestExactStages;
+  TestMirrorsDeformsDecals;
   TestGuiScripts;
   TestPlayerInfo;
   Writeln(Format('%d passed, %d failed', [Passed, Failed]));

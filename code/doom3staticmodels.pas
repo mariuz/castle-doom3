@@ -31,7 +31,13 @@ type
     Material: String;
     Positions: array of TVector3; { Doom 3 coordinates }
     TexCoords: array of TVector2; { CGE convention }
+    { Vertex colors (LWO RGB / RGBA maps, ASE color vertexes), one per
+      position; empty when the model has none (Doom 3 then uses white).
+      Stages with "vertexColor" are modulated by them (BuildNode). }
+    Colors: array of TVector4;
     Indexes: array of Int32;      { counter-clockwise from the front }
+    { Has vertex colors for every vertex? }
+    function HasColors: Boolean;
     function TriangleCount: Integer;
     { Smooth normals like Doom 3: vertexes with the same position and
       texture coordinate share a normal (Doom 3 coordinates). }
@@ -84,7 +90,7 @@ implementation
 
 uses
   Math,
-  CastleLog,
+  CastleLog, CastleUtils,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3LightEffects, Doom3Gui,
   Doom3Collision;
 
@@ -129,6 +135,11 @@ end;
 function TD3StaticSurface.TriangleCount: Integer;
 begin
   Result := Length(Indexes) div 3;
+end;
+
+function TD3StaticSurface.HasColors: Boolean;
+begin
+  Result := (Length(Colors) > 0) and (Length(Colors) = Length(Positions));
 end;
 
 function TD3StaticSurface.ComputeNormals: TVector3List;
@@ -309,6 +320,8 @@ type
     Verts: array of Integer;
     UVs: array of TVector2;     { per polygon-vertex (VMAD), else from VMAP }
     HasUV: array of Boolean;
+    Colors: array of TVector4;  { per polygon-vertex colors (VMAD RGB / RGBA) }
+    HasColor: array of Boolean;
     Tag: Integer;
   end;
 var
@@ -319,13 +332,18 @@ var
   Points: array of TVector3;
   PointUVs: array of TVector2;
   PointHasUV: array of Boolean;
+  PointColors: array of TVector4;
+  PointHasColor: array of Boolean;
+  AnyColor: Boolean;
   Polys: array of TPolygon;
   VmapType, PolsType, PtagType: String;
   UV: TVector2;
+  Color: TVector4;
   Surf: TD3StaticSurface;
   Base, K: Integer;
   PosLw: TVector3;
 begin
+  AnyColor := False;
   Result := False;
   R := TLwoReader.Create;
   Tags := TStringList.Create;
@@ -370,6 +388,8 @@ begin
         SetLength(Points, PointBase + Count);
         SetLength(PointUVs, Length(Points));
         SetLength(PointHasUV, Length(Points));
+        SetLength(PointColors, Length(Points));
+        SetLength(PointHasColor, Length(Points));
         for I := 0 to Count - 1 do
         begin
           PosLw.X := R.F4;
@@ -409,6 +429,40 @@ begin
               PointUVs[V] := UV;
               PointHasUV[V] := True;
             end;
+          end
+        else
+        if ((VmapType = 'RGB ') and (Dim = 3)) or ((VmapType = 'RGBA') and (Dim = 4)) then
+          { vertex colors, like Doom 3's lwo2 reader (idRenderModelStatic
+            takes the first color map) }
+          while R.Pos < ChunkEnd do
+          begin
+            V := PointBase + R.VX;
+            if ChunkId = 'VMAD' then
+              P := PolyBase + R.VX
+            else
+              P := -1;
+            Color.X := R.F4;
+            Color.Y := R.F4;
+            Color.Z := R.F4;
+            if Dim = 4 then
+              Color.W := R.F4
+            else
+              Color.W := 1;
+            AnyColor := True;
+            if (P >= 0) and (P < Length(Polys)) then
+            begin
+              for J := 0 to High(Polys[P].Verts) do
+                if Polys[P].Verts[J] = V then
+                begin
+                  Polys[P].Colors[J] := Color;
+                  Polys[P].HasColor[J] := True;
+                end;
+            end else
+            if (P < 0) and (V < Length(Points)) then
+            begin
+              PointColors[V] := Color;
+              PointHasColor[V] := True;
+            end;
           end;
       end else
       if ChunkId = 'POLS' then
@@ -422,6 +476,8 @@ begin
           SetLength(Polys[High(Polys)].Verts, Count);
           SetLength(Polys[High(Polys)].UVs, Count);
           SetLength(Polys[High(Polys)].HasUV, Count);
+          SetLength(Polys[High(Polys)].Colors, Count);
+          SetLength(Polys[High(Polys)].HasColor, Count);
           Polys[High(Polys)].Tag := -1;
           for J := 0 to Count - 1 do
             Polys[High(Polys)].Verts[J] := PointBase + R.VX;
@@ -456,6 +512,8 @@ begin
       Base := Length(Surf.Positions);
       SetLength(Surf.Positions, Base + Length(Polys[I].Verts));
       SetLength(Surf.TexCoords, Base + Length(Polys[I].Verts));
+      if AnyColor then
+        SetLength(Surf.Colors, Base + Length(Polys[I].Verts));
       for J := 0 to High(Polys[I].Verts) do
       begin
         V := Polys[I].Verts[J];
@@ -469,6 +527,16 @@ begin
           Surf.TexCoords[Base + J] := PointUVs[V]
         else
           Surf.TexCoords[Base + J] := TVector2.Zero;
+        if AnyColor then
+        begin
+          if Polys[I].HasColor[J] then
+            Surf.Colors[Base + J] := Polys[I].Colors[J]
+          else
+          if PointHasColor[V] then
+            Surf.Colors[Base + J] := PointColors[V]
+          else
+            Surf.Colors[Base + J] := Vector4(1, 1, 1, 1);
+        end;
       end;
       K := Length(Surf.Indexes);
       SetLength(Surf.Indexes, K + 3 * (Length(Polys[I].Verts) - 2));
@@ -569,8 +637,10 @@ var
   Materials: specialize TObjectList<TAseMaterial>;
   Verts: array of TVector3;
   TVerts: array of TVector2;
+  CVerts: array of TVector3;
   Faces: array of array [0..2] of Integer;
   TFaces: array of array [0..2] of Integer;
+  CFaces: array of array [0..2] of Integer;
   MtlIds: array of Integer;
   MaterialRef, Depth, I, K, N, Base: Integer;
   InMesh: Boolean;
@@ -581,11 +651,15 @@ var
   procedure FlushObject;
   var
     F, C: Integer;
+    HasColors: Boolean;
   begin
     if (Length(Faces) = 0) or (Materials.Count = 0) then
       Exit;
     if (MaterialRef < 0) or (MaterialRef >= Materials.Count) then
       MaterialRef := 0;
+    { *MESH_CVERTLIST / *MESH_CFACELIST: vertex colors per face corner
+      (idRenderModelStatic::ConvertASEToModelSurfaces) }
+    HasColors := (Length(CVerts) > 0) and (Length(CFaces) >= Length(Faces));
     for F := 0 to High(Faces) do
     begin
       Mat := Materials[MaterialRef].ForFace(MtlIds[F]);
@@ -596,6 +670,8 @@ var
       SetLength(Surf.Positions, Base + 3);
       SetLength(Surf.TexCoords, Base + 3);
       SetLength(Surf.Indexes, Base + 3);
+      if HasColors or (Length(Surf.Colors) > 0) then
+        SetLength(Surf.Colors, Base + 3);
       for C := 0 to 2 do
       begin
         if (Faces[F][C] >= 0) and (Faces[F][C] < Length(Verts)) then
@@ -607,13 +683,21 @@ var
         Surf.TexCoords[Base + C] := Vector2(UV.X * Mat.UTiling + Mat.UOffset,
           UV.Y * Mat.VTiling + Mat.VOffset);
         Surf.Indexes[Base + C] := Base + C;
+        if Length(Surf.Colors) > 0 then
+        begin
+          Surf.Colors[Base + C] := Vector4(1, 1, 1, 1);
+          if HasColors and (CFaces[F][C] >= 0) and (CFaces[F][C] < Length(CVerts)) then
+            Surf.Colors[Base + C] := Vector4(CVerts[CFaces[F][C]], 1);
+        end;
       end;
     end;
     Faces := nil;
     TFaces := nil;
+    CFaces := nil;
     MtlIds := nil;
     Verts := nil;
     TVerts := nil;
+    CVerts := nil;
   end;
 
 begin
@@ -706,6 +790,32 @@ begin
             TFaces[I][K] := N;
         end;
       end else
+      if InMesh and SameText(Tok, '*MESH_NUMCVERTEX') then
+        SetLength(CVerts, L.ReadInt)
+      else
+      if InMesh and SameText(Tok, '*MESH_VERTCOL') then
+      begin
+        I := L.ReadInt;
+        if (I >= 0) and (I < Length(CVerts)) then
+        begin
+          CVerts[I].X := L.ReadFloat;
+          CVerts[I].Y := L.ReadFloat;
+          CVerts[I].Z := L.ReadFloat;
+        end;
+      end else
+      if InMesh and SameText(Tok, '*MESH_NUMCVFACES') then
+        SetLength(CFaces, L.ReadInt)
+      else
+      if InMesh and SameText(Tok, '*MESH_CFACE') then
+      begin
+        I := L.ReadInt;
+        for K := 0 to 2 do
+        begin
+          N := L.ReadInt;
+          if (I >= 0) and (I < Length(CFaces)) then
+            CFaces[I][K] := N;
+        end;
+      end else
       if SameText(Tok, '*MATERIAL_REF') then
         MaterialRef := L.ReadInt;
     end;
@@ -741,12 +851,13 @@ function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStr
 var
   S: TD3StaticSurface;
   Coords: array of TVector3;
+  UVs: array of TVector2;
+  Indexes: array of Int32;
   I, J: Integer;
   Coord: TCoordinateNode;
   NormalNode: TNormalNode;
   Normals: TVector3List;
   TexCoord: TTextureCoordinateNode;
-  Geometry: TIndexedTriangleSetNode;
   Shape: TShapeNode;
   SkinDecl: TD3Skin;
   MaterialName: String;
@@ -754,6 +865,40 @@ var
   GuiUrl: String;
   Kind: TD3SpecialShape;
   App: TAppearanceNode;
+  Tube, Inverse: Boolean;
+  Islands: TD3EyeIslands;
+  EyeIndexes: TInt32List;
+
+  { A shape of the surface's triangles (sharing coordinates, normals and
+    texture coordinates) with an appearance; a "deform tube" surface's
+    quads follow the view (each shape has its own coordinates then). }
+  function SurfaceShape(const App: TAppearanceNode; const Overlay: Integer): TShapeNode;
+  var
+    Geometry: TIndexedTriangleSetNode;
+    C: TCoordinateNode;
+  begin
+    Geometry := TIndexedTriangleSetNode.Create;
+    if Tube then
+    begin
+      C := TCoordinateNode.Create;
+      C.SetPoint(Coords);
+      Geometry.Coord := C;
+      RegisterTubeSurface(C, Coords, Indexes);
+    end else
+      Geometry.Coord := Coord;
+    Geometry.TexCoord := TexCoord;
+    Geometry.Normal := NormalNode;
+    Geometry.SetIndex(Indexes);
+    Geometry.Ccw := True;
+    Geometry.Solid := not M.TwoSided and not Tube;
+    { stages with "vertexColor" are modulated by the model's vertex colors }
+    if S.HasColors and StageUsesVertexColors(M, Overlay, Inverse) then
+      Geometry.Color := VertexColorNode(S.Colors, Inverse);
+    Result := TShapeNode.Create;
+    Result.Geometry := Geometry;
+    Result.Appearance := App;
+  end;
+
 begin
   Result := TX3DRootNode.Create;
   SkinDecl := nil;
@@ -773,14 +918,32 @@ begin
     SetLength(Coords, Length(S.Positions));
     for I := 0 to High(S.Positions) do
       Coords[I] := D3ToCge(S.Positions[I]);
-    Coord := TCoordinateNode.Create;
-    Coord.SetPoint(Coords);
+    UVs := Copy(S.TexCoords);
+    Indexes := S.Indexes;
+    Tube := M.Deform = 'tube';
+    { "deform eyeball": the eye triangles with the projected texture
+      coordinates, the origin and focus triangles dropped }
+    if (M.Deform = 'eyeball') and EyeballIslands(S.Indexes, Length(Coords), Islands, Name + ' ' + S.Material) then
+    begin
+      EyeIndexes := EyeballIndexes(Islands, S.Indexes);
+      try
+        SetLength(Indexes, EyeIndexes.Count);
+        for I := 0 to EyeIndexes.Count - 1 do
+          Indexes[I] := EyeIndexes[I];
+      finally
+        EyeIndexes.Free;
+      end;
+      EyeballTexCoords(Islands, Coords, UVs);
+      Inc(EyeballSurfaceCount);
+    end;
+    Coord := nil;
+    if not Tube then
+    begin
+      Coord := TCoordinateNode.Create;
+      Coord.SetPoint(Coords);
+    end;
     TexCoord := TTextureCoordinateNode.Create;
-    TexCoord.SetPoint(S.TexCoords);
-    Geometry := TIndexedTriangleSetNode.Create;
-    Geometry.Coord := Coord;
-    Geometry.TexCoord := TexCoord;
-    Geometry.SetIndex(S.Indexes);
+    TexCoord.SetPoint(UVs);
     Normals := S.ComputeNormals;
     try
       for I := 0 to Normals.Count - 1 do
@@ -790,20 +953,16 @@ begin
     finally
       Normals.Free;
     end;
-    Geometry.Normal := NormalNode;
-    Geometry.Ccw := True;
-    Geometry.Solid := not M.TwoSided;
-    Shape := TShapeNode.Create;
-    Shape.Geometry := Geometry;
+    Kind := ssNone;
     if GuiUrl <> '' then
-      Shape.Appearance := GuiAppearance(GuiUrl)
+      App := GuiAppearance(GuiUrl)
     else
     if M.DrawAsGlass then
-    begin
-      Shape.Appearance := GlassAppearance(MaterialName, Kind);
-      SetupSpecialShape(Shape, Kind);
-    end else
-      Shape.Appearance := MaterialAppearance(MaterialName, Parms);
+      App := GlassAppearance(MaterialName, Kind)
+    else
+      App := MaterialAppearance(MaterialName, Parms);
+    Shape := SurfaceShape(App, -1);
+    SetupSpecialShape(Shape, Kind);
     if (GuiUrl = '') and not M.DrawAsGlass then
       Result.AddChildren(ConditionalShapeNode(Shape, BaseStageCondition(M), Parms))
     else
@@ -814,16 +973,7 @@ begin
     if (GuiUrl = '') and not M.DrawAsGlass then
       for J := 0 to M.OverlayCount - 1 do
       begin
-        Geometry := TIndexedTriangleSetNode.Create;
-        Geometry.Coord := Coord;
-        Geometry.TexCoord := TexCoord;
-        Geometry.Normal := NormalNode;
-        Geometry.SetIndex(S.Indexes);
-        Geometry.Ccw := True;
-        Geometry.Solid := not M.TwoSided;
-        Shape := TShapeNode.Create;
-        Shape.Geometry := Geometry;
-        Shape.Appearance := OverlayAppearance(MaterialName, J, Parms);
+        Shape := SurfaceShape(OverlayAppearance(MaterialName, J, Parms), J);
         Result.AddChildren(ConditionalShapeNode(Shape, OverlayStageCondition(M, J), Parms));
       end;
 
@@ -833,37 +983,33 @@ begin
       App := HazeOverlayAppearance(MaterialName);
       if App <> nil then
       begin
-        Geometry := TIndexedTriangleSetNode.Create;
-        Geometry.Coord := Coord;
-        Geometry.TexCoord := TexCoord;
-        Geometry.Normal := NormalNode;
-        Geometry.SetIndex(S.Indexes);
-        Geometry.Ccw := True;
-        Geometry.Solid := not M.TwoSided;
-        Shape := TShapeNode.Create;
-        Shape.Geometry := Geometry;
-        Shape.Appearance := App;
+        Shape := SurfaceShape(App, MaxInt);
         SetupSpecialShape(Shape, ssHaze);
         Result.AddChildren(Shape);
       end;
     end;
 
-    { a cube map reflection stage over a lit or plain surface }
+    { a cube map reflection stage over a lit or plain surface (perturbed
+      by the bump map when the material has one) }
     if (GuiUrl = '') and not M.DrawAsGlass and (M.ReflectCubeMap <> '') then
     begin
       App := ReflectionAppearance(MaterialName);
       if App <> nil then
       begin
-        Geometry := TIndexedTriangleSetNode.Create;
-        Geometry.Coord := Coord;
-        Geometry.Normal := NormalNode;
-        Geometry.SetIndex(S.Indexes);
-        Geometry.Ccw := True;
-        Geometry.Solid := not M.TwoSided;
-        Shape := TShapeNode.Create;
-        Shape.Geometry := Geometry;
-        Shape.Appearance := App;
-        SetupSpecialShape(Shape, ssReflection);
+        Shape := SurfaceShape(App, MaxInt);
+        SetupSpecialShape(Shape, ReflectionKind(M));
+        Result.AddChildren(Shape);
+      end;
+    end;
+
+    { a mirror stage over a lit or plain surface }
+    if (GuiUrl = '') and not M.DrawAsGlass and M.HasMirror then
+    begin
+      App := MirrorAppearance(MaterialName);
+      if App <> nil then
+      begin
+        Shape := SurfaceShape(App, MaxInt);
+        SetupSpecialShape(Shape, ssMirror);
         Result.AddChildren(Shape);
       end;
     end;

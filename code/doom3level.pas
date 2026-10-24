@@ -614,6 +614,7 @@ var
   M: TD3Material;
   Coords, Normals: array of TVector3;
   UVs: array of TVector2;
+  Indexes: array of Int32;
   I, J: Integer;
   Group: TAbstractGroupingNode;
   GuiUrl: String;
@@ -621,6 +622,20 @@ var
   Kind: TD3SpecialShape;
   Shape: TShapeNode;
   FlareSize: Single;
+  Tube: Boolean;
+  Islands: TD3EyeIslands;
+  EyeIndexes: TInt32List;
+
+  { The surface's shape with an appearance; "deform tube" shapes are
+    registered to follow the view. }
+  function SurfaceShape(const App: TAppearanceNode): TShapeNode;
+  begin
+    Result := ProcShape(Coords, Normals, UVs, Indexes, not M.TwoSided and not Tube, App);
+    if Tube then
+      RegisterTubeSurface(TCoordinateNode((Result.Geometry as TIndexedTriangleSetNode).Coord),
+        Coords, Indexes);
+  end;
+
 begin
   for Surf in Model.Surfaces do
   begin
@@ -663,6 +678,25 @@ begin
       { CGE images are bottom-to-top, Doom 3 t goes down the image }
       UVs[I] := Vector2(Surf.Vertexes[I].ST.X, 1 - Surf.Vertexes[I].ST.Y);
     end;
+    Indexes := Surf.Indexes;
+    { "deform tube": the quads turn to face the view (two sided, like
+      Doom 3 wants their materials); "deform eyeball": the eye triangles
+      with the projected texture coordinates, the origin and focus
+      triangles dropped }
+    Tube := M.Deform = 'tube';
+    if (M.Deform = 'eyeball') and EyeballIslands(Surf.Indexes, Length(Coords), Islands, Surf.Material) then
+    begin
+      EyeIndexes := EyeballIndexes(Islands, Surf.Indexes);
+      try
+        SetLength(Indexes, EyeIndexes.Count);
+        for I := 0 to EyeIndexes.Count - 1 do
+          Indexes[I] := EyeIndexes[I];
+      finally
+        EyeIndexes.Free;
+      end;
+      EyeballTexCoords(Islands, Coords, UVs);
+      Inc(EyeballSurfaceCount);
+    end;
     Kind := ssNone;
     if GuiUrl <> '' then
       App := GuiAppearance(GuiUrl)
@@ -674,12 +708,12 @@ begin
       if Kind = ssHaze then
         Inc(HazeCount)
       else
-      if Kind = ssReflection then
+      if Kind in [ssReflection, ssBumpyReflection] then
         Inc(ReflectionCount);
     end
     else
       App := MaterialAppearance(Surf.Material, Parms);
-    Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
+    Shape := SurfaceShape(App);
     SetupSpecialShape(Shape, Kind);
     if (GuiUrl = '') and not M.DrawAsGlass then
       Group.AddChildren(ConditionalShapeNode(Shape, BaseStageCondition(M), Parms))
@@ -691,8 +725,7 @@ begin
     if (GuiUrl = '') and not M.DrawAsGlass then
       for J := 0 to M.OverlayCount - 1 do
       begin
-        Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes,
-          not M.TwoSided, OverlayAppearance(Surf.Material, J, Parms));
+        Shape := SurfaceShape(OverlayAppearance(Surf.Material, J, Parms));
         Group.AddChildren(ConditionalShapeNode(Shape, OverlayStageCondition(M, J), Parms));
         Inc(OverlayShapeCount);
       end;
@@ -704,23 +737,36 @@ begin
       App := HazeOverlayAppearance(Surf.Material);
       if App <> nil then
       begin
-        Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
+        Shape := SurfaceShape(App);
         SetupSpecialShape(Shape, ssHaze);
         NonSolidGroup.AddChildren(Shape);
         Inc(HazeCount);
       end;
     end;
 
-    { a cube map reflection stage over a lit or plain surface }
+    { a cube map reflection stage over a lit or plain surface (perturbed
+      by the bump map when the material has one) }
     if (GuiUrl = '') and not M.DrawAsGlass and (M.ReflectCubeMap <> '') then
     begin
       App := ReflectionAppearance(Surf.Material);
       if App <> nil then
       begin
-        Shape := ProcShape(Coords, Normals, UVs, Surf.Indexes, not M.TwoSided, App);
-        SetupSpecialShape(Shape, ssReflection);
+        Shape := SurfaceShape(App);
+        SetupSpecialShape(Shape, ReflectionKind(M));
         Group.AddChildren(Shape);
         Inc(ReflectionCount);
+      end;
+    end;
+
+    { a mirror stage over a lit or plain surface }
+    if (GuiUrl = '') and not M.DrawAsGlass and M.HasMirror then
+    begin
+      App := MirrorAppearance(Surf.Material);
+      if App <> nil then
+      begin
+        Shape := SurfaceShape(App);
+        SetupSpecialShape(Shape, ssMirror);
+        Group.AddChildren(Shape);
       end;
     end;
   end;
@@ -1218,7 +1264,11 @@ begin
       FLights[I].Node.IsOn := On;
   end;
   if Camera <> nil then
+  begin
     UpdateShadowLight(Camera.WorldTranslation);
+    { "deform tube" surfaces turn to face the view }
+    UpdateViewDeforms(Camera.WorldTranslation);
+  end;
   { shadow casting brushes of visible areas and of areas the shadow light
     reaches }
   for I := 0 to High(FCasterScenes) do
@@ -1985,7 +2035,7 @@ var
   Base: String;
   E: TD3MapEntity;
   B: TD3BrushEntity;
-  Overlays, Conditionals, Sprites, Glass, Haze, Reflections: Integer;
+  Overlays, Conditionals, Sprites, Glass, Haze, Reflections, MirrorsBefore, Tubes, Eyeballs: Integer;
 begin
   ClearMap;
   if FMapName = '' then
@@ -2027,6 +2077,9 @@ begin
   Glass := GlassCount;
   Haze := HazeCount;
   Reflections := ReflectionCount;
+  MirrorsBefore := MirrorCount;
+  Tubes := TubeSurfaceCount;
+  Eyeballs := EyeballSurfaceCount;
   BuildWorld;
   LoadProfileStep('world');
   BuildCollision(Base);
@@ -2035,12 +2088,14 @@ begin
   LoadProfileStep('brushes');
   WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
     [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
-  WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections',
-    [HazeCount - Haze, ReflectionCount - Reflections]);
+  WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections, %d mirrors',
+    [HazeCount - Haze, ReflectionCount - Reflections, MirrorCount - MirrorsBefore]);
   BuildStaticModelEntities;
   LoadProfileStep('static models');
   WritelnLog('Doom3Level', 'Conditional stages: %d shapes with an "if" condition',
     [ConditionalShapeCount - Conditionals]);
+  WritelnLog('Doom3Level', 'Deforms: %d tube shapes, %d eyeball surfaces',
+    [TubeSurfaceCount - Tubes, EyeballSurfaceCount - Eyeballs]);
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
   { the GUIs on the surfaces become live (events, transitions, the cursor) }

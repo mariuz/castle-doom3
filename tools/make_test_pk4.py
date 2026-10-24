@@ -307,6 +307,20 @@ def stage_images():
             row.append((v, v, v, a))
         rows.append(row)
     add('textures/test/decal_hole.tga', tga(n, n, rows, alpha=True))
+    rows = []
+    for y in range(n):
+        row = []
+        for x in range(n):
+            # an eye: a white ball, a blue iris, a black pupil in the center
+            r = math.hypot(x - 31.5, y - 31.5) / 31.5
+            if r < 0.18:
+                row.append((0.02, 0.02, 0.02))
+            elif r < 0.42:
+                row.append((0.15, 0.35, 0.8))
+            else:
+                row.append((0.95, 0.95, 0.92))
+        rows.append(row)
+    add('textures/test/eye.tga', tga(n, n, rows))
 
 
 def sky_and_screen_images():
@@ -898,6 +912,34 @@ POOL = 'textures/test/pool'
 HAZEWALL = 'textures/test/hazewall'
 FLARE2 = 'textures/test/flare2'
 CRATEGLOW = 'textures/test/crateglow'
+MIRROR = 'textures/test/mirror'
+BEAM = 'textures/test/beam'
+EYE = 'textures/test/eyeball'
+EXPAND = 'textures/test/expand'
+MOVE = 'textures/test/move'
+
+
+def eyeball_surface(model, mat, center, half, normal_sign=-1):
+    """A "deform eyeball" surface on a wall in the plane y = center.y facing
+    -y: the eye quad (two triangles), its origin triangle 4 units behind it
+    and its focus triangle 20 units in front, shifted 6 units along +x (so
+    the pupil looks a little that way)."""
+    cx, cy, cz = center
+    surf = model.surf(mat)
+    normal = (0, normal_sign, 0)
+    base = len(surf.verts)
+    # counter-clockwise seen from the front (-y: +x is to the right)
+    corners = [(cx - half, cy, cz - half), (cx + half, cy, cz - half),
+               (cx + half, cy, cz + half), (cx - half, cy, cz + half)]
+    for p, st in zip(corners, ((0, 1), (1, 1), (1, 0), (0, 0))):
+        surf.verts.append((p, st, normal))
+    surf.indexes += [base, base + 2, base + 1, base, base + 3, base + 2]
+    for (ox, oy) in ((0, -4 * normal_sign), (6, 20 * normal_sign)):
+        base = len(surf.verts)
+        for p in ((cx + ox - 2, cy + oy, cz - 2), (cx + ox + 2, cy + oy, cz - 2), (cx + ox, cy + oy, cz + 2)):
+            surf.verts.append((p, (0, 0), normal))
+        surf.indexes += [base, base + 2, base + 1]
+
 
 # Room A: x -256..256, y -256..256, z 0..192
 # Doorway tunnel (area 1): x 256..272, y -48..48, z 0..112
@@ -925,6 +967,10 @@ wall_rect(area0, FLARE, 'z', 176, -1, -12, 12, -12, 12)
 # a decal (polygonOffset) in the floor's plane, west of the start: one
 # whole texture over the 32 x 32 rectangle
 wall_rect(area0, DECAL, 'z', 0, 1, -128, -96, -128, -96, uv_scale=1 / 32.0)
+# a mirror on the west wall (mirrorRenderMap), 100 x 100
+wall_rect(area0, MIRROR, 'x', -255, 1, 40, 140, 40, 140)
+# an eye on the north wall (deform eyeball), 32 wide, looking a little +x
+eyeball_surface(area0, EYE, (60, 254, 100), 16)
 
 # doorway tunnel
 wall_rect(area1, FLOOR, 'z', 0, 1, 256, 272, -48, 48)
@@ -956,6 +1002,8 @@ wall_rect(area1, HAZEWALL, 'x', 273, 1, 200, 300, 8, 100)
 wall_rect(area1, POOL, 'z', 0.5, 1, 300, 380, 120, 200)
 # a flare (deform flare 24) under light_5
 wall_rect(area1, FLARE2, 'z', 196, -1, 816, 824, -4, 4)
+# a vertical beam 16 wide (deform tube: it turns to face the viewer)
+wall_rect(area1, BEAM, 'y', 100, -1, 552, 568, 20, 200)
 for (cx, cy) in ((448, -192), (448, 192), (640, 250)):
     wall_rect(area1, GLOW, 'z', 287, -1, cx - 32, cx + 32, cy - 32, cy + 32)
 # a status screen on the north wall of room B (y = 384, facing -Y: right is +X)
@@ -1000,6 +1048,12 @@ box(crawl, {'*': METAL}, (-8, -40, -6), (8, 40, 6))
 spinner = Model('spinner_1')
 box(spinner, {'*': METAL}, (-64, -6, -6), (64, 6, 6))
 box(spinner, {'*': METAL}, (-6, -64, -6), (6, 64, 6))
+# a box whose faces pulse along their normals (deform expand)
+pulse = Model('pulse_1')
+box(pulse, EXPAND, (-16, -16, -16), (16, 16, 16))
+# a plate sliding along x (deform move)
+slider = Model('slider_1')
+box(slider, MOVE, (-12, -4, -12), (12, 4, 12))
 
 
 def fmt(v):
@@ -1054,7 +1108,8 @@ def box_shadow_volume(mn, mx, light, scale=4.0):
 
 def proc_text():
     out = ['mapProcFile003', '']
-    for m in (area0, area1, door, crate, crate2, spinner, panel, door2, doorlight, lift, bar, crawl):
+    for m in (area0, area1, door, crate, crate2, spinner, panel, door2, doorlight, lift, bar, crawl,
+              pulse, slider):
         surfs = list(m.surfaces.values())
         out.append('model { /* name = */ "%s" /* numSurfaces = */ %d' % (m.name, len(surfs)))
         out.append('')
@@ -1195,7 +1250,9 @@ def cm_model(name, polygons, brushes=()):
 
 
 def cm_text():
-    world = list(quads_of(area0, skip=(GLOW,))) + list(quads_of(area1, skip=(GLOW,)))
+    # (the mirror, the eye and the beam are decorations in front of the walls,
+    # not in the collision model; the eye isn't made of quads)
+    world = list(quads_of(area0, skip=(GLOW, MIRROR, EYE))) + list(quads_of(area1, skip=(GLOW, BEAM)))
     # an invisible playerclip wall across the west of room A (y = 0, x -256..-120)
     clip_box = ((-256, -4, 0), (-120, 4, 192))
     world += box_quads(clip_box[0], clip_box[1], CLIP)
@@ -1232,7 +1289,7 @@ def cm_text():
     brushes += [(mins, maxs, 'solid,opaque') for mins, maxs in solids]
     out = ['CM "1.00"', '', '1234567890', '']
     out.append(cm_model('worldMap', world, brushes))
-    for m in (door, crate, crate2, spinner, panel, door2, doorlight, lift, bar, crawl):
+    for m in (door, crate, crate2, spinner, panel, door2, doorlight, lift, bar, crawl, pulse, slider):
         out.append(cm_model(m.name, list(quads_of(m)), []))
     # the volume of trigger_once_1 (entity-local, like dmap writes it)
     out.append(cm_model('trigger_once_1', box_quads((-24, -80, -56), (24, 80, 56), TRIGONCE), []))
@@ -1410,6 +1467,14 @@ def map_text():
          'light_radius': '120 120 120', '_color': '0.3 0.6 1', 'start_off': '1'},
         {'classname': 'func_rotating', 'name': 'spinner_1', 'model': 'spinner_1',
          'origin': '590 0 220', 'speed': '45'},
+        # deforms: a pulsing box (expand) and a sliding plate (move) in
+        # room A's north, a sign with vertex colors (an ASE) on the west wall
+        {'classname': 'func_static', 'name': 'pulse_1', 'model': 'pulse_1',
+         'origin': '100 170 24'},
+        {'classname': 'func_static', 'name': 'slider_1', 'model': 'slider_1',
+         'origin': '-100 236 48'},
+        {'classname': 'func_static', 'name': 'sign_1', 'noclipmodel': '1',
+         'model': 'models/mapobjects/test/sign.ase', 'origin': '-254 185 120'},
         # static models
         {'classname': 'func_static', 'name': 'barrel_1',
          'model': 'models/mapobjects/test/barrel.lwo', 'origin': '-60 190 0'},
@@ -1774,6 +1839,94 @@ textures/test/crateglow
 	}
 }
 
+/* a mirror: the scene rendered from the mirrored camera (mirrorRenderMap);
+   the texture matrix is Doom 3's clip space mapping, ignored here */
+textures/test/mirror
+{
+	qer_editorimage textures/test/metal_d.tga
+	noshadows
+	nonsolid
+	{
+		mirrorRenderMap 256 256
+		translate 0.5 , 0.5
+		scale 0.5 , 0.5
+	}
+}
+
+/* a beam: its quads turn to face the viewer (deform tube) */
+textures/test/beam
+{
+	qer_editorimage textures/test/flare.tga
+	deform tube
+	noshadows
+	nonsolid
+	translucent
+	twosided
+	{
+		blend add
+		map textures/test/flare.tga
+	}
+}
+
+/* lit metal pulsing along its normals (deform expand) */
+textures/test/expand
+{
+	qer_editorimage textures/test/metal_d.tga
+	deform expand 2 + 2 * sinTable[ time * 0.5 ]
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	specularmap	textures/test/metal_s.tga
+}
+
+/* lit metal sliding along x (deform move) */
+textures/test/move
+{
+	qer_editorimage textures/test/metal_d.tga
+	deform move 16 * sinTable[ time * 0.25 ]
+	diffusemap	textures/test/metal_d.tga
+	bumpmap		textures/test/metal_local.tga
+	specularmap	textures/test/metal_s.tga
+}
+
+/* an eye looking at its focus triangle (deform eyeball): the texture is
+   projected one unit per texture, so it is scaled over the 32 unit eye */
+textures/test/eyeball
+{
+	qer_editorimage textures/test/eye.tga
+	deform eyeball
+	noshadows
+	nonsolid
+	{
+		map textures/test/eye.tga
+		centerScale 0.03125, 0.03125
+	}
+}
+
+/* the blob's eye (deform eyeball on an md5 mesh), 12 units wide */
+models/test/blob_eye
+{
+	qer_editorimage textures/test/eye.tga
+	deform eyeball
+	noshadows
+	{
+		map textures/test/eye.tga
+		centerScale 0.0625, 0.0625
+	}
+}
+
+/* a sign tinted by its model's vertex colors (an ASE with color vertexes) */
+textures/test/sign
+{
+	qer_editorimage textures/test/lightpanel.tga
+	noshadows
+	nonsolid
+	{
+		blend add
+		map textures/test/lightpanel.tga
+		vertexColor
+	}
+}
+
 /* no specular map: uses the default */
 textures/test/ceiling
 {
@@ -1875,9 +2028,15 @@ models/weapons/test/muzzleflash
 	}
 }
 
+/* the barrel's diffuse stage is modulated by the model's vertex colors
+   (its LWO has an RGBA map: darker at the bottom) */
 models/mapobjects/test/barrel
 {
-	diffusemap	models/mapobjects/test/barrel_d.tga
+	{
+		blend diffusemap
+		map models/mapobjects/test/barrel_d.tga
+		vertexColor
+	}
 	bumpmap		heightmap(models/mapobjects/test/barrel_d.tga, 3)
 	specularmap	models/mapobjects/test/barrel_s.tga
 }
@@ -3109,11 +3268,35 @@ def af_text(name, model, boxes):
     return '\n'.join(out)
 
 
-def md5mesh_text(shader='models/test/blob', boxes=BLOB_BOXES):
+def md5mesh_text(shader='models/test/blob', boxes=BLOB_BOXES, eye=False):
+    """The creature's mesh: a box per joint. With eye, a second mesh on the
+    head joint with the "deform eyeball" material models/test/blob_eye: a 12
+    unit eye quad on the head's front (+x), its origin triangle inside the
+    head and its focus triangle 18 units ahead, shifted 3 along +y."""
+    meshes = []
+
+    def mesh_text(name, mesh_shader, verts, tris, weights):
+        out = ['mesh {', '\t// meshes: %s' % name, '\tshader "%s"' % mesh_shader, '',
+               '\tnumverts %d' % len(verts)]
+        for i, (st, sw, cw) in enumerate(verts):
+            out.append('\tvert %d ( %s %s ) %d %d' % (i, fmt(st[0]), fmt(st[1]), sw, cw))
+        out += ['', '\tnumtris %d' % len(tris)]
+        for i, t in enumerate(tris):
+            out.append('\ttri %d %d %d %d' % (i, t[0], t[1], t[2]))
+        out += ['', '\tnumweights %d' % len(weights)]
+        for i, (j, b, p) in enumerate(weights):
+            out.append('\tweight %d %d %s ( %s %s %s )' % (i, j, fmt(b), fmt(p[0]), fmt(p[1]), fmt(p[2])))
+        out += ['}', '']
+        return '\n'.join(out)
+
     verts, tris, weights = [], [], []
 
-    def add_box(joint_index, mins, maxs):
+    def add_vert(joint_index, c, st):
         jx, jy, jz = JOINTS[joint_index][2]
+        weights.append((joint_index, 1.0, (c[0] - jx, c[1] - jy, c[2] - jz)))
+        verts.append((st, len(weights) - 1, 1))
+
+    def add_box(joint_index, mins, maxs):
         (x0, y0, z0), (x1, y1, z1) = mins, maxs
         corners = [(x, y, z) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)]
         # faces as corner indices, counter-clockwise from outside
@@ -3121,33 +3304,37 @@ def md5mesh_text(shader='models/test/blob', boxes=BLOB_BOXES):
         for f in faces:
             base = len(verts)
             for k, ci in enumerate(f):
-                c = corners[ci]
-                st = ((0, 0), (1, 0), (1, 1), (0, 1))[k]
-                weights.append((joint_index, 1.0, (c[0] - jx, c[1] - jy, c[2] - jz)))
-                verts.append((st, len(weights) - 1, 1))
+                add_vert(joint_index, corners[ci], ((0, 0), (1, 0), (1, 1), (0, 1))[k])
             # clockwise from outside, as Doom 3 expects
             tris.append((base, base + 2, base + 1))
             tris.append((base, base + 3, base + 2))
 
     for joint_index, mins, maxs in boxes:
         add_box(joint_index, mins, maxs)
+    meshes.append(mesh_text('body', shader, verts, tris, weights))
+
+    if eye:
+        verts, tris, weights = [], [], []
+        # the eye quad, counter-clockwise seen from +x (+y to the right)
+        for c, st in zip([(12.5, -6, 72), (12.5, 6, 72), (12.5, 6, 84), (12.5, -6, 84)],
+                         ((0, 1), (1, 1), (1, 0), (0, 0))):
+            add_vert(2, c, st)
+        tris += [(0, 2, 1), (0, 3, 2)]
+        # the origin triangle inside the head, the focus triangle ahead
+        for pts in (((4, -1, 77), (4, 1, 77), (4, 0, 79)), ((30, 2, 77), (30, 4, 77), (30, 3, 79))):
+            base = len(verts)
+            for c in pts:
+                add_vert(2, c, (0, 0))
+            tris.append((base, base + 2, base + 1))
+        meshes.append(mesh_text('eye', 'models/test/blob_eye', verts, tris, weights))
 
     out = ['MD5Version 10', 'commandline "generated by tools/make_test_pk4.py"', '',
-           'numJoints %d' % len(JOINTS), 'numMeshes 1', '', 'joints {']
+           'numJoints %d' % len(JOINTS), 'numMeshes %d' % len(meshes), '', 'joints {']
     for name, parent, p in JOINTS:
         out.append('\t"%s"\t%d ( %s %s %s ) ( 0 0 0 )\t\t// %s' % (
             name, parent, fmt(p[0]), fmt(p[1]), fmt(p[2]), JOINTS[parent][0] if parent >= 0 else ''))
-    out += ['}', '', 'mesh {', '\t// meshes: body', '\tshader "%s"' % shader, '',
-            '\tnumverts %d' % len(verts)]
-    for i, (st, sw, cw) in enumerate(verts):
-        out.append('\tvert %d ( %s %s ) %d %d' % (i, fmt(st[0]), fmt(st[1]), sw, cw))
-    out += ['', '\tnumtris %d' % len(tris)]
-    for i, t in enumerate(tris):
-        out.append('\ttri %d %d %d %d' % (i, t[0], t[1], t[2]))
-    out += ['', '\tnumweights %d' % len(weights)]
-    for i, (j, b, p) in enumerate(weights):
-        out.append('\tweight %d %d %s ( %s %s %s )' % (i, j, fmt(b), fmt(p[0]), fmt(p[1]), fmt(p[2])))
     out += ['}', '']
+    out += meshes
     return '\n'.join(out)
 
 
@@ -3508,12 +3695,13 @@ def lwo_vx(i):
     return struct.pack('>H', i) if i < 0xFF00 else struct.pack('>I', 0xFF000000 | i)
 
 
-def make_lwo(points, polys, uvs, vmad, surfaces):
+def make_lwo(points, polys, uvs, vmad, surfaces, colors=None):
     """points: Doom 3 coordinates; polys: (surface index, [point indexes]) with
     the corners counter-clockwise seen from the front in Doom 3 space; they
     are written reversed, clockwise from the front, as LightWave stores them
     (its y/z swap with Doom 3 only relabels the axes, it isn't a mirror);
-    uvs: per point (u, v); vmad: (point, poly, (u, v)) overrides."""
+    uvs: per point (u, v); vmad: (point, poly, (u, v)) overrides; colors:
+    per point (r, g, b, a) vertex colors (an RGBA map), or None."""
     tags = b''.join(lwo_str(n) for n in surfaces)
     layr = struct.pack('>HH', 0, 0) + struct.pack('>fff', 0, 0, 0) + lwo_str('test')
     # Doom 3 reads LightWave points as (x, z, y)
@@ -3526,7 +3714,12 @@ def make_lwo(points, polys, uvs, vmad, surfaces):
     vmad_data = b'TXUV' + struct.pack('>H', 2) + lwo_str('txuv') + b''.join(
         lwo_vx(pt) + lwo_vx(pl) + struct.pack('>ff', u, v) for pt, pl, (u, v) in vmad)
     body = b'LWO2' + lwo_chunk('TAGS', tags) + lwo_chunk('LAYR', layr) + lwo_chunk('PNTS', pnts)
-    body += lwo_chunk('VMAP', vmap) + lwo_chunk('POLS', pols) + lwo_chunk('PTAG', ptag)
+    body += lwo_chunk('VMAP', vmap)
+    if colors:
+        rgba = b'RGBA' + struct.pack('>H', 4) + lwo_str('color') + b''.join(
+            lwo_vx(i) + struct.pack('>ffff', *c) for i, c in enumerate(colors))
+        body += lwo_chunk('VMAP', rgba)
+    body += lwo_chunk('POLS', pols) + lwo_chunk('PTAG', ptag)
     body += lwo_chunk('VMAD', vmad_data)
     for name in surfaces:
         body += lwo_chunk('SURF', lwo_str(name) + lwo_str(''))
@@ -3554,8 +3747,10 @@ def barrel_lwo():
             vmad.append((n + j, len(polys) - 1, (1.0, 1.0)))
     polys.append((1, [n + i for i in range(n)]))             # top, facing +Z
     polys.append((1, [i for i in reversed(range(n))]))       # bottom, facing -Z
+    # vertex colors (an RGBA map): the bottom ring darker than the top
+    colors = [(0.4, 0.4, 0.4, 1.0)] * n + [(1.0, 1.0, 1.0, 1.0)] * n
     return make_lwo(points, polys, uvs, vmad,
-                    ['models/mapobjects/test/barrel', 'textures/test/metal', 'unused_surface'])
+                    ['models/mapobjects/test/barrel', 'textures/test/metal', 'unused_surface'], colors)
 
 
 def brass_lwo():
@@ -3646,6 +3841,47 @@ def terminal_ase():
     out += ['\t\t}', '\t\t*MESH_NUMTVFACES %d' % len(tfaces), '\t\t*MESH_TFACELIST {']
     for i, t in enumerate(tfaces):
         out.append('\t\t\t*MESH_TFACE %d\t%d\t%d\t%d' % (i, t[0], t[1], t[2]))
+    out += ['\t\t}', '\t}', '\t*PROP_MOTIONBLUR 0', '\t*MATERIAL_REF 0', '}', '']
+    return '\r\n'.join(out)
+
+
+def sign_ase():
+    """A sign: one quad facing +X with color vertexes (*MESH_CVERTLIST /
+    *MESH_CFACELIST): red at the bottom, green at the top; its material
+    (textures/test/sign) has a vertexColor stage."""
+    verts = [(0, -30, -20), (0, 30, -20), (0, 30, 20), (0, -30, 20)]
+    tverts = [(0, 0), (1, 0), (1, 1), (0, 1)]
+    cverts = [(1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+    faces = [(0, 1, 2), (0, 2, 3)]
+    out = ['*3DSMAX_ASCIIEXPORT\t200', '*COMMENT "generated by tools/make_test_pk4.py"',
+           '*SCENE {', '\t*SCENE_FILENAME "sign.max"', '}',
+           '*MATERIAL_LIST {', '\t*MATERIAL_COUNT 1', '\t*MATERIAL 0 {',
+           '\t\t*MATERIAL_NAME "sign"', '\t\t*MATERIAL_CLASS "Standard"',
+           '\t\t*MAP_DIFFUSE {', '\t\t\t*MAP_NAME "Map #1"',
+           '\t\t\t*BITMAP "C:\\Doom3\\base\\textures\\test\\sign.tga"',
+           '\t\t\t*UVW_U_OFFSET 0.0000', '\t\t\t*UVW_V_OFFSET 0.0000',
+           '\t\t\t*UVW_U_TILING 1.0000', '\t\t\t*UVW_V_TILING 1.0000', '\t\t}',
+           '\t}', '}', '*GEOMOBJECT {', '\t*NODE_NAME "sign"', '\t*MESH {', '\t\t*TIMEVALUE 0',
+           '\t\t*MESH_NUMVERTEX %d' % len(verts), '\t\t*MESH_NUMFACES %d' % len(faces),
+           '\t\t*MESH_VERTEX_LIST {']
+    for i, v in enumerate(verts):
+        out.append('\t\t\t*MESH_VERTEX %5d\t%.4f\t%.4f\t%.4f' % (i, v[0], v[1], v[2]))
+    out += ['\t\t}', '\t\t*MESH_FACE_LIST {']
+    for i, (a, b, c) in enumerate(faces):
+        out.append('\t\t\t*MESH_FACE %5d:    A: %5d B: %5d C: %5d AB:    1 BC:    1 CA:    0'
+                   '\t *MESH_SMOOTHING 1 \t*MESH_MTLID 0' % (i, a, b, c))
+    out += ['\t\t}', '\t\t*MESH_NUMTVERTEX %d' % len(tverts), '\t\t*MESH_TVERTLIST {']
+    for i, (u, v) in enumerate(tverts):
+        out.append('\t\t\t*MESH_TVERT %d\t%.4f\t%.4f\t0.0000' % (i, u, v))
+    out += ['\t\t}', '\t\t*MESH_NUMTVFACES %d' % len(faces), '\t\t*MESH_TFACELIST {']
+    for i, (a, b, c) in enumerate(faces):
+        out.append('\t\t\t*MESH_TFACE %d\t%d\t%d\t%d' % (i, a, b, c))
+    out += ['\t\t}', '\t\t*MESH_NUMCVERTEX %d' % len(cverts), '\t\t*MESH_CVERTLIST {']
+    for i, (r, g, b) in enumerate(cverts):
+        out.append('\t\t\t*MESH_VERTCOL %d\t%.4f\t%.4f\t%.4f' % (i, r, g, b))
+    out += ['\t\t}', '\t\t*MESH_NUMCVFACES %d' % len(faces), '\t\t*MESH_CFACELIST {']
+    for i, (a, b, c) in enumerate(faces):
+        out.append('\t\t\t*MESH_CFACE %d\t%d\t%d\t%d' % (i, a, b, c))
     out += ['\t\t}', '\t}', '\t*PROP_MOTIONBLUR 0', '\t*MATERIAL_REF 0', '}', '']
     return '\r\n'.join(out)
 
@@ -4636,7 +4872,7 @@ def main():
     add('particles/test.prt', PARTICLES)
     add('fx/test.fx', FX)
     particle_textures()
-    add('models/md5/test/blob.md5mesh', md5mesh_text())
+    add('models/md5/test/blob.md5mesh', md5mesh_text(eye=True))
     add('models/md5/test/player.md5mesh', md5mesh_text('models/test/player', PLAYER_BOXES))
     add('af/test_creatures.af', '// Castle Doom 3 test articulated figures (generated by tools/make_test_pk4.py)\n\n' +
         af_text('test_blob', 'test_blob', BLOB_BOXES) + '\n' + af_text('test_player', 'model_test_player', PLAYER_BOXES))
@@ -4647,6 +4883,7 @@ def main():
     gui_assets()
     add('models/mapobjects/test/barrel.lwo', barrel_lwo())
     add('models/mapobjects/test/terminal.ase', terminal_ase())
+    add('models/mapobjects/test/sign.ase', sign_ase())
     add('models/items/test/box.lwo', box_lwo(16, 16, 10))
     add('models/weapons/test/brass.lwo', brass_lwo())
     add('models/weapons/test/brass_d.tga', tga(8, 8, [[(0.85, 0.65 - 0.05 * (x % 2), 0.25)] * 8 for x in range(8)]))

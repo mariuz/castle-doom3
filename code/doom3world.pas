@@ -1605,7 +1605,7 @@ begin
   FEmitters := specialize TObjectList<TD3ParticleEmitter>.Create(True);
   FEmitterEntities := specialize TObjectList<TD3EmitterEntity>.Create(True);
   FFx := specialize TObjectList<TD3Fx>.Create(True);
-  FDecals := TD3DecalSystem.Create;
+  FDecals := TD3DecalSystem.Create(nil);
   FPdas := TStringList.Create;
   FEmails := TStringList.Create;
   FVideos := TStringList.Create;
@@ -7905,14 +7905,32 @@ end;
 
 procedure TD3Game.AddDecal(const MaterialName: String; const Position, Normal: TVector3;
   const Size: Single);
+var
+  WorldScenes, EntityScenes: array of TCastleScene;
+  I: Integer;
+  B: TD3BrushEntity;
 begin
   if FMap = nil then
     Exit;
   if FDecals.Scene.Parent = nil then
     FMap.Add(FDecals.Scene);
-  if FDecals.Add(MaterialName, Position, Normal, Size, FTime) then
-    WritelnLog('Doom3World', 'Decal %s at %s (size %s, %d decals)',
-      [MaterialName, Position.ToString, FormatFloat('0.#', Size), FDecals.Decals.Count]);
+  { idRenderWorld::ProjectDecalOntoWorld: the areas' surfaces and the
+    static entities (brush entities, static models) around the hit }
+  WorldScenes := nil;
+  for I := 0 to FMap.AreaCount - 1 do
+    if FMap.AreaScene(I) <> nil then
+      WorldScenes := Concat(WorldScenes, [FMap.AreaScene(I)]);
+  EntityScenes := nil;
+  for B in FMap.Brushes do
+    if (B.Scene <> nil) and B.Scene.Exists then
+      EntityScenes := Concat(EntityScenes, [TCastleScene(B.Scene)]);
+  if FDecals.Project(MaterialName, Position, Normal, Size, FTime, WorldScenes, EntityScenes) then
+    WritelnLog('Doom3World', 'Decal %s at %s (size %s, %d decals, %d triangles, %d entity scenes)',
+      [MaterialName, Position.ToString, FormatFloat('0.#', Size), FDecals.Decals.Count,
+       FDecals.TriangleCount, FDecals.TargetCount])
+  else
+    WritelnLog('Doom3World', 'Decal %s at %s (size %s): no surface in the projection box',
+      [MaterialName, Position.ToString, FormatFloat('0.#', Size)]);
 end;
 
 procedure TD3Game.EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);

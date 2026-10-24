@@ -119,7 +119,7 @@ jobs:
           grep -q "Ragdoll of blob_1 settled" test_output/fight.log || { echo "::error::the blob's ragdoll should settle"; exit 1; }
           run_test menu MENU "Q"
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
-          grep -q "13 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
+          grep -q "14 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -Eq "testmap.cm.: [0-9]+ models" test_output/clip.log || { echo "::error::collision model not loaded"; exit 1; }
           run_test portals testmap "W:1,S,G:200 0 0,A:0,W:2.2,S,A:180,W:0.2,S,Q"
@@ -137,6 +137,12 @@ jobs:
           grep -q "Special stages: 2 heat haze" test_output/exactstages.log || { echo "::error::the lit heat haze wall should add a haze overlay"; exit 1; }
           grep -q "Decal textures/test/decal_hole at 480 -250 68 (size 8" test_output/exactstages.log || { echo "::error::the bullet should leave a decal on the pillar"; exit 1; }
           grep -q "Decal textures/test/decal_hole at 400 -60 0 (size 32" test_output/exactstages.log || { echo "::error::the FX decal action should leave a decal on the floor"; exit 1; }
+          # mirrors, deforms (tube, expand, move, eyeball), bumpy reflections, vertex colors, decals projected onto entities
+          run_test deforms testmap "W:1,O:notarget,G:400 100 0,A:0,W:0.5,S,G:-150 90 0,A:180,W:0.5,S,G:40 120 0,A:30,W:0.5,S,W:1,S,G:60 150 0,A:90,W:0.3,S,G:-150 185 0,A:180,W:0.3,S,G:-60 60 0,A:135,W:0.3,S,G:60 -160 0,A:0,W:0.3,O:decal textures/test/decal_hole 16,W:0.3,S,Q"
+          grep -q "Special stages: 2 heat haze glass surfaces, 2 reflections, 1 mirrors" test_output/deforms.log || { echo "::error::the mirrorRenderMap stage should make a mirror"; exit 1; }
+          grep -q "Deforms: 1 tube shapes, 1 eyeball surfaces" test_output/deforms.log || { echo "::error::the beam (deform tube) and the wall eye (deform eyeball) should be built"; exit 1; }
+          cmp -s test_output/deforms_3.png test_output/deforms_4.png && { echo "::error::the expanding box (deform expand) should pulse"; exit 1; } || true
+          grep -Eq "Decal textures/test/decal_hole at .* \(size 16, [12] decals, [0-9]+ triangles, [12] entity scenes\)" test_output/deforms.log || { echo "::error::the console decal should be projected onto crate_1 (and crate_2 beside it)"; exit 1; }
           run_test guiscripts testmap "W:1,O:notarget,G:-190 -60 0,A:180,P:12,W:1,S,O:guis,X,W:0.3,S,W:1,S,A:0,W:0.5,O:guis,Q"
           grep -q "GUI focus: guis/test_panel.gui (panel_1)" test_output/guiscripts.log || { echo "::error::looking at the panel should focus its GUI"; exit 1; }
           grep -q "GUI guis/test_panel.gui (panel_1): click at 320 43" test_output/guiscripts.log || { echo "::error::the attack button should click the GUI at the cursor"; exit 1; }
