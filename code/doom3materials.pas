@@ -19,7 +19,7 @@ unit Doom3Materials;
 interface
 
 uses
-  SysUtils, Classes, X3DNodes, Doom3Decls, Doom3Expressions;
+  SysUtils, Classes, CastleVectors, CastleUtils, X3DNodes, Doom3Decls, Doom3Expressions;
 
 type
   { An entity's shader parameters (its _color, shaderParm0..11): the stage
@@ -77,7 +77,13 @@ type
     { heat haze: the effect needs Phong shading (castle_vertex_eye) }
     ssHaze,
     { cube map reflection: texture coordinates from the reflection vector }
-    ssReflection
+    ssReflection,
+    { cube map reflection perturbed by the bump map: Phong shading, the
+      surface's own texture coordinates (the normal map's) }
+    ssBumpyReflection,
+    { a mirror: texture coordinates from the mirror plane (CGE's
+      RenderedTexture with a ViewpointMirror) }
+    ssMirror
   );
 
 { The appearance of a glass-like material (TD3Material.DrawAsGlass):
@@ -91,13 +97,81 @@ function GlassAppearance(const MaterialName: String; out Kind: TD3SpecialShape):
 { The reflection stage of a material ("cubeMap ...", "texgen reflect")
   as an additive overlay on the same triangles (DepthMode "lequal"),
   or nil if the material has none (or its cube map images are missing).
-  Set up its shape with SetupSpecialShape(ssReflection). }
+  Set up its shape with SetupSpecialShape(ReflectionKind(M)). }
 function ReflectionAppearance(const MaterialName: String): TAppearanceNode;
+{ How a material's reflection stage is drawn: perturbed by its bump map
+  (ssBumpyReflection, like Doom 3's bumpyEnvironment program, used for every
+  "texgen reflect" stage of a material with a bump map) or plain
+  (ssReflection). }
+function ReflectionKind(const M: TD3Material): TD3SpecialShape;
+
+{ The mirror stage of a material ("mirrorRenderMap w h") as an overlay on
+  the same triangles (DepthMode "lequal"): the scene rendered from the
+  mirrored camera every frame (a RenderedTexture with a ViewpointMirror,
+  w x h). nil if the material has none. Set up its shape with
+  SetupSpecialShape(ssMirror). }
+function MirrorAppearance(const MaterialName: String): TAppearanceNode;
+{ Mirror appearances made so far (for the log). }
+function MirrorCount: Integer;
 
 { Set up a shape for a special appearance: Phong shading for heat haze,
-  texture coordinates from the reflection vector for reflections
-  (the geometry must be an X3DComposedGeometryNode). }
+  texture coordinates from the reflection vector for reflections, from the
+  mirror plane for mirrors (the geometry must be an X3DComposedGeometryNode). }
 procedure SetupSpecialShape(const Shape: TShapeNode; const Kind: TD3SpecialShape);
+
+{ The vertex colors of a material's stage: does the base stage (Overlay
+  -1) or the overlay stage Overlay (see OverlayAppearance) use the
+  model's vertex colors ("vertexColor"), and inverted ("inverseVertexColor")? }
+function StageUsesVertexColors(const M: TD3Material; const Overlay: Integer;
+  out Inverse: Boolean): Boolean;
+{ A Color node modulating a stage's shape by vertex colors (1 - them when
+  Inverse), for TAbstractComposedGeometryNode.Color. }
+function VertexColorNode(const Colors: array of TVector4; const Inverse: Boolean): TColorRGBANode;
+
+{ "deform tube": the quads of a surface (4 vertexes, 6 indexes each) are
+  turned around their long axis to face the viewer every frame
+  (R_TubeDeform). Register the shape's coordinate node with the original
+  positions (the scene's coordinates) and indexes; UpdateViewDeforms
+  (every frame, with the camera position in world space) rewrites the
+  coordinates (the node's scene transform is taken into account once it
+  is in a scene). }
+procedure RegisterTubeSurface(const Coord: TCoordinateNode;
+  const Positions: array of TVector3; const Indexes: array of Int32);
+procedure UpdateViewDeforms(const ViewPosition: TVector3);
+{ Compute the tube positions for a view position (the scene's
+  coordinates): what UpdateViewDeforms writes. }
+procedure TubePositions(const Positions: array of TVector3; const Indexes: array of Int32;
+  const LocalView: TVector3; var Result: array of TVector3);
+function TubeSurfaceCount: Integer;
+
+type
+  { A connected island of a "deform eyeball" surface (R_EyeballDeform):
+    the triangles (their index into the index list / 3) and vertexes. }
+  TD3EyeIsland = record
+    Tris: array of Int32;
+    Verts: array of Int32;
+  end;
+  TD3EyeIslands = array of TD3EyeIsland;
+
+{ "deform eyeball": the surface must be exactly three islands of connected
+  triangles: the eye (more than one triangle), an origin triangle behind it
+  and a focus triangle in front. False (and a warning) otherwise. }
+function EyeballIslands(const Indexes: array of Int32; const VertexCount: Integer;
+  out Islands: TD3EyeIslands; const SurfaceName: String): Boolean;
+{ The indexes of the drawn (eye) triangles: Doom 3 drops the origin and
+  focus triangles. }
+function EyeballIndexes(const Islands: TD3EyeIslands; const Indexes: array of Int32): TInt32List;
+{ The eyes' texture coordinates for the current positions (any
+  coordinates, the result is the same): the texture is projected from the
+  origin island through the focus island, (0.5, 0.5) on the line between
+  them, one texture unit per world unit (R_EyeballDeform; Doom 3's eye
+  materials are small). UVs gets CGE's v = 1 - t for the eye vertexes,
+  the others are left alone. }
+procedure EyeballTexCoords(const Islands: TD3EyeIslands; const Positions: array of TVector3;
+  var UVs: array of TVector2);
+{ Eyeball surfaces registered (for the log): the builders count them. }
+var
+  EyeballSurfaceCount: Integer;
 
 { The URLs of a Doom 3 cube map's images, for CGE's +X, -X, +Y, -Y, -Z, +Z
   (the order of TCastleBackground's textures and of X3D's right, left,
@@ -124,7 +198,7 @@ var
 implementation
 
 uses
-  Math, Generics.Collections, CastleLog, CastleVectors, CastleRenderOptions, CastleImages, X3DFields,
+  Math, Generics.Collections, CastleLog, CastleRenderOptions, CastleImages, CastleTransform, X3DFields,
   Doom3Images, Doom3Files;
 
 type
@@ -160,6 +234,27 @@ type
     Scroll: array [0..1] of TD3Expr; { owned by the material }
   end;
 
+  { A "deform expand" / "deform move" effect whose amount changes. }
+  TVertexDeformSurface = record
+    Field: TSFFloat;
+    Expr: TD3Expr; { owned by the material }
+    Parms: TD3EntityParms;
+  end;
+
+  { A bumpy reflection whose stage color changes. }
+  TReflectColor = record
+    Field: TSFVec4f;
+    ColorExpr: TColorExprs;
+    Parms: TD3EntityParms;
+  end;
+
+  { A "deform tube" surface: its coordinate node and the original quads. }
+  TTubeSurface = record
+    Coord: TCoordinateNode;
+    Positions: array of TVector3;
+    Indexes: array of Int32;
+  end;
+
   { Forgets registered animated surfaces whose nodes are freed (a
     scene with an animated material freed before the map: debris). }
   TNodeWatcher = class
@@ -171,6 +266,10 @@ var
   HazeScrolls: specialize TList<THazeScroll>;
   ConditionalShapes: specialize TList<TConditionalShape>;
   TurbulentSurfaces: specialize TList<TTurbulentSurface>;
+  VertexDeformSurfaces: specialize TList<TVertexDeformSurface>;
+  ReflectColors: specialize TList<TReflectColor>;
+  TubeSurfaces: specialize TList<TTubeSurface>;
+  Mirrors: Integer;
   NodeWatcher: TNodeWatcher;
 
 { TD3EntityParms }
@@ -237,6 +336,15 @@ begin
   for I := TurbulentSurfaces.Count - 1 downto 0 do
     if TurbulentSurfaces[I].Fields[0].ParentNode = Node then
       TurbulentSurfaces.Delete(I);
+  for I := VertexDeformSurfaces.Count - 1 downto 0 do
+    if VertexDeformSurfaces[I].Field.ParentNode = Node then
+      VertexDeformSurfaces.Delete(I);
+  for I := ReflectColors.Count - 1 downto 0 do
+    if ReflectColors[I].Field.ParentNode = Node then
+      ReflectColors.Delete(I);
+  for I := TubeSurfaces.Count - 1 downto 0 do
+    if TubeSurfaces[I].Coord = Node then
+      TubeSurfaces.Delete(I);
 end;
 
 function SurfaceContext(const Time: Single): TD3ExprContext;
@@ -342,6 +450,14 @@ begin
       if (T.Exprs[K] <> nil) and not T.Exprs[K].IsConstant then
         T.Fields[K].Send(T.Exprs[K].Eval(ECtx));
   end;
+  { deform expand / move: the amount }
+  for I := 0 to VertexDeformSurfaces.Count - 1 do
+    VertexDeformSurfaces[I].Field.Send(VertexDeformSurfaces[I].Expr.Eval(
+      ContextFor(VertexDeformSurfaces[I].Parms, Time)));
+  { bumpy reflections: the stage color }
+  for I := 0 to ReflectColors.Count - 1 do
+    ReflectColors[I].Field.Send(EvalColor(ReflectColors[I].ColorExpr,
+      ContextFor(ReflectColors[I].Parms, Time)));
 end;
 
 function ConditionalShapeNode(const Shape: TShapeNode; const Condition: TD3Expr;
@@ -402,6 +518,9 @@ begin
   HazeScrolls.Clear;
   ConditionalShapes.Clear;
   TurbulentSurfaces.Clear;
+  VertexDeformSurfaces.Clear;
+  ReflectColors.Clear;
+  TubeSurfaces.Clear;
 end;
 
 function AnimatedSurfaceCount: Integer;
@@ -473,6 +592,11 @@ begin
   Result.ShadowCaster := False;
 end;
 
+{ The appearance's alpha mode and blend function for a stage blend mode
+  (opaque stages with an alpha test are masked). }
+procedure ApplyBlendMode(const App: TAppearanceNode; const BlendMode: TD3BlendMode;
+  const AlphaTest: Single); forward;
+
 { An unlit stage: emissive texture, blend mode, texture matrix and color. }
 procedure StageInto(const App: TAppearanceNode; const Image: String; const BlendMode: TD3BlendMode;
   const ColorExpr: TColorExprs; const Ops: TD3TexOps; const AlphaTest: Single;
@@ -480,7 +604,6 @@ procedure StageInto(const App: TAppearanceNode; const Image: String; const Blend
 var
   Unlit: TUnlitMaterialNode;
   Url: String;
-  Blend: TBlendModeNode;
 begin
   Unlit := TUnlitMaterialNode.Create;
   Unlit.EmissiveColor := Vector3(1, 1, 1);
@@ -489,6 +612,14 @@ begin
     Unlit.EmissiveTexture := MakeTexture(Url);
   App.Material := Unlit;
   SetupStage(App, ColorExpr, BlendMode, Ops, Unlit, Parms);
+  ApplyBlendMode(App, BlendMode, AlphaTest);
+end;
+
+procedure ApplyBlendMode(const App: TAppearanceNode; const BlendMode: TD3BlendMode;
+  const AlphaTest: Single);
+var
+  Blend: TBlendModeNode;
+begin
   case BlendMode of
     bmOpaque:
       if AlphaTest >= 0 then
@@ -673,6 +804,383 @@ begin
   end;
 end;
 
+const
+  { "deform expand <amount>": every vertex moves along its normal by the
+    amount (R_ExpandDeform); "deform move <amount>": along Doom 3's x axis,
+    which is CGE's x (R_MoveDeform). In the vertex shader, so shadow
+    volumes and collisions keep the plain surface. }
+  ExpandVertexCode =
+    'uniform float d3_deform_amount;' + LineEnding +
+    'void PLUG_vertex_object_space(inout vec4 vertex_object, inout vec3 normal_object)' + LineEnding +
+    '{' + LineEnding +
+    '  vertex_object.xyz += normal_object * d3_deform_amount;' + LineEnding +
+    '}';
+  MoveVertexCode =
+    'uniform float d3_deform_amount;' + LineEnding +
+    'void PLUG_vertex_object_space(inout vec4 vertex_object, inout vec3 normal_object)' + LineEnding +
+    '{' + LineEnding +
+    '  vertex_object.x += d3_deform_amount;' + LineEnding +
+    '}';
+
+procedure ApplyVertexDeform(const App: TAppearanceNode; const M: TD3Material;
+  const Parms: TD3EntityParms);
+var
+  Effect: TEffectNode;
+  Vert: TEffectPartNode;
+  D: TVertexDeformSurface;
+  Amount: Single;
+begin
+  if (M.Deform <> 'expand') and (M.Deform <> 'move') then
+    Exit;
+  if M.DeformParms[0] <> nil then
+    Amount := M.DeformParms[0].Eval(ContextFor(Parms, 0))
+  else
+    Amount := 0;
+  Effect := TEffectNode.Create;
+  Effect.Language := slGLSL;
+  D.Field := TSFFloat.Create(Effect, True, 'd3_deform_amount', Amount);
+  Effect.AddCustomField(D.Field);
+  Vert := TEffectPartNode.Create;
+  Vert.ShaderType := stVertex;
+  if M.Deform = 'expand' then
+    Vert.Contents := ExpandVertexCode
+  else
+    Vert.Contents := MoveVertexCode;
+  Effect.SetParts([Vert]);
+  App.SetEffects([Effect]);
+  if (M.DeformParms[0] <> nil) and not M.DeformParms[0].IsConstant then
+  begin
+    D.Expr := M.DeformParms[0];
+    D.Parms := Parms;
+    Effect.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+    VertexDeformSurfaces.Add(D);
+  end;
+end;
+
+{ The shader deforms of a material's stages (turbulent, expand, move). }
+procedure ApplyDeformEffects(const App: TAppearanceNode; const M: TD3Material;
+  const Parms: TD3EntityParms);
+begin
+  ApplyTurbulentDeform(App, M, Parms);
+  ApplyVertexDeform(App, M, Parms);
+end;
+
+{ "deform tube" ------------------------------------------------------------ }
+
+procedure TubePositions(const Positions: array of TVector3; const Indexes: array of Int32;
+  const LocalView: TVector3; var Result: array of TVector3);
+const
+  { the edges of a quad's two triangles (R_TubeDeform's edgeVerts) }
+  EdgeVerts: array [0..5, 0..1] of Integer = ((0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3));
+var
+  I, J, I1, I2: Integer;
+  Lengths: array [0..1] of Single;
+  Nums: array [0..1] of Integer;
+  Mid: array [0..1] of TVector3;
+  Major, Minor, Dir: TVector3;
+  L: Single;
+begin
+  for I := 0 to High(Positions) do
+    Result[I] := Positions[I];
+  I := 0;
+  while I + 5 < Length(Indexes) do
+  begin
+    { the two shortest of the six edges }
+    Nums[0] := 0;
+    Nums[1] := 0;
+    Lengths[0] := 999999;
+    Lengths[1] := 999999;
+    for J := 0 to 5 do
+    begin
+      I1 := Indexes[I + EdgeVerts[J, 0]];
+      I2 := Indexes[I + EdgeVerts[J, 1]];
+      if (I1 > High(Positions)) or (I2 > High(Positions)) then
+        Continue;
+      L := PointsDistance(Positions[I1], Positions[I2]);
+      if L < Lengths[0] then
+      begin
+        Nums[1] := Nums[0];
+        Lengths[1] := Lengths[0];
+        Nums[0] := J;
+        Lengths[0] := L;
+      end else
+      if L < Lengths[1] then
+      begin
+        Nums[1] := J;
+        Lengths[1] := L;
+      end;
+    end;
+    { their midpoints give the major axis }
+    for J := 0 to 1 do
+    begin
+      I1 := Indexes[I + EdgeVerts[Nums[J], 0]];
+      I2 := Indexes[I + EdgeVerts[Nums[J], 1]];
+      if (I1 > High(Positions)) or (I2 > High(Positions)) then
+        Exit;
+      Mid[J] := (Positions[I1] + Positions[I2]) * 0.5;
+    end;
+    Major := Mid[1] - Mid[0];
+    { re-project the short edges' points across the view direction }
+    for J := 0 to 1 do
+    begin
+      I1 := Indexes[I + EdgeVerts[Nums[J], 0]];
+      I2 := Indexes[I + EdgeVerts[Nums[J], 1]];
+      L := 0.5 * Lengths[J];
+      Dir := Mid[J] - LocalView;
+      Minor := TVector3.CrossProduct(Major, Dir);
+      if Minor.IsZero then
+        Continue;
+      Minor := Minor.Normalize;
+      if J = 1 then
+      begin
+        Result[I1] := Mid[J] - Minor * L;
+        Result[I2] := Mid[J] + Minor * L;
+      end else
+      begin
+        Result[I1] := Mid[J] + Minor * L;
+        Result[I2] := Mid[J] - Minor * L;
+      end;
+    end;
+    Inc(I, 6);
+  end;
+end;
+
+procedure RegisterTubeSurface(const Coord: TCoordinateNode;
+  const Positions: array of TVector3; const Indexes: array of Int32);
+var
+  T: TTubeSurface;
+  I: Integer;
+begin
+  T.Coord := Coord;
+  SetLength(T.Positions, Length(Positions));
+  for I := 0 to High(Positions) do
+    T.Positions[I] := Positions[I];
+  SetLength(T.Indexes, Length(Indexes));
+  for I := 0 to High(Indexes) do
+    T.Indexes[I] := Indexes[I];
+  Coord.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+  TubeSurfaces.Add(T);
+end;
+
+procedure UpdateViewDeforms(const ViewPosition: TVector3);
+var
+  I: Integer;
+  T: TTubeSurface;
+  LocalView: TVector3;
+  Points: TVector3List;
+begin
+  for I := 0 to TubeSurfaces.Count - 1 do
+  begin
+    T := TubeSurfaces[I];
+    { the node's scene may be transformed (a brush entity) }
+    if (T.Coord.Scene <> nil) and (T.Coord.Scene is TCastleTransform) then
+      LocalView := TCastleTransform(T.Coord.Scene).WorldInverseTransform.MultPoint(ViewPosition)
+    else
+      LocalView := ViewPosition;
+    Points := T.Coord.FdPoint.Items;
+    Points.Count := Length(T.Positions);
+    if Points.Count > 0 then
+      TubePositions(T.Positions, T.Indexes, LocalView,
+        Slice(TVector3List.PTypeList(Points.L)^, Points.Count));
+    T.Coord.FdPoint.Changed;
+  end;
+end;
+
+function TubeSurfaceCount: Integer;
+begin
+  Result := TubeSurfaces.Count;
+end;
+
+{ "deform eyeball" --------------------------------------------------------- }
+
+function EyeballIslands(const Indexes: array of Int32; const VertexCount: Integer;
+  out Islands: TD3EyeIslands; const SurfaceName: String): Boolean;
+const
+  MaxIslands = 3;
+var
+  NumTris, T, I, J, N: Integer;
+  Used: array of Boolean;
+  VertIsland: array of Integer;
+  Stack: array of Integer;
+  Island: Integer;
+
+  function Shares(const A, B: Integer): Boolean;
+  var
+    K, L: Integer;
+  begin
+    for K := 0 to 2 do
+      for L := 0 to 2 do
+        if Indexes[A * 3 + K] = Indexes[B * 3 + L] then
+          Exit(True);
+    Result := False;
+  end;
+
+begin
+  Result := False;
+  Islands := nil;
+  NumTris := Length(Indexes) div 3;
+  if NumTris < 3 then
+    Exit;
+  SetLength(Used, NumTris);
+  SetLength(VertIsland, VertexCount);
+  for I := 0 to High(VertIsland) do
+    VertIsland[I] := -1;
+  Island := 0;
+  for T := 0 to NumTris - 1 do
+  begin
+    if Used[T] then
+      Continue;
+    if Island >= MaxIslands then
+    begin
+      WritelnWarning('Doom3Materials', 'deform eyeball: "%s" has more than %d triangle islands',
+        [SurfaceName, MaxIslands]);
+      Islands := nil;
+      Exit;
+    end;
+    SetLength(Islands, Island + 1);
+    { flood the triangles connected by shared vertexes
+      (AddTriangleToIsland_r) }
+    Stack := [T];
+    Used[T] := True;
+    while Length(Stack) > 0 do
+    begin
+      I := Stack[High(Stack)];
+      SetLength(Stack, Length(Stack) - 1);
+      Islands[Island].Tris := Concat(Islands[Island].Tris, [I]);
+      for J := 0 to NumTris - 1 do
+        if not Used[J] and Shares(I, J) then
+        begin
+          Used[J] := True;
+          Stack := Concat(Stack, [J]);
+        end;
+    end;
+    for I := 0 to High(Islands[Island].Tris) do
+      for J := 0 to 2 do
+      begin
+        N := Indexes[Islands[Island].Tris[I] * 3 + J];
+        if (N >= 0) and (N < VertexCount) and (VertIsland[N] <> Island) then
+        begin
+          VertIsland[N] := Island;
+          Islands[Island].Verts := Concat(Islands[Island].Verts, [N]);
+        end;
+      end;
+    Inc(Island);
+  end;
+  if Island <> MaxIslands then
+  begin
+    WritelnWarning('Doom3Materials', 'deform eyeball: "%s" has %d triangle islands, needs 3',
+      [SurfaceName, Island]);
+    Islands := nil;
+    Exit;
+  end;
+  Result := True;
+end;
+
+function EyeballIndexes(const Islands: TD3EyeIslands; const Indexes: array of Int32): TInt32List;
+var
+  I, J, K: Integer;
+begin
+  Result := TInt32List.Create;
+  for I := 0 to High(Islands) do
+    if Length(Islands[I].Tris) > 1 then
+      for J := 0 to High(Islands[I].Tris) do
+        for K := 0 to 2 do
+          Result.Add(Indexes[Islands[I].Tris[J] * 3 + K]);
+end;
+
+procedure EyeballTexCoords(const Islands: TD3EyeIslands; const Positions: array of TVector3;
+  var UVs: array of TVector2);
+var
+  Mids: array of TVector3;
+  I, J, K, OriginIsland, FocusIsland: Integer;
+  BoxMin, BoxMax, Origin, Focus, Dir, V1, V2, Local: TVector3;
+  TexVec: array [0..1] of TVector3;
+  Dist: array of Single;
+  Order: array of Integer;
+  Tmp: Integer;
+  FTmp: Single;
+begin
+  if Length(Islands) < 3 then
+    Exit;
+  { the islands' centers (the centers of their bounds) }
+  SetLength(Mids, Length(Islands));
+  for I := 0 to High(Islands) do
+  begin
+    BoxMin := Vector3(MaxSingle, MaxSingle, MaxSingle);
+    BoxMax := -BoxMin;
+    for J := 0 to High(Islands[I].Verts) do
+    begin
+      K := Islands[I].Verts[J];
+      if K > High(Positions) then
+        Continue;
+      BoxMin := Vector3(Min(BoxMin.X, Positions[K].X), Min(BoxMin.Y, Positions[K].Y), Min(BoxMin.Z, Positions[K].Z));
+      BoxMax := Vector3(Max(BoxMax.X, Positions[K].X), Max(BoxMax.Y, Positions[K].Y), Max(BoxMax.Z, Positions[K].Z));
+    end;
+    Mids[I] := (BoxMin + BoxMax) * 0.5;
+  end;
+  SetLength(Dist, Length(Islands));
+  SetLength(Order, Length(Islands));
+  for I := 0 to High(Islands) do
+  begin
+    if Length(Islands[I].Tris) <= 1 then
+      Continue;
+    { the closest other island is the eye's origin, the next one its focus }
+    for J := 0 to High(Islands) do
+    begin
+      Dist[J] := PointsDistance(Mids[J], Mids[I]);
+      Order[J] := J;
+      K := J - 1;
+      while (K >= 0) and (Dist[K] > Dist[K + 1]) do
+      begin
+        Tmp := Order[K];
+        Order[K] := Order[K + 1];
+        Order[K + 1] := Tmp;
+        FTmp := Dist[K];
+        Dist[K] := Dist[K + 1];
+        Dist[K + 1] := FTmp;
+        Dec(K);
+      end;
+    end;
+    OriginIsland := Order[1];
+    FocusIsland := Order[2];
+    Origin := Mids[OriginIsland];
+    Focus := Mids[FocusIsland];
+    Dir := Focus - Origin;
+    if Dir.IsZero then
+      Continue;
+    Dir := Dir.Normalize;
+    { the projection axes from the origin triangle: its normal, and the
+      cross of that with the direction, both made perpendicular to it }
+    if (Length(Islands[OriginIsland].Verts) < 3) or
+       (Islands[OriginIsland].Verts[0] > High(Positions)) or
+       (Islands[OriginIsland].Verts[1] > High(Positions)) or
+       (Islands[OriginIsland].Verts[2] > High(Positions)) then
+      Continue;
+    V1 := Positions[Islands[OriginIsland].Verts[1]] - Positions[Islands[OriginIsland].Verts[0]];
+    V2 := Positions[Islands[OriginIsland].Verts[2]] - Positions[Islands[OriginIsland].Verts[0]];
+    if V1.IsZero or V2.IsZero then
+      Continue;
+    TexVec[0] := TVector3.CrossProduct(V1.Normalize, V2.Normalize);
+    TexVec[1] := TVector3.CrossProduct(TexVec[0], Dir);
+    for J := 0 to 1 do
+    begin
+      TexVec[J] := TexVec[J] - Dir * TVector3.DotProduct(TexVec[J], Dir);
+      if not TexVec[J].IsZero then
+        TexVec[J] := TexVec[J].Normalize;
+    end;
+    for J := 0 to High(Islands[I].Verts) do
+    begin
+      K := Islands[I].Verts[J];
+      if (K > High(Positions)) or (K > High(UVs)) then
+        Continue;
+      Local := Positions[K] - Origin;
+      { Doom 3's t goes down the image: CGE's v = 1 - t }
+      UVs[K] := Vector2(0.5 + TVector3.DotProduct(Local, TexVec[0]),
+        1 - (0.5 + TVector3.DotProduct(Local, TexVec[1])));
+    end;
+  end;
+end;
+
 function OverlayAppearance(const MaterialName: String; const Index: Integer;
   const Parms: TD3EntityParms): TAppearanceNode;
 var
@@ -689,7 +1197,7 @@ begin
     begin
       StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest, Parms);
       StageDepthMode(Result, Index, M);
-      ApplyTurbulentDeform(Result, M, Parms);
+      ApplyDeformEffects(Result, M, Parms);
       Exit;
     end;
     Dec(I);
@@ -698,7 +1206,63 @@ begin
     StageInto(Result, M.ExtraStages[I].Image, M.ExtraStages[I].Blend, M.ExtraStages[I].ColorExpr,
       M.ExtraStages[I].TexOps, M.ExtraStages[I].AlphaTest, Parms);
   StageDepthMode(Result, Index, M);
-  ApplyTurbulentDeform(Result, M, Parms);
+  ApplyDeformEffects(Result, M, Parms);
+end;
+
+function StageUsesVertexColors(const M: TD3Material; const Overlay: Integer;
+  out Inverse: Boolean): Boolean;
+var
+  I: Integer;
+begin
+  Inverse := False;
+  if Overlay < 0 then
+  begin
+    if M.DiffuseImage <> '' then
+    begin
+      Inverse := M.DiffuseInverseVertexColor;
+      Exit(M.DiffuseVertexColor or M.DiffuseInverseVertexColor);
+    end;
+    Inverse := M.StageInverseVertexColor;
+    Exit(M.StageVertexColor or M.StageInverseVertexColor);
+  end;
+  I := Overlay;
+  if (M.DiffuseImage <> '') and (M.StageImage <> '') then
+  begin
+    if I = 0 then
+    begin
+      Inverse := M.StageInverseVertexColor;
+      Exit(M.StageVertexColor or M.StageInverseVertexColor);
+    end;
+    Dec(I);
+  end;
+  Result := False;
+  if (I >= 0) and (I <= High(M.ExtraStages)) then
+  begin
+    Inverse := M.ExtraStages[I].InverseVertexColor;
+    Result := M.ExtraStages[I].VertexColor or M.ExtraStages[I].InverseVertexColor;
+  end;
+end;
+
+function VertexColorNode(const Colors: array of TVector4; const Inverse: Boolean): TColorRGBANode;
+var
+  List: TVector4List;
+  I: Integer;
+begin
+  Result := TColorRGBANode.Create;
+  Result.Mode := cmModulate;
+  List := TVector4List.Create;
+  try
+    List.Count := Length(Colors);
+    for I := 0 to High(Colors) do
+      if Inverse then
+        { Doom 3's inverseVertexColor: 1 - the color, alpha too }
+        List[I] := Vector4(1, 1, 1, 1) - Colors[I]
+      else
+        List[I] := Colors[I];
+    Result.SetColor(List);
+  finally
+    List.Free;
+  end;
 end;
 
 function HazeAppearance(const M: TD3Material): TAppearanceNode; forward;
@@ -832,14 +1396,52 @@ begin
   Result := True;
 end;
 
+const
+  { Doom 3's bumpyEnvironment program: the reflection vector from the
+    bump-mapped normal (CGE's bump mapping plug runs before this one and
+    leaves the perturbed normal in normal_eye), per fragment, looking up
+    the cube map in world space like the plain reflection's texgen
+    (-reflect(-V, N) = reflect(V, N)); the stage color scales it. The
+    lit material's own color is replaced. }
+  BumpyReflectionCode =
+    'uniform samplerCube d3_refl_cube;' + LineEnding +
+    'uniform vec4 d3_refl_color;' + LineEnding +
+    'varying vec4 castle_vertex_eye;' + LineEnding +
+    '/* from the EyeWorldSpace shader library, linked after this code */' + LineEnding +
+    'vec3 direction_eye_to_world_space(vec3 direction_eye);' + LineEnding +
+    'vec3 d3_refl_normal_eye = vec3(0.0, 0.0, 1.0);' + LineEnding +
+    'void PLUG_fragment_eye_space(const vec4 vertex_eye, inout vec3 normal_eye)' + LineEnding +
+    '{' + LineEnding +
+    '  d3_refl_normal_eye = normal_eye;' + LineEnding +
+    '}' + LineEnding +
+    'void PLUG_fragment_modify(inout vec4 fragment_color)' + LineEnding +
+    '{' + LineEnding +
+    '  vec3 refl_eye = reflect(normalize(vec3(castle_vertex_eye)), normalize(d3_refl_normal_eye));' + LineEnding +
+    '  vec3 refl_world = direction_eye_to_world_space(refl_eye);' + LineEnding +
+    '  fragment_color = vec4(textureCube(d3_refl_cube, refl_world).rgb * d3_refl_color.rgb, 1.0);' + LineEnding +
+    '}';
+
+function ReflectionKind(const M: TD3Material): TD3SpecialShape;
+begin
+  if (M.BumpImage <> '') and (ImageProgramUrl(M.BumpImage, ikNormal) <> '') then
+    Result := ssBumpyReflection
+  else
+    Result := ssReflection;
+end;
+
 { An additive appearance reflecting the material's cube map,
-  nil if the cube map images are missing. }
+  nil if the cube map images are missing. With a bump map the reflection
+  is perturbed by it per fragment (ReflectionKind). }
 function ReflectionAppearanceCore(const M: TD3Material): TAppearanceNode;
 var
   Urls: array [0..5] of String;
   Cube: TComposedCubeMapTextureNode;
   Unlit: TUnlitMaterialNode;
+  Mat: TMaterialNode;
   Blend: TBlendModeNode;
+  Effect: TEffectNode;
+  Part: TEffectPartNode;
+  R: TReflectColor;
 
   function Face(const I: Integer): TImageTextureNode;
   begin
@@ -861,11 +1463,45 @@ begin
   Cube.Back := Face(5);
 
   Result := TAppearanceNode.Create;
-  Unlit := TUnlitMaterialNode.Create;
-  Result.Material := Unlit;
-  Result.Texture := Cube;
-  { reflections are added (Doom 3 blends them with gl_one destination) }
-  SetupStage(Result, M.ReflectColorExpr, bmAdd, nil, Unlit);
+  if ReflectionKind(M) = ssBumpyReflection then
+  begin
+    { a lit material only for CGE's bump mapping (its normal map, the
+      tangents from the surface's texture coordinates); the effect
+      replaces the lit color }
+    Mat := TMaterialNode.Create;
+    Mat.DiffuseColor := TVector3.Zero;
+    Mat.AmbientIntensity := 0;
+    Mat.SpecularColor := TVector3.Zero;
+    Mat.EmissiveColor := TVector3.Zero;
+    Mat.NormalTexture := MakeTexture(ImageProgramUrl(M.BumpImage, ikNormal));
+    Result.Material := Mat;
+    Effect := TEffectNode.Create;
+    Effect.Language := slGLSL;
+    Effect.SetShaderLibraries(['castle-shader:/EyeWorldSpace.glsl']);
+    Effect.AddCustomField(TSFNode.Create(Effect, True, 'd3_refl_cube', [TAbstractTextureNode], Cube));
+    R.Field := TSFVec4f.Create(Effect, True, 'd3_refl_color',
+      EvalColor(M.ReflectColorExpr, SurfaceContext(0)));
+    Effect.AddCustomField(R.Field);
+    Part := TEffectPartNode.Create;
+    Part.ShaderType := stFragment;
+    Part.Contents := BumpyReflectionCode;
+    Effect.SetParts([Part]);
+    Result.SetEffects([Effect]);
+    if ColorAnimated(M.ReflectColorExpr, nil) then
+    begin
+      R.ColorExpr := M.ReflectColorExpr;
+      R.Parms := nil;
+      Effect.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+      ReflectColors.Add(R);
+    end;
+  end else
+  begin
+    Unlit := TUnlitMaterialNode.Create;
+    Result.Material := Unlit;
+    Result.Texture := Cube;
+    { reflections are added (Doom 3 blends them with gl_one destination) }
+    SetupStage(Result, M.ReflectColorExpr, bmAdd, nil, Unlit);
+  end;
   Result.AlphaMode := amBlend;
   Blend := TBlendModeNode.Create;
   Blend.SrcFactor := bsOne;
@@ -887,17 +1523,73 @@ begin
   Result.DepthMode := DepthMode;
 end;
 
+{ The scene seen in the mirror, as the stage's texture: CGE renders it
+  from the camera mirrored in the shape's plane every frame (the near plane
+  at the mirror), and the MIRROR-PLANE texture coordinates (SetupSpecialShape)
+  read it at the fragment's place. }
+function MirrorAppearanceCore(const M: TD3Material): TAppearanceNode;
+var
+  Tex: TRenderedTextureNode;
+  Mirror: TViewpointMirrorNode;
+  Unlit: TUnlitMaterialNode;
+begin
+  Result := nil;
+  if not M.HasMirror then
+    Exit;
+  Tex := TRenderedTextureNode.Create;
+  Tex.SetDimensions([Max(16, M.MirrorWidth), Max(16, M.MirrorHeight), 4, 1, 1]);
+  Tex.Update := upAlways;
+  Tex.RepeatS := False;
+  Tex.RepeatT := False;
+  Mirror := TViewpointMirrorNode.Create;
+  Tex.Viewpoint := Mirror;
+  Result := TAppearanceNode.Create;
+  Unlit := TUnlitMaterialNode.Create;
+  Unlit.EmissiveColor := Vector3(1, 1, 1);
+  Unlit.EmissiveTexture := Tex;
+  Result.Material := Unlit;
+  { the stage's color and blend; its texture matrix is Doom 3's clip space
+    mapping, not applied }
+  SetupStage(Result, M.MirrorColorExpr, M.MirrorBlend, nil, Unlit);
+  ApplyBlendMode(Result, M.MirrorBlend, -1);
+  Result.ShadowCaster := False;
+  Inc(Mirrors);
+end;
+
+function MirrorAppearance(const MaterialName: String): TAppearanceNode;
+var
+  DepthMode: TDepthModeNode;
+begin
+  Result := MirrorAppearanceCore(Decls.Material(MaterialName));
+  if Result = nil then
+    Exit;
+  DepthMode := TDepthModeNode.Create;
+  DepthMode.DepthFunc := dmfLessEqual;
+  Result.DepthMode := DepthMode;
+end;
+
+function MirrorCount: Integer;
+begin
+  Result := Mirrors;
+end;
+
 procedure SetupSpecialShape(const Shape: TShapeNode; const Kind: TD3SpecialShape);
 var
   Generator: TTextureCoordinateGeneratorNode;
 begin
   case Kind of
-    ssHaze:
+    ssHaze, ssBumpyReflection:
       Shape.Shading := shPhong;
     ssReflection:
       begin
         Generator := TTextureCoordinateGeneratorNode.Create;
         Generator.Mode := 'WORLDSPACEREFLECTIONVECTOR';
+        (Shape.Geometry as TAbstractComposedGeometryNode).TexCoord := Generator;
+      end;
+    ssMirror:
+      begin
+        Generator := TTextureCoordinateGeneratorNode.Create;
+        Generator.Mode := 'MIRROR-PLANE';
         (Shape.Geometry as TAbstractComposedGeometryNode).TexCoord := Generator;
       end;
     else ;
@@ -919,11 +1611,17 @@ begin
   Result := ReflectionAppearanceCore(M);
   if Result <> nil then
   begin
-    Kind := ssReflection;
+    Kind := ReflectionKind(M);
+    Exit;
+  end;
+  Result := MirrorAppearanceCore(M);
+  if Result <> nil then
+  begin
+    Kind := ssMirror;
     Exit;
   end;
 
-  { mirrors, videos... we can't draw: a faint additive tint }
+  { videos, remote renders... we can't draw: a faint additive tint }
   Kind := ssNone;
   Result := TAppearanceNode.Create;
   Unlit := TUnlitMaterialNode.Create;
@@ -982,13 +1680,13 @@ begin
     else
       Result.AlphaMode := amOpaque;
     ApplyPolygonOffset(Result, M);
-    ApplyTurbulentDeform(Result, M, Parms);
+    ApplyDeformEffects(Result, M, Parms);
   end else
   if M.StageImage <> '' then
   begin
     StageInto(Result, M.StageImage, M.StageBlend, M.StageColorExpr, M.StageTexOps, M.AlphaTest, Parms);
     ApplyPolygonOffset(Result, M);
-    ApplyTurbulentDeform(Result, M, Parms);
+    ApplyDeformEffects(Result, M, Parms);
   end else
   begin
     { not drawn; callers normally skip invisible materials }
@@ -1004,11 +1702,17 @@ initialization
   HazeScrolls := specialize TList<THazeScroll>.Create;
   ConditionalShapes := specialize TList<TConditionalShape>.Create;
   TurbulentSurfaces := specialize TList<TTurbulentSurface>.Create;
+  VertexDeformSurfaces := specialize TList<TVertexDeformSurface>.Create;
+  ReflectColors := specialize TList<TReflectColor>.Create;
+  TubeSurfaces := specialize TList<TTubeSurface>.Create;
   NodeWatcher := TNodeWatcher.Create;
 finalization
   FreeAndNil(AnimatedSurfaces);
   FreeAndNil(HazeScrolls);
   FreeAndNil(ConditionalShapes);
   FreeAndNil(TurbulentSurfaces);
+  FreeAndNil(VertexDeformSurfaces);
+  FreeAndNil(ReflectColors);
+  FreeAndNil(TubeSurfaces);
   FreeAndNil(NodeWatcher);
 end.

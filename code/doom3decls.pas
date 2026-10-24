@@ -99,9 +99,19 @@ type
     ReflectCubeMap: String;
     ReflectBlend: TD3BlendMode;
     ReflectColorExpr: array [0..3] of TD3Expr;
+    { The first "mirrorRenderMap <width> <height>" stage: the size of the
+      mirror's render (0 when there is none), its blend mode and color
+      registers (nil means 1; owned). Its texture matrix (Doom 3's
+      "translate 0.5, 0.5" / "scale 0.5, 0.5" mapping clip coordinates to
+      the texture) is not kept: CGE's mirror texture coordinates are
+      already 0..1. }
+    MirrorWidth, MirrorHeight: Integer;
+    MirrorBlend: TD3BlendMode;
+    MirrorColorExpr: array [0..3] of TD3Expr;
     { "deform sprite", "deform tube"...: the deform kind, lowercase, and
-      its parameters: a flare's size ("deform flare 24"), turbulent's
-      table name, range, time offset and domain (expressions; owned) }
+      its parameters: a flare's size ("deform flare 24"), expand's and
+      move's amount, turbulent's table name, range, time offset and domain
+      (expressions; owned) }
     Deform: String;
     DeformTable: String;
     DeformParms: array [0..3] of TD3Expr;
@@ -115,9 +125,13 @@ type
     DecalStart, DecalEnd: TVector4;
     { the diffuse stage's "if" condition (nil: always drawn); owned }
     DiffuseCondition: TD3Expr;
-    { the first plain stage's and the diffuse stage's vertexColor }
+    { the first plain stage's and the diffuse stage's vertexColor /
+      inverseVertexColor: the stage is modulated by the model's vertex
+      colors (or by 1 - them) }
     StageVertexColor, StageInverseVertexColor: Boolean;
-    DiffuseVertexColor: Boolean;
+    DiffuseVertexColor, DiffuseInverseVertexColor: Boolean;
+    { Has a mirrorRenderMap stage (MirrorWidth and MirrorHeight set)? }
+    function HasMirror: Boolean;
     { Only stages we can't draw (reflections, heat haze, mirrors, videos):
       drawn as faint glass so windows stay visible }
     function DrawAsGlass: Boolean;
@@ -287,6 +301,11 @@ begin
   Result := IsInvisible and HasSpecialStage and (SkyCubeMap = '') and (GuiSurf = '');
 end;
 
+function TD3Material.HasMirror: Boolean;
+begin
+  Result := (MirrorWidth > 0) and (MirrorHeight > 0);
+end;
+
 function TD3Material.OverlayCount: Integer;
 begin
   Result := Length(ExtraStages);
@@ -309,6 +328,7 @@ begin
   begin
     FreeAndNil(StageColorExpr[I]);
     FreeAndNil(ReflectColorExpr[I]);
+    FreeAndNil(MirrorColorExpr[I]);
   end;
   for I := 0 to 1 do
     FreeAndNil(HazeScroll[I]);
@@ -789,6 +809,7 @@ var
   StageSpecial, HasBlend, HasStageColor, StageSkyTexGen, StageVC, StageInvVC: Boolean;
   StageCubeMap: String;
   StageCameraCubeMap, StageReflectTexGen: Boolean;
+  StageMirrorW, StageMirrorH: Integer;
   StageProgram: String;
   StageFragmentMaps: array [0..2] of String;
   StageVertexParms: array [0..1] of String;
@@ -854,6 +875,8 @@ begin
         StageCameraCubeMap := False;
         StageSkyTexGen := False;
         StageReflectTexGen := False;
+        StageMirrorW := 0;
+        StageMirrorH := 0;
         StageProgram := '';
         for I := 0 to High(StageFragmentMaps) do
           StageFragmentMaps[I] := '';
@@ -971,10 +994,19 @@ begin
           end else
           if L = 'bumpyenvironment' then
           begin
-            { a cube map reflection perturbed by the bump map: drawn as a
-              plain reflection }
+            { a cube map reflection perturbed by the bump map (Doom 3 does
+              that for every "texgen reflect" stage of a material with a
+              bump map: see ReflectionAppearance) }
             StageCubeMap := Lexer.NextStr;
             StageReflectTexGen := True;
+            StageSpecial := True;
+          end else
+          if L = 'mirrorrendermap' then
+          begin
+            { mirrorRenderMap <width> <height>: the scene rendered from the
+              mirrored camera }
+            StageMirrorW := Lexer.ReadInt;
+            StageMirrorH := Lexer.ReadInt;
             StageSpecial := True;
           end else
           if L = 'vertexcolor' then
@@ -984,8 +1016,7 @@ begin
             StageInvVC := True
           else
           if (L = 'cubemap') or (L = 'cameracubemap') or (L = 'videomap') or
-             (L = 'soundmap') or (L = 'remoterendermap') or (L = 'mirrorrendermap') or
-             (L = 'texgen') then
+             (L = 'soundmap') or (L = 'remoterendermap') or (L = 'texgen') then
             StageSpecial := True
           else
           if Tok = '{' then
@@ -1014,6 +1045,21 @@ begin
           for I := 0 to 3 do
           begin
             Result.ReflectColorExpr[I] := Regs[I];
+            Regs[I] := nil;
+          end;
+        end;
+        { a mirror: the first mirrorRenderMap stage }
+        if (StageMirrorW > 0) and (StageMirrorH > 0) and not Result.HasMirror then
+        begin
+          Result.MirrorWidth := StageMirrorW;
+          Result.MirrorHeight := StageMirrorH;
+          if HasBlend then
+            Result.MirrorBlend := StageBlendMode
+          else
+            Result.MirrorBlend := bmOpaque;
+          for I := 0 to 3 do
+          begin
+            Result.MirrorColorExpr[I] := Regs[I];
             Regs[I] := nil;
           end;
         end;
@@ -1068,6 +1114,7 @@ begin
           Result.DiffuseCondition := StageCond;
           StageCond := nil;
           Result.DiffuseVertexColor := StageVC;
+          Result.DiffuseInverseVertexColor := StageInvVC;
         end;
         FreeTexOps(StageOps);
         if StageSpecial then
@@ -1180,6 +1227,9 @@ begin
           if Trim(Line) <> '' then
             Result.DeformParms[0] := ParseD3ExpressionString(Line, @Table);
         end else
+        if (Result.Deform = 'sprite') or (Result.Deform = 'tube') or (Result.Deform = 'eyeball') then
+          { no parameters (the rest of the line is a comment at most) }
+        else
           Result.DeformTable := LowerCase(Trim(Line));
       end else
       if L = 'polygonoffset' then
