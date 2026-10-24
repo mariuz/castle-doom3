@@ -17,7 +17,8 @@ uses
   Doom3Lexer, Doom3Expressions;
 
 type
-  TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtAF, dtParticle, dtFx, dtOther);
+  TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtAF, dtParticle, dtFx,
+    dtPda, dtEmail, dtAudio, dtVideo, dtOther);
 
   TD3BlendMode = (bmOpaque, bmBlend, bmAdd, bmFilter);
 
@@ -234,7 +235,8 @@ uses
 
 const
   DeclTypeNames: array [TD3DeclType] of String =
-    ('material', 'entitydef', 'model', 'skin', 'sound', 'table', 'articulatedfigure', 'particle', 'fx', '');
+    ('material', 'entitydef', 'model', 'skin', 'sound', 'table', 'articulatedfigure', 'particle', 'fx',
+     'pda', 'email', 'audio', 'video', '');
 
 function ReadImageProgram(const Lexer: TDoom3Lexer): String;
 var
@@ -628,6 +630,10 @@ begin
   IndexDir('af/', '.af', dtAF);
   IndexDir('particles/', '.prt', dtParticle);
   IndexDir('fx/', '.fx', dtFx);
+  { PDAs: pda, email, audio and video decls together (Doom 3's "pdas",
+    Resurrection of Evil's "newpdas") }
+  IndexDir('pdas/', '.pda', dtOther);
+  IndexDir('newpdas/', '.pda', dtOther);
   FLoaded := True;
   WritelnLog('Doom3Decls', 'Indexed %d materials, %d entityDefs, %d models, %d skins, %d sound shaders, %d articulated figures, %d particles, %d fx',
     [FBodies[dtMaterial].Count, FBodies[dtEntityDef].Count, FBodies[dtModel].Count,

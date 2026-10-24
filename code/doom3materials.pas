@@ -38,11 +38,13 @@ type
   shader parameters (nil: Doom 3's world defaults, 1 1 1 1). }
 function MaterialAppearance(const MaterialName: String; const Parms: TD3EntityParms = nil): TAppearanceNode;
 
-{ Register a shape drawn only while its stage's "if" condition holds
+{ The node to add to the scene for a shape whose stage has an "if"
+  condition: a Switch holding it, shown while the condition holds
   (evaluated every frame by UpdateAnimatedSurfaces with the entity's
-  parameters). }
-procedure RegisterConditionalShape(const Shape: TShapeNode; const Condition: TD3Expr;
-  const Parms: TD3EntityParms);
+  parameters; a Switch, because CGE doesn't apply a shape's "visible"
+  field changing at runtime). Without a condition the shape itself. }
+function ConditionalShapeNode(const Shape: TShapeNode; const Condition: TD3Expr;
+  const Parms: TD3EntityParms): TAbstractChildNode;
 { The "if" condition of a material's base shape (nil: none), and of its
   overlay stage Index (see OverlayAppearance). }
 function BaseStageCondition(const M: TD3Material): TD3Expr;
@@ -122,7 +124,7 @@ var
 implementation
 
 uses
-  Math, Generics.Collections, CastleVectors, CastleRenderOptions, CastleImages, X3DFields,
+  Math, Generics.Collections, CastleLog, CastleVectors, CastleRenderOptions, CastleImages, X3DFields,
   Doom3Images, Doom3Files;
 
 type
@@ -140,6 +142,7 @@ type
   { A shape drawn while a stage condition holds. }
   TConditionalShape = record
     Shape: TShapeNode;
+    Switch: TSwitchNode;
     Condition: TD3Expr;
     Parms: TD3EntityParms;
   end;
@@ -229,7 +232,7 @@ begin
     if HazeScrolls[I].Field.ParentNode = Node then
       HazeScrolls.Delete(I);
   for I := ConditionalShapes.Count - 1 downto 0 do
-    if ConditionalShapes[I].Shape = Node then
+    if (ConditionalShapes[I].Shape = Node) or (ConditionalShapes[I].Switch = Node) then
       ConditionalShapes.Delete(I);
   for I := TurbulentSurfaces.Count - 1 downto 0 do
     if TurbulentSurfaces[I].Fields[0].ParentNode = Node then
@@ -320,8 +323,15 @@ begin
   begin
     C := ConditionalShapes[I];
     Visible := C.Condition.Eval(ContextFor(C.Parms, Time)) <> 0;
-    if C.Shape.Visible <> Visible then
-      C.Shape.Visible := Visible;
+    if (C.Switch.WhichChoice >= 0) <> Visible then
+    begin
+      if Visible then
+        C.Switch.WhichChoice := 0
+      else
+        C.Switch.WhichChoice := -1;
+      WritelnLog('Doom3Materials', 'Conditional shape %s (unlit %s): %s', [C.Shape.X3DName,
+        BoolToStr(C.Shape.Appearance.Material is TUnlitMaterialNode, '1', '0'), BoolToStr(Visible, 'shown', 'hidden')]);
+    end;
   end;
   { deform turbulent: its range, time offset and domain }
   for I := 0 to TurbulentSurfaces.Count - 1 do
@@ -334,19 +344,26 @@ begin
   end;
 end;
 
-procedure RegisterConditionalShape(const Shape: TShapeNode; const Condition: TD3Expr;
-  const Parms: TD3EntityParms);
+function ConditionalShapeNode(const Shape: TShapeNode; const Condition: TD3Expr;
+  const Parms: TD3EntityParms): TAbstractChildNode;
 var
   C: TConditionalShape;
 begin
+  Result := Shape;
   if (Shape = nil) or (Condition = nil) then
     Exit;
   C.Shape := Shape;
+  C.Switch := TSwitchNode.Create;
+  C.Switch.AddChildren(Shape);
+  if Condition.Eval(ContextFor(Parms, 0)) <> 0 then
+    C.Switch.WhichChoice := 0
+  else
+    C.Switch.WhichChoice := -1;
   C.Condition := Condition;
   C.Parms := Parms;
-  Shape.Visible := Condition.Eval(ContextFor(Parms, 0)) <> 0;
-  Shape.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+  C.Switch.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
   ConditionalShapes.Add(C);
+  Result := C.Switch;
 end;
 
 function BaseStageCondition(const M: TD3Material): TD3Expr;
