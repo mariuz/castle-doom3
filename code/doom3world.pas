@@ -417,10 +417,14 @@ type
     Gravity: Single;
     Fuse, Radius: Single;
     Damage: Integer;
+    { its damage def's "push": the impulse on a moveable it hits }
+    Push: Single;
     { def_splash_damage (idGameLocal::RadiusDamage): damage at the
       explosion, falling to 0 at SplashRadius }
     SplashDamage: Integer;
     SplashRadius: Single;
+    { the splash def's "push" (idGameLocal::RadiusPush) }
+    SplashPush: Single;
     { detonate_on_fuse: explode when the fuse ends, else just vanish }
     DetonateOnFuse: Boolean;
     Owner: String;
@@ -523,6 +527,8 @@ type
     DamageUntil, NextDamageTime: Single;
     { half its bounds, and their center from its origin (local, unrotated) }
     HalfSize, CenterOffset: TVector3;
+    { "mass" (idMoveable: 100): a push of P changes its speed by P / Mass }
+    Mass: Single;
     function Origin: TVector3;
   end;
 
@@ -984,6 +990,9 @@ type
     { A brush entity's world bounds, also while hidden or without visible
       surfaces (its model or collision model bounds); empty when none. }
     function MoverBounds(const B: TD3BrushEntity): TBox3D;
+    { a segment blocked for monsters (MASK_MONSTERSOLID: solid and
+      monsterclip, not playerclip) }
+    function MonsterSegmentCollision(const A, B: TVector3): Boolean;
     { idEntity::BindToJoint: Child follows Model's joint (Oriented: its
       rotation too). False without such a joint. }
     function BindToJoint(const Child: TCastleTransform; const Model: TD3ModelEntity;
@@ -1339,6 +1348,11 @@ type
     function BobbedViewAxis: TMatrix3;
     property BobFracSin: Single read FBobFracSin;
     function MoveableOf(const E: TD3MapEntity): TD3Moveable;
+    { idMoveable::ApplyImpulse on the moveable at Point (CGE world): its
+      speed changes by Impulse / mass. False when none is there. }
+    function PushMoveableAt(const Point, Impulse: TVector3): Boolean;
+    { idGameLocal::RadiusPush on the moveables (CGE world position) }
+    procedure PushMoveablesInRadius(const Position: TVector3; const Radius, Push: Single);
     { Throw a moveable at Velocity (Doom 3), its damage on for 2.5 s
       (idAI_Vagary::Event_ThrowObjectAtEnemy, idMoveable::EnableDamage) }
     procedure ThrowMoveable(const M: TD3Moveable; const Velocity: TVector3);
@@ -2413,9 +2427,9 @@ begin
   if Side.IsZero then
     Side := Vector3(1, 0, 0);
   Side := Side.Normalize * Radius;
-  Result := not FMap.World.WorldSegmentCollision(A, B) and
-    not FMap.World.WorldSegmentCollision(A + Side, B + Side) and
-    not FMap.World.WorldSegmentCollision(A - Side, B - Side);
+  Result := not MonsterSegmentCollision(A, B) and
+    not MonsterSegmentCollision(A + Side, B + Side) and
+    not MonsterSegmentCollision(A - Side, B - Side);
 end;
 
 function TD3Game.FlyRouteWaypoint(var Route: TD3Route; const Pos, Goal: TVector3;
@@ -2490,9 +2504,26 @@ begin
   M.CanDamage := not E.BoolValue('damageWhenActive');
   M.MinDamageVelocity := E.FloatValue('minDamageVelocity', 100);
   M.MaxDamageVelocity := E.FloatValue('maxDamageVelocity', 200);
+  M.Mass := Max(1, E.FloatValue('mass', 100));
   M.HalfSize := (B.LocalMax - B.LocalMin) * 0.5;
   M.CenterOffset := (B.LocalMax + B.LocalMin) * 0.5;
   FMoveables.Add(M);
+end;
+
+function TD3Game.PushMoveableAt(const Point, Impulse: TVector3): Boolean;
+var
+  M: TD3Moveable;
+begin
+  for M in FMoveables do
+    if not M.Brush.Hidden and (M.Brush.Scene <> nil) and (FindBinding(M.Brush.Scene) = nil) and
+       M.Brush.Scene.BoundingBox.Grow(2).Contains(Point) then
+    begin
+      M.Velocity := M.Velocity + CgeToD3(Impulse) / M.Mass;
+      M.AtRest := False;
+      WritelnLog('Doom3World', '%s pushed (%.0f units/s)', [M.Brush.Entity.Name, Impulse.Length / M.Mass]);
+      Exit(True);
+    end;
+  Result := False;
 end;
 
 function TD3Game.MoveableOf(const E: TD3MapEntity): TD3Moveable;
@@ -4142,7 +4173,12 @@ begin
     Result := True;
   end else
   if WallDist < Reach then
-    PlaySoundAt(Def.Values['snd_hit'], FPlayerEye + Dir * WallDist)
+  begin
+    PlaySoundAt(Def.Values['snd_hit'], FPlayerEye + Dir * WallDist);
+    { a moveable: pushed (idWeapon::Event_Melee's ApplyImpulse of "push") }
+    if StrToFloatDef(Def.Values['push'], 0, DefaultFormatSettings) > 0 then
+      PushMoveableAt(FPlayerEye + Dir * WallDist, Dir * StrToFloatDef(Def.Values['push'], 0, DefaultFormatSettings));
+  end
   else
     PlaySoundAt(Def.Values['snd_miss'], FPlayerEye);
 end;
@@ -4415,7 +4451,7 @@ begin
   From := A.Model.Holder.Translation;
   Center := From + Vector3(0, Height / 2, 0);
   Dir := D3ToCge(Move / Len);
-  if FMap.World.WorldSegmentCollision(Center, Center + D3ToCge(Move) + Dir * Radius) then
+  if MonsterSegmentCollision(Center, Center + D3ToCge(Move) + Dir * Radius) then
     Exit(False);
   if A.MoveType <> MoveTypeFly then
   begin
@@ -4572,6 +4608,25 @@ begin
   end;
 end;
 
+function TD3Game.MonsterSegmentCollision(const A, B: TVector3): Boolean;
+var
+  WasPlayer: Boolean;
+begin
+  { MASK_MONSTERSOLID: the collision model's solid and monsterclip
+    polygons instead of the player's (solid and playerclip) }
+  if (FMap.WorldCollision = nil) or (FMap.MonsterCollision = nil) then
+    Exit(FMap.World.WorldSegmentCollision(A, B));
+  WasPlayer := FMap.WorldCollision.Collides;
+  FMap.WorldCollision.Collides := False;
+  FMap.MonsterCollision.Collides := True;
+  try
+    Result := FMap.World.WorldSegmentCollision(A, B);
+  finally
+    FMap.MonsterCollision.Collides := False;
+    FMap.WorldCollision.Collides := WasPlayer;
+  end;
+end;
+
 function TD3Game.StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
 var
   NewPos, Center, FloorStart: TVector3;
@@ -4583,16 +4638,16 @@ begin
     Exit(From);
   Center := From + Vector3(0, Height / 2, 0);
   NewPos := From + Step;
-  { blocked by a wall or a closed door? try sliding along one axis }
-  if FMap.World.WorldSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
+  { blocked by a wall, a closed door or monster clip? try sliding along one axis }
+  if MonsterSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
     Step.Normalize * Radius) then
   begin
     NewPos := From + Vector3(Step.X, 0, 0);
-    if FMap.World.WorldSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
+    if MonsterSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
       Vector3(Sign(Step.X) * Radius, 0, 0)) then
     begin
       NewPos := From + Vector3(0, 0, Step.Z);
-      if FMap.World.WorldSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
+      if MonsterSegmentCollision(Center, NewPos + Vector3(0, Height / 2, 0) +
         Vector3(0, 0, Sign(Step.Z) * Radius)) then
         NewPos := From;
     end;
@@ -4627,7 +4682,7 @@ begin
       Reach.Data[Axis] := Sign(S.Data[Axis]) * Height / 2
     else
       Reach.Data[Axis] := Sign(S.Data[Axis]) * Radius;
-    if FMap.World.WorldSegmentCollision(Center, Center + S + Reach) then
+    if MonsterSegmentCollision(Center, Center + S + Reach) then
       Blocked := True
     else
       Result := Result + S;
@@ -8737,12 +8792,16 @@ begin
   Result.SplashDefName := Def.Values['def_splash_damage'];
   DamageDef := Decls.EntityDef(Def.Values['def_damage']);
   if DamageDef <> nil then
+  begin
     Result.Damage := StrToIntDef(DamageDef.Values['damage'], Result.Damage);
+    Result.Push := StrToFloatDef(DamageDef.Values['push'], 0, DefaultFormatSettings);
+  end;
   DamageDef := Decls.EntityDef(Def.Values['def_splash_damage']);
   if DamageDef <> nil then
   begin
     Result.SplashDamage := StrToIntDef(DamageDef.Values['damage'], 0);
     Result.SplashRadius := StrToFloatDef(DamageDef.Values['radius'], 0, DefaultFormatSettings);
+    Result.SplashPush := StrToFloatDef(DamageDef.Values['push'], 0, DefaultFormatSettings);
   end;
   Result.Owner := Owner;
   Result.ExplodeSound := Def.Values['snd_explode'];
@@ -8780,6 +8839,34 @@ begin
   RadiusDamage(P.Position, Back, P.SplashDamage, P.SplashRadius, P.Owner, P.SplashDefName);
   if P.FromPlayer and (P.SplashDamage > 0) and (P.SplashRadius > 0) then
     MonsterSplash(P.Position, P.SplashDamage, P.SplashRadius, P.SplashDefName);
+  if (P.SplashPush > 0) and (P.SplashRadius > 0) then
+    PushMoveablesInRadius(P.Position, P.SplashRadius, P.SplashPush);
+end;
+
+procedure TD3Game.PushMoveablesInRadius(const Position: TVector3; const Radius, Push: Single);
+var
+  M: TD3Moveable;
+  Center, Dir: TVector3;
+begin
+  { idGameLocal::RadiusPush: everything in the radius, away from the
+    explosion and up, by the full push }
+  for M in FMoveables do
+  begin
+    if M.Brush.Hidden or (M.Brush.Scene = nil) or (FindBinding(M.Brush.Scene) <> nil) then
+      Continue;
+    Center := M.Brush.Scene.BoundingBox.Center;
+    if (Center - Position).Length > Radius then
+      Continue;
+    Dir := CgeToD3(Center - Position);
+    if Dir.IsZero then
+      Dir := Vector3(0, 0, 1)
+    else
+      Dir := Dir.Normalize;
+    Dir.Z := Dir.Z + 1;
+    M.Velocity := M.Velocity + Dir * (Push / M.Mass);
+    M.AtRest := False;
+    WritelnLog('Doom3World', '%s pushed by a splash (%.0f units/s)', [M.Brush.Entity.Name, (Dir * (Push / M.Mass)).Length]);
+  end;
 end;
 
 procedure TD3Game.MonsterSplash(const Position: TVector3; const Damage: Integer; const Radius: Single;
@@ -9002,6 +9089,10 @@ begin
     if not Detonate and not Bounced and (Len > 0) and WorldHit(P.Position, Step / Len, Len, HitDist, Normal) then
     begin
       NewPos := P.Position + Step * (HitDist / Len);
+      { a moveable: pushed along the shot (idProjectile::Collide's
+        ApplyImpulse of the damage def's "push") }
+      if P.Push > 0 then
+        PushMoveableAt(NewPos, P.Velocity.Normalize * P.Push);
       if P.DetonateOnWorld then
       begin
         Detonate := True;
