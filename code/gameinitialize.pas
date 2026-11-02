@@ -34,6 +34,10 @@ begin
     and many mobile GPUs) light distances overflow past 256 units, so
     Doom 3's lights don't reach most walls. No effect on desktop OpenGL. }
   FragmentShaderHighPrecision := True;
+  { env CD3_LIMIT_FPS=3: long frames like CI's software rendering, to test
+    the game with them on a fast machine }
+  if StrToFloatDef(GetEnvironmentVariable('CD3_LIMIT_FPS'), 0) > 0 then
+    ApplicationProperties.LimitFps := StrToFloatDef(GetEnvironmentVariable('CD3_LIMIT_FPS'), 0);
 
   AutoTestMap := '';
   CmdMap := '';

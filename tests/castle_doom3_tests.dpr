@@ -2800,6 +2800,16 @@ begin
     Check(not TVector3.Equals(Start, Mov.Origin, 1), 'the barrel was thrown');
     Check(Game.Health < Health, Format('the thrown barrel hit the player (%d -> %d)', [Health, Game.Health]));
     Check(Health - Game.Health <= 12, 'by at most damage_test_moveable (12)');
+
+    { the same throw with 1 s frames (software rendering in CI): the step's
+      gravity mustn't bend it under the player }
+    Mov.Brush.Scene.Translation := D3ToCge(Start);
+    Step(1.5);
+    Health := Game.Health;
+    Game.ThrowMoveable(Mov, Vector3(420 - Start.X, -250 - Start.Y, 0).Normalize * 700 + Vector3(0, 0, 150));
+    for I := 1 to 3 do
+      Step(1);
+    Check(Game.Health < Health, Format('the barrel hits with 1 s frames too (%d -> %d)', [Health, Game.Health]));
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
