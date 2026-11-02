@@ -4315,6 +4315,7 @@ var
   I: Integer;
   Lock: TD3MapEntity;
   Far: TVector3;
+  Box: TBox3D;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -4343,6 +4344,16 @@ begin
       rotated 90 degrees, so its 48 units long local y moves along x }
     CheckNear(112 - 8, Door1.Distance, 'door_1 distance (height - lip)');
     CheckNear(48 - 8, Door2.Distance, 'door_2 distance from its rotated box');
+
+    { a hidden door's scene has an empty box (the full game's monorail,
+      comm1, hell1 and enpro crashed spawning such doors): its model bounds
+      stand in }
+    Box := Game.MoverBounds(Door1.Brush);
+    Door1.Brush.SetHidden(True);
+    Check(Door1.Brush.Scene.BoundingBox.IsEmpty, 'a hidden scene has an empty box');
+    Check(not Game.MoverBounds(Door1.Brush).IsEmpty, 'mover bounds of a hidden door');
+    CheckNear(0, (Game.MoverBounds(Door1.Brush).Size - Box.Size).Length, 'the same size as shown', 0.01);
+    Door1.Brush.SetHidden(False);
     CheckEquals('tunnel', Door2.Team, 'door_2 team');
     { the entityDef's keys are merged into the entity (none in the test def:
       func_door spawn defaults come from the code then) }

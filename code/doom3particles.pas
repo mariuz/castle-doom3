@@ -224,7 +224,7 @@ implementation
 uses
   Math,
   CastleLog, CastleUtils,
-  Doom3Lexer, Doom3Decls, Doom3Materials, Doom3MapFile;
+  Doom3Lexer, Doom3Decls, Doom3Materials, Doom3MapFile, Doom3LightEffects;
 
 { TD3ParticleParm }
 
@@ -803,6 +803,9 @@ begin
     FStages[I].Shape.Appearance := App;
     Root.AddChildren(FStages[I].Shape);
   end;
+  { lit particle materials need the light volumes' shader library, like
+    every scene of the map (their GLSL doesn't link without it) }
+  AddLightLibrary(Root);
   FScene := TCastleScene.Create(nil);
   FScene.Name := 'Particles';
   FScene.Load(Root, True);

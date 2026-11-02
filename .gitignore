@@ -18,7 +18,7 @@ castle-auto-generated-resources.res
 # Logs, test outputs, screenshots and temporary files
 *.log
 test_output/
-smoke_output/
+smoke_output*/
 measure_output/
 castle-doom3-*.png
 # the sampling profiler's output (CD3_SAMPLE, console "sample")
