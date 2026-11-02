@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields, CastleTimeUtils,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui;
 
 type
   TViewPlay = class(TCastleView)
@@ -77,6 +77,15 @@ type
     FPdaPanel: TCastleRectangleControl;
     FPdaLabel: TCastleLabel;
     FPdaOpen: Boolean;
+    { Doom 3's PDA GUI (guis/pda.gui, idPlayer's objectiveSystem) when the
+      data has it, drawn full screen; else the text panel }
+    FPdaGui: TD3Gui;
+    FPdaImage: TCastleImageControl;
+    FPdaTimeMs: Single;
+    FPdaOpenedOnce, FPdaMouseDown: Boolean;
+    { console g_pdaGui 1: use guis/pda.gui (partial: its lists and pages
+      work, parts of it stay empty), else the text panel }
+    FUsePdaGui: Boolean;
     FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
@@ -102,6 +111,10 @@ type
     procedure HandleEndLevel(const Msg: String);
     procedure SetPdaOpen(const Value: Boolean);
     procedure UpdatePdaText;
+    { idPlayer::UpdatePDAInfo (and TogglePDA's inventory, weapons and
+      UpdateObjectiveInfo) into the PDA GUI's state }
+    procedure FillPdaGui(const UpdateSel: Boolean);
+    procedure UpdatePdaGui(const SecondsPassed: Single);
     procedure HandleConsoleCommand(const Cmd, Args: String);
     { fire the weapon: Once from a demo script, else the button is held }
     procedure Fire(const Once: Boolean);
@@ -155,8 +168,8 @@ uses
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
   Doom3Sampler,
   CastleShapes, CastleBoxes,
-  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu,
-  Doom3EnvProbes, CastleColors;
+  Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
+  Doom3EnvProbes, CastleColors, CastleRectangles;
 
 const
   LongFrameSeconds = 0.1;
@@ -359,6 +372,10 @@ begin
   ReleaseDemoKeys;
   FreeEnvProbes;
   SetReverbEffect(nil, 'leaving the game');
+  FreeAndNil(FPdaGui);
+  { freed with FreeAtStop }
+  FPdaImage := nil;
+  FPdaOpen := False;
   FreeAndNil(FGame);
   inherited Stop;
 end;
@@ -520,10 +537,295 @@ end;
 procedure TViewPlay.SetPdaOpen(const Value: Boolean);
 begin
   FPdaOpen := Value and (FGame <> nil);
-  FPdaPanel.Exists := FPdaOpen;
-  if FPdaOpen then
-    UpdatePdaText;
-  WritelnLog('GameViewPlay', 'PDA screen %s', [BoolToStr(FPdaOpen, 'open', 'closed')]);
+  if FPdaOpen and FUsePdaGui and (FPdaGui = nil) and D3Fs.FileExists('guis/pda.gui') then
+  begin
+    FPdaGui := TD3Gui.Create;
+    if not FPdaGui.LoadFromVfs('guis/pda.gui') then
+      FreeAndNil(FPdaGui)
+    else
+    begin
+      FPdaImage := TCastleImageControl.Create(FreeAtStop);
+      FPdaImage.Stretch := True;
+      FPdaImage.ProportionalScaling := psFit;
+      FPdaImage.FullSize := True;
+      FPdaImage.Exists := False;
+      InsertFront(FPdaImage);
+    end;
+  end;
+  if (FPdaGui <> nil) and not FUsePdaGui then
+  begin
+    FPdaImage.Exists := False;
+    FreeAndNil(FPdaGui);
+  end;
+  if FPdaGui <> nil then
+  begin
+    FPdaPanel.Exists := False;
+    FPdaImage.Exists := FPdaOpen;
+    if FPdaOpen then
+    begin
+      FPdaTimeMs := 0;
+      FillPdaGui(False);
+      FPdaGui.Activate(0);
+      FPdaGui.Dirty := True;
+      UpdatePdaGui(0);
+    end;
+  end else
+  begin
+    FPdaPanel.Exists := FPdaOpen;
+    if FPdaOpen then
+      UpdatePdaText;
+  end;
+  WritelnLog('GameViewPlay', 'PDA screen %s%s', [BoolToStr(FPdaOpen, 'open', 'closed'),
+    Iff(FPdaOpen and (FPdaGui <> nil), ' (guis/pda.gui)', '')]);
+end;
+
+procedure TViewPlay.FillPdaGui(const UpdateSel: Boolean);
+var
+  G: TD3Gui;
+  I, J, Current, Index, Sel, N: Integer;
+  Pda, Cur: TD3PdaDecl;
+  Email: TD3EmailDecl;
+  Audio: TD3AudioDecl;
+  Video: TD3VideoDecl;
+  EmailNames: TStringList;
+  Sec: String;
+  O: TD3Objective;
+
+  procedure SetS(const Key, Value: String);
+  begin
+    G.SetState(Key, Value);
+  end;
+
+begin
+  G := FPdaGui;
+  { idPlayer::TogglePDA: the inventory and weapons }
+  SetS('inv_count', IntToStr(FGame.Carried.Count));
+  for I := 0 to 31 do
+  begin
+    SetS('inv_name_' + IntToStr(I), '');
+    SetS('inv_icon_' + IntToStr(I), '');
+    SetS('inv_text_' + IntToStr(I), '');
+  end;
+  for I := 0 to FGame.Carried.Count - 1 do
+    SetS('inv_name_' + IntToStr(I), FGame.Carried[I]);
+  for I := 0 to 15 do
+    SetS('weapon' + IntToStr(I), IntToStr(Ord(FGame.HasWeapon(I))));
+  { UpdatePDAInfo: the PDA list (the personal one first, the others newest
+    first), the selected PDA's data }
+  Current := StrToIntDef(G.StateValue('listPDA_sel_0'), 0);
+  if Current < 0 then
+    Current := 0;
+  if UpdateSel then
+  begin
+    SetS('listPDAVideo_sel_0', '0');
+    SetS('listPDAEmail_sel_0', '0');
+    SetS('listPDAAudio_sel_0', '0');
+  end;
+  N := FGame.Pdas.Count;
+  if Current > 0 then
+    Current := N - Current;
+  for I := 0 to 127 do
+    SetS('listPDA_item_' + IntToStr(I), '');
+  for I := 0 to 63 do
+  begin
+    SetS('listPDAVideo_item_' + IntToStr(I), '');
+    SetS('listPDAAudio_item_' + IntToStr(I), '');
+    SetS('listPDAEmail_item_' + IntToStr(I), '');
+    SetS('listPDASecurity_item_' + IntToStr(I), '');
+  end;
+  Cur := nil;
+  for J := 0 to N - 1 do
+  begin
+    Pda := PdaDecl(FGame.Pdas[J]);
+    if Pda = nil then
+      Continue;
+    Index := N - J;
+    if J = 0 then
+      Index := 0;
+    SetS('listPDA_item_' + IntToStr(Index), D3LangString(Pda.PdaName));
+    if J = Current then
+      Cur := Pda;
+  end;
+  if Cur <> nil then
+  begin
+    Sec := D3LangString(Cur.Security);
+    if Sec = '' then
+      Sec := D3LangString('#str_00066');
+    SetS('PDASecurityClearance', Sec);
+    SetS('pda_icon', Cur.Icon);
+    SetS('pda_id', Cur.Id);
+    SetS('pda_title', D3LangString(Cur.Title));
+    if Current = 0 then
+    begin
+      { the personal PDA: the player's location and name, the videos }
+      if UpdateSel or not FPdaOpenedOnce then
+      begin
+        G.NamedEvent('playerPDAActive');
+        SetS('pda_personal', '1');
+        FPdaOpenedOnce := True;
+      end;
+      SetS('pda_location', D3LangString(FGame.LocationAt(Camera.Translation)));
+      SetS('pda_name', 'Player');
+      for I := 0 to FGame.Videos.Count - 1 do
+      begin
+        Video := VideoDecl(FGame.Videos[I]);
+        if Video <> nil then
+          SetS('listPDAVideo_item_' + IntToStr(I), D3LangString(Video.VideoName));
+      end;
+      Sel := StrToIntDef(G.StateValue('listPDAVideo_sel_0'), 0);
+      Video := nil;
+      if (Sel >= 0) and (Sel < FGame.Videos.Count) then
+        Video := VideoDecl(FGame.Videos[Sel]);
+      if Video <> nil then
+      begin
+        SetS('PDAVideoTitle', D3LangString(Video.VideoName));
+        SetS('PDAVideoVid', Video.Video);
+        SetS('PDAVideoIcon', Video.Preview);
+        SetS('PDAVideoInfo', D3LangString(Video.Info));
+      end else
+      begin
+        SetS('PDAVideoTitle', '');
+        SetS('PDAVideoInfo', '');
+      end;
+    end else
+    begin
+      { another's PDA: its owner, the audio logs }
+      if UpdateSel then
+      begin
+        G.NamedEvent('playerPDANotActive');
+        SetS('pda_personal', '0');
+      end;
+      SetS('pda_location', D3LangString(Cur.Post));
+      SetS('pda_name', D3LangString(Cur.FullName));
+      for I := 0 to Cur.Audios.Count - 1 do
+      begin
+        Audio := AudioDecl(Cur.Audios[I]);
+        if Audio <> nil then
+          SetS('listPDAAudio_item_' + IntToStr(I), D3LangString(Audio.AudioName));
+      end;
+      SetS('audioLogCount', IntToStr(Cur.Audios.Count));
+      Sel := StrToIntDef(G.StateValue('listPDAAudio_sel_0'), 0);
+      Audio := nil;
+      if (Sel >= 0) and (Sel < Cur.Audios.Count) then
+        Audio := AudioDecl(Cur.Audios[Sel]);
+      if Audio <> nil then
+      begin
+        SetS('PDAAudioTitle', D3LangString(Audio.AudioName));
+        SetS('PDAAudioIcon', Audio.Preview);
+        SetS('PDAAudioInfo', D3LangString(Audio.Info));
+      end;
+    end;
+    { the emails: the PDA's, the personal one also those given later
+      (target_giveemail) }
+    EmailNames := TStringList.Create;
+    try
+      EmailNames.AddStrings(Cur.Emails);
+      if Current = 0 then
+        for I := 0 to FGame.Emails.Count - 1 do
+          if EmailNames.IndexOf(FGame.Emails[I]) < 0 then
+            EmailNames.Add(FGame.Emails[I]);
+      for I := 0 to EmailNames.Count - 1 do
+      begin
+        Email := EmailDecl(EmailNames[I]);
+        if Email <> nil then
+          SetS('listPDAEmail_item_' + IntToStr(I), D3LangString(Email.From) + #9 +
+            D3LangString(Email.Subject) + #9 + D3LangString(Email.Date));
+      end;
+      Sel := StrToIntDef(G.StateValue('listPDAEmail_sel_0'), -1);
+      Email := nil;
+      if (Sel >= 0) and (Sel < EmailNames.Count) then
+        Email := EmailDecl(EmailNames[Sel]);
+      if Email <> nil then
+      begin
+        SetS('PDAEmailTitle', D3LangString(Email.Subject));
+        SetS('PDAEmailText', D3LangString(Email.Text));
+      end else
+      begin
+        SetS('PDAEmailTitle', '');
+        SetS('PDAEmailText', '');
+      end;
+    finally
+      EmailNames.Free;
+    end;
+  end;
+  if StrToIntDef(G.StateValue('listPDA_sel_0'), -1) = -1 then
+    SetS('listPDA_sel_0', '0');
+  { UpdateObjectiveInfo }
+  for I := 1 to 3 do
+    SetS('objective' + IntToStr(I), '');
+  for I := 0 to FGame.ObjectiveCount - 1 do
+  begin
+    O := FGame.Objective(I);
+    SetS('objective' + IntToStr(I + 1), '1');
+    SetS('objectivetitle' + IntToStr(I + 1), O.Title);
+    SetS('objectivetext' + IntToStr(I + 1), O.Text);
+    SetS('objectiveshot' + IntToStr(I + 1), O.Screenshot);
+  end;
+  SetS('missionobjective', FGame.MissionObjective);
+  G.Dirty := True;
+end;
+
+procedure TViewPlay.UpdatePdaGui(const SecondsPassed: Single);
+var
+  R: TFloatRectangle;
+  P: TVector2;
+  Down: Boolean;
+  Cmd, Part: String;
+  Words: TStringArray;
+begin
+  if (FPdaGui = nil) or not FPdaOpen then
+    Exit;
+  FPdaTimeMs := FPdaTimeMs + SecondsPassed * 1000;
+  FPdaGui.Update(Round(FPdaTimeMs));
+  { the mouse on the 640 x 480 GUI (CGE's y goes up) }
+  R := FPdaImage.RenderRect;
+  if (R.Width > 0) and (R.Height > 0) then
+  begin
+    P := Container.MousePosition;
+    FPdaGui.SetCursor(EnsureRange((P.X - R.Left) / R.Width * GuiWidth, 0, GuiWidth),
+      EnsureRange((1 - (P.Y - R.Bottom) / R.Height) * GuiHeight, 0, GuiHeight));
+  end;
+  Down := buttonLeft in Container.MousePressed;
+  if Down and not FPdaMouseDown then
+    FPdaGui.Click
+  else
+  if FPdaMouseDown and not Down then
+    FPdaGui.ClickRelease;
+  FPdaMouseDown := Down;
+  { idPlayer::HandleSingleGuiCommand: the PDA's commands }
+  Cmd := FPdaGui.TakeCmd;
+  if Cmd <> '' then
+  begin
+    WritelnLog('GameViewPlay', 'PDA GUI: "%s"', [Cmd]);
+    for Part in Cmd.Split([';']) do
+    begin
+      Words := Trim(Part).Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+      if Length(Words) = 0 then
+        Continue;
+      case LowerCase(Words[0]) of
+        'updatepda': FillPdaGui(True);
+        'updatepda2': FillPdaGui(False);
+        'close':
+          begin
+            SetPdaOpen(False);
+            Exit;
+          end;
+        'playpdaaudio':
+          if FPdaGui.StateValue('PDAAudioTitle') <> '' then
+            FGame.PlayPdaAudio(FPdaGui.StateValue('pda_personal') <> '1',
+              StrToIntDef(FPdaGui.StateValue('listPDA_sel_0'), 0),
+              StrToIntDef(FPdaGui.StateValue('listPDAAudio_sel_0'), 0));
+        'stoppdaaudio', 'stoppdavideo', 'playpdavideo':
+          ;
+      end;
+    end;
+  end;
+  if FPdaGui.Dirty then
+  begin
+    FPdaImage.Image := RenderGui(FPdaGui, nil);
+    FPdaImage.OwnsImage := True;
+    FPdaGui.Dirty := False;
+  end;
 end;
 
 procedure TViewPlay.UpdatePdaText;
@@ -1429,6 +1731,13 @@ begin
         Console.Print(Format('Elevator %s: floor %d, state %d', [FGame.Elevators[I].Entity.Name,
           FGame.Elevators[I].CurrentFloor, Ord(FGame.Elevators[I].State)]));
   end else
+  if Cmd = 'g_pdagui' then
+  begin
+    { Doom 3's PDA GUI instead of the text panel (partial) }
+    if Args <> '' then
+      FUsePdaGui := StrToIntDef(Args, 0) <> 0;
+    Console.Print('g_pdaGui ' + Iff(FUsePdaGui, '1', '0') + ' (guis/pda.gui, partial; used when the PDA opens)');
+  end else
   if Cmd = 'r_prepareresources' then
   begin
     { prepare every area's rendering resources at load (the next map) }
@@ -1972,6 +2281,7 @@ begin
   inherited Update(SecondsPassed, HandleInput);
   if FGame = nil then
     Exit;
+  UpdatePdaGui(SecondsPassed);
   if (FProfileFrames = 0) and FLastUpdateValid and
      (TimerSeconds(Timer, FLastUpdate) > LongFrameSeconds) then
     WritelnLog('Profile', 'Long frame: %.2f s (eye %s, yaw %.0f, area %d, visible areas %d)',
