@@ -147,6 +147,13 @@ type
     { JOINTMOD_WORLD rotations (model space) by joint, FHasMod when set }
     FJointMods: array of TQuaternion;
     FHasMod: array of Boolean;
+    { appearances a skin change replaced, kept (KeepExistingBegin) for a
+      few updates: the scene and its renderer still use them until they
+      have processed the change (freed at once, they crashed it later) }
+    FReplacedAppearances: array of TAppearanceNode;
+    FReplacedAge: Integer;
+    { JOINTMOD_LOCAL: the rotation is in the joint's own frame }
+    FModLocal: array of Boolean;
     FModCount: Integer;
     { mods were cleared: show the plain pose again }
     FModsCleared: Boolean;
@@ -166,12 +173,16 @@ type
     { the skin set, and each MeshShapes' material before the skin }
     FSkinName: String;
     FMeshShaders: array of String;
+    { the material each MeshShapes' appearance shows (a skin to an invisible
+      material only hides the shape, keeping its appearance) }
+    FAppearanceMaterials: array of String;
     procedure SetShown(const Value: Boolean);
     procedure ApplyPose;
     procedure FinishPose;
     procedure LockPoseOrigin;
     procedure FireFrameCommands(const FromTime, ToTime: Single);
     procedure BuildShadowHulls(const Root: TX3DRootNode);
+    procedure FreeReplacedAppearances;
   public
     { The animation stands still (SetFrame). }
     Paused: Boolean;
@@ -249,7 +260,7 @@ type
       the joint) after the animation, like idAnimator::SetJointAxis with
       JOINTMOD_WORLD (heads looking at something). Shown at the next
       Update. }
-    procedure SetJointMod(const Joint: Integer; const Q: TQuaternion);
+    procedure SetJointMod(const Joint: Integer; const Q: TQuaternion; const Local: Boolean = False);
     procedure ClearJointMods;
     { Each Update, joint ToName (of this model) takes the local rotation of
       Source's joint FromName (copy_joint: a head following the body's
@@ -975,6 +986,7 @@ begin
     Shape.Appearance := MaterialAppearance(MaterialName);
     MeshShapes := Concat(MeshShapes, [Shape]);
     MeshMaterials := Concat(MeshMaterials, [MaterialName]);
+    FAppearanceMaterials := Concat(FAppearanceMaterials, [MaterialName]);
     FMeshShaders := Concat(FMeshShaders, [Mesh.Shader]);
     { meshes that don't cast (noshadows: eyes, glows) needn't be closed }
     if not FModel.MeshClosed(I) and not Decls.Material(MaterialName).NoShadows then
@@ -1022,7 +1034,8 @@ begin
   if SkinName <> '' then
     SkinDecl := Decls.Skin(SkinName);
   { the old appearances live until the scene let go of them (freed while
-    the scene still enumerates their textures, they crash it) }
+    the scene still enumerates their textures, they crash it): kept for a
+    few updates (FreeReplacedAppearances) }
   Old := nil;
   try
     for I := 0 to High(MeshShapes) do
@@ -1033,6 +1046,19 @@ begin
       if MaterialName = MeshMaterials[I] then
         Continue;
       MeshMaterials[I] := MaterialName;
+      { an invisible material (nodraw: the grenade's "nonade" skin) only
+        hides the shape; back to the material it shows, only shows it }
+      if Decls.Material(MaterialName).IsInvisible then
+      begin
+        MeshShapes[I].Visible := False;
+        Continue;
+      end;
+      if SameText(MaterialName, FAppearanceMaterials[I]) then
+      begin
+        MeshShapes[I].Visible := True;
+        Continue;
+      end;
+      FAppearanceMaterials[I] := MaterialName;
       if MeshShapes[I].Appearance <> nil then
       begin
         MeshShapes[I].Appearance.KeepExistingBegin;
@@ -1044,17 +1070,32 @@ begin
         MeshShapes[I].Appearance.ShadowCaster := False;
     end;
   finally
-    for I := 0 to High(Old) do
-    begin
-      Old[I].KeepExistingEnd;
-      Old[I].FreeIfUnused;
-    end;
+    FReplacedAppearances := Concat(FReplacedAppearances, Old);
+    FReplacedAge := 0;
   end;
+end;
+
+procedure TD3Md5Instance.FreeReplacedAppearances;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FReplacedAppearances) do
+  begin
+    { kept nodes stay attached to the scene (CGE's KeepExistingBegin
+      note): detached first, freeing them doesn't touch the scene (freed
+      maybe) }
+    FReplacedAppearances[I].UnregisterScene;
+    FReplacedAppearances[I].KeepExistingEnd;
+    FReplacedAppearances[I].FreeIfUnused;
+  end;
+  FReplacedAppearances := nil;
 end;
 
 destructor TD3Md5Instance.Destroy;
 begin
   FreeAndNil(FScene);
+  { no scene uses them now }
+  FreeReplacedAppearances;
   FAnims.Free;
   inherited Destroy;
 end;
@@ -1138,7 +1179,14 @@ begin
   if FModCount > 0 then
     for J := 0 to High(FFinalPose) do
       if FHasMod[J] then
-        TurnSubtree(J, FJointMods[J]);
+      begin
+        if FModLocal[J] then
+          { a rotation in the joint's frame, to model space }
+          TurnSubtree(J, QuatNormalize(QuatMultiply(QuatMultiply(FFinalPose[J].Orientation, FJointMods[J]),
+            QuatConjugate(FFinalPose[J].Orientation))))
+        else
+          TurnSubtree(J, FJointMods[J]);
+      end;
   for I := 0 to High(FCopyJoints) do
   begin
     { the source's local rotation (relative to its parent), set as this
@@ -1196,7 +1244,7 @@ begin
     Result := FPose;
 end;
 
-procedure TD3Md5Instance.SetJointMod(const Joint: Integer; const Q: TQuaternion);
+procedure TD3Md5Instance.SetJointMod(const Joint: Integer; const Q: TQuaternion; const Local: Boolean);
 begin
   if (Joint < 0) or (Joint > High(FModel.Joints)) then
     Exit;
@@ -1204,11 +1252,13 @@ begin
   begin
     SetLength(FHasMod, Length(FModel.Joints));
     SetLength(FJointMods, Length(FModel.Joints));
+    SetLength(FModLocal, Length(FModel.Joints));
   end;
   if not FHasMod[Joint] then
     Inc(FModCount);
   FHasMod[Joint] := True;
   FJointMods[Joint] := Q;
+  FModLocal[Joint] := Local;
 end;
 
 procedure TD3Md5Instance.ClearJointMods;
@@ -1540,6 +1590,12 @@ var
   OldTime: Single;
   First, Last: TD3JointArray;
 begin
+  if Length(FReplacedAppearances) > 0 then
+  begin
+    Inc(FReplacedAge);
+    if FReplacedAge > 3 then
+      FreeReplacedAppearances;
+  end;
   if (FAnim = nil) or Paused then
   begin
     LastOriginDelta := TVector3.Zero;
