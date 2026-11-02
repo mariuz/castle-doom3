@@ -187,6 +187,48 @@ begin
   end;
 end;
 
+{ listDef (idListWindow): rows from "<name>_item_<i>", a click selects one
+  ("<name>_sel_0") and runs onAction (the PDA's lists) }
+procedure TestGuiLists;
+var
+  Gui: TD3Gui;
+  L: TD3GuiWindow;
+  Img: TRGBAlphaImage;
+  H: Single;
+begin
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 ' +
+      'listDef mails { rect 100, 100, 400, 200 textscale 0.25 forecolor 1, 1, 1, 1 tabstops "0, 150, 300" ' +
+      'onAction { set "cmd" "updatepda" ; } } }'), 'GUI with a listDef');
+    L := Gui.FindWindow('mails');
+    Check((L <> nil) and L.IsList, 'listDef parsed as a list');
+    if L = nil then
+      Exit;
+    CheckEquals(3, Length(L.Tabstops), 'tab stops');
+    Gui.SetState('mails_item_0', 'Alice' + #9 + 'Hello' + #9 + 'today');
+    Gui.SetState('mails_item_1', 'Bob' + #9 + 'Re: Hello' + #9 + 'now');
+    CheckEquals(2, Gui.ListCount(L), 'two rows (up to the first empty item)');
+    CheckEquals(-1, Gui.ListSelection(L), 'nothing selected');
+    H := Gui.ListRowHeight(L);
+    Check(H > 4, 'a row height');
+    Gui.Activate(0);
+    { the second row }
+    Gui.SetCursor(200, 100 + H * 1.5);
+    Check(Gui.Click, 'a click on the list runs its onAction');
+    CheckEquals(1, Gui.ListSelection(L), 'the row clicked is selected');
+    CheckEquals('updatepda', Gui.TakeCmd, 'the onAction command');
+    Img := RenderGui(Gui, nil);
+    try
+      Check(Img <> nil, 'the list draws');
+    finally
+      Img.Free;
+    end;
+  finally
+    Gui.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -6560,6 +6602,7 @@ begin
   TestFiles;
   TestDecls;
   TestStringsAndSoundFiles;
+  TestGuiLists;
   TestImages;
   TestProc;
   TestMapFile;

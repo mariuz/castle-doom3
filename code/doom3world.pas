@@ -1280,6 +1280,9 @@ type
     { Objectives (item_objective / item_objectivecomplete) and the mission
       objective (target_primaryobjective). }
     function ObjectiveCount: Integer;
+    { idPlayer's "playpdaaudio": the audio log of a PDA (its list row:
+      0 the personal one, else newest first) }
+    procedure PlayPdaAudio(const OtherPda: Boolean; const PdaRow, AudioIndex: Integer);
     function Objective(const I: Integer): TD3Objective;
     property MissionObjective: String read FMissionObjective;
     procedure GiveObjective(const Title, Text, Screenshot: String);
@@ -8179,6 +8182,27 @@ begin
 end;
 
 { Player information (roadmap 5f) ------------------------------------------- }
+
+procedure TD3Game.PlayPdaAudio(const OtherPda: Boolean; const PdaRow, AudioIndex: Integer);
+var
+  Pda: TD3PdaDecl;
+  Audio: TD3AudioDecl;
+  J: Integer;
+begin
+  J := 0;
+  if PdaRow > 0 then
+    J := FPdas.Count - PdaRow;
+  if (J < 0) or (J >= FPdas.Count) then
+    Exit;
+  Pda := PdaDecl(FPdas[J]);
+  if (Pda = nil) or (AudioIndex < 0) or (AudioIndex >= Pda.Audios.Count) then
+    Exit;
+  Audio := AudioDecl(Pda.Audios[AudioIndex]);
+  if Audio = nil then
+    Exit;
+  WritelnLog('Doom3World', 'PDA audio log %s (%s)', [Audio.Name, Audio.Audio]);
+  PlaySoundAt(Audio.Audio, FPlayerEye);
+end;
 
 function TD3Game.TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;
 var

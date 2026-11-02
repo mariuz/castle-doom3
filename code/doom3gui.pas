@@ -42,6 +42,7 @@ uses
 type
   TD3GuiWindow = class;
   TD3Gui = class;
+  TD3GuiFloats = array of Single;
 
   TD3GuiScript = class;
 
@@ -88,6 +89,10 @@ type
     { noevents: the cursor and clicks pass through; notime: no time line;
       nocursor: no cursor drawn over it }
     NoEvents, NoTime, NoCursor: Boolean;
+    { a listDef (idListWindow): rows from the GUI state "<name>_item_<i>",
+      columns split by tabs at Tabstops, the selection "<name>_sel_0" }
+    IsList: Boolean;
+    Tabstops: TD3GuiFloats;
     { properties given as expressions (visible "gui::x", backcolor
       "$hilite"): name=expression, evaluated when drawn }
     Exprs: TStringList;
@@ -210,6 +215,13 @@ type
     { Text with gui:: references resolved and \n new lines. }
     function PropText(const W: TD3GuiWindow): String;
     function TransitionCount: Integer;
+    { listDef rows (idListWindow): the item text, how many items there are
+      (up to the first empty one), the selected row (-1 none), the row
+      height (its font's line height) }
+    function ListItem(const W: TD3GuiWindow; const Index: Integer): String;
+    function ListCount(const W: TD3GuiWindow): Integer;
+    function ListSelection(const W: TD3GuiWindow): Integer;
+    function ListRowHeight(const W: TD3GuiWindow): Single;
   end;
 
 const
@@ -399,6 +411,16 @@ begin
     Result.Data[I] := D3StrToFloat(Parts[I], Default.Data[I]);
 end;
 
+{ "10, 120, 200": a list of numbers }
+function ParseFloatList(const S: String): TD3GuiFloats;
+var
+  Part: String;
+begin
+  Result := nil;
+  for Part in S.Split([',', ' '], TStringSplitOptions.ExcludeEmpty) do
+    Result := Concat(Result, [D3StrToFloat(Part, 0)]);
+end;
+
 procedure TD3GuiWindow.SetProp(const Key, Value: String);
 var
   V: TVector4;
@@ -465,6 +487,9 @@ begin
   else
   if K = 'nowrap' then
     NoWrap := D3StrToFloat(S, 0) <> 0
+  else
+  if K = 'tabstops' then
+    Tabstops := ParseFloatList(S)
   else
   if K = 'noevents' then
     NoEvents := D3StrToFloat(S, 0) <> 0
@@ -666,6 +691,7 @@ begin
     begin
       Child := TD3GuiWindow.Create;
       Child.Name := L.NextStr;
+      Child.IsList := Key = 'listdef';
       Child.Parent := W;
       W.Children.Add(Child);
       if L.Check('{') then
@@ -786,6 +812,7 @@ begin
       begin
         Desktop := TD3GuiWindow.Create;
         Desktop.Name := L.NextStr;
+        Desktop.IsList := LowerCase(Tok) = 'listdef';
         if L.Check('{') then
           ParseWindow(L, Desktop);
         Break;
@@ -1053,8 +1080,9 @@ end;
 
 function TD3Gui.ClickWindow(const W: TD3GuiWindow; const X, Y: Single; const Release: Boolean): Boolean;
 var
-  I: Integer;
+  I, Row: Integer;
   C: TD3GuiWindow;
+  Left, Top: Single;
 begin
   { idWindow::HandleEvent K_MOUSE1: the deepest window under the cursor
     that takes events gets the click }
@@ -1065,6 +1093,18 @@ begin
       Exit(ClickWindow(C, X, Y, Release));
   end;
   Result := False;
+  { a listDef: the row under the cursor becomes the selection
+    (idListWindow::HandleEvent), then its onAction runs }
+  if W.IsList and not Release then
+  begin
+    WindowAbs(W, Left, Top);
+    Row := Floor((Y - Top) / ListRowHeight(W));
+    if (Row >= 0) and (ListItem(W, Row) <> '') then
+    begin
+      SetState(W.Name + '_sel_0', IntToStr(Row));
+      Dirty := True;
+    end;
+  end;
   if Release then
   begin
     if W.OnActionRelease <> nil then
@@ -1078,6 +1118,38 @@ begin
     RunScript(W, W.OnAction);
     Result := True;
   end;
+end;
+
+function TD3Gui.ListItem(const W: TD3GuiWindow; const Index: Integer): String;
+begin
+  Result := StateValue(W.Name + '_item_' + IntToStr(Index));
+end;
+
+function TD3Gui.ListCount(const W: TD3GuiWindow): Integer;
+begin
+  Result := 0;
+  while (Result < 256) and (ListItem(W, Result) <> '') do
+    Inc(Result);
+end;
+
+function TD3Gui.ListSelection(const W: TD3GuiWindow): Integer;
+begin
+  Result := StrToIntDef(StateValue(W.Name + '_sel_0'), -1);
+end;
+
+function TD3Gui.ListRowHeight(const W: TD3GuiWindow): Single;
+var
+  F: TD3Font;
+  Scale: Single;
+begin
+  { idDeviceContext's MaxCharHeight, like the text's lines }
+  Scale := PropFloat(W, 'textscale');
+  F := D3Font(W.FontName);
+  if (F <> nil) and (F.SizeFor(Scale) <> nil) then
+    Result := F.LineHeight(Scale) + 5
+  else
+    Result := 48 * Scale * 1.15;
+  Result := Max(4, Result);
 end;
 
 function TD3Gui.Click: Boolean;
@@ -1929,6 +2001,7 @@ type
     procedure DrawImagePart(const X0, Y0, DstW, DstH: Integer; const Src: TRGBAlphaImage;
       const S, T, S2, T2: Single; const CR, CG, CB, CA: Integer);
     procedure DrawText(const R: TFloatRectangle; const W: TD3GuiWindow; const S: String);
+    procedure DrawList(const R: TFloatRectangle; const W: TD3GuiWindow);
     procedure DrawWindow(const W: TD3GuiWindow; const ParentX, ParentY: Single);
     procedure DrawCursor;
   end;
@@ -2051,6 +2124,67 @@ begin
       if A = 255 then
         A := Max(P^.X, Max(P^.Y, P^.Z));
       BlendBytes(X0 + GX, Y0 + GY, CR, CG, CB, CA * A div 255);
+    end;
+  end;
+end;
+
+{ Doom 3 color escapes ("^8" gray...) left out }
+function StripColorCodes(const S: String): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  I := 1;
+  while I <= Length(S) do
+  begin
+    if (S[I] = '^') and (I < Length(S)) then
+    begin
+      Inc(I, 2);
+      Continue;
+    end;
+    Result := Result + S[I];
+    Inc(I);
+  end;
+end;
+
+procedure TGuiPainter.DrawList(const R: TFloatRectangle; const W: TD3GuiWindow);
+var
+  I, C, Count, Sel: Integer;
+  RowH, X0, X1, Y: Single;
+  Columns: TStringArray;
+  Hilite: TVector4;
+begin
+  { idListWindow::Draw: a row per item, its columns at the tab stops, the
+    selected row hilited }
+  RowH := Gui.ListRowHeight(W);
+  Count := Gui.ListCount(W);
+  Sel := Gui.ListSelection(W);
+  for I := 0 to Count - 1 do
+  begin
+    Y := R.Bottom + I * RowH;
+    if Y + RowH > R.Bottom + R.Height + 0.5 then
+      Break;
+    if I = Sel then
+    begin
+      Hilite := Gui.PropVec4(W, 'forecolor');
+      Hilite.W := Hilite.W * 0.25;
+      FillRect(FloatRectangle(R.Left, Y, R.Width, RowH), Hilite);
+    end;
+    Columns := StripColorCodes(Gui.ListItem(W, I)).Split([#9]);
+    for C := 0 to High(Columns) do
+    begin
+      if C <= High(W.Tabstops) then
+        X0 := R.Left + W.Tabstops[C]
+      else
+      if C = 0 then
+        X0 := R.Left
+      else
+        X0 := R.Left + R.Width * C / Length(Columns);
+      if C + 1 <= High(W.Tabstops) then
+        X1 := R.Left + W.Tabstops[C + 1]
+      else
+        X1 := R.Left + R.Width;
+      DrawText(FloatRectangle(X0, Y, Max(1, X1 - X0), RowH), W, Columns[C]);
     end;
   end;
 end;
@@ -2244,7 +2378,10 @@ begin
     FillRect(FloatRectangle(R.Left, R.Bottom + B, B, R.Height - 2 * B), V);
     FillRect(FloatRectangle(R.Left + R.Width - B, R.Bottom + B, B, R.Height - 2 * B), V);
   end;
-  DrawText(R, W, Gui.PropText(W));
+  if W.IsList then
+    DrawList(R, W)
+  else
+    DrawText(R, W, Gui.PropText(W));
   for C in W.Children do
     DrawWindow(C, R.Left, R.Bottom);
 end;
