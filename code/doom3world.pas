@@ -922,6 +922,10 @@ type
     procedure SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
     function CanSee(const A, B: TVector3): Boolean;
   public
+    { A brush entity's world bounds, also while hidden or without visible
+      surfaces (its model or collision model bounds); empty when none. }
+    function MoverBounds(const B: TD3BrushEntity): TBox3D;
+  public
     { Player state }
     Health, Armor: Integer;
     God, NoTarget: Boolean;
@@ -1774,6 +1778,45 @@ begin
   FSounds.Add(LowerCase(ShaderName), Result);
 end;
 
+{ A brush entity's world bounds: its scene's, else (only invisible surfaces,
+  like some doors of the full game) its model bounds, else its collision
+  model's (idDoor uses the clip model's bounds); empty when none. }
+function TD3Game.MoverBounds(const B: TD3BrushEntity): TBox3D;
+var
+  Cm: TD3CollisionModel;
+  V: TVector3;
+  I: Integer;
+  Local: TBox3D;
+begin
+  Result := B.Scene.BoundingBox;
+  if not Result.IsEmpty then
+    Exit;
+  Local := TBox3D.Empty;
+  if (B.LocalMin.X <= B.LocalMax.X) and (B.LocalMin.Y <= B.LocalMax.Y) and (B.LocalMin.Z <= B.LocalMax.Z) then
+  begin
+    Local.Include(D3ToCge(B.LocalMin));
+    Local.Include(D3ToCge(B.LocalMax));
+  end else
+  if FMap.Collision <> nil then
+  begin
+    Cm := FMap.Collision.FindModel(B.Entity.Value('model', B.Entity.Name));
+    if Cm = nil then
+      Cm := FMap.Collision.FindModel(B.Entity.Name);
+    if Cm <> nil then
+    begin
+      for V in Cm.Vertices do
+        Local.Include(D3ToCge(V));
+      for I := 0 to High(Cm.Brushes) do
+      begin
+        Local.Include(D3ToCge(Cm.Brushes[I].Mins));
+        Local.Include(D3ToCge(Cm.Brushes[I].Maxs));
+      end;
+    end;
+  end;
+  if not Local.IsEmpty then
+    Result := Local.Transform(B.Scene.Transform);
+end;
+
 procedure TD3Game.SpawnMover(const B: TD3BrushEntity);
 var
   E: TD3MapEntity;
@@ -1803,7 +1846,13 @@ begin
     { like idDoor: the size of the door's world bounds along the move
       direction (doors are often rotated: "rotation" on 137 of the demo's
       155 doors), minus "lip" }
-    Box := B.Scene.BoundingBox;
+    Box := MoverBounds(B);
+    if Box.IsEmpty then
+    begin
+      WritelnWarning('Doom3World', 'Door %s has no bounds (no visible or collision geometry): not a mover', [E.Name]);
+      M.Free;
+      Exit;
+    end;
     Size := CgeToD3(Box.Size);
     Size := Vector3(Abs(Size.X), Abs(Size.Y), Abs(Size.Z));
     M.Distance := Abs(Dir.X) * Size.X + Abs(Dir.Y) * Size.Y + Abs(Dir.Z) * Size.Z -
@@ -1829,7 +1878,7 @@ begin
       B.Scene.AddBehavior(M.Sounds);
     end;
     if FMap.Portals <> nil then
-      M.Portals := FMap.Portals.PortalsInBox(B.Scene.BoundingBox.Grow(16));
+      M.Portals := FMap.Portals.PortalsInBox(Box.Grow(16));
     FMovers.Add(M);
   end else
   if (Cls = 'func_rotating') or (Cls = 'func_fx_rotating') then

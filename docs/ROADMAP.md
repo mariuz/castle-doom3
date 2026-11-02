@@ -48,7 +48,39 @@ Status of version 0.12.0 plus the unreleased changes in `docs/CHANGELOG.md`. "Do
 
     Still open: two `QuadSet` shapes in Mars City Underground whose GLSL doesn't link (`position_eye_to_world_space` undefined: a CGE effect), the remaining 0.15 to 0.4 s frames while turning (find what they do), overlapping `info_location`s.
 
-    Then the full game's maps with `smoke_maps.ps1` (needs the full game's data: not on the test machine).
+    The full game (GOG's Doom 3 1.3.1, 2026-11-02): all 27 single player maps load and spawn without exceptions or shader errors (`tools/smoke_maps.ps1 -BasePath <Doom 3>`, NVIDIA):
+
+    | Map | Areas | Triangles | Lights | Brush entities | Static models | md5 models | Load + 2 screenshots |
+    |---|---|---|---|---|---|---|---|
+    | `game/mars_city1` | 56 | 54,496 | 463 | 420 | 487 | 71 | 17 s |
+    | `game/mc_underground` | 58 | 125,706 | 614 | 720 | 473 | 79 | 19 s |
+    | `game/mars_city2` | 104 | 105,491 | 639 | 567 | 639 | 112 | 20 s |
+    | `game/admin` | 72 | 52,708 | 521 | 429 | 322 | 68 | 14 s |
+    | `game/alphalabs1` | 73 | 110,404 | 549 | 535 | 401 | 104 | 18 s |
+    | `game/alphalabs2` | 116 | 177,789 | 392 | 546 | 409 | 96 | 17 s |
+    | `game/alphalabs3` | 41 | 56,372 | 388 | 305 | 242 | 85 | 12 s |
+    | `game/alphalabs4` | 71 | 96,007 | 704 | 655 | 408 | 154 | 18 s |
+    | `game/enpro` | 93 | 139,358 | 536 | 450 | 445 | 144 | 19 s |
+    | `game/commoutside` | 100 | 77,880 | 602 | 715 | 563 | 109 | 18 s |
+    | `game/comm1` | 76 | 105,429 | 615 | 748 | 484 | 100 | 21 s |
+    | `game/recycling1` | 92 | 116,367 | 422 | 319 | 366 | 111 | 17 s |
+    | `game/recycling2` | 82 | 118,634 | 408 | 276 | 345 | 83 | 14 s |
+    | `game/monorail` | 58 | 100,371 | 458 | 609 | 335 | 90 | 16 s |
+    | `game/delta1` | 94 | 106,125 | 882 | 1006 | 484 | 112 | 21 s |
+    | `game/delta2a` | 100 | 82,150 | 543 | 717 | 674 | 127 | 21 s |
+    | `game/delta2b` | 116 | 129,941 | 573 | 715 | 542 | 101 | 20 s |
+    | `game/delta3` | 128 | 121,089 | 588 | 812 | 800 | 98 | 21 s |
+    | `game/delta4` | 20 | 22,512 | 107 | 103 | 81 | 59 | 9 s |
+    | `game/hell1` | 74 | 55,845 | 479 | 578 | 830 | 123 | 17 s |
+    | `game/delta5` | 97 | 79,491 | 456 | 485 | 301 | 85 | 15 s |
+    | `game/cpu` | 73 | 56,545 | 443 | 612 | 516 | 107 | 16 s |
+    | `game/cpuboss` | 44 | 47,902 | 314 | 349 | 343 | 73 | 13 s |
+    | `game/site3` | 68 | 75,941 | 302 | 302 | 276 | 63 | 14 s |
+    | `game/caverns1` | 52 | 118,427 | 318 | 395 | 552 | 173 | 16 s |
+    | `game/caverns2` | 32 | 70,836 | 125 | 206 | 227 | 91 | 11 s |
+    | `game/hellhole` | 38 | 46,536 | 197 | 169 | 287 | 21 | 12 s |
+
+    Fixed on the way: doors hidden at spawn (`hide`) or without visible surfaces crashed the spawn of monorail, comm1, hell1 and enpro (an empty scene box; `MoverBounds` falls back to the model's or the collision model's bounds, like idDoor's clip model); lit particle materials didn't link their GLSL (particle scenes lacked `AddLightLibrary`). Left in the logs: stereo sound files played by spatial sources (OpenAL plays them non-spatial, like Doom 3: harmless, 85 messages), overlapping `info_location`s (Doom 3 reports them too), a missing particle `smokeandspark.smoke` (not in id's data either). Next: play through them (triggers, scripts and monsters of the later maps run unchecked; hell1's start shows a character in its bind pose), and Resurrection of Evil (`d3xp`, item 8).
 2. **Shadows from several lights** (CGE change A, in `doom3-port`): started, unreleased: console `r_shadowLights N` makes the N strongest lights that are on cast shadow volumes (`UpdateShadowLights`; default 1, the old behavior). Each light is a pass of the receivers, limited to the light's screen rectangle (`r_useScissor`) and to the depth range of its sphere (`r_useDepthBounds`, the depth bounds test, CGE change S), and the precomputed shadow volumes cast with several lights too, each for its light only (change S). Measured on the demo maps with `tools/measure_shadowlights.ps1` (2026-11-02, NVIDIA, one run per map; FPS with 1 / 2 / 3 / 4 / 8 shadow lights, the depth bounds on, and without shadows): Mars City 1 34.3 / 8.4 / 8.1 / 5.6 / 3.7, 36.4; Mars City Underground 43.9 / 36.7 / 38.0 / 37.9 / 37.7, 46.8; Mars City 2 50.5 / 35.6 / 25.3 / 29.7 / 27.7, 47.5. A second light costs 16..75%, so the default stays 1 (`FShadowLightsMax`); the depth bounds test changes little (within the noise). Next: find why extra lights cost so much in Mars City 1 (its N = 2 is 4 times slower; a GPU Trace with `tools/nsight_gputrace.ps1`) before raising the default. (Earlier, on the test level under Mesa's software rasterizer, where every pass costs CPU time per pixel, one light runs at 11.5 FPS, two at 3.5, five at 2.9 and no shadows at 18.3, which says nothing about a GPU but shows the passes aren't free).
 3. **Exact material stages**: done, unreleased (see ARCHITECTURE.md "Material stages"): stage `if` conditions, entity shader parameters (`_color`, `shaderParmN`, `setColor` / `setShaderParm`), `polygonOffset` and `decalInfo`, runtime decals (unit `Doom3Decals`: projectile `mtr_detonate`, FX `decal` actions, console `decal`), heat haze over lit and plain materials (the demo's 16), `deform turbulent` and `deform flare`, `mirrorRenderMap` mirrors (CGE's `RenderedTexture` with a `ViewpointMirror`), `deform tube` / `expand` / `move` / `eyeball`, the bump map's distortion of reflections (`bumpyEnvironment` and every reflection of a bump mapped material), LWO and ASE vertex colors for `vertexColor` / `inverseVertexColor`, decals clipped to the surface polygons with a depth fade and projected onto brush entities and static models too (idRenderModelDecal). Not done: `deform particle`, decals on md5 models (idRenderModelOverlay), `remoteRenderMap` / `xrayRenderMap` (still the glass tint), `noOverlays`.
 4. **Interactive GUIs**: done, unreleased (see ARCHITECTURE.md "GUIs"): the GUI script (`onTime` time lines, `onAction`, mouse enter / exit, `set` / `transition` / `resetTime` / `runScript` / `localSound` / `showCursor` / `if`), property expressions, the cursor where the player looks (focus within 80 units, the attack button clicks, the weapon lowers), the entity commands (`activate`, `runScript`, `play`...), Doom 3's fonts, live GUIs redrawn when they change. Not done: `editDef` / `choiceDef` / `listDef` / `sliderDef` input, key events and focus, named events from scripts, `rotate` / `shear`, the HUD and menus as GUIs (ours are CGE UI).
