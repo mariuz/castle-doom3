@@ -448,6 +448,9 @@ begin
   FShadows := True;
   FPrelightShadows := True;
   FShadowLight := -1;
+  { measured on the demo maps (tools/measure_shadowlights.ps1, 2026-11-02):
+    a second shadow light costs 16..75% of the frame rate (Mars City 1:
+    34 FPS with one, 8 with two), so one light casts by default }
   FShadowLightsMax := 1;
   FShadowMapSize := 512;
   FLightScale := 1;
