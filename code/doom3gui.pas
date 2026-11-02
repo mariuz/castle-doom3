@@ -1239,12 +1239,13 @@ begin
   if Peek = '-' then
   begin
     Inc(P);
-    Exit(-ParseUnary);
+    Exit(-ParseUnary());
   end;
   if Peek = '!' then
   begin
     Inc(P);
-    Exit(Ord(ParseUnary = 0));
+    { ParseUnary() calls it: the bare name is the result variable }
+    Exit(Ord(ParseUnary() = 0));
   end;
   Result := ParsePrimary;
 end;
@@ -1495,6 +1496,8 @@ begin
   end else
   if W.FindVar(Key, V) then
     Result := V;
+  { "#str_01234": the string tables (idLangDict) }
+  Result := D3LangString(Result);
   { Doom 3 strings use "\n" for new lines }
   Result := StringReplace(Result, '\n', #10, [rfReplaceAll]);
 end;

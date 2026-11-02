@@ -73,7 +73,8 @@ jobs:
       - name: Check the test PK4 is up to date with its generator
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends python3
+          # PIL and DejaVu Sans render the test font (font_assets)
+          apt-get install -y --no-install-recommends python3 python3-pil fonts-dejavu-core
           cp data/base/castle_doom3_test.pk4 /tmp/committed.pk4
           python3 tools/make_test_pk4.py
           cmp data/base/castle_doom3_test.pk4 /tmp/committed.pk4 || echo "::warning::test PK4 differs from tools/make_test_pk4.py output (zlib versions can differ); regenerate and commit it"

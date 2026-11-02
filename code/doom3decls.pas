@@ -238,6 +238,16 @@ type
   without spaces, like "heightmap(textures/a_bmp.tga,4)". }
 function ReadImageProgram(const Lexer: TDoom3Lexer): String;
 
+{ "#str_01234" through the string tables (idLangDict: every strings/*.lang
+  with "english" in its name), else S as is. Loaded on first use,
+  forgotten by Decls.Clear. }
+function D3LangString(const S: String): String;
+
+{ The file a sound shader's file name plays, like idWaveFile::Open: the
+  .ogg of the same name first (the retail data ships .ogg files under the
+  shaders' .wav names), then the name itself; '' when neither exists. }
+function D3SoundFile(const Path: String): String;
+
 var
   Decls: TD3DeclManager;
 
@@ -562,11 +572,64 @@ begin
   FClearHooks[High(FClearHooks)] := Proc;
 end;
 
+var
+  LangStrings: specialize TDictionary<String, String>;
+
+function D3LangString(const S: String): String;
+var
+  Files: TStringList;
+  F, Key, Value: String;
+  L: TDoom3Lexer;
+begin
+  if (Length(S) < 5) or not SameText(Copy(S, 1, 5), '#str_') then
+    Exit(S);
+  if LangStrings = nil then
+  begin
+    LangStrings := specialize TDictionary<String, String>.Create;
+    Files := D3Fs.FindFiles('strings/', '.lang');
+    try
+      for F in Files do
+        if Pos('english', LowerCase(ExtractFileName(F))) > 0 then
+        begin
+          L := TDoom3Lexer.Create(D3Fs.ReadText(F));
+          try
+            if L.Peek = '{' then
+              L.Next(Key);
+            while L.Next(Key) and (Key <> '}') do
+            begin
+              Value := L.NextStr;
+              { idLangDict: a later file replaces a key }
+              LangStrings.AddOrSetValue(LowerCase(Key), Value);
+            end;
+          finally
+            L.Free;
+          end;
+        end;
+      WritelnLog('Doom3Decls', 'Strings: %d from %d files', [LangStrings.Count, Files.Count]);
+    finally
+      Files.Free;
+    end;
+  end;
+  if not LangStrings.TryGetValue(LowerCase(Trim(S)), Result) then
+    Result := S;
+end;
+
+function D3SoundFile(const Path: String): String;
+begin
+  Result := ChangeFileExt(Path, '.ogg');
+  if D3Fs.FileExists(Result) then
+    Exit;
+  Result := Path;
+  if not D3Fs.FileExists(Result) then
+    Result := '';
+end;
+
 procedure TD3DeclManager.Clear;
 var
   T: TD3DeclType;
   Proc: TProcedure;
 begin
+  FreeAndNil(LangStrings);
   for Proc in FClearHooks do
     Proc();
   for T := Low(T) to High(T) do
@@ -1488,11 +1551,12 @@ begin
   if not FBodies[dtSound].TryGetValue(Key, Body) then
   begin
     { a direct file name works as a sound shader too }
-    if D3Fs.FileExists(Key) then
+    Tok := D3SoundFile(Key);
+    if Tok <> '' then
     begin
       Result := TD3SoundShader.Create;
       Result.Name := Key;
-      Result.Files.Add(Key);
+      Result.Files.Add(Tok);
       FSounds.Add(Key, Result);
     end;
     Exit;
@@ -1523,9 +1587,17 @@ begin
       if L = 'global' then
         Result.Global := True
       else
+      if (Pos('/', Tok) > 0) or (Pos('\', Tok) > 0) then
+        { Doom 3 normalizes backslashes in paths (a few retail shaders use them) }
+        Tok := StringReplace(Tok, '\', '/', [rfReplaceAll]);
       if (Pos('/', Tok) > 0) and
          ((ExtractFileExt(L) = '.wav') or (ExtractFileExt(L) = '.ogg')) then
-        Result.Files.Add(Tok)
+      begin
+        { files that exist only (Doom 3 plays its default sound for the others) }
+        Tok := D3SoundFile(Tok);
+        if Tok <> '' then
+          Result.Files.Add(Tok);
+      end
       else
       if Tok = '{' then
         Lexer.SkipBracedSection;
@@ -1539,4 +1611,5 @@ initialization
   Decls := TD3DeclManager.Create;
 finalization
   FreeAndNil(Decls);
+  FreeAndNil(LangStrings);
 end.
