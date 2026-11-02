@@ -2047,6 +2047,12 @@ models/test/blob
 	diffusemap	models/test/blob_d.tga
 	bumpmap		heightmap(models/test/blob_bmp.tga, 4)
 	specularmap	makeIntensity(models/test/blob_d.tga)
+	{	// burning corpse effect (like the retail monsters' skins)
+		if	parm7
+		blend	gl_zero, gl_one
+		map	models/test/blob_bmp.tga
+		alphaTest 0.05 + 0.3 * (time - parm7)
+	}
 }
 
 /* the test guns' casings (debris_test_brass) */

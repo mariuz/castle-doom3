@@ -4346,6 +4346,74 @@ begin
   end;
 end;
 
+{ burn deaths: the material's burn-away stage (alphaTest over time - parm7),
+  the skin alpha tested by its dissolve image }
+procedure TestBurnAway;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  M: TD3Material;
+  Ctx: TD3ExprContext;
+  A: TD3Actor;
+  I: Integer;
+  App: TAppearanceNode;
+  Far: TVector3;
+  Img: TCastleImage;
+begin
+  M := Decls.Material('models/test/blob');
+  CheckEquals('models/test/blob_bmp.tga', M.BurnImage, 'the burn stage''s dissolve map');
+  Check(M.BurnAlphaTest <> nil, 'its alphaTest expression');
+  if M.BurnAlphaTest = nil then
+    Exit;
+  Ctx := Default(TD3ExprContext);
+  Ctx.Time := 2;
+  Ctx.Parms[7] := 1;
+  CheckNear(0.35, M.BurnAlphaTest.Eval(Ctx), '0.05 + 0.3 * (time - parm7)', 0.001);
+  { the burning skin: the diffuse colors with the dissolve image's
+    brightness as alpha (blob_bmp has no alpha channel) }
+  Img := EvaluateImageProgram('castlealphafrom(models/test/blob_d.tga,models/test/blob_bmp.tga)', ikColor);
+  try
+    Check(Img is TRGBAlphaImage, 'castlealphafrom makes an RGBA image');
+    if Img <> nil then
+      Check(Img.HasAlpha, 'with an alpha channel');
+  finally
+    Img.Free;
+  end;
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for burns');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    A := nil;
+    for I := 0 to Game.Actors.Count - 1 do
+      if Game.Actors[I].Model.Entity.Name = 'blob_scripted_1' then
+        A := Game.Actors[I];
+    Check(A <> nil, 'blob_scripted_1 is an actor');
+    if A = nil then
+      Exit;
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.ActorBurn(A);
+    Check(Length(A.BurnMeshes) > 0, 'its skin burns away');
+    if Length(A.BurnMeshes) = 0 then
+      Exit;
+    App := A.Model.Instance.MeshShapes[A.BurnMeshes[0]].Appearance;
+    Check(App.AlphaMode = amMask, 'alpha tested');
+    Check(Pos('castlealphafrom', TImageTextureNode(TMaterialNode(App.Material).DiffuseTexture).FdUrl.Items[0]) > 0,
+      'its diffuse texture with the dissolve image''s alpha');
+    for I := 1 to 20 do
+      Game.Update(0.05, Far);
+    CheckNear(0.05 + 0.3 * 1, App.AlphaCutoff, 'the cutoff after 1 s', 0.03);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { sound item 6: a shader's random file, shakes, the path through portals }
 procedure TestSoundShakesAndPaths;
 var
@@ -6706,6 +6774,7 @@ begin
   TestMoveablePush;
   TestHitLocations;
   TestSoundShakesAndPaths;
+  TestBurnAway;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;

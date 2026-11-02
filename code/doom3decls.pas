@@ -85,6 +85,11 @@ type
     SkyCameraCubeMap: Boolean;
     { Plain stages after the first one (glows over lit walls...) }
     ExtraStages: array of TD3ExtraStage;
+    { the burn-away stage (a monster skin's "if parm7 ... alphaTest 0.05 +
+      0.3 * (time - parm7)"): its map (the dissolve image) and alpha test
+      expression (owned); '' / nil without one }
+    BurnImage: String;
+    BurnAlphaTest: TD3Expr;
     { The first heat haze stage (program heatHaze*.vfp, reading
       _currentRender): the distortion normal map (fragmentMap 1, '' when
       there is no such stage), the mask (fragmentMap 2 of the WithMask
@@ -331,6 +336,7 @@ destructor TD3Material.Destroy;
 var
   I, J: Integer;
 begin
+  FreeAndNil(BurnAlphaTest);
   for I := 0 to High(ExtraStages) do
   begin
     FreeAndNil(ExtraStages[I].Condition);
@@ -886,6 +892,7 @@ var
   StageFragmentMaps: array [0..2] of String;
   StageVertexParms: array [0..1] of String;
   StageAlphaTest: Single;
+  StageAlphaTestExpr: TD3Expr;
   Regs: array [0..3] of TD3Expr;
   StageCond: TD3Expr;
   Parts: TStringArray;
@@ -956,6 +963,7 @@ begin
           StageVertexParms[I] := '';
         HasBlend := False;
         StageAlphaTest := -1;
+        StageAlphaTestExpr := nil;
         StageVC := False;
         StageInvVC := False;
         FreeAndNil(StageCond);
@@ -1057,8 +1065,17 @@ begin
             StageMap := ReadImageProgram(Lexer)
           else
           if L = 'alphatest' then
-            StageAlphaTest := Lexer.ReadFloat
-          else
+          begin
+            { a number, or an expression of time and parms (burn-away) }
+            FreeAndNil(StageAlphaTestExpr);
+            StageAlphaTestExpr := ParseD3ExpressionString(Lexer.RestOfLine, @Table);
+            if (StageAlphaTestExpr <> nil) and StageAlphaTestExpr.IsConstant then
+            begin
+              StageAlphaTest := StageAlphaTestExpr.Eval(Default(TD3ExprContext));
+              FreeAndNil(StageAlphaTestExpr);
+            end else
+              StageAlphaTest := 0;
+          end else
           if L = 'if' then
           begin
             FreeAndNil(StageCond);
@@ -1189,6 +1206,15 @@ begin
           Result.DiffuseInverseVertexColor := StageInvVC;
         end;
         FreeTexOps(StageOps);
+        { the first stage with an alpha test that changes (with time and
+          parm7): the burn-away }
+        if (StageAlphaTestExpr <> nil) and (Result.BurnAlphaTest = nil) and (StageMap <> '') then
+        begin
+          Result.BurnImage := StageMap;
+          Result.BurnAlphaTest := StageAlphaTestExpr;
+          StageAlphaTestExpr := nil;
+        end;
+        FreeAndNil(StageAlphaTestExpr);
         if StageSpecial then
         begin
           Result.HasSpecialStage := True;

@@ -274,6 +274,29 @@ begin
   end;
 end;
 
+{ Color's pixels with Alpha's alpha (its brightness without an alpha
+  channel), Alpha sampled at the same relative place. }
+function AlphaFrom(const Color, Alpha: TCastleImage): TRGBAlphaImage;
+var
+  X, Y, AX, AY: Integer;
+  C, A: TVector4;
+begin
+  Result := TRGBAlphaImage.Create(Color.Width, Color.Height);
+  for Y := 0 to Color.Height - 1 do
+    for X := 0 to Color.Width - 1 do
+    begin
+      C := Color.Colors[X, Y, 0];
+      AX := Min(Alpha.Width - 1, X * Alpha.Width div Max(1, Color.Width));
+      AY := Min(Alpha.Height - 1, Y * Alpha.Height div Max(1, Color.Height));
+      A := Alpha.Colors[AX, AY, 0];
+      if Alpha.HasAlpha then
+        C.W := A.W
+      else
+        C.W := (A.X + A.Y + A.Z) / 3;
+      Result.Colors[X, Y, 0] := C;
+    end;
+end;
+
 function Evaluate(const Lexer: TDoom3Lexer; const Kind: TD3ImageKind): TCastleImage;
 var
   Func: String;
@@ -302,6 +325,26 @@ begin
         end;
       finally
         A.Free;
+      end;
+    end else
+    if Func = 'castlealphafrom' then
+    begin
+      { (this port's) the first image's colors with the second's alpha (or
+        brightness): a burn-away skin alpha tested by its dissolve map }
+      A := Evaluate(Lexer, ikColor);
+      B := nil;
+      if Lexer.Check(',') then
+        B := Evaluate(Lexer, ikColor);
+      Lexer.Check(')');
+      if (A <> nil) and (B <> nil) then
+      begin
+        Result := AlphaFrom(A, B);
+        A.Free;
+        B.Free;
+      end else
+      begin
+        Result := A;
+        B.Free;
       end;
     end else
     if Func = 'addnormals' then

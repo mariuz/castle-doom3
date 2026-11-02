@@ -1731,6 +1731,13 @@ begin
         Console.Print(Format('Elevator %s: floor %d, state %d', [FGame.Elevators[I].Entity.Name,
           FGame.Elevators[I].CurrentFloor, Ord(FGame.Elevators[I].State)]));
   end else
+  if Cmd = 'burn' then
+  begin
+    { burn <actor>: its burn-away (idAI::Event_Burn) }
+    for I := 0 to FGame.Actors.Count - 1 do
+      if SameText(FGame.Actors[I].Model.Entity.Name, Args) then
+        FGame.ActorBurn(FGame.Actors[I]);
+  end else
   if Cmd = 's_occlusion' then
   begin
     { sounds quieter by their path through the portals (closed doors) }
