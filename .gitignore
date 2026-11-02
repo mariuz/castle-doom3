@@ -32,3 +32,4 @@ samples.txt
 # Linux / macOS executable
 /castle-doom3
 /tests/castle-doom3-tests
+__pycache__/
