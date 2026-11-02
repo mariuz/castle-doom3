@@ -793,6 +793,7 @@ type
     procedure SpawnPlayerModel;
     procedure SpawnWorldWeapon(const W: TD3Weapon);
     procedure UpdateBrass(const SecondsPassed: Single);
+    procedure UpdateBrassStep(const SecondsPassed: Single);
     procedure StartRagdoll;
     { a ragdoll for a model with this entityDef's "ragdoll" (its
       articulated figure; the skeleton when there's none), nil without
@@ -5339,6 +5340,19 @@ begin
 end;
 
 procedure TD3Game.UpdateBrass(const SecondsPassed: Single);
+const
+  MaxStep = 1 / 60;
+var
+  Steps, I: Integer;
+begin
+  { in steps of at most 1/60 s: with long frames (software rendering) the
+    gravity of one frame kept the bounces above the resting speed }
+  Steps := Max(1, Ceil(SecondsPassed / MaxStep));
+  for I := 1 to Steps do
+    UpdateBrassStep(SecondsPassed / Steps);
+end;
+
+procedure TD3Game.UpdateBrassStep(const SecondsPassed: Single);
 const
   Gravity = 1066;
 var

@@ -4035,6 +4035,13 @@ begin
     CheckNear(0, CgeToD3(Game.Brass[0].Position).Z, 'on the floor', 1);
     Step(2.5);
     CheckEquals(0, Game.Brass.Count, 'gone after its fuse (4 s)');
+    { long frames (software rendering in CI: 0.34 s) still let it rest }
+    Check(Game.EjectBrass(Game.Weapon), 'brass ejected again');
+    for I := 1 to 6 do
+      Game.Update(0.34, Eye);
+    Check(Game.Brass[0].Resting, 'the casing rests with long frames too');
+    Step(2.5);
+    CheckEquals(0, Game.Brass.Count, 'gone after its fuse again');
     { a shot ejects one (ejectBrassDelay 0) }
     Game.AttackOnce;
     Step(1);
