@@ -3145,6 +3145,20 @@ test_door {
 	sound/test/door.wav
 }
 
+// two files: idSoundShader plays one of them at random, not the same twice
+test_pair {
+	sound/test/door.wav
+	sound/test/step.wav
+}
+
+// shakes the view of a player near it
+test_shake {
+	minDistance	1
+	maxDistance	10
+	shakes		0.3
+	sound/test/door.wav
+}
+
 // a missing file is dropped, a backslash path normalized (like some retail
 // shaders, monster_zombie_security_chatter3)
 test_backslash {
