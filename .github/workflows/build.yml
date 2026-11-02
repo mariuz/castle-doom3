@@ -120,7 +120,7 @@ jobs:
           grep -q "Ragdoll of blob_1 settled" test_output/fight.log || { echo "::error::the blob's ragdoll should settle"; exit 1; }
           run_test menu MENU "Q"
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
-          grep -q "14 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
+          grep -q "15 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -Eq "testmap.cm.: [0-9]+ models" test_output/clip.log || { echo "::error::collision model not loaded"; exit 1; }
           run_test portals testmap "W:1,S,G:200 0 0,A:0,W:2.2,S,A:180,W:0.2,S,Q"
@@ -177,17 +177,17 @@ jobs:
           run_test stages testmap "W:1,O:notarget,G:640 -150 0,A:90,P:45,W:0.4,S,G:740 -200 96,A:-45,W:0.3,S,W:1,S,Q"
           grep -q 'Sky "textures/test/sky"' test_output/stages.log || { echo "::error::the skybox should be set up"; exit 1; }
           cmp -s test_output/stages_2.png test_output/stages_3.png && { echo "::error::the terminal screen should scroll"; exit 1; } || true
-          grep -q "Material stages: 1 overlays, 1 sprites, 2 glass surfaces" test_output/stages.log || { echo "::error::overlay stages, sprites and glass should be built"; exit 1; }
-          grep -q "Special stages: 1 heat haze glass surfaces, 2 reflections" test_output/stages.log || { echo "::error::the heat haze pane and the cube map reflections should be built"; exit 1; }
+          grep -q "Material stages: 2 overlays, 2 sprites, 3 glass surfaces" test_output/stages.log || { echo "::error::overlay stages, sprites and glass should be built"; exit 1; }
+          grep -q "Special stages: 2 heat haze glass surfaces, 2 reflections" test_output/stages.log || { echo "::error::the heat haze pane and the cube map reflections should be built"; exit 1; }
           run_test guis testmap "W:1,O:notarget,G:-150 -60 0,A:180,P:10,W:0.4,S,G:385 200 0,A:90,P:22,W:0.4,S,Q"
-          grep -q 'Rendered "guis/test_panel.gui" (5 windows)' test_output/guis.log || { echo "::error::the panel GUI should be rendered"; exit 1; }
+          grep -q 'Rendered "guis/test_panel.gui" (8 windows)' test_output/guis.log || { echo "::error::the panel GUI should be rendered"; exit 1; }
           grep -q 'Rendered "guis/test_status.gui" (6 windows)' test_output/guis.log || { echo "::error::the status GUI should be rendered"; exit 1; }
           grep -q "Shadow casters: 20 brushes" test_output/shadows.log || { echo "::error::the .cm brushes should cast shadows"; exit 1; }
           grep -q 'Prelight shadow volume "_prelight_light_1": 20 triangles' test_output/shadows.log || { echo "::error::the precomputed shadow volume of light_1 should cast"; exit 1; }
           run_test hulls testmap "W:0.5,O:r_md5ShadowClosed 0,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"
           grep -q "casts with 6 joint boxes" test_output/hulls.log || { echo "::error::big md5 meshes should cast with joint boxes"; exit 1; }
           run_test closedcast testmap "W:0.5,O:r_md5ShadowTris 0,W:1.5,O:notarget,G:470 -170 0,A:45,P:-20,W:0.5,S,Q"
-          grep -q 'Shadows: "models/md5/test/blob.md5mesh" has 72 triangles, closed: casts with its triangles' test_output/closedcast.log || { echo "::error::closed md5 meshes should cast with their own triangles"; exit 1; }
+          grep -q 'Shadows: "models/md5/test/blob.md5mesh" has 76 triangles, closed: casts with its triangles' test_output/closedcast.log || { echo "::error::closed md5 meshes should cast with their own triangles"; exit 1; }
           run_test lights testmap "W:1,O:notarget,G:420 -60 0,A:0,W:0.6,O:lights,S,W:0.4,O:lights,W:0.7,O:lights,Q"
           test "$(grep 'Lights: light_4 ' test_output/lights.log | sort -u | wc -l)" -ge 2 || { echo "::error::the pulsing light should change color"; exit 1; }
           grep -q "Killed blob_1" test_output/fight.log || { echo "::error::the creature was not killed"; exit 1; }
