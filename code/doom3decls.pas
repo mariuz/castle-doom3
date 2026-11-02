@@ -154,6 +154,8 @@ type
     function IsSolid: Boolean;
     { Blocks the player in a collision model: solid or playerclip. }
     function BlocksPlayer: Boolean;
+    { MASK_MONSTERSOLID: solid or monsterclip (not playerclip) }
+    function BlocksMonsters: Boolean;
   end;
 
   { A "model" declaration from a .def file. }
@@ -466,6 +468,11 @@ end;
 function TD3Material.BlocksPlayer: Boolean;
 begin
   Result := PlayerClip or not (NonSolid or ClearsSolid);
+end;
+
+function TD3Material.BlocksMonsters: Boolean;
+begin
+  Result := MonsterClip or not (NonSolid or ClearsSolid);
 end;
 
 { TD3ModelDecl }

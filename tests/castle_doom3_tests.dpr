@@ -4304,6 +4304,68 @@ begin
   end;
 end;
 
+{ moveables pushed by shots (idProjectile::Collide: the damage def's
+  "push" as an impulse, speed change push / mass) }
+procedure TestMoveablePush;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Mov: TD3Moveable;
+  Start, Far: TVector3;
+  I: Integer;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for pushes');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Mov := Game.MoveableOf(Game.FindEntity('moveable_barrel_1'));
+    Check(Mov <> nil, 'moveable_barrel_1 is a moveable');
+    if Mov = nil then
+      Exit;
+    CheckNear(100, Mov.Mass, 'mass 100 by default');
+    Check(Mov.AtRest, 'at rest');
+    Start := Mov.Origin;
+    Check(not Game.PushMoveableAt(D3ToCge(Vector3(-200, -200, 50)), Vector3(5000, 0, 0)), 'nothing to push there');
+    { the fists' damage def pushes 20000 }
+    Check(Game.PushMoveableAt(Mov.Brush.Scene.BoundingBox.Center, D3ToCge(Vector3(20000, 0, 0))), 'a hit pushes it');
+    CheckNear(200, Mov.Velocity.X, '20000 / mass 100: 200 units per second', 0.01);
+    Check(not Mov.AtRest, 'moving');
+    for I := 1 to 10 do
+      Game.Update(0.05, Far);
+    Check(Mov.Origin.X - Start.X > 5, Format('it slid along the shot (%.1f)', [Mov.Origin.X - Start.X]));
+    { a splash (RadiusPush): away from the explosion and up }
+    for I := 1 to 40 do
+      Game.Update(0.05, Far);
+    Check(Mov.AtRest, 'at rest again');
+    Game.PushMoveablesInRadius(Mov.Brush.Scene.BoundingBox.Center + D3ToCge(Vector3(0, -30, 0)), 100, 10000);
+    Check(Mov.Velocity.Y > 0, 'pushed away from the explosion');
+    Check(Mov.Velocity.Z > 0, 'and up');
+
+    { monsterclip: the strip at x = -40 (y -256..-80) stops monsters, not
+      the player; the player's playerclip wall (y = 0, x < -120) the
+      other way round }
+    Check(Game.MonsterSegmentCollision(D3ToCge(Vector3(-60, -150, 30)), D3ToCge(Vector3(-20, -150, 30))),
+      'monster clip blocks monsters');
+    Check(not Map.World.WorldSegmentCollision(D3ToCge(Vector3(-60, -150, 30)), D3ToCge(Vector3(-20, -150, 30))),
+      'monster clip lets the player through');
+    Check(Map.World.WorldSegmentCollision(D3ToCge(Vector3(-200, -20, 30)), D3ToCge(Vector3(-200, 20, 30))),
+      'player clip blocks the player');
+    Check(not Game.MonsterSegmentCollision(D3ToCge(Vector3(-200, -20, 30)), D3ToCge(Vector3(-200, 20, 30))),
+      'player clip lets monsters through');
+    Check(Map.WorldCollision.Collides and not Map.MonsterCollision.Collides, 'the player''s collision restored');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { idEntity::BindToJoint: crate_1 on blob_1's body joint }
 procedure TestBindToJoint;
 var
@@ -6458,6 +6520,7 @@ begin
   TestBobbingAndPendulum;
   TestElevator;
   TestBindToJoint;
+  TestMoveablePush;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;

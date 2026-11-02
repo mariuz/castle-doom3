@@ -44,9 +44,11 @@ type
     NodeCount: Integer;
     { Indexed triangles (Doom 3 coordinates) of the polygons whose material
       blocks the player. }
-    procedure PlayerTriangles(out Coords: TVector3List; out Indexes: TInt32List);
-    { An invisible collision-only X3D node of PlayerTriangles. }
-    function BuildCollisionNode: TX3DRootNode;
+    procedure PlayerTriangles(out Coords: TVector3List; out Indexes: TInt32List;
+      const ForMonsters: Boolean = False);
+    { An invisible collision-only X3D node of PlayerTriangles (ForMonsters:
+      the polygons blocking monsters, solid and monsterclip). }
+    function BuildCollisionNode(const ForMonsters: Boolean = False): TX3DRootNode;
     { Brushes that block light (contents with "solid" or "opaque"). }
     function BrushCastsShadows(const I: Integer): Boolean;
   end;
@@ -222,7 +224,8 @@ end;
 
 { TD3CollisionModel }
 
-procedure TD3CollisionModel.PlayerTriangles(out Coords: TVector3List; out Indexes: TInt32List);
+procedure TD3CollisionModel.PlayerTriangles(out Coords: TVector3List; out Indexes: TInt32List;
+  const ForMonsters: Boolean);
 var
   I, J, Base: Integer;
   V: Int32;
@@ -233,6 +236,11 @@ begin
   begin
     if Length(Polygons[I].Verts) < 3 then
       Continue;
+    if ForMonsters then
+    begin
+      if not Decls.Material(Polygons[I].Material).BlocksMonsters then
+        Continue;
+    end else
     if not Decls.Material(Polygons[I].Material).BlocksPlayer then
       Continue;
     Base := Coords.Count;
@@ -310,7 +318,7 @@ begin
     ((C <> '') and (C[1] in ['0'..'9']));
 end;
 
-function TD3CollisionModel.BuildCollisionNode: TX3DRootNode;
+function TD3CollisionModel.BuildCollisionNode(const ForMonsters: Boolean): TX3DRootNode;
 var
   Coords: TVector3List;
   Indexes: TInt32List;
@@ -320,7 +328,7 @@ var
   Shape: TShapeNode;
 begin
   Result := TX3DRootNode.Create;
-  PlayerTriangles(Coords, Indexes);
+  PlayerTriangles(Coords, Indexes, ForMonsters);
   try
     if Indexes.Count = 0 then
       Exit;

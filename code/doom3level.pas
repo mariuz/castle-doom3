@@ -111,6 +111,9 @@ type
     FProc: TD3ProcFile;
     FMapFile: TD3MapFile;
     FLightScene, FWorldCollision: TCastleScene;
+    { the world's polygons blocking monsters (solid, monsterclip), off for
+      the player: monster moves swap it with FWorldCollision }
+    FMonsterCollision: TCastleScene;
     FAreaScenes, FAreaNonSolid: array of TCastleScene;
     { shadow casting brushes (.cm) per area; the last one has brushes
       outside all areas }
@@ -257,6 +260,7 @@ type
       UseCollisionModel is off): then the render geometry collides. }
     property Collision: TD3CollisionFile read FCollision;
     property WorldCollision: TCastleScene read FWorldCollision;
+    property MonsterCollision: TCastleScene read FMonsterCollision;
     property Brushes: specialize TObjectList<TD3BrushEntity> read FBrushes;
     { The live GUIs of the level's surfaces (brush entities, static models,
       world surfaces), with their entity names. }
@@ -524,6 +528,7 @@ begin
   FreeAndNil(FLightScene);
   FreeAndNil(FPortals);
   FreeAndNil(FWorldCollision);
+  FreeAndNil(FMonsterCollision);
   FreeAndNil(FCollision);
   FreeAndNil(FProc);
   FreeAndNil(FMapFile);
@@ -1689,6 +1694,16 @@ begin
   FWorldCollision.Pickable := False;
   FWorldCollision.CastShadows := False;
   Add(FWorldCollision);
+  FMonsterCollision := TD3Scene.Create(nil);
+  FMonsterCollision.SetTransient;
+  FMonsterCollision.Name := 'MonsterCollision';
+  FMonsterCollision.Load(WorldModel.BuildCollisionNode(True), True);
+  FMonsterCollision.PreciseCollisions := True;
+  FMonsterCollision.Collides := False;
+  FMonsterCollision.Visible := False;
+  FMonsterCollision.Pickable := False;
+  FMonsterCollision.CastShadows := False;
+  Add(FMonsterCollision);
   for I := 0 to High(FAreaScenes) do
     if FAreaScenes[I] <> nil then
       FAreaScenes[I].Collides := False;
