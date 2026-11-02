@@ -124,6 +124,10 @@ type
     TriggerBoxBase: TBox3D;
     { disabled by its elevator (idDoor::Enable): touching doesn't open it }
     Disabled: Boolean;
+    { "requires": the player opens it only carrying the item of that
+      inv_name ("removeItem": which it then takes, idGameLocal::RequirementMet) }
+    Requires: String;
+    RemoveItem: Boolean;
     procedure Update(const SecondsPassed: Single);
     procedure Open;
     procedure Close;
@@ -245,6 +249,12 @@ type
     ChildInParent: TMatrix4;
     { Number of bound ancestors (parents are updated before children). }
     Depth: Integer;
+    { bound to a joint of an md5 model (idEntity::BindToJoint): Parent is
+      the model's holder; Oriented follows the joint's rotation too, else
+      only its position (with the model's axis) }
+    JointModel: TD3ModelEntity;
+    Joint: String;
+    Oriented: Boolean;
   end;
 
   { An entity moved by script events (idMover's move, moveTo, rotateOnce,
@@ -800,6 +810,7 @@ type
     procedure SpawnMover(const B: TD3BrushEntity);
     procedure SpawnElevator(const B: TD3BrushEntity);
     function DoorMover(const Name: String): TD3Mover;
+    function DoorRequirementMet(const Door: TD3Mover): Boolean;
     procedure ElevatorGotoFloor(const El: TD3Elevator; const Floor: Integer);
     procedure ElevatorDoors(const El: TD3Elevator; const Open, Enable, Close, Disable: Boolean);
     procedure ElevatorGuiState(const El: TD3Elevator; const Key, Value: String);
@@ -896,6 +907,7 @@ type
     function TransformOf(const AName: String): TCastleTransform;
     function FindBinding(const Child: TCastleTransform): TD3Binding;
     procedure Bind(const Child, Parent: TCastleTransform);
+    function BindingParentMatrix(const Bnd: TD3Binding): TMatrix4;
     procedure Unbind(const Child: TCastleTransform);
     procedure StartScripts;
     procedure CallScript(const FunctionName: String; const Who: String);
@@ -972,6 +984,10 @@ type
     { A brush entity's world bounds, also while hidden or without visible
       surfaces (its model or collision model bounds); empty when none. }
     function MoverBounds(const B: TD3BrushEntity): TBox3D;
+    { idEntity::BindToJoint: Child follows Model's joint (Oriented: its
+      rotation too). False without such a joint. }
+    function BindToJoint(const Child: TCastleTransform; const Model: TD3ModelEntity;
+      const JointName: String; const Oriented: Boolean): Boolean;
   public
     { Player state }
     Health, Armor: Integer;
@@ -1506,7 +1522,8 @@ end;
 procedure TD3Mover.Update(const SecondsPassed: Single);
 var
   Step, S: Single;
-  Q: TQuaternion;
+  Q: TQuaternion;
+  R: TVector4;
 begin
   Time := Time + SecondsPassed;
   case Kind of
@@ -1524,7 +1541,11 @@ begin
           { idAngles(0, 0, roll): a roll about the entity's own x axis }
           Q := QuatFromAxisAngle(BaseRotation) *
             QuatFromAxisAngle(D3ToCge(Vector3(1, 0, 0)), DegToRad(SwingSpeed * S));
-          Brush.Scene.Rotation := Q.ToAxisAngle;
+          R := Q.ToAxisAngle;
+          { the identity (no swing, no base rotation) has no axis }
+          if IsNan(R.X) or IsNan(R.W) or R.XYZ.IsZero then
+            R := Vector4(0, 1, 0, 0);
+          Brush.Scene.Rotation := R;
         end;
       end;
     mkRotating:
@@ -1946,6 +1967,23 @@ begin
   Result := nil;
 end;
 
+function TD3Game.DoorRequirementMet(const Door: TD3Mover): Boolean;
+var
+  I: Integer;
+begin
+  { idGameLocal::RequirementMet: the player carries the item (by inv_name) }
+  if (Door.Requires = '') or (Door.State <> dsClosed) then
+    Exit(True);
+  I := FCarried.IndexOf(D3LangString(Door.Requires));
+  Result := I >= 0;
+  if Result and Door.RemoveItem then
+  begin
+    WritelnLog('Doom3World', 'Door %s takes %s', [Door.Brush.Entity.Name, FCarried[I]]);
+    FCarried.Delete(I);
+    Door.Requires := '';
+  end;
+end;
+
 function TD3Game.DoorMover(const Name: String): TD3Mover;
 begin
   if Name <> '' then
@@ -2216,6 +2254,8 @@ begin
       M.Speed := Max(1, M.Distance) / E.FloatValue('time');
     M.Wait := E.FloatValue('wait', 3);
     M.Locked := E.BoolValue('locked');
+    M.Requires := E.Value('requires');
+    M.RemoveItem := E.IntValue('removeItem', 0) <> 0;
     M.NoTouch := E.BoolValue('no_touch');
     M.Team := LowerCase(E.Value('team'));
     { Doom 3 doors open when you enter a trigger around them }
@@ -2266,6 +2306,9 @@ begin
     M.Brush := B;
     M.Kind := mkPendulum;
     M.BaseRotation := B.Scene.Rotation;
+    { no "rotation": a zero axis would make the quaternion NaN }
+    if M.BaseRotation.XYZ.IsZero then
+      M.BaseRotation := Vector4(0, 1, 0, 0);
     M.SwingSpeed := E.FloatValue('speed', 30) * 2;
     M.Phase := E.FloatValue('phase', 0);
     if E.HasKey('freq') and (E.FloatValue('freq') > 0) then
@@ -5520,7 +5563,7 @@ begin
   for Mover in FMovers do
   begin
     if (Mover.Kind = mkDoor) and not Mover.NoTouch and not Mover.Disabled and not PlayerDead and
-       Mover.TriggerBox.Contains(PlayerEye) then
+       Mover.TriggerBox.Contains(PlayerEye) and DoorRequirementMet(Mover) then
       OpenTeam(Mover);
     { monsters open doors too (idDoor's trigger touched by an actor): the
       AAS routes them through doorways }
@@ -9663,9 +9706,55 @@ begin
     FBindings.Add(Bnd);
   end;
   Bnd.Parent := Parent;
+  Bnd.JointModel := nil;
+  Bnd.Joint := '';
   { both are children of the map (world space): child = parent * relative }
   Bnd.ChildInParent := Parent.InverseTransform * Child.Transform;
   FBindingsSorted := False;
+end;
+
+function TD3Game.BindingParentMatrix(const Bnd: TD3Binding): TMatrix4;
+var
+  J, World: TMatrix4;
+  P: TVector3;
+begin
+  Result := Bnd.Parent.Transform;
+  if (Bnd.JointModel = nil) or (Bnd.JointModel.Instance = nil) or
+     not Bnd.JointModel.Instance.JointTransform(Bnd.Joint, J) then
+    Exit;
+  { the joint in the scene, the scene in its holder, the holder in the map }
+  World := Bnd.JointModel.Holder.Transform * Bnd.JointModel.Instance.Scene.Transform * J;
+  if Bnd.Oriented then
+    Result := World
+  else
+  begin
+    { the joint's position, the model's axis }
+    P := World.MultPoint(TVector3.Zero);
+    Result := Bnd.JointModel.Holder.Transform;
+    Result.Columns[3] := Vector4(P, 1);
+  end;
+end;
+
+function TD3Game.BindToJoint(const Child: TCastleTransform; const Model: TD3ModelEntity;
+  const JointName: String; const Oriented: Boolean): Boolean;
+var
+  Bnd: TD3Binding;
+  J, Inv: TMatrix4;
+begin
+  Result := (Child <> nil) and (Model <> nil) and (Model.Instance <> nil) and
+    (Child <> Model.Holder) and Model.Instance.JointTransform(JointName, J);
+  if not Result then
+    Exit;
+  Bind(Child, Model.Holder);
+  Bnd := FindBinding(Child);
+  if Bnd = nil then
+    Exit(False);
+  Bnd.JointModel := Model;
+  Bnd.Joint := JointName;
+  Bnd.Oriented := Oriented;
+  if not BindingParentMatrix(Bnd).TryInverse(Inv) then
+    Inv := TMatrix4.Identity;
+  Bnd.ChildInParent := Inv * Child.Transform;
 end;
 
 procedure TD3Game.Unbind(const Child: TCastleTransform);
@@ -9687,7 +9776,14 @@ begin
   { lights and other entities are not bound yet }
   for E in FMap.MapFile.Entities do
     if E.Value('bind') <> '' then
-      Bind(TransformOf(E.Name), TransformOf(E.Value('bind')));
+    begin
+      { "bindToJoint" with "bind": at that joint of the master's model
+        ("bindOrientated", default 1) }
+      if (E.Value('bindToJoint') = '') or
+         not BindToJoint(TransformOf(E.Name), FMap.FindModelEntity(E.Value('bind')),
+           E.Value('bindToJoint'), E.BoolValue('bindOrientated', True)) then
+        Bind(TransformOf(E.Name), TransformOf(E.Value('bind')));
+    end;
 end;
 
 function CompareBindingDepth(constref A, B: TD3Binding): Integer;
@@ -9721,7 +9817,7 @@ begin
   end;
   for Bnd in FBindings do
   begin
-    M := Bnd.Parent.Transform * Bnd.ChildInParent;
+    M := BindingParentMatrix(Bnd) * Bnd.ChildInParent;
     { most parents don't move: don't touch their children's scenes }
     if TMatrix4.Equals(M, Bnd.Child.Transform, 0.01) then
       Continue;
@@ -10501,6 +10597,16 @@ begin
   end else
 
   { binding }
+  if N = 'bindToJoint' then
+  begin
+    { bindToJoint( master, joint, orientated ) }
+    Other := HandleEntity(Args[0].E);
+    if (Other <> nil) and not BindToJoint(TransformOf(E.Name), FMap.FindModelEntity(Other.Name),
+       D3ValueToString(Args[1]), D3ValueToFloat(Args[2]) <> 0) then
+      WritelnLog('Doom3World', 'bindToJoint: %s has no joint "%s" (%s)', [Other.Name, D3ValueToString(Args[1]), E.Name]);
+    if FScriptMovers.TryGetValue(Target, M) and (FindBinding(M.Transform) <> nil) then
+      D3PlacementFromMatrix(FindBinding(M.Transform).ChildInParent, M.Origin, M.Angles);
+  end else
   if (N = 'bind') or (N = 'bindPosition') then
   begin
     Other := HandleEntity(Args[0].E);

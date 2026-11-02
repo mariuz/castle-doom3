@@ -137,6 +137,8 @@ type
     FShadowMapSize: Cardinal;
     FSkyMaterial: String;
     FCollision: TD3CollisionFile;
+    { brush entities colliding with their .cm clip model (BuildBrushEntities) }
+    FClipModelBrushes: Integer;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
     FModels: specialize TObjectList<TD3ModelEntity>;
@@ -1751,7 +1753,12 @@ var
   ModelName: String;
   Solid, Closed: Boolean;
   Positions: array of TVector3;
+  Cm: TD3CollisionModel;
+  CmRoot: TX3DRootNode;
+  CollisionNode: TCollisionNode;
+  ClipOnly: Boolean;
 begin
+  FClipModelBrushes := 0;
   for E in FMapFile.Entities do
   begin
     if EntityInhibited(E) then
@@ -1786,20 +1793,51 @@ begin
     B.Parms := TD3EntityParms.Create;
     B.Parms.FromKeys(E.Pairs);
     BuildProcModel(Model, Root, Root, E, B.Parms);
+    { a model of only nonsolid surfaces (heat haze sprites, decals...)
+      neither collides nor blocks sight and shots by itself }
+    Solid := False;
+    for Surf in Model.Surfaces do
+      if not (Decls.Material(Surf.Material).NonSolid or Decls.Material(Surf.Material).ClearsSolid) then
+        Solid := True;
+    { but its clip model in the .cm may (Doom 3 collides with idClipModel:
+      clip brushes of grates, glass, invisible blockers): an X3D Collision
+      node shows the model and collides with that proxy, moving with it.
+      Solid models keep colliding with their render triangles (shots and
+      the GUI focus need them). }
+    Cm := nil;
+    ClipOnly := False;
+    if (FCollision <> nil) and not Solid and E.BoolValue('solid', True) then
+    begin
+      Cm := FCollision.FindModel(E.Value('model', E.Name));
+      if (Cm = nil) and (E.Name <> '') then
+        Cm := FCollision.FindModel(E.Name);
+    end;
+    if Cm <> nil then
+    begin
+      CmRoot := Cm.BuildCollisionNode;
+      if CmRoot.FdChildren.Count > 0 then
+      begin
+        CollisionNode := TCollisionNode.Create;
+        for I := 0 to Root.FdChildren.Count - 1 do
+          CollisionNode.AddChildren(Root.FdChildren[I] as TAbstractChildNode);
+        Root.FdChildren.Clear;
+        CollisionNode.Proxy := CmRoot;
+        Root.AddChildren(CollisionNode);
+        Inc(FClipModelBrushes);
+        Solid := True;
+        ClipOnly := True;
+      end else
+        FreeAndNil(CmRoot);
+    end;
     AddLightLibrary(Root);
     B.Scene := TD3Scene.Create(nil);
     B.Scene.SetTransient;
     B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     B.Scene.Load(Root, True);
     B.Scene.ProcessEvents := SpriteCount <> Sprites;
-    { a model of only nonsolid surfaces (heat haze sprites, decals...)
-      neither collides nor blocks sight and shots }
-    Solid := False;
     Closed := False;
     for Surf in Model.Surfaces do
     begin
-      if not (Decls.Material(Surf.Material).NonSolid or Decls.Material(Surf.Material).ClearsSolid) then
-        Solid := True;
       if not Closed then
       begin
         SetLength(Positions, Length(Surf.Vertexes));
@@ -1811,7 +1849,8 @@ begin
     B.Scene.PreciseCollisions := E.BoolValue('solid', True) and Solid;
     B.Scene.CastShadows := Closed;
     B.Scene.Collides := B.Scene.PreciseCollisions;
-    B.Scene.Pickable := B.Scene.PreciseCollisions;
+    { clip brushes don't stop shots (player clip) }
+    B.Scene.Pickable := B.Scene.PreciseCollisions and not ClipOnly;
     B.Scene.Translation := D3ToCge(E.Origin);
     Rot := E.Rotation;
     SetD3Rotation(B.Scene, Rot);
@@ -1819,6 +1858,8 @@ begin
     B.SetHidden(E.IntValue('hide', 0) <> 0);
     FBrushes.Add(B);
   end;
+  if FClipModelBrushes > 0 then
+    WritelnLog('Doom3Level', 'Brush entities: %d without solid surfaces collide with their clip models', [FClipModelBrushes]);
 end;
 
 { Model of an entity (its "model" key or its entityDef's), resolved through

@@ -4304,6 +4304,56 @@ begin
   end;
 end;
 
+{ idEntity::BindToJoint: crate_1 on blob_1's body joint }
+procedure TestBindToJoint;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Blob: TD3ModelEntity;
+  Crate: TCastleTransform;
+  Start, BlobStart: TVector3;
+  Far: TVector3;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for bindToJoint');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Blob := Map.FindModelEntity('blob_1');
+    Check(Blob <> nil, 'blob_1 exists');
+    Check(Map.FindBrush('crate_1') <> nil, 'crate_1 exists');
+    if (Blob = nil) or (Map.FindBrush('crate_1') = nil) then
+      Exit;
+    Crate := Map.FindBrush('crate_1').Scene;
+    Check(not Game.BindToJoint(Crate, Blob, 'no_such_joint', True), 'no such joint: not bound');
+    Check(Game.BindToJoint(Crate, Blob, 'body', True), 'bound to the body joint');
+    Game.Update(0.05, Far);
+    Start := Crate.Translation;
+    BlobStart := Blob.Holder.Translation;
+    { the blob moves: the crate rides at its joint }
+    Blob.Holder.Translation := BlobStart + D3ToCge(Vector3(100, 0, 0));
+    Game.Update(0.05, Far);
+    CheckNear(100, CgeToD3(Crate.Translation - Start).X, 'it follows the joint', 2);
+    { not oriented: the joint's position, the model's axis }
+    Blob.Holder.Translation := BlobStart;
+    Game.Update(0.05, Far);
+    Check(Game.BindToJoint(Crate, Blob, 'body', False), 'bound by position only');
+    Start := Crate.Translation;
+    Blob.Holder.Translation := BlobStart + D3ToCge(Vector3(0, 50, 0));
+    Game.Update(0.05, Far);
+    CheckNear(50, CgeToD3(Crate.Translation - Start).Y, 'it follows the joint''s position', 2);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { func_elevator (idElevator): slider_1 made an elevator for the test, door_2
   (team tunnel with door_1) its inner door }
 procedure TestElevator;
@@ -4438,6 +4488,13 @@ begin
     M.Update(1);
     CheckNear(DegToRad(60 * Sqrt(0.5)), Abs(B.Scene.Rotation.W), 'pendulum swing at its peak', 0.001);
     CheckNear(1, Abs(B.Scene.Rotation.X), 'it swings about its x axis', 0.001);
+    { at rest (before its phase) without a base rotation: no NaN (hell1's
+      func_pendulum_5 broke ray casts) }
+    M.Time := 0;
+    M.Phase := 10;
+    M.Update(0.1);
+    Check(not IsNan(B.Scene.Rotation.W) and not IsNan(B.Scene.Rotation.X), 'a pendulum at rest has a valid rotation');
+    CheckNear(0, B.Scene.Rotation.W, 'and no angle');
   finally
     M.Free;
     B.Free;
@@ -4536,6 +4593,19 @@ begin
     finally
       Lock.Free;
     end;
+
+    { "requires": only with the item (by inv_name), "removeItem" takes it }
+    for I := 1 to 50 do
+      Game.Update(0.1, Far);
+    Check(Door1.State = dsClosed, 'shut again');
+    Door1.Requires := 'Test Keycard';
+    Door1.RemoveItem := True;
+    Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Check(Door1.State = dsClosed, 'without the keycard it stays shut');
+    Game.Carried.Add('Test Keycard');
+    Game.Update(0.1, D3ToCge(Vector3(200, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+    Check(Door1.State = dsOpening, 'with the keycard the player opens it');
+    CheckEquals(-1, Game.Carried.IndexOf('Test Keycard'), 'removeItem took the keycard');
 
     { func_rotating: activation stops and starts it }
     for M in Game.Movers do
@@ -6387,6 +6457,7 @@ begin
   TestMovers;
   TestBobbingAndPendulum;
   TestElevator;
+  TestBindToJoint;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;
