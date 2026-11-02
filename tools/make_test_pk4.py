@@ -2245,6 +2245,8 @@ model test_blob {
 	}
 	anim evade_left			models/md5/test/blob_evade.md5anim
 	anim pain				models/md5/test/blob_pain.md5anim
+	// the pain of a hit in its "head" damage group (idActor::Pain)
+	anim pain_head			models/md5/test/blob_pain.md5anim
 	anim throw				models/md5/test/blob_walk.md5anim {
 		frame 1				create_missile body
 		frame 6				launch_missile body
@@ -2403,6 +2405,8 @@ entityDef item_test_gib {
 	"model"					"models/items/test/gib.lwo"
 	"bouncyness"			"0.3"
 	"fuse"					"4"
+	// blood while it flies (the retail gibs: gibwound.prt)
+	"smoke_trail"			"test_blood.prt"
 }
 
 entityDef damage_test_splash {
@@ -2889,6 +2893,10 @@ entityDef monster_test_blob {
 	"def_dropGibItem1"		"item_test_gib"
 	"def_dropGibItem2"		"item_test_gib"
 	"def_dropGibItem3"		"item_test_gib"
+	// hits in its head joint (and under it) do twice the damage and play
+	// pain_head (idActor's damage groups)
+	"damage_zone head"		"*head"
+	"damage_scale head"		"2"
 }
 '''
 
