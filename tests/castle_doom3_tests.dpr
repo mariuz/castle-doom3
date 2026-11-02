@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(116, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(117, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -127,7 +127,7 @@ begin
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
     'the berserk skin remaps the body');
-  CheckEquals(12, Decls.DeclCount(dtSound), 'sound shader count');
+  CheckEquals(13, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
@@ -184,6 +184,42 @@ begin
     CheckNear(15, Snd.MaxDistance, 'test_hum maxDistance');
     CheckNear(-6, Snd.Volume, 'test_hum volume');
     CheckEquals('sound/test/hum.wav', Snd.Files[0], 'test_hum file');
+  end;
+end;
+
+procedure TestStringsAndSoundFiles;
+var
+  Snd: TD3SoundShader;
+  Gui: TD3Gui;
+begin
+  { string tables (idLangDict) }
+  CheckEquals('Test Junction', D3LangString('#str_90001'), 'string from strings/english.lang');
+  CheckEquals('Test Junction', D3LangString('#STR_90001'), 'string keys ignore case');
+  CheckEquals('#str_99999', D3LangString('#str_99999'), 'unknown string as is');
+  CheckEquals('plain', D3LangString('plain'), 'plain text as is');
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 ' +
+      'windowDef t { rect 0, 0, 100, 20 text "gui::gui_parm1" } ' +
+      'windowDef n { rect 0, 20, 100, 40 text "#str_90002" } }'), 'GUI with string table text');
+    Gui.SetState('gui_parm1', '#str_90001');
+    CheckEquals('Test Junction', Gui.PropText(Gui.FindWindow('t')), 'GUI state text through the string table');
+    CheckEquals('Line one' + #10 + 'Line two', Gui.PropText(Gui.FindWindow('n')), 'GUI text through the string table, new lines');
+  finally
+    Gui.Free;
+  end;
+
+  { sound files: the .ogg of the name first (none in the test PK4), missing
+    files dropped, backslashes normalized }
+  CheckEquals('sound/test/door.wav', D3SoundFile('sound/test/door.wav'), 'sound file without an .ogg');
+  CheckEquals('', D3SoundFile('sound/test/missing.wav'), 'missing sound file');
+  Snd := Decls.SoundShader('test_backslash');
+  Check(Snd <> nil, 'sound shader test_backslash');
+  if Snd <> nil then
+  begin
+    CheckEquals(1, Snd.Files.Count, 'missing files are dropped');
+    if Snd.Files.Count > 0 then
+      CheckEquals('sound/test/door.wav', Snd.Files[0], 'backslash path normalized');
   end;
 end;
 
@@ -6155,6 +6191,7 @@ begin
   TestLexer;
   TestFiles;
   TestDecls;
+  TestStringsAndSoundFiles;
   TestImages;
   TestProc;
   TestMapFile;

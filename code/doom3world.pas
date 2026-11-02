@@ -2017,36 +2017,9 @@ end;
 
 { Items and the inventory ---------------------------------------------------- }
 
-var
-  LangStrings: TStringList;
-
-{ "#str_01234" through strings/english.lang (idLangDict), else as is }
 function LangString(const S: String): String;
-var
-  L: TDoom3Lexer;
-  Key: String;
 begin
-  if Copy(S, 1, 5) <> '#str_' then
-    Exit(S);
-  if LangStrings = nil then
-  begin
-    LangStrings := TStringList.Create;
-    LangStrings.CaseSensitive := False;
-    if D3Fs.FileExists('strings/english.lang') then
-    begin
-      L := TDoom3Lexer.Create(D3Fs.ReadText('strings/english.lang'));
-      try
-        L.Expect('{');
-        while L.Next(Key) and (Key <> '}') do
-          LangStrings.Values[Key] := L.NextStr;
-      finally
-        L.Free;
-      end;
-    end;
-  end;
-  Result := LangStrings.Values[S];
-  if Result = '' then
-    Result := S;
+  Result := D3LangString(S);
 end;
 
 procedure TD3Game.SpawnItem(const E: TD3MapEntity);
@@ -10700,6 +10673,4 @@ initialization
     'monster_flying_cacodemon', 'monster_flying_lostsoul',
     'monster_boss_cyberdemon', 'monster_boss_guardian', 'monster_boss_guardian_seeker',
     'monster_boss_sabaoth', 'monster_boss_vagary'];
-finalization
-  FreeAndNil(LangStrings);
 end.

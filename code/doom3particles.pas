@@ -372,7 +372,8 @@ begin
       'rotation': ParseParm(Lexer, S.Rotation);
       'size': ParseParm(Lexer, S.Size);
       'aspect': ParseParm(Lexer, S.Aspect);
-      'initialangle': S.InitialAngle := Lexer.ReadFloat;
+      { idDeclParticle::ParseParticleStage reads "angle" (the retail files' spelling) }
+      'angle', 'initialangle': S.InitialAngle := Lexer.ReadFloat;
       'gravity':
         begin
           S.WorldGravity := SameText(Lexer.Peek, 'world');
@@ -1229,6 +1230,10 @@ var
   Key, Body: String;
 begin
   Key := LowerCase(StringReplace(AName, '\', '/', [rfReplaceAll]));
+  { idDeclManager::MakeNameCanonical drops the extension: maps name
+    "fx/sparks.fx" for the decl fx/sparks }
+  if ExtractFileExt(Key) = '.fx' then
+    Key := ChangeFileExt(Key, '');
   if Key = '' then
     Exit(nil);
   EnsureClearHook;

@@ -9,7 +9,7 @@ interface
 uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
-  CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields,
+  CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields, CastleTimeUtils,
   Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda;
 
 type
@@ -42,6 +42,10 @@ type
       baked from the map; nil until baked for the current map }
     FEnvProbes: TCastleScene;
     FEnvProbesOn: Boolean;
+    { don't prepare the map's rendering resources at load (console
+      r_prepareResources 0, env CD3_PREPARE_RESOURCES=0): they are then
+      prepared when each area first shows (a stall) }
+    FSkipPrepare: Boolean;
     FEnvProbeScale: Single;
     { a cinematic camera has the view: the player's view to go back to }
     FInCinematic: Boolean;
@@ -76,6 +80,10 @@ type
     FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
+    { after those, frames longer than LongFrameSeconds are logged (stalls
+      when new areas come into view: textures, shaders) }
+    FLastUpdate: TTimerResult;
+    FLastUpdateValid: Boolean;
     { the map's efxs/<map>.efx (nil when missing), the effect in
       SoundEngine.Reverb (nil = reverb off), console s_useEAXReverb }
     FEfx: TD3EfxFile;
@@ -143,12 +151,15 @@ implementation
 
 uses
   Math, TypInfo,
-  CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions, CastleTimeUtils,
+  CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
   Doom3Sampler,
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Gui, Doom3Images, GameViewMenu,
   Doom3EnvProbes, CastleColors;
+
+const
+  LongFrameSeconds = 0.1;
 
 constructor TViewPlay.Create(AOwner: TComponent);
 begin
@@ -456,7 +467,15 @@ begin
     BakeEnvProbes;
   Hud.ShowMessage(AMapName, 4);
   LoadProfileStep('sky');
+  { textures, shaders and buffers of every area now, also the ones hidden by
+    portal visibility, instead of a stall when each first comes into view }
+  if not FSkipPrepare and (GetEnvironmentVariable('CD3_PREPARE_RESOURCES') <> '0') then
+  begin
+    MainViewport.PrepareResources(Map, [prRenderSelf, prBoundingBox]);
+    LoadProfileStep('prepare');
+  end;
   FProfileFrames := 1;
+  FLastUpdateValid := False;
 end;
 
 procedure TViewPlay.SetupSky;
@@ -1398,6 +1417,13 @@ begin
     end;
     Console.Print(Format('%d particle systems, %d fx', [FGame.Emitters.Count, FGame.Fx.Count]));
   end else
+  if Cmd = 'r_prepareresources' then
+  begin
+    { prepare every area's rendering resources at load (the next map) }
+    if Args <> '' then
+      FSkipPrepare := StrToIntDef(Args, 1) = 0;
+    Console.Print('r_prepareResources ' + Iff(FSkipPrepare, '0', '1') + ' (used by the next map loaded)');
+  end else
   if Cmd = 'r_shadowmapsize' then
   begin
     { size of each shadow map view, for the next map loaded }
@@ -1934,6 +1960,13 @@ begin
   inherited Update(SecondsPassed, HandleInput);
   if FGame = nil then
     Exit;
+  if (FProfileFrames = 0) and FLastUpdateValid and
+     (TimerSeconds(Timer, FLastUpdate) > LongFrameSeconds) then
+    WritelnLog('Profile', 'Long frame: %.2f s (eye %s, yaw %.0f, area %d, visible areas %d)',
+      [TimerSeconds(Timer, FLastUpdate), CgeToD3(Camera.Translation).ToString, CameraYaw,
+       Map.AreaAt(Camera.Translation), Map.VisibleAreaCount]);
+  FLastUpdate := Timer;
+  FLastUpdateValid := True;
   if FProfileFrames > 0 then
   begin
     { the time since the last step: the previous frame (its render) }
