@@ -229,6 +229,49 @@ begin
   end;
 end;
 
+{ guis/pda.gui's constructs: parenthesized expressions, comments after
+  values; the windows after them keep their parents }
+procedure TestGuiNesting;
+var
+  Gui: TD3Gui;
+begin
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop {' + LineEnding +
+      ' rect 0,0,640,480' + LineEnding +
+      ' windowDef ItemIconBG {' + LineEnding +
+      '  visible 1' + LineEnding +
+      '  rect 570,480,59,40' + LineEnding +
+      '  windowDef NoItem {' + LineEnding +
+      '   visible ("gui::inv_count" == 0)' + LineEnding +
+      '   rect 13,4,32,32' + LineEnding +
+      '  }' + LineEnding +
+      '  windowDef ItemIcon {' + LineEnding +
+      '   visible ("gui::inv_count" > 0)' + LineEnding +
+      '   onMouseEnter {' + LineEnding +
+      '    transition "TextItemName::forecolor" "1 1 1 0.8" "1 1 1 0.4" "150" ;' + LineEnding +
+      '   }' + LineEnding +
+      '  }' + LineEnding +
+      ' }' + #9 + LineEnding +
+      ' windowDef TextItemName {' + LineEnding +
+      '  rect 400,400,232,18 //565,415,67,18' + LineEnding +
+      '  //rect 327,415,232,18' + LineEnding +
+      '  text "gui::inv_name_0"' + LineEnding +
+      ' }' + LineEnding +
+      ' windowDef Last { rect 0,0,10,10 }' + LineEnding +
+      '}'), 'the pda.gui snippet loads');
+    Check(Gui.FindWindow('TextItemName') <> nil, 'TextItemName parsed');
+    if Gui.FindWindow('TextItemName') <> nil then
+      CheckEquals('Desktop', Gui.FindWindow('TextItemName').Parent.Name, 'TextItemName is the desktop''s child');
+    Check(Gui.FindWindow('Last') <> nil, 'the window after it parsed');
+    Gui.SetState('inv_count', '0');
+    Check(Gui.PropVisible(Gui.FindWindow('NoItem')), 'visible ("gui::inv_count" == 0)');
+    Check(not Gui.PropVisible(Gui.FindWindow('ItemIcon')), 'visible ("gui::inv_count" > 0)');
+  finally
+    Gui.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -6748,6 +6791,7 @@ begin
   TestDecls;
   TestStringsAndSoundFiles;
   TestGuiLists;
+  TestGuiNesting;
   TestImages;
   TestProc;
   TestMapFile;

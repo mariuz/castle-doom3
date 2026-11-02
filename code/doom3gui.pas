@@ -93,6 +93,9 @@ type
       columns split by tabs at Tabstops, the selection "<name>_sel_0" }
     IsList: Boolean;
     Tabstops: TD3GuiFloats;
+    { "listName": the state keys' prefix (idListWindow; the window's name
+      when not set) }
+    ListName: String;
     { properties given as expressions (visible "gui::x", backcolor
       "$hilite"): name=expression, evaluated when drawn }
     Exprs: TStringList;
@@ -118,6 +121,8 @@ type
     function Interactive: Boolean;
     { The font for its text: its own or the nearest parent's. }
     function FontName: String;
+    { a listDef's state key prefix: ListName, else its name }
+    function ListKey: String;
     { A variable (definevec4...) by name, here or in a parent; '' if none. }
     function FindVar(const AName: String; out Value: String): Boolean;
   end;
@@ -491,6 +496,9 @@ begin
   if K = 'tabstops' then
     Tabstops := ParseFloatList(S)
   else
+  if K = 'listname' then
+    ListName := S
+  else
   if K = 'noevents' then
     NoEvents := D3StrToFloat(S, 0) <> 0
   else
@@ -601,11 +609,14 @@ end;
 
 { The text of a parenthesized expression after "(" up to the matching ")". }
 function ReadParenthesized(const L: TDoom3Lexer): String;
+const
+  OpChars = ['=', '!', '<', '>', '&', '|'];
 var
   Depth: Integer;
-  Tok: String;
+  Tok, Last: String;
 begin
   Result := '';
+  Last := '';
   Depth := 1;
   while L.Next(Tok) do
   begin
@@ -618,9 +629,12 @@ begin
       if Depth = 0 then
         Break;
     end;
-    if Result <> '' then
+    { the lexer splits "==", "!=", "<=", ">=", "&&", "||": joined again }
+    if (Result <> '') and not ((Length(Tok) = 1) and (Length(Last) = 1) and
+       (Tok[1] in OpChars) and (Last[1] in OpChars)) then
       Result := Result + ' ';
     Result := Result + Tok;
+    Last := Tok;
   end;
 end;
 
@@ -773,8 +787,12 @@ begin
       { a property's value: tokens separated by commas, e.g.
         rect 0, 0, 640, 480 / text "abc" / visible "gui::x" }
       Value := L.NextStr;
-      while L.Check(',') do
-        Value := Value + ',' + L.NextStr;
+      { visible ("gui::inv_count" == 0): a parenthesized expression }
+      if Value = '(' then
+        Value := ReadParenthesized(L)
+      else
+        while L.Check(',') do
+          Value := Value + ',' + L.NextStr;
       L.Check(';');
       W.SetProp(Key, Value);
     end;
@@ -1101,7 +1119,7 @@ begin
     Row := Floor((Y - Top) / ListRowHeight(W));
     if (Row >= 0) and (ListItem(W, Row) <> '') then
     begin
-      SetState(W.Name + '_sel_0', IntToStr(Row));
+      SetState(W.ListKey + '_sel_0', IntToStr(Row));
       Dirty := True;
     end;
   end;
@@ -1120,9 +1138,16 @@ begin
   end;
 end;
 
+function TD3GuiWindow.ListKey: String;
+begin
+  Result := ListName;
+  if Result = '' then
+    Result := Name;
+end;
+
 function TD3Gui.ListItem(const W: TD3GuiWindow; const Index: Integer): String;
 begin
-  Result := StateValue(W.Name + '_item_' + IntToStr(Index));
+  Result := StateValue(W.ListKey + '_item_' + IntToStr(Index));
 end;
 
 function TD3Gui.ListCount(const W: TD3GuiWindow): Integer;
@@ -1134,7 +1159,7 @@ end;
 
 function TD3Gui.ListSelection(const W: TD3GuiWindow): Integer;
 begin
-  Result := StrToIntDef(StateValue(W.Name + '_sel_0'), -1);
+  Result := StrToIntDef(StateValue(W.ListKey + '_sel_0'), -1);
 end;
 
 function TD3Gui.ListRowHeight(const W: TD3GuiWindow): Single;
