@@ -19,6 +19,7 @@ castle-auto-generated-resources.res
 *.log
 test_output/
 smoke_output/
+measure_output/
 castle-doom3-*.png
 # the sampling profiler's output (CD3_SAMPLE, console "sample")
 samples.txt
