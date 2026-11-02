@@ -635,6 +635,9 @@ type
     function Flag(const AName: String): Boolean;
     { the script runs it (else the built-in pistol) }
     function Scripted: Boolean;
+    { its script object: "weapon_scriptobject" (idWeapon::GetWeaponDef),
+      else "scriptobject" }
+    function ScriptObjectName: String;
   end;
 
   TD3Game = class
@@ -1424,6 +1427,8 @@ const
   PlayerHandle = $7FFFFF00;
   { the player's weapon's handle (its script object's self) }
   WeaponHandle = $7FFFFF01;
+  { the projectile the weapon holds (createProjectile), until launched }
+  HeldProjectileHandle = $7FFFFF02;
   { idPlayer's powerups (powerupEndTime indexes, idItemPowerup's "type") }
   PowerupBerserk = 0;
   PowerupInvisibility = 1;
@@ -2918,6 +2923,17 @@ end;
 
 { Weapons ------------------------------------------------------------------- }
 
+function TD3Weapon.ScriptObjectName: String;
+begin
+  Result := '';
+  if Def <> nil then
+  begin
+    Result := Def.Values['weapon_scriptobject'];
+    if Result = '' then
+      Result := Def.Values['scriptobject'];
+  end;
+end;
+
 destructor TD3Weapon.Destroy;
 begin
   if (View <> nil) and (Holder <> nil) then
@@ -3061,7 +3077,8 @@ begin
   { the script object, its init in its thread (idWeapon's thread) }
   T := nil;
   if FScript <> nil then
-    T := FScript.FindType(W.Def.Values['scriptobject']);
+    { idWeapon::GetWeaponDef reads "weapon_scriptobject" }
+    T := FScript.FindType(W.ScriptObjectName);
   if T <> nil then
   begin
     W.Obj := TD3ScriptObject.Create(T);
@@ -3073,7 +3090,7 @@ begin
     W.SetFlag('WEAPON_RAISEWEAPON', True);
   end;
   WritelnLog('Doom3World', 'Weapon %d: %s (%s, clip %d)', [Slot, W.DefName,
-    BoolToStr(W.Scripted, 'script ' + W.Def.Values['scriptobject'], 'built-in pistol'), Clip[Slot]]);
+    BoolToStr(W.Scripted, 'script ' + W.ScriptObjectName, 'built-in pistol'), Clip[Slot]]);
 end;
 
 procedure TD3Game.SelectWeapon(const Slot: Integer);
@@ -3719,9 +3736,34 @@ begin
             WritelnLog('Doom3World', 'Weapon %s holds %s', [W.DefName, W.ProjectileDef]);
           end;
         end;
-        EventResult := D3EntityValue(0);
+        { an entity the script can test and talk to (the retail grenade
+          only throws "if ( projectile )") }
+        if W.HeldProjectile <> nil then
+          EventResult := D3EntityValue(HeldProjectileHandle)
+        else
+          EventResult := D3EntityValue(0);
       end;
+    { the world model: an entity of its own in Doom 3; here the weapon's
+      own events with handles 1000 + joint (getJointHandle on it) }
     'getWorldModel': EventResult := D3EntityValue(0);
+    'getJointHandle':
+      { the view model's joint (-1 without it) }
+      if W.View <> nil then
+        EventResult := D3FloatValue(W.View.Model.JointIndex(ArgStr(0)))
+      else
+        EventResult := D3FloatValue(-1);
+    'setJointAngle':
+      { setJointAngle( joint, JOINTMOD_LOCAL / _WORLD, angles ): turned
+        after the animation (the chaingun's barrel spin) }
+      if (W.View <> nil) and (Round(ArgF(0)) >= 0) then
+        W.View.SetJointMod(Round(ArgF(0)), QuatFromAngles(Args[2].V.X, Args[2].V.Y, Args[2].V.Z),
+          Round(ArgF(1)) in [1, 2]);
+    'clearAllJoints':
+      if W.View <> nil then
+        W.View.ClearJointMods;
+    'setGuiParm', 'setGuiFloat':
+      { the weapon's GUI (the BFG's charge display): not drawn here }
+      ;
     'ejectBrass': EjectBrass(W);
     'flashlight':
       begin
@@ -10338,6 +10380,7 @@ var
   ME: TD3ModelEntity;
   Door: TD3Mover;
   Dist: Single;
+  Def: TStringList;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -10426,6 +10469,27 @@ begin
     if (FWeapon = nil) or not FWeapon.Scripted then
       Exit(False);
     Exit(WeaponEvent(FWeapon, Thread, N, Args, EventResult));
+  end;
+
+  if Target = HeldProjectileHandle then
+  begin
+    { the weapon's held projectile (createProjectile) }
+    case N of
+      'startSound':
+        if (FWeapon <> nil) and (FWeapon.HeldProjectile <> nil) then
+        begin
+          Def := Decls.EntityDef(FWeapon.ProjectileDef);
+          if Def <> nil then
+            PlaySoundAt(Def.Values[D3ValueToString(Args[0])], FWeapon.HeldProjectile.Position);
+        end;
+      'remove':
+        DropHeldProjectile(FWeapon);
+      'show', 'hide', 'unbind', 'bind', 'bindToJoint', 'setOrigin', 'setAngles':
+        ;
+      else
+        Result := False;
+    end;
+    Exit;
   end;
 
   if Target = PlayerHandle then
