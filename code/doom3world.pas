@@ -186,6 +186,14 @@ type
     GibTime: Single;
     { no pain before (pain_delay), a pain anim is playing (the simple AI) }
     PainDebounce: Single;
+    { idActor's damage groups by joint ("damage_zone <group>" joint lists,
+      "damage_scale <group>"), built at the first hit; the pain anim of the
+      last hit ("pain_<group>" when the model has it, else "pain") }
+    JointZones: array of String;
+    JointScales: array of Single;
+    ZonesBuilt: Boolean;
+    PainAnimName: String;
+    LastHitZone: String;
     PainAnim: Boolean;
     { its sound key last played (snd_pain_small, snd_death...), for tests }
     LastSound: String;
@@ -324,6 +332,8 @@ type
     WaitAction: String;
     { the monster (health, shots) of a scripted monster, nil for characters }
     Monster: TD3Monster;
+    { idAI::Event_Burn's SHADERPARM_TIME_OF_DEATH (0: not burning) }
+    BurnTime: Single;
     { stopThinking: its threads stopped }
     Thinking: Boolean;
     { the player is its enemy; moving to it }
@@ -512,6 +522,8 @@ type
     FuseEnd, Bounce, NextSound: Single;
     BounceSound: String;
     Resting: Boolean;
+    { "smoke_trail" (gibs: gibwound.prt), stopped when it rests or goes }
+    Trail: TD3ParticleEmitter;
     destructor Destroy; override;
   end;
 
@@ -904,6 +916,9 @@ type
     function MonsterSound(const Mon: TD3Monster; const Key: String): Boolean;
     function MonsterPain(const Mon: TD3Monster; const Damage: Integer): Boolean;
     procedure GibMonster(const Mon: TD3Monster; const Direction: TVector3; const DamageDefName: String);
+    procedure ActorBurn(const A: TD3Actor);
+    procedure BuildDamageZones(const Mon: TD3Monster);
+    function MonsterHitZone(const Mon: TD3Monster; const HitPoint: TVector3; out Scale: Single): String;
     function SpawnGibs(const E: TD3MapEntity; const Def: TStringList; const Center, Direction: TVector3): Integer;
     function SpawnDebris(const Def: TStringList; const Position, Velocity, AngularVelocity: TVector3;
       const Yaw, Fuse: Single): TD3Brass;
@@ -1154,6 +1169,10 @@ type
       direction (zero: none): the ragdoll is pushed along it. }
     procedure DamageMonster(const Mon: TD3Monster; const Amount: Integer; const DamageDefName: String;
       const Direction: TVector3); overload;
+    { DamageMonster hit at HitPoint (CGE world): the damage group of the
+      joint nearest it scales the damage and picks the pain anim }
+    procedure DamageMonsterAt(const Mon: TD3Monster; const Amount: Integer; const DamageDefName: String;
+      const Direction, HitPoint: TVector3; const HasHitPoint: Boolean);
     { The dead player was gibbed (its body shows no more). }
     property PlayerGibbed: Boolean read FPlayerGibbed;
     { the dead body's ragdoll, nil when it isn't one }
@@ -1541,7 +1560,7 @@ end;
 procedure TD3Mover.Update(const SecondsPassed: Single);
 var
   Step, S: Single;
-  Q: TQuaternion;
+  Q: TQuaternion;
   R: TVector4;
 begin
   Time := Time + SecondsPassed;
@@ -3914,8 +3933,8 @@ begin
     MonsterSound(Mon, 'snd_pain');
   Result := True;
   { the simple AI flinches with its pain anim (the scripts play their own) }
-  if (Mon.Actor = nil) and (Mon.Model.Instance <> nil) and Mon.Model.Instance.HasAnim('pain') and
-     Mon.Model.Instance.PlayAnim('pain', False) then
+  if (Mon.Actor = nil) and (Mon.Model.Instance <> nil) and Mon.Model.Instance.HasAnim(Mon.PainAnimName) and
+     Mon.Model.Instance.PlayAnim(Mon.PainAnimName, False) then
   begin
     Mon.PainAnim := True;
     Mon.PainTime := Max(Mon.PainTime, Mon.Model.Instance.AnimLength);
@@ -3924,10 +3943,125 @@ end;
 
 procedure TD3Game.DamageMonster(const Mon: TD3Monster; const Amount: Integer; const DamageDefName: String;
   const Direction: TVector3);
+begin
+  DamageMonsterAt(Mon, Amount, DamageDefName, Direction, TVector3.Zero, False);
+end;
+
+{ Joint K is under joint J (one of its descendants). }
+function JointUnder(const Joints: TD3JointArray; const K, J: Integer): Boolean;
+var
+  P, Guard: Integer;
+begin
+  P := Joints[K].Parent;
+  Guard := 0;
+  while (P >= 0) and (Guard < 1000) do
+  begin
+    if P = J then
+      Exit(True);
+    P := Joints[P].Parent;
+    Inc(Guard);
+  end;
+  Result := False;
+end;
+
+procedure TD3Game.BuildDamageZones(const Mon: TD3Monster);
+var
+  Def: TStringList;
+  I, J, K, N: Integer;
+  Key, Zone, Pattern, JointName: String;
+  Exclude, Subtree: Boolean;
+  Joints: TD3JointArray;
+  InZone: array of Boolean;
+begin
+  { idActor::SetupDamageGroups: "damage_zone <group>" lists joints:
+    "*name" a joint and everything under it, "-" excludes, later zones win }
+  Mon.ZonesBuilt := True;
+  if (Mon.Model.Instance = nil) or (Mon.Model.EntityDef = nil) then
+    Exit;
+  Def := Mon.Model.EntityDef;
+  Joints := Mon.Model.Instance.Model.Joints;
+  N := Length(Joints);
+  SetLength(Mon.JointZones, N);
+  SetLength(Mon.JointScales, N);
+  for I := 0 to N - 1 do
+    Mon.JointScales[I] := 1;
+  for I := 0 to Def.Count - 1 do
+  begin
+    Key := LowerCase(Def.Names[I]);
+    if Copy(Key, 1, 12) <> 'damage_zone ' then
+      Continue;
+    Zone := Trim(Copy(Def.Names[I], 13, MaxInt));
+    InZone := nil;
+    SetLength(InZone, N);
+    for Pattern in Def.ValueFromIndex[I].Split([' ', #9], TStringSplitOptions.ExcludeEmpty) do
+    begin
+      JointName := Pattern;
+      Exclude := Copy(JointName, 1, 1) = '-';
+      if Exclude then
+        Delete(JointName, 1, 1);
+      Subtree := Copy(JointName, 1, 1) = '*';
+      if Subtree then
+        Delete(JointName, 1, 1);
+      J := Mon.Model.Instance.Model.JointIndex(JointName);
+      if J < 0 then
+        Continue;
+      for K := 0 to N - 1 do
+      begin
+        { K under J: walk its parents }
+        if (K = J) or (Subtree and JointUnder(Joints, K, J)) then
+          InZone[K] := not Exclude;
+      end;
+    end;
+    for K := 0 to N - 1 do
+      if InZone[K] then
+        Mon.JointZones[K] := Zone;
+  end;
+  for I := 0 to N - 1 do
+    if Mon.JointZones[I] <> '' then
+      Mon.JointScales[I] := StrToFloatDef(Def.Values['damage_scale ' + Mon.JointZones[I]], 1, DefaultFormatSettings);
+end;
+
+function TD3Game.MonsterHitZone(const Mon: TD3Monster; const HitPoint: TVector3; out Scale: Single): String;
+var
+  I, Best: Integer;
+  P, Local: TVector3;
+  D, BestD: Single;
+begin
+  { the joint nearest the hit (idActor's location: the joint of the clip
+    model hit) }
+  Result := '';
+  Scale := 1;
+  if not Mon.ZonesBuilt then
+    BuildDamageZones(Mon);
+  if Length(Mon.JointZones) = 0 then
+    Exit;
+  Local := Mon.Model.Instance.Scene.WorldToLocal(HitPoint);
+  Best := -1;
+  BestD := MaxSingle;
+  for I := 0 to High(Mon.JointZones) do
+    if Mon.Model.Instance.JointPosition(Mon.Model.Instance.Model.Joints[I].Name, P) then
+    begin
+      D := (P - Local).LengthSqr;
+      if D < BestD then
+      begin
+        BestD := D;
+        Best := I;
+      end;
+    end;
+  if Best < 0 then
+    Exit;
+  Result := Mon.JointZones[Best];
+  Scale := Mon.JointScales[Best];
+end;
+
+procedure TD3Game.DamageMonsterAt(const Mon: TD3Monster; const Amount: Integer; const DamageDefName: String;
+  const Direction, HitPoint: TVector3; const HasHitPoint: Boolean);
 var
   Damage: Integer;
   Info: TD3DamageInfo;
   Pain, Gib: Boolean;
+  Zone: String;
+  Scale: Single;
 begin
   if Mon.State = msDead then
     Exit;
@@ -3937,6 +4071,22 @@ begin
   Damage := Amount;
   if PowerUpActive(PowerupBerserk) then
     Damage := Round(Damage * 1.7);
+  { idActor::GetDamageForLocation and the pain anim of the group hit
+    (idActor::Pain: "pain_<group>" if the model has it, not for the legs) }
+  Mon.PainAnimName := 'pain';
+  Mon.LastHitZone := '';
+  if HasHitPoint then
+  begin
+    Zone := MonsterHitZone(Mon, HitPoint, Scale);
+    Mon.LastHitZone := Zone;
+    if Zone <> '' then
+    begin
+      Damage := Ceil(Damage * Scale);
+      if (Zone <> 'legs') and Mon.Model.Instance.HasAnim('pain_' + Zone) then
+        Mon.PainAnimName := 'pain_' + Zone;
+      WritelnLog('Doom3World', '%s hit in the %s (x%s, %d)', [Mon.Model.Entity.Name, Zone, FormatFloat('0.##', Scale), Damage]);
+    end;
+  end;
   Dec(Mon.Health, Damage);
   Mon.PainTime := Max(Mon.PainTime, 0.2);
   Mon.Dormant := False;
@@ -3950,8 +4100,6 @@ begin
   begin
     Mon.State := msDead;
     Mon.StateTime := 0;
-    if Info.Burn then
-      Unsupported('burn death (' + DamageDefName + ')');
     { idAFEntity_Gibbable: gibbed by a gibbing def, or by taking it past
       -20, when the monster can be ("gib") }
     Gib := (Info.Gib or (Mon.Health < -20)) and
@@ -3972,6 +4120,39 @@ begin
     Pain := MonsterPain(Mon, Damage);
   if Mon.Actor <> nil then
     ActorDamaged(Mon.Actor, Mon.Health <= 0, Pain);
+end;
+
+procedure TD3Game.ActorBurn(const A: TD3Actor);
+var
+  Value, Particle, JointName: String;
+  P: TVector3;
+  Dash: Integer;
+  Def: TStringList;
+begin
+  { idAI::Event_Burn: the time of death (the materials' burn-away stages
+    use it) and "smoke_burnParticleSystem" ("particle-joint") at that
+    joint }
+  A.BurnTime := FTime;
+  Def := A.Model.EntityDef;
+  Value := A.Model.Entity.Value('smoke_burnParticleSystem');
+  if (Value = '') and (Def <> nil) then
+    Value := Def.Values['smoke_burnParticleSystem'];
+  WritelnLog('Doom3World', '%s burns (%s)', [A.Model.Entity.Name, Value]);
+  if Value = '' then
+    Exit;
+  Dash := LastDelimiter('-', Value);
+  Particle := Value;
+  JointName := '';
+  if Dash > 0 then
+  begin
+    Particle := Copy(Value, 1, Dash - 1);
+    JointName := Copy(Value, Dash + 1, MaxInt);
+  end;
+  P := A.Model.Holder.Translation;
+  if (JointName <> '') and (A.Model.Instance <> nil) and A.Model.Instance.JointPosition(JointName, P) then
+    P := A.Model.Instance.Scene.LocalToWorld(P);
+  EmitSmoke(ChangeFileExt(Particle, ''), A.Model.Entity.Name + ' smoke_burnParticleSystem', P,
+    AxisFromDirection(Vector3(0, 0, 1)));
 end;
 
 procedure TD3Game.GibMonster(const Mon: TD3Monster; const Direction: TVector3; const DamageDefName: String);
@@ -4080,6 +4261,9 @@ begin
     B.FuseEnd := FTime + StrToFloatDef(Def.Values['fuse'], 3, DefaultFormatSettings);
   B.Bounce := StrToFloatDef(Def.Values['bouncyness'], 0.6, DefaultFormatSettings);
   B.BounceSound := Def.Values['snd_bounce'];
+  if Def.Values['smoke_trail'] <> '' then
+    B.Trail := AddEmitter(Def.Values['smoke_trail'], CgeToD3(Position), AxisFromDirection(Vector3(0, 0, 1)),
+      False, B.Kind + ' smoke_trail');
   B.Holder.Translation := B.Position;
   SetD3Rotation(B.Holder, AnglesMatrix(B.Angles));
   if FBrass.Count >= MaxDebris then
@@ -4209,7 +4393,7 @@ begin
     if PowerUpActive(PowerupBerserk) then
       Damage := Damage * 30;
     WritelnLog('Doom3World', 'Weapon %s hits %s (%d)', [W.DefName, Mon.Model.Entity.Name, Damage]);
-    DamageMonster(Mon, Damage, W.MeleeDef, Dir);
+    DamageMonsterAt(Mon, Damage, W.MeleeDef, Dir, FPlayerEye + Dir * MonDist, True);
     EmitWound(Mon.Model.Entity, Mon.Model.EntityDef, FPlayerEye + Dir * MonDist, -Dir);
     PlaySoundAt(Def.Values['snd_flesh'], FPlayerEye + Dir * MonDist);
     Result := True;
@@ -5858,6 +6042,8 @@ end;
 
 destructor TD3Brass.Destroy;
 begin
+  if Trail <> nil then
+    Trail.Stopped := True;
   if (Scene <> nil) and (Holder <> nil) then
     Holder.Remove(Scene);
   FreeAndNil(Scene);
@@ -6000,6 +6186,11 @@ begin
         V := TVector3.Zero;
         B.Angles := Vector3(0, B.Angles.Y, 90);
         WritelnLog('Doom3World', '%s lands at %s', [B.Kind, CgeToD3(B.Position).ToString]);
+        if B.Trail <> nil then
+        begin
+          B.Trail.Stopped := True;
+          B.Trail := nil;
+        end;
       end;
     end else
       B.Position := B.Position + Step;
@@ -6774,7 +6965,11 @@ begin
     'getJumpVelocity': EventResult := D3VectorValue(TVector3.Zero);
     'setLinearVelocity':
       ;
-    'getPainAnim': EventResult := D3StringValue('pain');
+    'getPainAnim':
+      if (A.Monster <> nil) and (A.Monster.PainAnimName <> '') then
+        EventResult := D3StringValue(A.Monster.PainAnimName)
+      else
+        EventResult := D3StringValue('pain');
     'stopThinking':
       begin
         A.Thinking := False;
@@ -6884,7 +7079,7 @@ begin
     'animTurn', 'becomeSolid', 'becomeNonSolid',
     'kickObstacles', 'preventPain', 'overrideAnim',
     'setBlendFrames', 'checkAnim', 'setAnimPrefix', 'wakeOnFlashlight',
-    'setSmokeVisibility', 'clearBurn', 'markUsed', 'muzzleFlash':
+    'setSmokeVisibility', 'markUsed', 'muzzleFlash':
       ;
     { attacks (idAI's events); projectiles are no entities here: the
       missile events return $null_entity }
@@ -7158,9 +7353,19 @@ begin
       end;
     'numSmokeEmitters': EventResult := D3FloatValue(0);
     'enableClip', 'disableClip', 'enableGravity', 'disableGravity', 'enableAFPush',
-    'disableAFPush', 'allowHiddenMovement', 'triggerParticles', 'shrivel', 'burn', 'preBurn',
+    'disableAFPush', 'allowHiddenMovement', 'triggerParticles', 'shrivel',
     'stopRagdoll':
       ;
+    'preBurn':
+      { idAI::Event_PreBurn: no shadow }
+      A.Model.Instance.Scene.CastShadows := False;
+    'burn':
+      ActorBurn(A);
+    'clearBurn':
+      begin
+        A.Model.Instance.Scene.CastShadows := not A.Model.Entity.BoolValue('noshadows');
+        A.BurnTime := 0;
+      end;
     'getSize': EventResult := D3VectorValue(Vector3(32, 32, 72));
     else
       Result := False;
@@ -9096,8 +9301,8 @@ begin
       if HitMonster <> nil then
       begin
         WritelnLog('Doom3World', 'Projectile of the player hits %s (%d)', [HitMonster.Model.Entity.Name, P.Damage]);
-        DamageMonster(HitMonster, P.Damage, P.DamageDefName, P.Velocity);
         NewPos := P.Position + Step * (Min(Dist, Len) / Len);
+        DamageMonsterAt(HitMonster, P.Damage, P.DamageDefName, P.Velocity, NewPos, True);
         EmitWound(HitMonster.Model.Entity, HitMonster.Model.EntityDef, NewPos, -P.Velocity);
         Detonate := True;
         HitPlayer := True;

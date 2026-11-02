@@ -173,7 +173,7 @@ begin
   begin
     CheckEquals('models/md5/test/blob.md5mesh', Model.Mesh, 'model mesh');
     CheckEquals('models/md5/test/blob_walk.md5anim', Model.AnimFile('walk'), 'model anim (with frame commands)');
-    CheckEquals(7, Model.Anims.Count, 'model anim count');
+    CheckEquals(8, Model.Anims.Count, 'model anim count');
   end;
 
   Snd := Decls.SoundShader('test_hum');
@@ -4304,6 +4304,69 @@ begin
   end;
 end;
 
+{ damage groups (idActor: "damage_zone head" "*head", "damage_scale head" 2,
+  pain_head) and the gibs' smoke_trail }
+procedure TestHitLocations;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Mon: TD3Monster;
+  P: TVector3;
+  Health0, I, Debris0: Integer;
+  Trails: Integer;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for hit locations');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Mon := nil;
+    for I := 0 to Game.Monsters.Count - 1 do
+      if Game.Monsters[I].Model.Entity.Name = 'blob_1' then
+        Mon := Game.Monsters[I];
+    Check(Mon <> nil, 'blob_1 is a monster');
+    if Mon = nil then
+      Exit;
+    { a hit at its head joint: twice the damage, pain_head }
+    Check(Mon.Model.Instance.JointPosition('head', P), 'blob_1 has a head joint');
+    P := Mon.Model.Instance.Scene.LocalToWorld(P);
+    Health0 := Mon.Health;
+    Game.DamageMonsterAt(Mon, 10, '', Vector3(1, 0, 0), P, True);
+    CheckEquals('head', Mon.LastHitZone, 'hit in the head group');
+    CheckEquals(Health0 - 20, Mon.Health, 'damage_scale head 2');
+    CheckEquals('pain_head', Mon.PainAnimName, 'its pain_head anim');
+    { a hit at its body joint: no group, plain damage and pain }
+    Check(Mon.Model.Instance.JointPosition('body', P), 'blob_1 has a body joint');
+    P := Mon.Model.Instance.Scene.LocalToWorld(P);
+    Health0 := Mon.Health;
+    Game.DamageMonsterAt(Mon, 10, '', Vector3(1, 0, 0), P, True);
+    CheckEquals('', Mon.LastHitZone, 'the body is in no group');
+    CheckEquals(Health0 - 10, Mon.Health, 'plain damage');
+    CheckEquals('pain', Mon.PainAnimName, 'plain pain');
+    { no hit point (splash): plain }
+    Health0 := Mon.Health;
+    Game.DamageMonster(Mon, 10, '', Vector3(1, 0, 0));
+    CheckEquals(Health0 - 10, Mon.Health, 'no hit point: plain damage');
+    { gibbed: its gibs trail smoke_trail }
+    Debris0 := Game.Brass.Count;
+    Game.DamageMonster(Mon, 200, 'damage_test_gib', Vector3(0, 1, 0));
+    Trails := 0;
+    for I := Debris0 to Game.Brass.Count - 1 do
+      if Game.Brass[I].Trail <> nil then
+        Inc(Trails);
+    CheckEquals(Game.Brass.Count - Debris0, Trails, 'every gib trails its smoke_trail');
+    Check(Trails > 0, 'gibs flew');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { moveables pushed by shots (idProjectile::Collide: the damage def's
   "push" as an impulse, speed change push / mass) }
 procedure TestMoveablePush;
@@ -6521,6 +6584,7 @@ begin
   TestElevator;
   TestBindToJoint;
   TestMoveablePush;
+  TestHitLocations;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;
