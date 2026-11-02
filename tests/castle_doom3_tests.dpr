@@ -4304,6 +4304,146 @@ begin
   end;
 end;
 
+{ func_elevator (idElevator): slider_1 made an elevator for the test, door_2
+  (team tunnel with door_1) its inner door }
+procedure TestElevator;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  E: TD3MapEntity;
+  El: TD3Elevator;
+  Door2: TD3Mover;
+  Far, Start, DoorStart: TVector3;
+  I: Integer;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Far);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for the elevator');
+    E := nil;
+    for I := 0 to Map.MapFile.Entities.Count - 1 do
+      if Map.MapFile.Entities[I].Name = 'slider_1' then
+        E := Map.MapFile.Entities[I];
+    Check(E <> nil, 'slider_1 exists');
+    if E = nil then
+      Exit;
+    Start := E.Origin;
+    E.SetValue('classname', 'func_elevator');
+    E.SetValue('floorPos_1', Format('%g %g %g', [Start.X, Start.Y, Start.Z], DefaultFormatSettings));
+    E.SetValue('floorPos_2', Format('%g %g %g', [Start.X, Start.Y, Start.Z + 64], DefaultFormatSettings));
+    E.SetValue('move_time', '1');
+    E.SetValue('innerdoor', 'door_2');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    { far from the doors' triggers }
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    CheckEquals(1, Game.Elevators.Count, 'one elevator');
+    El := Game.Elevators[0];
+    CheckEquals(2, Length(El.Floors), 'two floors');
+    Door2 := nil;
+    for I := 0 to Game.Movers.Count - 1 do
+      if Game.Movers[I].Brush.Entity.Name = 'door_2' then
+        Door2 := Game.Movers[I];
+    Check(Door2 <> nil, 'door_2 is a door');
+    if Door2 = nil then
+      Exit;
+    { it starts at floor 1 (its "floor"), opens its inner door there }
+    Step(0.5);
+    CheckEquals(1, El.CurrentFloor, 'at floor 1');
+    Check(El.State = esIdle, 'idle at floor 1');
+    Check(Door2.State in [dsOpening, dsOpen], 'the inner door opens on arrival');
+    Check(not Door2.Disabled, 'the inner door is enabled at a floor');
+    { changefloor with the inner door open: posted again 0.5 s later (like
+      Doom 3), until the door shuts by itself ("wait") }
+    Game.ElevatorChangeFloor(El, 2);
+    Check(El.RetryAt >= 0, 'changefloor waits for the open inner door');
+    Check(El.State = esIdle, 'still idle meanwhile');
+    Step(6);
+    { then it closes the doors (disabled) and goes }
+    Check(El.State in [esMoving, esIdle], 'it moved once the door shut');
+    Step(3);
+    CheckEquals(2, El.CurrentFloor, 'the posted changefloor reached floor 2');
+    { back to floor 1 with the door shut: at once }
+    Step(5);
+    Check(Door2.State = dsClosed, 'the inner door shut by itself');
+    Game.ElevatorChangeFloor(El, 1);
+    Step(0.05);
+    Check(El.State in [esWaitingOnDoors, esMoving], 'changefloor with the door shut goes at once');
+    Check(Door2.Disabled, 'the doors are disabled while it goes');
+    Step(2);
+    CheckEquals(1, El.CurrentFloor, 'back at floor 1');
+    Step(5);
+    DoorStart := Door2.Brush.Scene.Translation;
+    Game.ElevatorChangeFloor(El, 2);
+    Step(2.5);
+    CheckEquals(2, El.CurrentFloor, 'at floor 2');
+    Check(El.State = esIdle, 'idle at floor 2');
+    CheckNear(Start.Z + 64, CgeToD3(Map.FindBrush('slider_1').Scene.Translation).Z, 'at floorPos_2', 0.1);
+    Check(Door2.State in [dsOpening, dsOpen], 'the inner door opens at floor 2');
+    { the inner door rode up with it }
+    Step(3);
+    CheckNear(64, CgeToD3(Door2.Brush.Scene.Translation - DoorStart).Z, 'the inner door rode up 64', 0.1);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+{ func_bobbing / func_pendulum motion: idExtrapolate DECELSINE | NOSTOP }
+procedure TestBobbingAndPendulum;
+var
+  B: TD3BrushEntity;
+  M: TD3Mover;
+begin
+  B := TD3BrushEntity.Create;
+  M := TD3Mover.Create;
+  try
+    B.Scene := TCastleScene.Create(nil);
+    M.Brush := B;
+    { cpu's seneca_func_bobbing_13: height 4, speed 4, phase 0.2 }
+    M.Kind := mkBobbing;
+    M.Duration := 2;
+    M.Phase := 0.2;
+    M.BobDelta := Vector3(0, 0, 8);
+    M.Update(0.1);
+    CheckNear(0, CgeToD3(B.Scene.Translation).Z, 'bobbing waits for its phase');
+    M.Update(2.1);
+    CheckNear(8 * 2 * Sqrt(0.5), CgeToD3(B.Scene.Translation).Z, 'bobbing top after a half period', 0.01);
+    M.Update(4);
+    CheckNear(-8 * 2 * Sqrt(0.5), CgeToD3(B.Scene.Translation).Z, 'bobbing bottom', 0.01);
+    { a pendulum: 2 * speed 30, frequency 0.5 (duration 1 s) }
+    M.Kind := mkPendulum;
+    M.Time := 0;
+    M.Phase := 0;
+    M.Duration := 1;
+    M.SwingSpeed := 60;
+    M.BaseRotation := Vector4(0, 1, 0, 0);
+    M.Update(1);
+    CheckNear(DegToRad(60 * Sqrt(0.5)), Abs(B.Scene.Rotation.W), 'pendulum swing at its peak', 0.001);
+    CheckNear(1, Abs(B.Scene.Rotation.X), 'it swings about its x axis', 0.001);
+  finally
+    M.Free;
+    B.Free;
+  end;
+end;
+
 procedure TestMovers;
 var
   World: TCastleRootTransform;
@@ -4500,6 +4640,7 @@ var
   A: TD3Actor;
   Info: TD3DamageInfo;
   Health0, Debris0, I: Integer;
+  MaxSpeed: Single;
   Hurt: TD3Trigger;
 
   procedure Step(const Seconds: Single);
@@ -4593,8 +4734,12 @@ begin
     CheckEquals('snd_gibbed', Blob2.LastSound, 'snd_gibbed');
     Check(Blob2.Ragdoll = nil, 'no ragdoll for a gibbed body');
     CheckEquals(Debris0 + 3, Game.Brass.Count, 'its 3 def_dropGibItems fly as debris');
+    { idAFEntity_Gibbable::SpawnGibs: (random direction +- the hit's) * 75,
+      so one of them can come out slow: at least one flies }
+    MaxSpeed := 0;
     for I := Debris0 to Game.Brass.Count - 1 do
-      Check(Game.Brass[I].Velocity.Length > 30, 'a gib flies');
+      MaxSpeed := Max(MaxSpeed, Game.Brass[I].Velocity.Length);
+    Check(MaxSpeed > 30, 'the gibs fly');
     Step(0.5);
     Check(Blob2.Model.Holder.Exists, 'the body is still there after 0.5 s');
     Check((Blob2.Model.Instance.SkinScale > 0.3) and (Blob2.Model.Instance.SkinScale < 0.7),
@@ -6240,6 +6385,8 @@ begin
   TestTriggers;
   TestEfx;
   TestMovers;
+  TestBobbingAndPendulum;
+  TestElevator;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;

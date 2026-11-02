@@ -86,7 +86,7 @@ type
     Start, Duration: Single;
   end;
 
-  TD3MoverKind = (mkDoor, mkRotating);
+  TD3MoverKind = (mkDoor, mkRotating, mkBobbing, mkPendulum);
   TD3DoorState = (dsClosed, dsOpening, dsOpen, dsClosing);
 
   TD3Mover = class
@@ -109,9 +109,49 @@ type
     RotSpeed, Angle: Single;
     { func_rotating turning ("start_on", toggled by activation) }
     Running: Boolean;
+    { func_bobbing / func_pendulum: idExtrapolate's DECELSINE | NOSTOP from
+      the map's start, Phase seconds late; BasePos / BaseRotation are the
+      spawn pose }
+    Time, Phase, Duration: Single;
+    BobDelta: TVector3;
+    SwingSpeed: Single;
+    BasePos: TVector3;
+    BaseRotation: TVector4;
+    { an elevator's inner door rides with it (idDoor bound to the
+      elevator's team): offset by how far Master moved since MasterStart }
+    Master: TCastleTransform;
+    MasterStart: TVector3;
+    TriggerBoxBase: TBox3D;
+    { disabled by its elevator (idDoor::Enable): touching doesn't open it }
+    Disabled: Boolean;
     procedure Update(const SecondsPassed: Single);
     procedure Open;
     procedure Close;
+  end;
+
+  TD3ElevatorState = (esInit, esIdle, esWaitingOnDoors, esMoving);
+
+  { func_elevator (idElevator): goes to "floorPos_N" when its GUI says
+    "changefloor N" or it is activated ("trigger", "triggerFloor"), closing
+    its doors first ("innerdoor" rides with it, "floorDoor_N"), opening them
+    on arrival ("pauseOnFloor" / "pauseTime"), back to "returnFloor" after
+    "returnTime". It moves like a script mover (move_time, move_speed,
+    accel_time, decel_time). }
+  TD3Elevator = class
+    Entity: TD3MapEntity;
+    Floors: array of record
+      Floor: Integer;
+      Door: String;
+      Pos: TVector3; { Doom 3 world origin }
+    end;
+    State: TD3ElevatorState;
+    CurrentFloor, PendingFloor, LastFloor: Integer;
+    ControlsDisabled: Boolean;
+    { posted events (game time, -1: none): a retried gotoFloor, the
+      arrival after pauseTime, the return }
+    RetryAt, ArriveAt, ReturnAt, LastTouch: Single;
+    RetryFloor: Integer;
+    function FloorIndex(const Floor: Integer): Integer;
   end;
 
   TD3MonsterState = (msIdle, msChase, msAttack, msDead);
@@ -585,6 +625,7 @@ type
   strict private
     FMap: TDoom3Map;
     FMovers: specialize TObjectList<TD3Mover>;
+    FElevators: specialize TObjectList<TD3Elevator>;
     FMonsters: specialize TObjectList<TD3Monster>;
     FSpeakers: specialize TObjectList<TD3Speaker>;
     FSounds: specialize TObjectDictionary<String, TCastleSound>;
@@ -757,6 +798,12 @@ type
     function EntityOriginNow(const E: TD3MapEntity): TVector3;
     function SoundFromShader(const ShaderName: String): TCastleSound;
     procedure SpawnMover(const B: TD3BrushEntity);
+    procedure SpawnElevator(const B: TD3BrushEntity);
+    function DoorMover(const Name: String): TD3Mover;
+    procedure ElevatorGotoFloor(const El: TD3Elevator; const Floor: Integer);
+    procedure ElevatorDoors(const El: TD3Elevator; const Open, Enable, Close, Disable: Boolean);
+    procedure ElevatorGuiState(const El: TD3Elevator; const Key, Value: String);
+    procedure UpdateElevators;
     procedure SpawnSpeaker(const E: TD3MapEntity);
     procedure SpawnTrigger(const E: TD3MapEntity);
     function SpawnMonster(const ME: TD3ModelEntity): TD3Monster;
@@ -1146,6 +1193,10 @@ type
     { Seconds the player has been dead. }
     property DeadTime: Single read FDeadTime;
     property Movers: specialize TObjectList<TD3Mover> read FMovers;
+    property Elevators: specialize TObjectList<TD3Elevator> read FElevators;
+    { idElevator::HandleSingleGuiCommand "changefloor N" }
+    procedure ElevatorChangeFloor(const El: TD3Elevator; const Floor: Integer);
+    function ElevatorOf(const E: TD3MapEntity): TD3Elevator;
     property Monsters: specialize TObjectList<TD3Monster> read FMonsters;
     property Triggers: specialize TObjectList<TD3Trigger> read FTriggers;
     property Animated: specialize TObjectList<TD3Animated> read FAnimated;
@@ -1454,9 +1505,28 @@ end;
 
 procedure TD3Mover.Update(const SecondsPassed: Single);
 var
-  Step: Single;
+  Step, S: Single;
+  Q: TQuaternion;
 begin
+  Time := Time + SecondsPassed;
   case Kind of
+    mkBobbing, mkPendulum:
+      begin
+        { idExtrapolate DECELSINE: sin(t / duration * pi / 2) * duration *
+          sqrt(1/2) * speed, from Phase on }
+        S := 0;
+        if (Duration > 0) and (Time > Phase) then
+          S := Sin((Time - Phase) / Duration * Pi / 2) * Duration * Sqrt(0.5);
+        if Kind = mkBobbing then
+          Brush.Scene.Translation := BasePos + D3ToCge(BobDelta * S)
+        else
+        begin
+          { idAngles(0, 0, roll): a roll about the entity's own x axis }
+          Q := QuatFromAxisAngle(BaseRotation) *
+            QuatFromAxisAngle(D3ToCge(Vector3(1, 0, 0)), DegToRad(SwingSpeed * S));
+          Brush.Scene.Rotation := Q.ToAxisAngle;
+        end;
+      end;
     mkRotating:
       if Running then
       begin
@@ -1493,9 +1563,24 @@ begin
             end;
           else ;
         end;
-        Brush.Scene.Translation := ClosedPos + MoveDir * (Distance * Progress);
+        if Master <> nil then
+        begin
+          Brush.Scene.Translation := ClosedPos + (Master.Translation - MasterStart) + MoveDir * (Distance * Progress);
+          TriggerBox := TriggerBoxBase.Translate(Master.Translation - MasterStart);
+        end else
+          Brush.Scene.Translation := ClosedPos + MoveDir * (Distance * Progress);
       end;
   end;
+end;
+
+{ TD3Elevator }
+
+function TD3Elevator.FloorIndex(const Floor: Integer): Integer;
+begin
+  for Result := 0 to High(Floors) do
+    if Floors[Result].Floor = Floor then
+      Exit;
+  Result := -1;
 end;
 
 { TD3Monster }
@@ -1578,6 +1663,7 @@ begin
   inherited Create;
   FMap := AMap;
   FMovers := specialize TObjectList<TD3Mover>.Create(True);
+  FElevators := specialize TObjectList<TD3Elevator>.Create(True);
   FBrass := specialize TObjectList<TD3Brass>.Create(True);
   FBrassDue := -1;
   RagdollEnabled := True;
@@ -1637,6 +1723,7 @@ destructor TD3Game.Destroy;
 begin
   Clear;
   FMovers.Free;
+  FElevators.Free;
   FBrass.Free;
   FMonsters.Free;
   FSpeakers.Free;
@@ -1694,6 +1781,7 @@ begin
   FPlayerGibbed := False;
   FItems.Clear;
   FMovers.Clear;
+  FElevators.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
   FTriggers.Clear;
@@ -1817,6 +1905,270 @@ begin
     Result := Local.Transform(B.Scene.Transform);
 end;
 
+{ func_elevator ------------------------------------------------------------- }
+
+procedure TD3Game.SpawnElevator(const B: TD3BrushEntity);
+var
+  E: TD3MapEntity;
+  El: TD3Elevator;
+  I, N: Integer;
+  Key: String;
+begin
+  { idElevator::Spawn }
+  E := B.Entity;
+  El := TD3Elevator.Create;
+  El.Entity := E;
+  El.PendingFloor := E.IntValue('floor', 1);
+  El.RetryAt := -1;
+  El.ArriveAt := -1;
+  El.ReturnAt := -1;
+  El.LastTouch := -10;
+  for I := 0 to E.Pairs.Count - 1 do
+  begin
+    Key := LowerCase(E.Pairs.Names[I]);
+    if Copy(Key, 1, 9) <> 'floorpos_' then
+      Continue;
+    N := Length(El.Floors);
+    SetLength(El.Floors, N + 1);
+    El.Floors[N].Floor := StrToIntDef(Copy(Key, 10, MaxInt), 0);
+    El.Floors[N].Door := E.Value('floorDoor_' + IntToStr(El.Floors[N].Floor));
+    El.Floors[N].Pos := E.VectorValue(E.Pairs.Names[I], E.Origin);
+  end;
+  FElevators.Add(El);
+  WritelnLog('Doom3World', 'Elevator %s: %d floors, at floor %d', [E.Name, Length(El.Floors), El.PendingFloor]);
+end;
+
+function TD3Game.ElevatorOf(const E: TD3MapEntity): TD3Elevator;
+begin
+  for Result in FElevators do
+    if Result.Entity = E then
+      Exit;
+  Result := nil;
+end;
+
+function TD3Game.DoorMover(const Name: String): TD3Mover;
+begin
+  if Name <> '' then
+    for Result in FMovers do
+      if (Result.Kind = mkDoor) and SameText(Result.Brush.Entity.Name, Name) then
+        Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.ElevatorDoors(const El: TD3Elevator; const Open, Enable, Close, Disable: Boolean);
+var
+  Door: TD3Mover;
+  I: Integer;
+begin
+  { the inner door, then the floor doors: Open / Enable act on the current
+    floor's (OpenFloorDoor, EnableProperDoors), Close / Disable on all
+    (CloseAllDoors, DisableAllDoors) }
+  Door := DoorMover(El.Entity.Value('innerdoor'));
+  if Door <> nil then
+  begin
+    if Open then
+      OpenTeam(Door);
+    if Close then
+      CloseTeam(Door);
+    if Enable then
+      Door.Disabled := False;
+    if Disable then
+      Door.Disabled := True;
+  end;
+  for I := 0 to High(El.Floors) do
+  begin
+    Door := DoorMover(El.Floors[I].Door);
+    if Door = nil then
+      Continue;
+    if Open and (El.Floors[I].Floor = El.CurrentFloor) then
+      OpenTeam(Door);
+    if Close then
+      CloseTeam(Door);
+    if Enable and (El.Floors[I].Floor = El.CurrentFloor) then
+      Door.Disabled := False;
+    if Disable then
+      Door.Disabled := True;
+  end;
+end;
+
+procedure TD3Game.ElevatorGuiState(const El: TD3Elevator; const Key, Value: String);
+var
+  S: TD3GuiSurface;
+  I: Integer;
+  Names: TStringList;
+begin
+  { idMover::SetGuiStates: its own GUIs and the "guiTarget" entities' }
+  Names := TStringList.Create;
+  try
+    Names.CaseSensitive := False;
+    Names.Add(El.Entity.Name);
+    for I := 0 to El.Entity.Pairs.Count - 1 do
+      if Copy(LowerCase(El.Entity.Pairs.Names[I]), 1, 9) = 'guitarget' then
+        Names.Add(El.Entity.Pairs.ValueFromIndex[I]);
+    for S in FMap.GuiSurfaces do
+      if Names.IndexOf(S.EntityName) >= 0 then
+        S.Gui.SetState(Key, Value);
+  finally
+    Names.Free;
+  end;
+end;
+
+procedure TD3Game.ElevatorGotoFloor(const El: TD3Elevator; const Floor: Integer);
+var
+  Door: TD3Mover;
+begin
+  { idElevator::Event_GotoFloor: wait for an open inner door, close the
+    doors, then move once they are shut (UpdateElevators) }
+  if El.FloorIndex(Floor) < 0 then
+    Exit;
+  Door := DoorMover(El.Entity.Value('innerdoor'));
+  if (Door <> nil) and (Door.State <> dsClosed) and (El.State <> esInit) then
+  begin
+    El.RetryFloor := Floor;
+    El.RetryAt := FTime + 0.5;
+    Exit;
+  end;
+  ElevatorDoors(El, False, False, True, True);
+  El.State := esWaitingOnDoors;
+  El.PendingFloor := Floor;
+end;
+
+procedure TD3Game.ElevatorChangeFloor(const El: TD3Elevator; const Floor: Integer);
+var
+  Door: TD3Mover;
+begin
+  if El.ControlsDisabled then
+    Exit;
+  WritelnLog('Doom3World', 'Elevator %s: changefloor %d (at %d)', [El.Entity.Name, Floor, El.CurrentFloor]);
+  if Floor = El.CurrentFloor then
+    { open the current floor's and the inner doors }
+    ElevatorDoors(El, True, False, False, False)
+  else
+  begin
+    Door := DoorMover(El.Entity.Value('innerdoor'));
+    if (Door <> nil) and (Door.State <> dsClosed) then
+    begin
+      El.RetryFloor := Floor;
+      El.RetryAt := FTime + 0.5;
+    end else
+      ElevatorGotoFloor(El, Floor);
+  end;
+end;
+
+procedure TD3Game.UpdateElevators;
+var
+  El: TD3Elevator;
+  Door, Other: TD3Mover;
+  M: TD3ScriptMover;
+  B: TD3BrushEntity;
+  I: Integer;
+begin
+  for El in FElevators do
+  begin
+    B := FMap.FindBrush(El.Entity.Name);
+    if B = nil then
+      Continue;
+    Door := DoorMover(El.Entity.Value('innerdoor'));
+    if El.State = esInit then
+    begin
+      { idElevator::Think's INIT: the inner door rides with it (its sounds
+        off), it goes to its "floor" }
+      if Door <> nil then
+        for Other in FMovers do
+          if (Other = Door) or ((Door.Team <> '') and (Other.Kind = mkDoor) and (Other.Team = Door.Team)) then
+          begin
+            { the whole team (both halves) }
+            Other.Master := B.Scene;
+            Other.MasterStart := B.Scene.Translation;
+            Other.SoundOpen := nil;
+            Other.SoundClose := nil;
+          end;
+      ElevatorGotoFloor(El, El.PendingFloor);
+      ElevatorDoors(El, False, False, False, True);
+      ElevatorGuiState(El, 'movestate', Iff(El.PendingFloor = 1, '1', '2'));
+    end;
+    { posted events }
+    if (El.RetryAt >= 0) and (FTime >= El.RetryAt) then
+    begin
+      El.RetryAt := -1;
+      ElevatorGotoFloor(El, El.RetryFloor);
+    end;
+    if (El.ReturnAt >= 0) and (FTime >= El.ReturnAt) then
+    begin
+      El.ReturnAt := -1;
+      ElevatorGotoFloor(El, El.Entity.IntValue('returnFloor', 0));
+    end;
+    { "trigger": the player standing on it calls it to "triggerFloor"
+      (Event_Touch, at most every 2 s) }
+    if El.Entity.BoolValue('trigger') and (El.State = esIdle) and (FTime >= El.LastTouch + 2) and
+       not PlayerDead and B.Scene.BoundingBox.Grow(8).Contains(PlayerFeet) then
+    begin
+      El.LastTouch := FTime;
+      if El.Entity.IntValue('triggerFloor', 0) <> El.CurrentFloor then
+      begin
+        El.RetryFloor := El.Entity.IntValue('triggerFloor', 0);
+        El.RetryAt := FTime + 0.25;
+      end;
+    end;
+    case El.State of
+      esWaitingOnDoors:
+        if (Door = nil) or (Door.State = dsClosed) then
+        begin
+          { idMover::MoveToPos + idElevator::BeginMove }
+          El.LastFloor := El.CurrentFloor;
+          El.CurrentFloor := El.PendingFloor;
+          I := El.FloorIndex(El.CurrentFloor);
+          M := ScriptMover(EntityHandle(El.Entity));
+          if (I >= 0) and (M <> nil) then
+          begin
+            M.MoveFrom := M.Origin;
+            M.MoveTo := El.Floors[I].Pos;
+            M.MoveStart := FTime;
+            if M.MoveSpeed > 0 then
+              M.MoveDuration := (M.MoveTo - M.MoveFrom).Length / M.MoveSpeed
+            else
+              M.MoveDuration := M.MoveTime;
+            { already there (its "floor" at the start): no wait }
+            if (M.MoveTo - M.MoveFrom).Length < 0.01 then
+              M.MoveDuration := 0;
+            M.Moving := True;
+            El.ControlsDisabled := True;
+            ElevatorGuiState(El, 'movestate', Iff(El.CurrentFloor = 1, '4', '3'));
+            WritelnLog('Doom3World', 'Elevator %s moves to floor %d', [El.Entity.Name, El.CurrentFloor]);
+          end;
+          El.State := esMoving;
+        end;
+      esMoving:
+        begin
+          M := ScriptMover(EntityHandle(El.Entity));
+          if (M = nil) or not M.Moving then
+          begin
+            { idElevator::DoneMoving }
+            El.State := esIdle;
+            ElevatorDoors(El, False, True, False, False);
+            ElevatorGuiState(El, 'floor', IntToStr(El.CurrentFloor));
+            if El.Entity.IntValue('pauseOnFloor', -1) = El.CurrentFloor then
+              El.ArriveAt := FTime + El.Entity.FloatValue('pauseTime', 0)
+            else
+              El.ArriveAt := FTime;
+          end;
+        end;
+      else ;
+    end;
+    if (El.ArriveAt >= 0) and (FTime >= El.ArriveAt) then
+    begin
+      { idElevator::Event_PostFloorArrival }
+      El.ArriveAt := -1;
+      ElevatorDoors(El, True, False, False, False);
+      ElevatorGuiState(El, 'movestate', Iff(El.CurrentFloor = 1, '1', '2'));
+      El.ControlsDisabled := False;
+      WritelnLog('Doom3World', 'Elevator %s at floor %d', [El.Entity.Name, El.CurrentFloor]);
+      if (El.Entity.FloatValue('returnTime', 0) > 0) and (El.Entity.IntValue('returnFloor', 0) <> El.CurrentFloor) then
+        El.ReturnAt := FTime + El.Entity.FloatValue('returnTime', 0);
+    end;
+  end;
+end;
+
 procedure TD3Game.SpawnMover(const B: TD3BrushEntity);
 var
   E: TD3MapEntity;
@@ -1869,6 +2221,7 @@ begin
     { Doom 3 doors open when you enter a trigger around them }
     TriggerSize := E.FloatValue('triggersize', 60);
     M.TriggerBox := Box.Grow(TriggerSize);
+    M.TriggerBoxBase := M.TriggerBox;
     M.SoundOpen := SoundFromShader(E.Value('snd_open'));
     M.SoundClose := SoundFromShader(E.Value('snd_close'));
     if (M.SoundOpen <> nil) or (M.SoundClose <> nil) then
@@ -1879,6 +2232,47 @@ begin
     end;
     if FMap.Portals <> nil then
       M.Portals := FMap.Portals.PortalsInBox(Box.Grow(16));
+    FMovers.Add(M);
+  end else
+  if Cls = 'func_elevator' then
+    SpawnElevator(B)
+  else
+  if Cls = 'func_bobbing' then
+  begin
+    { idBobber::Spawn: "speed" seconds (a half cycle), "height", "phase",
+      x_axis / y_axis (else up) }
+    M := TD3Mover.Create;
+    M.Brush := B;
+    M.Kind := mkBobbing;
+    M.BasePos := B.Scene.Translation;
+    M.Duration := E.FloatValue('speed', 4) * 0.5;
+    M.Phase := E.FloatValue('phase', 0);
+    Size := TVector3.Zero;
+    if E.BoolValue('x_axis') then
+      Size.X := E.FloatValue('height', 32)
+    else
+    if E.BoolValue('y_axis') then
+      Size.Y := E.FloatValue('height', 32)
+    else
+      Size.Z := E.FloatValue('height', 32);
+    M.BobDelta := Size * 2;
+    FMovers.Add(M);
+  end else
+  if Cls = 'func_pendulum' then
+  begin
+    { idPendulum::Spawn: swings "speed" degrees, its frequency from "freq"
+      or its length below the pivot (the origin): sqrt(g / (3 * length)) }
+    M := TD3Mover.Create;
+    M.Brush := B;
+    M.Kind := mkPendulum;
+    M.BaseRotation := B.Scene.Rotation;
+    M.SwingSpeed := E.FloatValue('speed', 30) * 2;
+    M.Phase := E.FloatValue('phase', 0);
+    if E.HasKey('freq') and (E.FloatValue('freq') > 0) then
+      MoveAngle := E.FloatValue('freq')
+    else
+      MoveAngle := 1 / (2 * Pi) * Sqrt(1066 / (3 * Max(8, Abs(B.LocalMin.Z))));
+    M.Duration := 0.5 / MoveAngle;
     FMovers.Add(M);
   end else
   if (Cls = 'func_rotating') or (Cls = 'func_fx_rotating') then
@@ -4884,6 +5278,13 @@ begin
     state (for its materials' shader parameters), nothing visible here }
   if Cls = 'func_static' then
     Handled := True;
+  { idElevator::Event_Activate }
+  if (Cls = 'func_elevator') and (ElevatorOf(E) <> nil) then
+  begin
+    if E.BoolValue('trigger') and (E.IntValue('triggerFloor', 0) <> ElevatorOf(E).CurrentFloor) then
+      ElevatorGotoFloor(ElevatorOf(E), E.IntValue('triggerFloor', 0));
+    Handled := True;
+  end;
   if not Handled then
     Unsupported('activating ' + Cls);
 end;
@@ -5118,12 +5519,12 @@ begin
   Feet := PlayerFeet;
   for Mover in FMovers do
   begin
-    if (Mover.Kind = mkDoor) and not Mover.NoTouch and not PlayerDead and
+    if (Mover.Kind = mkDoor) and not Mover.NoTouch and not Mover.Disabled and not PlayerDead and
        Mover.TriggerBox.Contains(PlayerEye) then
       OpenTeam(Mover);
     { monsters open doors too (idDoor's trigger touched by an actor): the
       AAS routes them through doorways }
-    if (Mover.Kind = mkDoor) and not Mover.NoTouch and (Mover.State <> dsOpen) then
+    if (Mover.Kind = mkDoor) and not Mover.NoTouch and not Mover.Disabled and (Mover.State <> dsOpen) then
       for Mon in FMonsters do
         if (Mon.State <> msDead) and Mon.Model.Holder.Exists and
            Mover.TriggerBox.Contains(Mon.Center) then
@@ -5137,6 +5538,7 @@ begin
       for P in Mover.Portals do
         FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
+  UpdateElevators;
   if not ScriptsPaused then
     UpdateScriptMovers;
   UpdateBindings;
@@ -7410,6 +7812,21 @@ begin
         WritelnLog('Doom3World', 'GUI %s print: %s', [S.Gui.Name, Trim(Copy(Trim(Part), 6, MaxInt))]);
       'close':
         ;
+      'changefloor':
+        { idElevator::HandleSingleGuiCommand: the GUI's entity, else its targets }
+        if Length(Words) > 1 then
+        begin
+          if (E <> nil) and (ElevatorOf(E) <> nil) then
+            ElevatorChangeFloor(ElevatorOf(E), StrToIntDef(Words[1], 0))
+          else
+          if E <> nil then
+            for Other in TargetsOf(E) do
+              if ElevatorOf(Other) <> nil then
+              begin
+                ElevatorChangeFloor(ElevatorOf(Other), StrToIntDef(Words[1], 0));
+                Break;
+              end;
+        end;
       else
         Unsupported('GUI command "' + Words[0] + '" (' + S.Gui.Name + ')');
     end;
