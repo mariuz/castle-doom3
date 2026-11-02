@@ -1417,6 +1417,18 @@ begin
     end;
     Console.Print(Format('%d particle systems, %d fx', [FGame.Emitters.Count, FGame.Fx.Count]));
   end else
+  if Cmd = 'elevator' then
+  begin
+    { elevator: list them; elevator <name> <floor>: its GUI's "changefloor" }
+    Words := Args.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if (Length(Words) > 1) and (FGame.FindEntity(Words[0]) <> nil) and
+       (FGame.ElevatorOf(FGame.FindEntity(Words[0])) <> nil) then
+      FGame.ElevatorChangeFloor(FGame.ElevatorOf(FGame.FindEntity(Words[0])), StrToIntDef(Words[1], 0))
+    else
+      for I := 0 to FGame.Elevators.Count - 1 do
+        Console.Print(Format('Elevator %s: floor %d, state %d', [FGame.Elevators[I].Entity.Name,
+          FGame.Elevators[I].CurrentFloor, Ord(FGame.Elevators[I].State)]));
+  end else
   if Cmd = 'r_prepareresources' then
   begin
     { prepare every area's rendering resources at load (the next map) }
