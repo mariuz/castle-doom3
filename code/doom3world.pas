@@ -334,6 +334,8 @@ type
     Monster: TD3Monster;
     { idAI::Event_Burn's SHADERPARM_TIME_OF_DEATH (0: not burning) }
     BurnTime: Single;
+    { its meshes with a burn-away stage, alpha tested from BurnTime on }
+    BurnMeshes: array of Integer;
     { stopThinking: its threads stopped }
     Thinking: Boolean;
     { the player is its enemy; moving to it }
@@ -930,7 +932,7 @@ type
     function MonsterSound(const Mon: TD3Monster; const Key: String): Boolean;
     function MonsterPain(const Mon: TD3Monster; const Damage: Integer): Boolean;
     procedure GibMonster(const Mon: TD3Monster; const Direction: TVector3; const DamageDefName: String);
-    procedure ActorBurn(const A: TD3Actor);
+    procedure UpdateBurns;
     procedure BuildDamageZones(const Mon: TD3Monster);
     function MonsterHitZone(const Mon: TD3Monster; const HitPoint: TVector3; out Scale: Single): String;
     function SpawnGibs(const E: TD3MapEntity; const Def: TStringList; const Center, Direction: TVector3): Integer;
@@ -1025,6 +1027,9 @@ type
       to the listener through the portals (a closed one adds 150), the
       straight distance in one area, MaxSingle when it can't get there }
     function SoundPathDistance(const Source, Listener: TVector3): Single;
+    { idAI::Event_Burn: the time of death, the burn particles, the skins'
+      burn-away stages alpha tested from now on }
+    procedure ActorBurn(const A: TD3Actor);
     { a sound shader's sound (one of its files at random), nil when missing }
     function SoundFromShader(const ShaderName: String): TCastleSound;
     procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
@@ -1506,7 +1511,7 @@ uses
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
-  Doom3AF;
+  Doom3AF, Doom3Images;
 
 const
   MonsterWalkSpeed = 90;
@@ -4342,22 +4347,72 @@ begin
     ActorDamaged(Mon.Actor, Mon.Health <= 0, Pain);
 end;
 
+procedure TD3Game.UpdateBurns;
+var
+  A: TD3Actor;
+  I: Integer;
+  Ctx: TD3ExprContext;
+  M: TD3Material;
+  App: TAppearanceNode;
+begin
+  { the burn-away stages' alphaTest (0.05 + 0.3 * (time - parm7): the
+    skin goes in about 3 s) }
+  for A in FActors do
+  begin
+    if (Length(A.BurnMeshes) = 0) or (A.Model.Instance = nil) then
+      Continue;
+    Ctx := Default(TD3ExprContext);
+    Ctx.Time := FTime;
+    Ctx.Parms[7] := A.BurnTime;
+    for I in A.BurnMeshes do
+    begin
+      if I > High(A.Model.Instance.MeshShapes) then
+        Continue;
+      M := Decls.Material(A.Model.Instance.MeshMaterials[I]);
+      App := A.Model.Instance.MeshShapes[I].Appearance;
+      if (M.BurnAlphaTest <> nil) and (App <> nil) then
+        App.AlphaCutoff := EnsureRange(M.BurnAlphaTest.Eval(Ctx), 0.001, 1);
+    end;
+  end;
+end;
+
 procedure TD3Game.ActorBurn(const A: TD3Actor);
 var
   Value, Particle, JointName: String;
   P: TVector3;
-  Dash: Integer;
+  Dash, I: Integer;
   Def: TStringList;
+  M: TD3Material;
+  App: TAppearanceNode;
 begin
   { idAI::Event_Burn: the time of death (the materials' burn-away stages
     use it) and "smoke_burnParticleSystem" ("particle-joint") at that
     joint }
   A.BurnTime := FTime;
+  { the skins with a burn-away stage: their diffuse texture gets the
+    dissolve image's alpha, alpha tested by the stage's expression
+    (UpdateBurns) }
+  A.BurnMeshes := nil;
+  if A.Model.Instance <> nil then
+    for I := 0 to High(A.Model.Instance.MeshShapes) do
+    begin
+      M := Decls.Material(A.Model.Instance.MeshMaterials[I]);
+      App := A.Model.Instance.MeshShapes[I].Appearance;
+      if (M.BurnAlphaTest = nil) or (M.DiffuseImage = '') or (App = nil) or
+         not (App.Material is TMaterialNode) or
+         not (TMaterialNode(App.Material).DiffuseTexture is TImageTextureNode) then
+        Continue;
+      TImageTextureNode(TMaterialNode(App.Material).DiffuseTexture).SetUrl(
+        [ImageProgramUrl('castlealphafrom(' + M.DiffuseImage + ',' + M.BurnImage + ')', ikColor)]);
+      App.AlphaMode := amMask;
+      App.AlphaCutoff := 0.01;
+      A.BurnMeshes := Concat(A.BurnMeshes, [I]);
+    end;
   Def := A.Model.EntityDef;
   Value := A.Model.Entity.Value('smoke_burnParticleSystem');
   if (Value = '') and (Def <> nil) then
     Value := Def.Values['smoke_burnParticleSystem'];
-  WritelnLog('Doom3World', '%s burns (%s)', [A.Model.Entity.Name, Value]);
+  WritelnLog('Doom3World', '%s burns (%s, %d meshes burn away)', [A.Model.Entity.Name, Value, Length(A.BurnMeshes)]);
   if Value = '' then
     Exit;
   Dash := LastDelimiter('-', Value);
@@ -6084,6 +6139,7 @@ begin
   end;
   UpdateElevators;
   UpdateShakes;
+  UpdateBurns;
   UpdateSoundOcclusion;
   if not ScriptsPaused then
     UpdateScriptMovers;
@@ -7587,6 +7643,7 @@ begin
       begin
         A.Model.Instance.Scene.CastShadows := not A.Model.Entity.BoolValue('noshadows');
         A.BurnTime := 0;
+        A.BurnMeshes := nil;
       end;
     'getSize': EventResult := D3VectorValue(Vector3(32, 32, 72));
     else
