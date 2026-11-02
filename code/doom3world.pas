@@ -1053,8 +1053,8 @@ type
       first used) }
     MaxHealth, MaxArmor: Integer;
     WeaponBits: Cardinal;
-    WeaponDefs: array [0..15] of String;
-    Clip: array [0..15] of Integer;
+    WeaponDefs: array [0..31] of String;
+    Clip: array [0..31] of Integer;
     { The player's view direction (CGE), set by the view each frame: weapons
       aim and their view models turn with it. }
     PlayerViewDir: TVector3;
@@ -10732,6 +10732,7 @@ end;
 
 procedure TD3Game.StartScripts;
 var
+  MainScript: String;
   Base, Key: String;
   Start: QWord;
   I: Integer;
@@ -10746,14 +10747,20 @@ begin
       FHandles.AddOrSetValue(LowerCase(FMap.MapFile.Entities[I].Name), I + 1);
   { like idGameLocal: the game's scripts, then the map's own }
   Base := TDoom3Map.MapBasePath(FMap.MapName);
-  if not D3Fs.FileExists('script/doom_main.script') and not D3Fs.FileExists(Base + '.script') then
+  MainScript := 'script/doom_main.script';
+  if not D3Fs.FileExists(MainScript) and not D3Fs.FileExists(Base + '.script') then
     Exit;
   Start := GetTickCount64;
   FScript := TD3ScriptVM.Create;
   FScript.Host := FScriptHost;
   try
-    if D3Fs.FileExists('script/doom_main.script') then
-      FScript.CompileFile('script/doom_main.script');
+    if D3Fs.FileExists(MainScript) then
+      FScript.CompileFile(MainScript);
+    { Resurrection of Evil: d3xp_main.script (its weapons, monsters and
+      maps) on top of the base program, d3xp's own versions of shared
+      files replacing the base ones through the file system }
+    if D3Fs.FileExists('script/d3xp_main.script') then
+      FScript.CompileFile('script/d3xp_main.script');
     if D3Fs.FileExists(Base + '.script') then
       FScript.CompileFile(Base + '.script');
   except
@@ -10907,6 +10914,13 @@ begin
       if E <> nil then
         StartCamera(E);
     end else
+    if N = 'randomInt' then
+      { d3xp's sys.randomInt( range ): 0 .. range - 1 }
+      EventResult := D3FloatValue(Random(Max(1, Round(ArgF(0)))))
+    else
+    if N = 'precacheGui' then
+      { GUIs load when a surface shows them }
+    else
     if N = 'influenceActive' then
       EventResult := D3FloatValue(0)
     else

@@ -608,7 +608,7 @@ begin
   end;
   for I := 0 to FGame.Carried.Count - 1 do
     SetS('inv_name_' + IntToStr(I), FGame.Carried[I]);
-  for I := 0 to 15 do
+  for I := 0 to 31 do
     SetS('weapon' + IntToStr(I), IntToStr(Ord(FGame.HasWeapon(I))));
   { UpdatePDAInfo: the PDA list (the personal one first, the others newest
     first), the selected PDA's data }

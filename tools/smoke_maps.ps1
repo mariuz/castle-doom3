@@ -6,13 +6,16 @@
 # Usage (from the repository root, after "castle-engine compile"):
 #   .\tools\smoke_maps.ps1 -BasePath "E:\Games\Doom3"
 #   .\tools\smoke_maps.ps1 -BasePath "E:\Work\doom3-demo" -Maps game/demo_mars_city1
+#   .\tools\smoke_maps.ps1 -BasePath "E:\Games\Doom3" -Game d3xp
 # Without -Maps, the demo's 3 maps are loaded when <BasePath>\demo\demo00.pk4
 # exists, otherwise the full game's single player maps (a map missing from
-# the data shows as "(not loaded)").
+# the data shows as "(not loaded)"); with -Game d3xp (<BasePath>\d3xp over
+# base), Resurrection of Evil's maps.
 
 param(
   [Parameter(Mandatory = $true)] [string] $BasePath,
   [string[]] $Maps = @(),
+  [string] $Game = "",
   [string] $OutDir = "smoke_output",
   [int] $TimeoutSeconds = 600
 )
@@ -30,7 +33,11 @@ if ($Maps.Count -eq 0) {
     "game/monorail", "game/delta1", "game/delta2a", "game/delta2b", "game/delta3",
     "game/delta4", "game/hell1", "game/delta5", "game/cpu", "game/cpuboss",
     "game/site3", "game/caverns1", "game/caverns2", "game/hellhole"
-  if (Test-Path (Join-Path $BasePath "demo\demo00.pk4")) { $Maps = $Demo } else { $Maps = $Full }
+  $D3xp = "game/erebus1", "game/erebus2", "game/erebus3", "game/erebus4", "game/erebus5",
+    "game/erebus6", "game/phobos1", "game/phobos2", "game/phobos3", "game/phobos4",
+    "game/deltax", "game/hell"
+  if ($Game -eq "d3xp") { $Maps = $D3xp }
+  elseif (Test-Path (Join-Path $BasePath "demo\demo00.pk4")) { $Maps = $Demo } else { $Maps = $Full }
 }
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -39,6 +46,7 @@ foreach ($Map in $Maps) {
   $Name = $Map -replace '[/\\]', '_'
   $Watch = [Diagnostics.Stopwatch]::StartNew()
   $Arguments = "--autotest $Map `"$OutDir\$Name`" --demo `"W:3,S,T:180,S,Q`" -basepath `"$BasePath`""
+  if ($Game -ne "") { $Arguments += " -game $Game" }
   $Process = Start-Process $Exe -ArgumentList $Arguments -PassThru
   if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
     Stop-Process $Process -Force
