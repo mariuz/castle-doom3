@@ -30,6 +30,11 @@ var
   Pk4s: TStringList;
   LoadedGame: Boolean;
 begin
+  { env CD3_LIMIT_FPS=3: long frames like CI's software rendering, to test
+    the game with them on a fast machine }
+  if StrToFloatDef(GetEnvironmentVariable('CD3_LIMIT_FPS'), 0) > 0 then
+    ApplicationProperties.LimitFps := StrToFloatDef(GetEnvironmentVariable('CD3_LIMIT_FPS'), 0);
+
   AutoTestMap := '';
   CmdMap := '';
   BasePath := '';

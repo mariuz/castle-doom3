@@ -843,6 +843,7 @@ type
     { the player's view axes (Doom 3 rows: forward, left, up) }
     function PlayerViewAxis: TMatrix3;
     procedure UpdateMoveables(const SecondsPassed: Single);
+    procedure UpdateMoveablesStep(const SecondsPassed: Single);
     function CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
     procedure UpdateBindings;
     function TransformOf(const AName: String): TCastleTransform;
@@ -3716,6 +3717,19 @@ begin
 end;
 
 procedure TD3Game.UpdateMoveables(const SecondsPassed: Single);
+const
+  MaxStep = 1 / 60;
+var
+  Steps, I: Integer;
+begin
+  { in steps of at most 1/60 s, like UpdateBrass: with long frames one
+    step's gravity bent a throw under the player }
+  Steps := Max(1, Ceil(SecondsPassed / MaxStep));
+  for I := 1 to Steps do
+    UpdateMoveablesStep(SecondsPassed / Steps);
+end;
+
+procedure TD3Game.UpdateMoveablesStep(const SecondsPassed: Single);
 const
   Gravity = 1066;
 var
