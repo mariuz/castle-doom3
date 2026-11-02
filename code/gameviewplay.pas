@@ -1731,6 +1731,20 @@ begin
         Console.Print(Format('Elevator %s: floor %d, state %d', [FGame.Elevators[I].Entity.Name,
           FGame.Elevators[I].CurrentFloor, Ord(FGame.Elevators[I].State)]));
   end else
+  if Cmd = 'pdaclick' then
+  begin
+    { pdaclick <x> <y>: a click on the PDA GUI at 640 x 480 coordinates
+      (demo scripts have no mouse) }
+    Words := Args.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if (FPdaGui <> nil) and FPdaOpen and (Length(Words) >= 2) then
+    begin
+      FPdaGui.SetCursor(StrToFloatDef(Words[0], 0), StrToFloatDef(Words[1], 0));
+      FPdaGui.Click;
+      FPdaGui.ClickRelease;
+      FPdaMouseDown := buttonLeft in Container.MousePressed;
+      Console.Print(Format('pdaclick %s %s', [Words[0], Words[1]]));
+    end;
+  end else
   if Cmd = 'burn' then
   begin
     { burn <actor>: its burn-away (idAI::Event_Burn) }
