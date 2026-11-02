@@ -660,6 +660,17 @@ type
     FMonsters: specialize TObjectList<TD3Monster>;
     FSpeakers: specialize TObjectList<TD3Speaker>;
     FSounds: specialize TObjectDictionary<String, TCastleSound>;
+    { the file of each sound shader played last (no repeats when it has
+      several: idSoundShader's random choice) }
+    FSoundLastFile: specialize TDictionary<String, Integer>;
+    { sounds shaking the view ("shakes"): where, how much, how far, until }
+    FShakes: array of record
+      Position: TVector3;
+      Amplitude, Radius, EndTime: Single;
+    end;
+    FShakeAngles: TVector3;
+    { the portal graph for sounds (built at the first use) }
+    FSoundOcclusionTime: Single;
     FTriggers: specialize TObjectList<TD3Trigger>;
     { map entities by lowercase name }
     FEntities: specialize TDictionary<String, TD3MapEntity>;
@@ -827,7 +838,10 @@ type
     procedure ExplodeParticles(const P: TD3Projectile; const HitWorld: Boolean; const Normal: TVector3);
     procedure EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
     function EntityOriginNow(const E: TD3MapEntity): TVector3;
-    function SoundFromShader(const ShaderName: String): TCastleSound;
+    procedure NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
+    procedure UpdateShakes;
+    procedure OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single);
+    procedure UpdateSoundOcclusion;
     procedure SpawnMover(const B: TD3BrushEntity);
     procedure SpawnElevator(const B: TD3BrushEntity);
     function DoorMover(const Name: String): TD3Mover;
@@ -966,7 +980,6 @@ type
       just off the surface) }
     procedure RadiusDamage(const Position, Back: TVector3; const Damage: Integer;
       const Radius: Single; const Owner: String; const SplashDefName: String = '');
-    procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
     procedure ActorDamaged(const A: TD3Actor; const Killed, Pain: Boolean);
     function ActorCanSeePlayer(const A: TD3Actor; const UseFov: Boolean): Boolean;
     function StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;
@@ -1008,6 +1021,13 @@ type
     { A brush entity's world bounds, also while hidden or without visible
       surfaces (its model or collision model bounds); empty when none. }
     function MoverBounds(const B: TD3BrushEntity): TBox3D;
+    { idSoundWorldLocal::ResolveOrigin: how far a sound at Source travels
+      to the listener through the portals (a closed one adds 150), the
+      straight distance in one area, MaxSingle when it can't get there }
+    function SoundPathDistance(const Source, Listener: TVector3): Single;
+    { a sound shader's sound (one of its files at random), nil when missing }
+    function SoundFromShader(const ShaderName: String): TCastleSound;
+    procedure PlaySoundAt(const ShaderName: String; const Position: TVector3);
     { a segment blocked for monsters (MASK_MONSTERSOLID: solid and
       monsterclip, not playerclip) }
     function MonsterSegmentCollision(const A, B: TVector3): Boolean;
@@ -1472,6 +1492,12 @@ var
 function D3DirPitch(const D: TVector3): Single;
 function D3DirYaw(const D: TVector3): Single;
 
+
+var
+  { sounds go quieter by their path through the portals (console
+    s_occlusion) }
+  SoundOcclusion: Boolean = True;
+
 implementation
 
 uses
@@ -1733,6 +1759,7 @@ begin
   FMonsters := specialize TObjectList<TD3Monster>.Create(True);
   FSpeakers := specialize TObjectList<TD3Speaker>.Create(True);
   FSounds := specialize TObjectDictionary<String, TCastleSound>.Create([doOwnsValues]);
+  FSoundLastFile := specialize TDictionary<String, Integer>.Create;
   FTriggers := specialize TObjectList<TD3Trigger>.Create(True);
   FEntities := specialize TDictionary<String, TD3MapEntity>.Create;
   FPending := specialize TList<TD3PendingTargets>.Create;
@@ -1790,6 +1817,7 @@ begin
   FMonsters.Free;
   FSpeakers.Free;
   FSounds.Free;
+  FSoundLastFile.Free;
   FTriggers.Free;
   FEntities.Free;
   FPending.Free;
@@ -1908,24 +1936,210 @@ const
   MetersToUnits = 39.37;
 var
   Shader: TD3SoundShader;
+  Key: String;
+  I, Last: Integer;
 begin
   Result := nil;
   if ShaderName = '' then
     Exit;
-  if FSounds.TryGetValue(LowerCase(ShaderName), Result) then
-    Exit;
+  Key := LowerCase(ShaderName);
   Shader := Decls.SoundShader(ShaderName);
-  if (Shader <> nil) and (Shader.Files.Count > 0) and D3Fs.FileExists(Shader.Files[0]) then
+  if (Shader = nil) or (Shader.Files.Count = 0) then
+  begin
+    if not FSounds.ContainsKey(Key) then
+    begin
+      WritelnLog('Doom3World', 'Sound shader "%s" not found', [ShaderName]);
+      FSounds.Add(Key, nil);
+    end;
+    Exit;
+  end;
+  { idSoundShader: a random one of its files each time, not the last one
+    again }
+  I := 0;
+  if Shader.Files.Count > 1 then
+  begin
+    I := Random(Shader.Files.Count);
+    if FSoundLastFile.TryGetValue(Key, Last) and (I = Last) then
+      I := (I + 1) mod Shader.Files.Count;
+    FSoundLastFile.AddOrSetValue(Key, I);
+    Key := Key + '#' + IntToStr(I);
+  end;
+  if FSounds.TryGetValue(Key, Result) then
+    Exit;
+  if D3Fs.FileExists(Shader.Files[I]) then
   begin
     Result := TCastleSound.Create(nil);
-    Result.Url := D3FsUrl(Shader.Files[0]);
+    Result.Url := D3FsUrl(Shader.Files[I]);
     Result.ReferenceDistance := Max(1, Shader.MinDistance) * MetersToUnits;
     Result.MaxDistance := Max(Shader.MinDistance + 1, Shader.MaxDistance) * MetersToUnits;
     { volume is in dB }
     Result.Volume := Min(1, Power(10, Shader.Volume / 20));
   end else
-    WritelnLog('Doom3World', 'Sound shader "%s" not found', [ShaderName]);
-  FSounds.Add(LowerCase(ShaderName), Result);
+    WritelnLog('Doom3World', 'Sound file "%s" of "%s" not found', [Shader.Files[I], ShaderName]);
+  FSounds.Add(Key, Result);
+end;
+
+procedure TD3Game.NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
+var
+  Shader: TD3SoundShader;
+  N: Integer;
+begin
+  { idSoundWorld::CurrentShakeAmplitudeForPosition: the shaking sounds
+    playing near the listener }
+  Shader := Decls.SoundShader(ShaderName);
+  if (Shader = nil) or (Shader.Shakes <= 0) then
+    Exit;
+  N := Length(FShakes);
+  SetLength(FShakes, N + 1);
+  FShakes[N].Position := Position;
+  FShakes[N].Amplitude := Shader.Shakes;
+  FShakes[N].Radius := Max(Shader.MinDistance + 1, Shader.MaxDistance) * 39.37;
+  if Duration > 0 then
+    FShakes[N].EndTime := FTime + Duration
+  else
+    FShakes[N].EndTime := FTime + 1;
+end;
+
+procedure TD3Game.UpdateShakes;
+var
+  I, N: Integer;
+  Amp, D: Single;
+begin
+  { idPlayerView::CalculateShake: random angles up to the amplitude }
+  Amp := 0;
+  N := 0;
+  for I := 0 to High(FShakes) do
+    if FTime < FShakes[I].EndTime then
+    begin
+      D := (FShakes[I].Position - FPlayerEye).Length;
+      if D < FShakes[I].Radius then
+        Amp := Amp + FShakes[I].Amplitude * (1 - D / FShakes[I].Radius);
+      FShakes[N] := FShakes[I];
+      Inc(N);
+    end;
+  SetLength(FShakes, N);
+  if Amp > 0 then
+    FShakeAngles := Vector3(Random * 2 - 1, Random * 2 - 1, Random * 2 - 1) * Amp
+  else
+    FShakeAngles := TVector3.Zero;
+end;
+
+{ Sound occlusion through portals --------------------------------------------- }
+
+function TD3Game.SoundPathDistance(const Source, Listener: TVector3): Single;
+const
+  MaxDepth = 10;
+  { idSoundSystemLocal::s_doorDistanceAdd }
+  DoorDistanceAdd = 150;
+var
+  Portals: TD3PortalVisibility;
+  SrcArea, ListenerArea: Integer;
+  Best: Single;
+  OnPath: array of Boolean;
+
+  procedure Walk(const Area: Integer; const From: TVector3; const Dist: Single; const Depth: Integer);
+  var
+    P, Other: Integer;
+    Center: TVector3;
+    Add: Single;
+  begin
+    { idSoundWorldLocal::ResolveOrigin: through the portals to the
+      listener's area, a closed one (a door) adding distance }
+    if Dist >= Best then
+      Exit;
+    if Area = ListenerArea then
+    begin
+      Best := Min(Best, Dist + (Listener - From).Length);
+      Exit;
+    end;
+    if Depth >= MaxDepth then
+      Exit;
+    OnPath[Area] := True;
+    for P := 0 to Portals.PortalCount - 1 do
+    begin
+      if Portals.PortalArea(P, 0) = Area then
+        Other := Portals.PortalArea(P, 1)
+      else
+      if Portals.PortalArea(P, 1) = Area then
+        Other := Portals.PortalArea(P, 0)
+      else
+        Continue;
+      if (Other < 0) or (Other >= Length(OnPath)) or OnPath[Other] then
+        Continue;
+      Center := Portals.PortalCenter(P);
+      Add := 0;
+      if Portals.PortalClosed[P] then
+        Add := DoorDistanceAdd;
+      Walk(Other, Center, Dist + (Center - From).Length + Add, Depth + 1);
+    end;
+    OnPath[Area] := False;
+  end;
+
+begin
+  Result := (Source - Listener).Length;
+  Portals := FMap.Portals;
+  if Portals = nil then
+    Exit;
+  SrcArea := FMap.AreaAt(Source);
+  ListenerArea := FMap.AreaAt(Listener);
+  if (SrcArea < 0) or (ListenerArea < 0) or (SrcArea = ListenerArea) then
+    Exit;
+  Best := MaxSingle;
+  SetLength(OnPath, Portals.AreaCount);
+  Walk(SrcArea, Source, 0, 0);
+  Result := Best;
+end;
+
+procedure TD3Game.OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single);
+var
+  Pos: TVector3;
+  Direct, Path: Single;
+begin
+  if (Source = nil) or (Source.Parent = nil) or not Source.Spatial then
+    Exit;
+  { the volume by the path through the portals instead of the straight
+    line (Doom 3 plays it from the portal it comes through) }
+  Pos := Source.Parent.WorldTranslation;
+  Direct := Max(1, (Pos - FPlayerEye).Length);
+  Path := SoundPathDistance(Pos, FPlayerEye);
+  if Path >= MaxSingle / 2 then
+    Source.Volume := 0
+  else
+  if (MaxDistance > 0) and (Path >= MaxDistance) then
+    Source.Volume := 0
+  else
+    Source.Volume := EnsureRange(Direct / Max(Direct, Path), 0, 1);
+end;
+
+procedure TD3Game.UpdateSoundOcclusion;
+var
+  S: TD3Speaker;
+  M: TD3Mover;
+  Src: TCastleSoundSource;
+  T: TCastleTransform;
+  B: TCastleBehavior;
+begin
+  if not SoundOcclusion or (FMap = nil) or (FMap.Portals = nil) then
+    Exit;
+  { a few times a second }
+  if FTime < FSoundOcclusionTime then
+    Exit;
+  FSoundOcclusionTime := FTime + 0.1;
+  for S in FSpeakers do
+    if S.Sound <> nil then
+      OccludeSoundSource(S.Source, S.Sound.MaxDistance)
+    else
+      OccludeSoundSource(S.Source, 0);
+  for M in FMovers do
+    OccludeSoundSource(M.Sounds, 0);
+  for Src in FSoundSources.Values do
+    OccludeSoundSource(Src, 0);
+  for T in FSoundTransforms do
+  begin
+    B := T.FindBehavior(TCastleSoundSource);
+    if B <> nil then
+      OccludeSoundSource(TCastleSoundSource(B), 0);
+  end;
 end;
 
 { A brush entity's world bounds: its scene's, else (only invisible surfaces,
@@ -3439,6 +3653,9 @@ begin
     Result := FViewBobAngles
   else
     Result := TVector3.Zero;
+  { idPlayerView::ShakeAxis: shaking sounds }
+  if not PlayerDead then
+    Result := Result + FShakeAngles;
   { the damage kick (idPlayerView::AngleOffset: the kick times the time
     left squared, in ms, times g_kickAmplitude 0.0001, within 70 degrees) }
   if not PlayerDead and (FTime < FKickFinish) then
@@ -5866,6 +6083,8 @@ begin
         FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
   UpdateElevators;
+  UpdateShakes;
+  UpdateSoundOcclusion;
   if not ScriptsPaused then
     UpdateScriptMovers;
   UpdateBindings;
@@ -7841,7 +8060,11 @@ begin
         end;
       end;
     fxShake:
-      Unsupported('fx shake (' + Fx.Decl.Name + ')');
+      { idEntityFx's FX_SHAKE: a kick of the players within its distance
+        (along the FX's offset: none for the retail ones) and a radius push
+        of its impulse }
+      if (A.ShakeParms[4] <> 0) and (A.ShakeParms[2] > 0) then
+        PushMoveablesInRadius(D3ToCge(Pos), A.ShakeParms[2], A.ShakeParms[4]);
     else
       if A.Data <> '' then
         Unsupported('fx model ' + A.Data + ' (' + Fx.Decl.Name + ')');
@@ -8809,6 +9032,7 @@ begin
   Playing.Sound := Snd;
   Playing.FreeOnStop := True;
   Source.Play(Playing);
+  NoteShakes(ShaderName, Position, Snd.Duration);
 end;
 
 function TD3Game.MuzzlePosition(const A: TD3Actor; const JointName: String): TVector3;
@@ -9915,6 +10139,8 @@ begin
   if Channel <> 0 then
     FScriptSounds.AddOrSetValue(IntToStr(Handle) + ':' + IntToStr(Channel), Playing);
   Result := Snd.Duration;
+  if Source.Parent <> nil then
+    NoteShakes(ShaderName, Source.Parent.WorldTranslation, Snd.Duration);
 end;
 
 procedure TD3Game.StopScriptSound(const Handle, Channel: Integer);

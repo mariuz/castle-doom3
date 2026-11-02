@@ -127,7 +127,7 @@ begin
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
     'the berserk skin remaps the body');
-  CheckEquals(13, Decls.DeclCount(dtSound), 'sound shader count');
+  CheckEquals(15, Decls.DeclCount(dtSound), 'sound shader count');
   CheckEquals(3, Decls.DeclCount(dtTable), 'table count');
 
   M := Decls.Material('textures/test/floor');
@@ -4346,6 +4346,83 @@ begin
   end;
 end;
 
+{ sound item 6: a shader's random file, shakes, the path through portals }
+procedure TestSoundShakesAndPaths;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye, RoomB: TVector3;
+  Url, LastUrl: String;
+  I, Repeats: Integer;
+  SawStep, SawDoor: Boolean;
+  Door1: TD3Mover;
+  Shut, Open: Single;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for sounds');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    { test_pair: both files, never the same twice in a row }
+    LastUrl := '';
+    Repeats := 0;
+    SawStep := False;
+    SawDoor := False;
+    for I := 1 to 20 do
+    begin
+      Url := Game.SoundFromShader('test_pair').Url;
+      if Url = LastUrl then
+        Inc(Repeats);
+      SawStep := SawStep or (Pos('step', Url) > 0);
+      SawDoor := SawDoor or (Pos('door', Url) > 0);
+      LastUrl := Url;
+    end;
+    Check(SawStep and SawDoor, 'test_pair plays both files');
+    CheckEquals(0, Repeats, 'never the same file twice in a row');
+
+    { test_shake near the player shakes the view while it plays }
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Eye);
+    Game.PlaySoundAt('test_shake', Eye);
+    Game.Update(0.05, Eye);
+    Check(not Game.ViewBobAngles.IsZero(0.0001), 'a shaking sound shakes the view');
+    for I := 1 to 60 do
+      Game.Update(0.05, Eye);
+    Check(Game.ViewBobAngles.IsZero(0.01), 'the shake ends with the sound');
+
+    { the path from room B to room A: through the doorway's portal, 150
+      longer with door_1 shut }
+    RoomB := D3ToCge(Vector3(420, -100, 40));
+    Eye := D3ToCge(Vector3(-100, 0, 40));
+    CheckNear(10, Game.SoundPathDistance(Eye, Eye + Vector3(10, 0, 0)), 'one area: the straight line', 0.01);
+    Door1 := nil;
+    for I := 0 to Game.Movers.Count - 1 do
+      if Game.Movers[I].Brush.Entity.Name = 'door_1' then
+        Door1 := Game.Movers[I];
+    Check(Door1 <> nil, 'door_1');
+    if Door1 = nil then
+      Exit;
+    Check(Length(Door1.Portals) > 0, 'door_1 closes a portal');
+    Game.Update(0.05, Eye);
+    Shut := Game.SoundPathDistance(RoomB, Eye);
+    Check(Shut >= (RoomB - Eye).Length + 150 - 1, Format('a shut door adds 150 (%.0f, straight %.0f)', [Shut, (RoomB - Eye).Length]));
+    Game.Activate(Door1.Brush.Entity);
+    for I := 1 to 30 do
+      Game.Update(0.05, Eye);
+    Open := Game.SoundPathDistance(RoomB, Eye);
+    CheckNear(Shut - 150, Open, 'open, the same path without the 150', 1);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { damage groups (idActor: "damage_zone head" "*head", "damage_scale head" 2,
   pain_head) and the gibs' smoke_trail }
 procedure TestHitLocations;
@@ -6628,6 +6705,7 @@ begin
   TestBindToJoint;
   TestMoveablePush;
   TestHitLocations;
+  TestSoundShakesAndPaths;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;

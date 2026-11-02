@@ -1731,6 +1731,13 @@ begin
         Console.Print(Format('Elevator %s: floor %d, state %d', [FGame.Elevators[I].Entity.Name,
           FGame.Elevators[I].CurrentFloor, Ord(FGame.Elevators[I].State)]));
   end else
+  if Cmd = 's_occlusion' then
+  begin
+    { sounds quieter by their path through the portals (closed doors) }
+    if Args <> '' then
+      SoundOcclusion := StrToIntDef(Args, 1) <> 0;
+    Console.Print('s_occlusion ' + Iff(SoundOcclusion, '1', '0'));
+  end else
   if Cmd = 'g_pdagui' then
   begin
     { Doom 3's PDA GUI instead of the text panel (partial) }

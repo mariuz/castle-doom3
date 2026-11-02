@@ -190,6 +190,8 @@ type
     Files: TStringList;
     MinDistance, MaxDistance, Volume: Single;
     Looping, Omni, Global: Boolean;
+    { "shakes": how much it shakes the view of a player hearing it }
+    Shakes: Single;
     constructor Create;
     destructor Destroy; override;
   end;
@@ -1584,6 +1586,9 @@ begin
       else
       if L = 'volume' then
         Result.Volume := Lexer.ReadFloat
+      else
+      if L = 'shakes' then
+        Result.Shakes := Lexer.ReadFloat
       else
       if L = 'looping' then
         Result.Looping := True
