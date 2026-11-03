@@ -2050,6 +2050,27 @@ textures/particles/test_flash
 	}
 }
 
+// a security camera's view (remoteRenderMap into a dynamic image, the
+// stage itself invisible) and a GUI material showing that image
+textures/test/remotecam
+{
+	translucent
+	{
+		rgba 0
+		remoteRenderMap 128 64
+		map textures/dynamic/testcam.tga
+	}
+}
+
+textures/test/remoteview
+{
+	translucent
+	{
+		blend add
+		map textures/dynamic/testcam.tga
+	}
+}
+
 // a video (a GUI background or a surface; the decoder's checks)
 video/test_video
 {
@@ -2966,6 +2987,7 @@ entityDef monster_test_blob {
 	"smoke_wound_flesh"		"test_blood.prt"
 	// blood splats on the surface behind a wound (idGameLocal::BloodSplat)
 	"mtr_splat_flesh"		"textures/test/decal_hole"
+	"mtr_wound_flesh"		"textures/test/decal_hole"
 	// pain and death: cries by the health left (pain_delay apart), the
 	// pain anim; gibbed past -20 health or by a gibbing damage def
 	"pain_delay"			"0.3"

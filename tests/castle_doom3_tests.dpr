@@ -120,7 +120,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(50, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(52, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(66, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
@@ -488,6 +488,46 @@ begin
       Img.Free;
     end;
   finally
+    Gui.Free;
+  end;
+end;
+
+{ remoteRenderMap: the stage's size and dynamic image; a GUI background
+  mapping a dynamic image draws what the game rendered into it }
+procedure TestRemoteViews;
+var
+  M: TD3Material;
+  Gui: TD3Gui;
+  Img, Cam: TRGBAlphaImage;
+  Wanted: TStringArray;
+begin
+  M := Decls.Material('textures/test/remotecam');
+  CheckEquals(128, M.RemoteWidth, 'remoteRenderMap width');
+  CheckEquals(64, M.RemoteHeight, 'remoteRenderMap height');
+  CheckEquals('textures/dynamic/testcam.tga', M.RemoteImage, 'remoteRenderMap image');
+  Check(M.IsInvisible, 'an rgba 0 stage draws nothing itself');
+  Gui := TD3Gui.Create;
+  Cam := TRGBAlphaImage.Create(4, 4);
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef View { rect 0, 0, 640, 480 background "textures/test/remoteview" matcolor 1, 1, 1, 1 } }'),
+      'a GUI showing a camera');
+    TakeWantedDynamicImages;
+    Img := RenderGui(Gui, nil);
+    Img.Free;
+    Wanted := TakeWantedDynamicImages;
+    Check((Length(Wanted) = 1) and (Wanted[0] = 'textures/dynamic/testcam'), 'the GUI asks for the camera''s image');
+    Check(Gui.HasVideo, 'it redraws while shown');
+    Cam.Clear(Vector4Byte(0, 255, 0, 255));
+    SetGuiDynamicImage('textures/dynamic/testcam', Cam);
+    Img := RenderGui(Gui, nil);
+    try
+      Check(PVector4Byte(Img.PixelPtr(Img.Width div 2, Img.Height div 2))^.Y > 200, 'it shows the rendered image');
+    finally
+      Img.Free;
+    end;
+  finally
+    Cam.Free;
     Gui.Free;
   end;
 end;
@@ -6259,6 +6299,22 @@ begin
       projected from the skinned positions }
     ME := Map.FindModelEntity('blob_1');
     Check(ME <> nil, 'blob_1 has a model');
+    { a wound (idRenderModelOverlay) on its +x side: a shape sharing the
+      mesh's coordinates, so it moves with the animation; 6 at most }
+    if ME <> nil then
+    begin
+      CheckEquals(0, ME.Instance.OverlayCount, 'no overlays yet');
+      Check(ME.Instance.AddOverlay('textures/test/decal_hole',
+        ME.Instance.Scene.WorldToLocal(ME.Holder.Translation + Vector3(0, 45, 0)), D3ToCge(Vector3(1, 0, 0)), 20) > 0,
+        'a wound overlay covers some triangles');
+      CheckEquals(1, ME.Instance.OverlayCount, 'one overlay');
+      for I := 1 to 8 do
+        ME.Instance.AddOverlay('textures/test/decal_hole',
+          ME.Instance.Scene.WorldToLocal(ME.Holder.Translation + Vector3(0, 45, 0)), D3ToCge(Vector3(1, 0, 0)), 20);
+      Check(ME.Instance.OverlayCount <= 6, 'the oldest overlays go (6 at most)');
+      ME.Instance.ClearOverlays;
+      CheckEquals(0, ME.Instance.OverlayCount, 'overlays cleared');
+    end;
     if ME <> nil then
     begin
       Found := 0;
@@ -7374,6 +7430,7 @@ begin
   TestGuiTrigger;
   TestGuiWidgets;
   TestGuiTransforms;
+  TestRemoteViews;
   TestImages;
   TestProc;
   TestMapFile;

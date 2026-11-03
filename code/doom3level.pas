@@ -103,8 +103,22 @@ type
     Fade: Single;
   end;
 
+  { A remoteRenderMap view (a security monitor): the camera entity it
+    looks from (CGE coordinates), the image it renders into and its size }
+  TD3RemoteView = class
+    Image, CameraName: String;
+    { the entity whose cameraTarget it follows (GUIs switch it with
+      setkeyval) }
+    Owner: TD3MapEntity;
+    Position, Direction, Up: TVector3;
+    { vertical, radians }
+    FieldOfView: Single;
+    Width, Height: Integer;
+  end;
+
   TDoom3Map = class(TCastleTransform)
   strict private
+    FRemoteViews: specialize TObjectList<TD3RemoteView>;
     FMapName: String;
     FSpawnModels: Boolean;
     FLightScale: Single;
@@ -267,6 +281,8 @@ type
     { The live GUIs of the level's surfaces (brush entities, static models,
       world surfaces), with their entity names. }
     property GuiSurfaces: specialize TObjectList<TD3GuiSurface> read FGuiSurfaces;
+    { the remoteRenderMap views (rendered by the view into their images) }
+    property RemoteViews: specialize TObjectList<TD3RemoteView> read FRemoteViews;
     { GUI textures redrawn so far (for the log and tests). }
     property GuiRenders: Integer read FGuiRenders;
     { The live GUI drawn by a texture URL (nil: none). }
@@ -293,6 +309,10 @@ type
     procedure SetLightParm(const I, Parm: Integer; const Value: Single);
     { Scale a light's color (0..1), for fading lights in and out. }
     procedure SetLightFade(const I: Integer; const Value: Single);
+    { the remoteRenderMap viewpoints at their cameras (after the map loaded) }
+    procedure PlaceRemoteViews;
+    { a remote view looking from a camera entity (its place, axis, fov) }
+    procedure AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity);
     { Move a light (bound to a mover): its CGE location and light volume
       matrix (world to the light's texture space) }
     procedure SetLightPose(const I: Integer; const Location: TVector3; const Matrix: TMatrix4);
@@ -523,6 +543,7 @@ begin
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FGuiSurfaces := specialize TObjectList<TD3GuiSurface>.Create(True);
+  FRemoteViews := specialize TObjectList<TD3RemoteView>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
 end;
 
@@ -531,6 +552,7 @@ begin
   ClearMap;
   FreeAndNil(FBrushes);
   FreeAndNil(FGuiSurfaces);
+  FreeAndNil(FRemoteViews);
   FreeAndNil(FModels);
   inherited Destroy;
 end;
@@ -675,6 +697,83 @@ begin
   end;
 end;
 
+var
+  { remoteRenderMap viewpoints waiting for their camera entity's place:
+    the camera's name, the viewpoint as its object }
+  PendingRemoteViews: TStringList;
+
+procedure TDoom3Map.AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity);
+var
+  Axis: Integer;
+  Rot: TMatrix3;
+  CamFwd, CamUp, Org: TVector3;
+  Fov: Single;
+begin
+  { the camera looks along its axis 0 (func_securitycamera: its
+    modelAxis, flipAxis), axis 2 up; its viewOffset forward; Doom 3's fov
+    is horizontal }
+  RV.CameraName := Cam.Name;
+  Rot := Cam.Rotation;
+  Axis := EnsureRange(Cam.IntValue('modelaxis', 0), 0, 2);
+  CamFwd := Vector3(Rot.Data[Axis, 0], Rot.Data[Axis, 1], Rot.Data[Axis, 2]);
+  if Cam.BoolValue('flipaxis') then
+    CamFwd := -CamFwd;
+  CamUp := Vector3(Rot.Data[2, 0], Rot.Data[2, 1], Rot.Data[2, 2]);
+  if Axis = 2 then
+    CamUp := Vector3(Rot.Data[0, 0], Rot.Data[0, 1], Rot.Data[0, 2]);
+  Org := Cam.Origin + CamFwd * ParseVector3(Cam.Value('viewoffset'), TVector3.Zero).X;
+  Fov := DegToRad(EnsureRange(Cam.FloatValue('fov', 90), 10, 170));
+  RV.Position := D3ToCge(Org);
+  RV.Direction := D3ToCge(CamFwd);
+  RV.Up := D3ToCge(CamUp);
+  RV.FieldOfView := 2 * ArcTan(Tan(Fov / 2) * RV.Height / Max(1, RV.Width));
+end;
+
+procedure TDoom3Map.PlaceRemoteViews;
+var
+  I: Integer;
+  Cam: TD3MapEntity;
+  VP: TViewpointNode;
+  RV: TD3RemoteView;
+  Image: String;
+begin
+  FRemoteViews.Clear;
+  for I := 0 to PendingRemoteViews.Count - 1 do
+  begin
+    { "camera|image|width|height", the viewpoint (visible stages) }
+    VP := TViewpointNode(PendingRemoteViews.Objects[I]);
+    Cam := FMapFile.FindByName(PendingRemoteViews.Names[I]);
+    if Cam = nil then
+    begin
+      WritelnWarning('Doom3Level', 'Remote view: no camera "%s"', [PendingRemoteViews.Names[I]]);
+      Continue;
+    end;
+    { the camera looks along its axis 0 (func_securitycamera: its
+      modelAxis, flipAxis), axis 2 up; its viewOffset forward; Doom 3's fov
+      is horizontal }
+    Image := PendingRemoteViews.ValueFromIndex[I];
+    RV := TD3RemoteView.Create;
+    RV.Image := Copy(Image, 1, Pos('|', Image + '|') - 1);
+    System.Delete(Image, 1, Pos('|', Image + '|'));
+    RV.Width := StrToIntDef(Copy(Image, 1, Pos('|', Image + '|') - 1), 256);
+    System.Delete(Image, 1, Pos('|', Image + '|'));
+    RV.Height := StrToIntDef(Copy(Image, 1, Pos('|', Image + '|') - 1), 128);
+    System.Delete(Image, 1, Pos('|', Image + '|'));
+    RV.Owner := FMapFile.FindByName(Image);
+    AimRemoteView(RV, Cam);
+    FRemoteViews.Add(RV);
+    if VP <> nil then
+    begin
+      VP.Position := RV.Position;
+      VP.Orientation := OrientationFromDirectionUp(RV.Direction, RV.Up);
+      VP.FieldOfView := RV.FieldOfView;
+    end;
+  end;
+  if FRemoteViews.Count > 0 then
+    WritelnLog('Doom3Level', 'Remote views: %d monitors', [FRemoteViews.Count]);
+  PendingRemoteViews.Clear;
+end;
+
 class procedure TDoom3Map.BuildProcModel(const Model: TD3ProcModel;
   const SolidGroup, NonSolidGroup: TAbstractGroupingNode;
   const Entity: TD3MapEntity);
@@ -698,6 +797,7 @@ var
   Kind: TD3SpecialShape;
   Shape: TShapeNode;
   FlareSize: Single;
+  RemoteView: TViewpointNode;
   Tube: Boolean;
   Islands: TD3EyeIslands;
   EyeIndexes: TInt32List;
@@ -730,6 +830,13 @@ begin
       else
         GuiUrl := GuiSurfaceUrl(M.GuiSurf, nil);
     end;
+    { a remoteRenderMap stage renders its camera (the entity's
+      cameraTarget) into its image, which GUIs show (security monitors);
+      the stage itself is often invisible (rgba 0) }
+    if (M.RemoteWidth > 0) and (Entity <> nil) and (Entity.Value('cameratarget') <> '') and
+       M.IsInvisible then
+      PendingRemoteViews.AddObject(Entity.Value('cameratarget') + '=' + M.RemoteImage + '|' +
+        IntToStr(M.RemoteWidth) + '|' + IntToStr(M.RemoteHeight) + '|' + Entity.Name, nil);
     if M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass then
       Continue;
     if M.NonSolid or M.Translucent or M.DrawAsGlass or (M.Deform = 'sprite') or
@@ -831,6 +938,20 @@ begin
         SetupSpecialShape(Shape, ReflectionKind(M));
         Group.AddChildren(Shape);
         Inc(ReflectionCount);
+      end;
+    end;
+
+    { a security monitor (remoteRenderMap): the view from the entity's
+      cameraTarget, placed when the map has loaded (PlaceRemoteViews) }
+    if (GuiUrl = '') and (M.RemoteWidth > 0) and (Entity <> nil) and (Entity.Value('cameratarget') <> '') then
+    begin
+      App := RemoteAppearance(Surf.Material, RemoteView);
+      if App <> nil then
+      begin
+        Shape := SurfaceShape(App);
+        Group.AddChildren(Shape);
+        PendingRemoteViews.AddObject(Entity.Value('cameratarget') + '=' + M.RemoteImage + '|' +
+          IntToStr(M.RemoteWidth) + '|' + IntToStr(M.RemoteHeight) + '|' + Entity.Name, RemoteView);
       end;
     end;
 
@@ -2249,6 +2370,7 @@ begin
     [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
   WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections, %d mirrors',
     [HazeCount - Haze, ReflectionCount - Reflections, MirrorCount - MirrorsBefore]);
+  PlaceRemoteViews;
   BuildStaticModelEntities;
   LoadProfileStep('static models');
   WritelnLog('Doom3Level', 'Conditional stages: %d shapes with an "if" condition',
@@ -2705,6 +2827,9 @@ begin
 end;
 
 initialization
+  PendingRemoteViews := TStringList.Create;
   RegisterSerializableComponent(TDoom3Map, 'Doom 3 Map');
   TDoom3Map.Skill := 1; // Doom 3's default g_skill: medium
+finalization
+  FreeAndNil(PendingRemoteViews);
 end.

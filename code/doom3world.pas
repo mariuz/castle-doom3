@@ -8806,6 +8806,10 @@ begin
         if Length(Words) > 3 then
         begin
           Other := FindEntity(Words[1]);
+          { gui_ keys reach the entity's GUIs (like target_setkeyval) }
+          if (Other <> nil) and (Copy(LowerCase(Words[2]), 1, 4) = 'gui_') then
+            FMap.SetGuiParm(Other, Words[2], Words[3])
+          else
           if Other <> nil then
             Other.SetValue(Words[2], Words[3]);
         end;
@@ -9853,7 +9857,8 @@ end;
 procedure TD3Game.EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
 var
   Key, Who: String;  Splats: TStringList;
-  I: Integer;
+  I, Tris: Integer;
+  ME: TD3ModelEntity;
   Dir, Normal: TVector3;
   HitDist: Single;
 
@@ -9871,6 +9876,21 @@ begin
     Key := Def.Values['smoke_wound_flesh'];
   if Key <> '' then
     EmitSmoke(Key, Who + ' smoke_wound_flesh', Position, AxisFromDirection(CgeToD3(Direction)));
+  { idActor::AddDamageEffect: the wound decal on the model
+    (idRenderModelOverlay: mtr_wound_flesh projected along the shot, it
+    moves with the mesh) }
+  if (E <> nil) and (E.Value('mtr_wound_flesh') <> '') and not Direction.IsZero then
+  begin
+    ME := FMap.FindModelEntity(E.Name);
+    if (ME <> nil) and (ME.Instance <> nil) and (ME.Instance.Scene <> nil) then
+    begin
+      Tris := ME.Instance.AddOverlay(E.Value('mtr_wound_flesh'), ME.Instance.Scene.WorldToLocal(Position),
+        ME.Instance.Scene.WorldToLocalDirection(-Direction), 20);
+      if Tris > 0 then
+        WritelnLog('Doom3World', 'Wound %s on %s (%d triangles, %d overlays)',
+          [E.Value('mtr_wound_flesh'), E.Name, Tris, ME.Instance.OverlayCount]);
+    end;
+  end;
   { idGameLocal::BloodSplat: a random mtr_splat_flesh* decal on the surface
     up to 64 behind the wound, along the shot, 32 to 64 wide }
   Splats := TStringList.Create;

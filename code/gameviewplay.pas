@@ -41,6 +41,11 @@ type
     { environment probes (r_envProbes): one EnvironmentLight per area,
       baked from the map; nil until baked for the current map }
     FEnvProbes: TCastleScene;
+    { security monitors (remoteRenderMap): a viewport over the same world
+      rendering the cameras GUIs show, a few times a second }
+    FRemoteViewport: TCastleViewport;
+    FRemoteCamera: TCastleCamera;
+    FRemoteTime: Single;
     FEnvProbesOn: Boolean;
     { don't prepare the map's rendering resources at load (console
       r_prepareResources 0, env CD3_PREPARE_RESOURCES=0): they are then
@@ -126,6 +131,7 @@ type
     procedure UpdateMuzzleFlash;
     { the HUD's tunnel vision and blood blobs from the game's damage }
     procedure UpdateDamageView;
+    procedure UpdateRemoteViews(const SecondsPassed: Single);
     { walk navigation falls at Doom 3's speed (TD3Game.FallSpeed) }
     procedure UpdateFallSpeed(const SecondsPassed: Single);
     { knockback moves the camera (with collisions) }
@@ -1246,6 +1252,77 @@ begin
   WalkNavigation.FallSpeedStart := FGame.FallSpeed(FFallTime + SecondsPassed * 0.5) /
     (WalkNavigation.MoveSpeed * WalkNavigation.MoveVerticalSpeed);
   WalkNavigation.Falling := False;
+end;
+
+procedure TViewPlay.UpdateRemoteViews(const SecondsPassed: Single);
+const
+  { idRenderWorld renders remote views every frame; 5 a second here }
+  Interval = 0.2;
+var
+  Wanted: TStringArray;
+  RV: TD3RemoteView;
+  Img: TRGBImage;
+  Rgba: TRGBAlphaImage;
+  W: String;
+  Want: Boolean;
+begin
+  FRemoteTime := FRemoteTime + SecondsPassed;
+  if (FRemoteTime < Interval) or (Map.RemoteViews.Count = 0) then
+    Exit;
+  FRemoteTime := 0;
+  Wanted := TakeWantedDynamicImages;
+  if Length(Wanted) = 0 then
+    Exit;
+  if FRemoteViewport = nil then
+  begin
+    FRemoteViewport := TCastleViewport.Create(FreeAtStop);
+    FRemoteViewport.FullSize := False;
+    FRemoteViewport.Items := MainViewport.Items;
+    FRemoteCamera := TCastleCamera.Create(FreeAtStop);
+    MainViewport.Items.Add(FRemoteCamera);
+    FRemoteViewport.Camera := FRemoteCamera;
+    FRemoteViewport.BackgroundColor := Black;
+  end;
+  for RV in Map.RemoteViews do
+  begin
+    { a GUI switched the monitor's cameraTarget (setkeyval) }
+    if (RV.Owner <> nil) and not SameText(RV.Owner.Value('cameratarget'), RV.CameraName) and
+       (Map.MapFile.FindByName(RV.Owner.Value('cameratarget')) <> nil) then
+    begin
+      Map.AimRemoteView(RV, Map.MapFile.FindByName(RV.Owner.Value('cameratarget')));
+      WritelnLog('GameViewPlay', 'Remote view %s looks from %s', [RV.Image, RV.CameraName]);
+    end;
+    Want := False;
+    for W in Wanted do
+      if SameText(W, ChangeFileExt(RV.Image, '')) then
+        Want := True;
+    if not Want then
+      Continue;
+    FRemoteViewport.Width := RV.Width;
+    FRemoteViewport.Height := RV.Height;
+    { portal visibility from the security camera, the player's again after }
+    FRemoteCamera.SetView(RV.Position, RV.Direction, RV.Up);
+    Map.UpdateVisibility(FRemoteCamera);
+    try
+      Img := CaptureView(Container, FRemoteViewport, RV.Position, RV.Direction, RV.Up, RV.FieldOfView,
+        RV.Width, RV.Height);
+    finally
+      Map.UpdateVisibility(MainViewport.Camera);
+    end;
+    try
+      { env CD3_REMOTE_DUMP=<dir>: the captured views as PNGs (debugging) }
+      if GetEnvironmentVariable('CD3_REMOTE_DUMP') <> '' then
+        SaveImage(Img, InclPathDelim(GetEnvironmentVariable('CD3_REMOTE_DUMP')) + RV.CameraName + '.png');
+      Rgba := Img.ToRGBAlphaImage;
+      try
+        SetGuiDynamicImage(ChangeFileExt(RV.Image, ''), Rgba);
+      finally
+        Rgba.Free;
+      end;
+    finally
+      Img.Free;
+    end;
+  end;
 end;
 
 procedure TViewPlay.UpdateDamageView;
@@ -2454,6 +2531,7 @@ begin
   Hud.Stamina := FGame.StaminaPercent;
   Hud.Dead := FGame.PlayerDead;
   UpdateDamageView;
+  UpdateRemoteViews(SecondsPassed);
   Hud.FlashlightOn := Flashlight.Exists;
   Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
 

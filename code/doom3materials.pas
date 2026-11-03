@@ -112,6 +112,11 @@ function ReflectionKind(const M: TD3Material): TD3SpecialShape;
   SetupSpecialShape(ssMirror). }
 function MirrorAppearance(const MaterialName: String): TAppearanceNode;
 { Mirror appearances made so far (for the log). }
+{ A remoteRenderMap stage: the scene rendered from Viewpoint (placed by the
+  caller at the entity's cameraTarget) every frame on the surface's own
+  texture coordinates; nil without such a stage. }
+function RemoteAppearance(const MaterialName: String; out Viewpoint: TViewpointNode): TAppearanceNode;
+function RemoteViewCount: Integer;
 function MirrorCount: Integer;
 
 { Set up a shape for a special appearance: Phong shading for heat haze,
@@ -1578,6 +1583,42 @@ end;
 function MirrorCount: Integer;
 begin
   Result := Mirrors;
+end;
+
+var
+  RemoteViews: Integer;
+
+function RemoteAppearance(const MaterialName: String; out Viewpoint: TViewpointNode): TAppearanceNode;
+var
+  M: TD3Material;
+  Tex: TRenderedTextureNode;
+  Unlit: TUnlitMaterialNode;
+begin
+  Result := nil;
+  Viewpoint := nil;
+  M := Decls.Material(MaterialName);
+  if (M.RemoteWidth <= 0) or (M.RemoteHeight <= 0) then
+    Exit;
+  Tex := TRenderedTextureNode.Create;
+  Tex.SetDimensions([Max(16, M.RemoteWidth), Max(16, M.RemoteHeight), 4, 1, 1]);
+  Tex.Update := upAlways;
+  Tex.RepeatS := False;
+  Tex.RepeatT := False;
+  Viewpoint := TViewpointNode.Create;
+  Tex.Viewpoint := Viewpoint;
+  Result := TAppearanceNode.Create;
+  Unlit := TUnlitMaterialNode.Create;
+  Unlit.EmissiveColor := Vector3(1, 1, 1);
+  Unlit.EmissiveTexture := Tex;
+  Result.Material := Unlit;
+  ApplyBlendMode(Result, M.RemoteBlend, -1);
+  Result.ShadowCaster := False;
+  Inc(RemoteViews);
+end;
+
+function RemoteViewCount: Integer;
+begin
+  Result := RemoteViews;
 end;
 
 procedure SetupSpecialShape(const Shape: TShapeNode; const Kind: TD3SpecialShape);

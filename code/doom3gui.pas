@@ -122,6 +122,8 @@ type
     { events (nil: none) }
     OnAction, OnActionRelease, OnMouseEnter, OnMouseExit, OnActivate, OnDeactivate,
     OnEsc, OnTrigger: TD3GuiScript;
+    { onEvent (Doom 3's ON_FRAME): every time the time line runs }
+    OnFrame: TD3GuiScript;
     NamedEvents: specialize TObjectDictionary<String, TD3GuiScript>;
     TimeEvents: array of TD3GuiTimeEvent;
     Children: specialize TObjectList<TD3GuiWindow>;
@@ -287,6 +289,13 @@ var
   OnGuiCvarChanged: procedure (const AName, Value: String) of object;
 
 function GuiCvar(const AName: String; const Default: String = ''): String;
+{ Images rendered by the game (remoteRenderMap: textures/dynamic/camera1):
+  GUI backgrounds whose material maps one draw it (and redraw while shown).
+  The image is copied. }
+procedure SetGuiDynamicImage(const AName: String; const Image: TRGBAlphaImage);
+{ the dynamic images GUIs drew since the last call (cleared): what to
+  render next }
+function TakeWantedDynamicImages: TStringArray;
 procedure SetGuiCvar(const AName, Value: String);
 
 { Draw a GUI into a new GuiImageWidth x GuiImageHeight image (caller
@@ -388,6 +397,8 @@ uses
   CastleUnicode, CastleUtils,
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Roq;
 
+function DynamicImage(const ImageName: String): TRGBAlphaImage; forward;
+
 { TD3GuiCommand }
 
 destructor TD3GuiCommand.Destroy;
@@ -436,6 +447,7 @@ begin
   FreeAndNil(Vars);
   FreeAndNil(Props);
   FreeAndNil(OnEnter);
+  FreeAndNil(OnFrame);
   inherited Destroy;
 end;
 
@@ -862,6 +874,9 @@ begin
         if Key = 'onenter' then
           W.OnEnter := Script
         else
+        if (Key = 'onevent') or (Key = 'onframe') then
+          W.OnFrame := Script
+        else
           Script.Free;
       end;
     end else
@@ -1224,6 +1239,9 @@ begin
         W.TimeEvents[I].Pending := False;
         RunScript(W, W.TimeEvents[I].Script);
       end;
+  { idWindow::RunTimeEvents: onEvent (ON_FRAME) after the time line }
+  if W.OnFrame <> nil then
+    RunScript(W, W.OnFrame);
   for I := 0 to W.Children.Count - 1 do
   begin
     C := W.Children[I];
@@ -2866,6 +2884,7 @@ var
   M: TD3Material;
   ImageName, F, Bg: String;
   Video: TD3RoqVideo;
+  Dyn: TRGBAlphaImage;
   C: TD3GuiWindow;
   B: Single;
   V: TVector4;
@@ -2897,6 +2916,19 @@ begin
       DrawImage(R, Video.Image, Gui.PropVec4(W, 'matcolor'));
       Gui.HasVideo := True;
     end;
+  end else
+  if (M <> nil) and ((Copy(LowerCase(M.StageImage), 1, 17) = 'textures/dynamic/') or
+     (Copy(LowerCase(M.DiffuseImage), 1, 17) = 'textures/dynamic/')) then
+  begin
+    { a camera's view (remoteRenderMap into textures/dynamic/...): the
+      game renders it, it changes every frame }
+    if Copy(LowerCase(M.StageImage), 1, 17) = 'textures/dynamic/' then
+      Dyn := DynamicImage(M.StageImage)
+    else
+      Dyn := DynamicImage(M.DiffuseImage);
+    if Dyn <> nil then
+      DrawImage(R, Dyn, Gui.PropVec4(W, 'matcolor'));
+    Gui.HasVideo := True;
   end else
   if M <> nil then
   begin
@@ -3032,6 +3064,44 @@ begin
   for I := 0 to 6 do
     Points[I] := Vector2(Gui.CursorX + Arrow[I].X * 1.2 + 1, Gui.CursorY + Arrow[I].Y * 1.2 + 1);
   FillPolygon(Self, Points, Vector4(1, 1, 1, 1));
+end;
+
+var
+  DynamicImages: specialize TObjectDictionary<String, TRGBAlphaImage>;
+  WantedDynamic: TStringList;
+
+procedure SetGuiDynamicImage(const AName: String; const Image: TRGBAlphaImage);
+var
+  Copy_: TRGBAlphaImage;
+begin
+  Copy_ := TRGBAlphaImage.Create;
+  Copy_.Assign(Image);
+  DynamicImages.AddOrSetValue(LowerCase(AName), Copy_);
+end;
+
+function TakeWantedDynamicImages: TStringArray;
+var
+  I: Integer;
+begin
+  SetLength(Result, WantedDynamic.Count);
+  for I := 0 to WantedDynamic.Count - 1 do
+    Result[I] := WantedDynamic[I];
+  WantedDynamic.Clear;
+end;
+
+{ a dynamic image by an image name (its extension dropped), noting that a
+  GUI wants it; nil while not rendered yet }
+function DynamicImage(const ImageName: String): TRGBAlphaImage;
+var
+  Key: String;
+begin
+  Key := LowerCase(ChangeFileExt(ImageName, ''));
+  if Copy(Key, 1, 17) <> 'textures/dynamic/' then
+    Exit(nil);
+  if WantedDynamic.IndexOf(Key) < 0 then
+    WantedDynamic.Add(Key);
+  if not DynamicImages.TryGetValue(Key, Result) then
+    Result := nil;
 end;
 
 function GuiCvar(const AName, Default: String): String;
@@ -3303,7 +3373,11 @@ initialization
   FontPages := specialize TObjectList<TRGBAlphaImage>.Create(True);
   MissingFonts := TStringList.Create;
   GuiCvars := TStringList.Create;
+  DynamicImages := specialize TObjectDictionary<String, TRGBAlphaImage>.Create([doOwnsValues]);
+  WantedDynamic := TStringList.Create;
 finalization
+  FreeAndNil(DynamicImages);
+  FreeAndNil(WantedDynamic);
   FreeAndNil(GuiCvars);
   if ProtocolRegistered then
     UnregisterUrlProtocol('d3gui');
