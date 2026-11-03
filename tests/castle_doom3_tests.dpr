@@ -120,10 +120,10 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(52, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(53, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(66, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
-  CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
+  CheckEquals(4, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
     'the berserk skin remaps the body');
@@ -651,7 +651,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(90, MapFile.Entities.Count, 'entity count');
+    CheckEquals(91, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -7177,6 +7177,17 @@ begin
     Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
     Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
 
+    { deform particle: emitbox_1's top (its skin's emitfrompoly) emits
+      test_steam from its triangles, over the box at (20, 140, 10) }
+    Check((Map.ParticleDeforms.Count = 1) and (Map.ParticleDeforms[0].EntityName = 'emitbox_1'),
+      'a deform particle surface (emitbox_1)');
+    if Map.ParticleDeforms.Count = 1 then
+    begin
+      CheckEquals('test_steam', Map.ParticleDeforms[0].Decl, 'its particle decl');
+      CheckEquals(2, Length(Map.ParticleDeforms[0].Points), 'its top''s two triangles');
+      if Length(Map.ParticleDeforms[0].Points) > 0 then
+        CheckNear(10, Map.ParticleDeforms[0].Points[0].Z, 'on the box''s top (10 high)');
+    end;
     CheckEquals(2, Game.EmitterEntities.Count, 'two emitter entities (func_emitter with .prt models)');
     if Game.EmitterEntities.Count <> 2 then
       Exit;

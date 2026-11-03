@@ -103,6 +103,16 @@ type
     Fade: Single;
   end;
 
+  { A "deform particle" surface (R_ParticleDeform): its particles are
+    emitted from its triangles instead of drawing it. Doom 3 coordinates,
+    the entity's model space (world for map areas). }
+  TD3ParticleDeform = class
+    Decl: String;
+    { '' for the world }
+    EntityName: String;
+    Points, Normals: array of TVector3;
+  end;
+
   { A remoteRenderMap view (a security monitor): the camera entity it
     looks from (CGE coordinates), the image it renders into and its size }
   TD3RemoteView = class
@@ -281,6 +291,9 @@ type
     { The live GUIs of the level's surfaces (brush entities, static models,
       world surfaces), with their entity names. }
     property GuiSurfaces: specialize TObjectList<TD3GuiSurface> read FGuiSurfaces;
+    { "deform particle" surfaces of the map loaded last (TD3Game emits
+      their particles) }
+    function ParticleDeforms: specialize TObjectList<TD3ParticleDeform>;
     { the remoteRenderMap views (rendered by the view into their images) }
     property RemoteViews: specialize TObjectList<TD3RemoteView> read FRemoteViews;
     { GUI textures redrawn so far (for the log and tests). }
@@ -698,6 +711,121 @@ begin
 end;
 
 var
+  MapParticleDeforms: specialize TObjectList<TD3ParticleDeform>;
+
+function TDoom3Map.ParticleDeforms: specialize TObjectList<TD3ParticleDeform>;
+begin
+  Result := MapParticleDeforms;
+end;
+
+{ A deform particle surface's triangles: their centers and normals, the
+  largest MaxPoints (each becomes an emitter). }
+procedure AddParticleDeform(const Surf: TD3ProcSurface; const M: TD3Material; const Entity: TD3MapEntity);
+const
+  MaxPoints = 24;
+var
+  D: TD3ParticleDeform;
+  T, I, Best: Integer;
+  A, B, C, N: TVector3;
+  Areas: array of Single;
+  Cents, Norms: array of TVector3;
+  BestArea: Single;
+begin
+  D := TD3ParticleDeform.Create;
+  D.Decl := Trim(M.DeformTable);
+  if Pos(' ', D.Decl) > 0 then
+    D.Decl := Copy(D.Decl, 1, Pos(' ', D.Decl) - 1);
+  if Entity <> nil then
+    D.EntityName := Entity.Name;
+  SetLength(Areas, Length(Surf.Indexes) div 3);
+  SetLength(Cents, Length(Areas));
+  SetLength(Norms, Length(Areas));
+  for T := 0 to High(Areas) do
+  begin
+    A := Surf.Vertexes[Surf.Indexes[T * 3]].Position;
+    B := Surf.Vertexes[Surf.Indexes[T * 3 + 1]].Position;
+    C := Surf.Vertexes[Surf.Indexes[T * 3 + 2]].Position;
+    { Doom 3's clockwise triangles: the normal of the front face }
+    N := TVector3.CrossProduct(C - A, B - A);
+    Areas[T] := N.Length / 2;
+    if N.Length > 0 then
+      N := N.Normalize
+    else
+      N := Vector3(0, 0, 1);
+    Cents[T] := (A + B + C) / 3;
+    Norms[T] := N;
+  end;
+  for I := 1 to Min(MaxPoints, Length(Areas)) do
+  begin
+    Best := -1;
+    BestArea := -1;
+    for T := 0 to High(Areas) do
+      if Areas[T] > BestArea then
+      begin
+        Best := T;
+        BestArea := Areas[T];
+      end;
+    if Best < 0 then
+      Break;
+    D.Points := Concat(D.Points, [Cents[Best]]);
+    D.Normals := Concat(D.Normals, [Norms[Best]]);
+    Areas[Best] := -2;
+  end;
+  MapParticleDeforms.Add(D);
+end;
+
+{ A static model's deform particle surfaces (counter-clockwise triangles),
+  the entity's model space. }
+procedure AddStaticParticleDeforms(const Model: TD3StaticModel; const SkinName: String; const E: TD3MapEntity);
+const
+  MaxPoints = 24;
+var
+  S: TD3StaticSurface;
+  M: TD3Material;
+  MaterialName: String;
+  SkinDecl: TD3Skin;
+  D: TD3ParticleDeform;
+  T, Step: Integer;
+  A, B, C, N: TVector3;
+begin
+  SkinDecl := nil;
+  if SkinName <> '' then
+    SkinDecl := Decls.Skin(SkinName);
+  for S in Model.Surfaces do
+  begin
+    MaterialName := S.Material;
+    if SkinDecl <> nil then
+      MaterialName := SkinDecl.Remap(MaterialName);
+    M := Decls.Material(MaterialName);
+    if not ((M.Deform = 'particle') or (M.Deform = 'particle2')) or (M.DeformTable = '') then
+      Continue;
+    D := TD3ParticleDeform.Create;
+    D.Decl := Trim(M.DeformTable);
+    if Pos(' ', D.Decl) > 0 then
+      D.Decl := Copy(D.Decl, 1, Pos(' ', D.Decl) - 1);
+    D.EntityName := E.Name;
+    { every Step-th triangle, at most MaxPoints }
+    Step := Max(1, (Length(S.Indexes) div 3 + MaxPoints - 1) div MaxPoints);
+    T := 0;
+    while T < Length(S.Indexes) div 3 do
+    begin
+      A := S.Positions[S.Indexes[T * 3]];
+      B := S.Positions[S.Indexes[T * 3 + 1]];
+      C := S.Positions[S.Indexes[T * 3 + 2]];
+      N := TVector3.CrossProduct(B - A, C - A);
+      if N.Length > 0 then
+        N := N.Normalize
+      else
+        N := Vector3(0, 0, 1);
+      D.Points := Concat(D.Points, [(A + B + C) / 3]);
+      D.Normals := Concat(D.Normals, [N]);
+      Inc(T, Step);
+    end;
+    MapParticleDeforms.Add(D);
+  end;
+end;
+
+var
   { remoteRenderMap viewpoints waiting for their camera entity's place:
     the camera's name, the viewpoint as its object }
   PendingRemoteViews: TStringList;
@@ -829,6 +957,13 @@ begin
         GuiUrl := GuiSurfaceUrl(M.GuiSurf, Entity.Pairs)
       else
         GuiUrl := GuiSurfaceUrl(M.GuiSurf, nil);
+    end;
+    { deform particle / particle2: particles from its triangles instead of
+      the surface (R_ParticleDeform) }
+    if ((M.Deform = 'particle') or (M.Deform = 'particle2')) and (M.DeformTable <> '') then
+    begin
+      AddParticleDeform(Surf, M, Entity);
+      Continue;
     end;
     { a remoteRenderMap stage renders its camera (the entity's
       cameraTarget) into its image, which GUIs show (security monitors);
@@ -2117,6 +2252,7 @@ begin
     B.Parms := TD3EntityParms.Create;
     B.Parms.FromKeys(E.Pairs);
     B.Scene.Load(Model.BuildNode(SkinName, E.Pairs, B.Parms), True);
+    AddStaticParticleDeforms(Model, SkinName, E);
     { map geometry (func_static, doors...) collides, unless "noclipmodel";
       lights' fixtures, items and other props don't }
     Cls := LowerCase(E.ClassName_);
@@ -2360,6 +2496,7 @@ begin
   MirrorsBefore := MirrorCount;
   Tubes := TubeSurfaceCount;
   Eyeballs := EyeballSurfaceCount;
+  MapParticleDeforms.Clear;
   BuildWorld;
   LoadProfileStep('world');
   BuildCollision(Base);
@@ -2828,8 +2965,10 @@ end;
 
 initialization
   PendingRemoteViews := TStringList.Create;
+  MapParticleDeforms := specialize TObjectList<TD3ParticleDeform>.Create(True);
   RegisterSerializableComponent(TDoom3Map, 'Doom 3 Map');
   TDoom3Map.Skill := 1; // Doom 3's default g_skill: medium
 finalization
   FreeAndNil(PendingRemoteViews);
+  FreeAndNil(MapParticleDeforms);
 end.

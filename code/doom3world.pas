@@ -885,6 +885,7 @@ type
     FDeadTime: Single;
     procedure Message(const S: String);
     procedure SpawnEmitters;
+    procedure SpawnParticleDeforms;
     function AddEmitter(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
       const OneShot: Boolean; const Who: String): TD3ParticleEmitter;
     function EmitterEntityOf(const E: TD3MapEntity): TD3EmitterEntity;
@@ -5594,6 +5595,7 @@ begin
         SpawnItem(E);
     end;
   SpawnEmitters;
+  SpawnParticleDeforms;
   InitInventory;
   { Doom 3 gives the player the "personal" PDA }
   if PdaDecl('personal') <> nil then
@@ -8335,6 +8337,61 @@ begin
     Result := CgeToD3(T.WorldTranslation)
   else
     Result := E.Origin;
+end;
+
+procedure TD3Game.SpawnParticleDeforms;
+var
+  D: TD3ParticleDeform;
+  I, Count: Integer;
+  E: TD3MapEntity;
+  Rot: TMatrix3;
+  P, N, Fwd, Lft: TVector3;
+  Ax: TD3Axis;
+  K: Integer;
+  Em: TD3ParticleEmitter;
+begin
+  { R_ParticleDeform: each triangle kept emits the material's particles
+    along its normal (brush entities: placed at spawn, by their origin and
+    rotation) }
+  Count := 0;
+  for D in FMap.ParticleDeforms do
+  begin
+    E := nil;
+    if D.EntityName <> '' then
+      E := FindEntity(D.EntityName);
+    for I := 0 to High(D.Points) do
+    begin
+      P := D.Points[I];
+      N := D.Normals[I];
+      if E <> nil then
+      begin
+        Rot := E.Rotation;
+        P := E.Origin + D3VecMat(P, Rot);
+        N := D3VecMat(N, Rot);
+      end;
+      { R_ParticleDeform: the triangle's normal is the system's up (z) }
+      N := N.Normalize;
+      if Abs(N.Z) < 0.9 then
+        Fwd := TVector3.CrossProduct(N, Vector3(0, 0, 1)).Normalize
+      else
+        Fwd := TVector3.CrossProduct(N, Vector3(0, 1, 0)).Normalize;
+      Lft := TVector3.CrossProduct(N, Fwd);
+      for K := 0 to 2 do
+      begin
+        Ax.Data[0, K] := Fwd.Data[K];
+        Ax.Data[1, K] := Lft.Data[K];
+        Ax.Data[2, K] := N.Data[K];
+      end;
+      Em := AddEmitter(D.Decl, P, Ax, False, 'deform particle ' + D.Decl);
+      if Em <> nil then
+      begin
+        Em.Persistent := True;
+        Inc(Count);
+      end;
+    end;
+  end;
+  if FMap.ParticleDeforms.Count > 0 then
+    WritelnLog('Doom3World', 'Deform particles: %d surfaces, %d emitters', [FMap.ParticleDeforms.Count, Count]);
 end;
 
 procedure TD3Game.SpawnEmitters;
