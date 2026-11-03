@@ -389,6 +389,109 @@ begin
   end;
 end;
 
+{ choiceDef, sliderDef, editDef (idChoiceWindow, idSliderWindow,
+  idEditWindow) with their cvars; keys, focus, onEsc }
+procedure TestGuiWidgets;
+var
+  Gui: TD3Gui;
+begin
+  GuiCvars.Clear;
+  GuiCvars.Values['ui_skill'] := '1';
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 onEsc { set "cmd" "close" ; } ' +
+      'choiceDef Skill { rect 0, 0, 200, 40 choices "Easy;Medium;Hard" cvar "ui_skill" } ' +
+      'choiceDef Mode { rect 0, 50, 200, 40 choices "On;Off" values "1;0" choiceType 1 cvar "ui_mode" } ' +
+      'sliderDef Vol { rect 0, 100, 200, 20 low 0 high 10 step 1 cvar "s_volume" } ' +
+      'editDef Name { rect 0, 200, 200, 30 maxchars 4 cvar "ui_name" onEnter { set "cmd" "entered" ; } } }'),
+      'a GUI with widgets');
+    Gui.Activate(0);
+    CheckEquals('Medium', Gui.PropText(Gui.FindWindow('Skill')), 'the choice from its cvar');
+    Gui.SetCursor(100, 20);
+    Check(Gui.Click, 'a click on the choice');
+    CheckEquals('Hard', Gui.PropText(Gui.FindWindow('Skill')), 'the next choice');
+    CheckEquals('2', GuiCvar('ui_skill'), 'choiceType 0: the cvar gets the index');
+    Gui.Click;
+    CheckEquals('Easy', Gui.PropText(Gui.FindWindow('Skill')), 'around to the first');
+    Gui.SetCursor(100, 70);
+    Gui.Click;
+    CheckEquals('0', GuiCvar('ui_mode'), 'choiceType 1: the cvar gets the value');
+    { the slider: a click at 30 percent, then dragged to the end }
+    Gui.SetCursor(60, 110);
+    Gui.Click;
+    CheckEquals('3', GuiCvar('s_volume'), 'the slider''s value under the cursor (in steps)');
+    Gui.SetCursor(250, 110);
+    CheckEquals('10', GuiCvar('s_volume'), 'dragged to the end');
+    Gui.ClickRelease;
+    Gui.SetCursor(60, 110);
+    CheckEquals('10', GuiCvar('s_volume'), 'released: no more dragging');
+    { the edit: focus, typing (up to maxchars), backspace, enter }
+    Gui.SetCursor(50, 210);
+    Gui.Click;
+    Check(Gui.Focus = Gui.FindWindow('Name'), 'a click focuses the edit');
+    Gui.KeyDown(0, 'a');
+    Gui.KeyDown(0, 'b');
+    Gui.KeyDown(0, 'c');
+    Gui.KeyDown(8, #0);
+    Gui.KeyDown(0, 'd');
+    Gui.KeyDown(0, 'e');
+    Gui.KeyDown(0, 'f');
+    CheckEquals('abde', GuiCvar('ui_name'), 'typed, backspaced, up to maxchars 4');
+    CheckEquals('abde_', Gui.PropText(Gui.FindWindow('Name')), 'the edit shows its cursor while focused');
+    Gui.KeyDown(13, #0);
+    CheckEquals('entered', Gui.TakeCmd, 'enter runs onEnter');
+    Check(Gui.Focus = nil, 'enter ends the focus');
+    Check(Gui.KeyDown(27, #0), 'escape');
+    CheckEquals('close', Gui.TakeCmd, 'escape runs the desktop''s onEsc');
+  finally
+    Gui.Free;
+    GuiCvars.Clear;
+  end;
+end;
+
+{ rotate / shear (idWindow::SetupTransforms): a window turned around its
+  center }
+procedure TestGuiTransforms;
+var
+  Gui: TD3Gui;
+  Img: TRGBAlphaImage;
+
+  function Red(const GX, GY: Single): Integer;
+  begin
+    Result := PVector4Byte(Img.PixelPtr(Round(GX * Img.Width / 640),
+      Img.Height - 1 - Round(GY * Img.Height / 480)))^.X;
+  end;
+
+begin
+  Gui := TD3Gui.Create;
+  try
+    { a bar 200 wide, 20 high around (320, 240); turned 90 degrees it is
+      20 wide and 200 high }
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef Bar { rect 220, 230, 200, 20 backcolor 1, 0, 0, 1 rotate 90 } }'), 'a rotated window');
+    Img := RenderGui(Gui, nil);
+    try
+      CheckEquals(255, Red(320, 240), 'the center stays');
+      CheckEquals(255, Red(320, 320), 'turned: it reaches down');
+      CheckEquals(0, Red(400, 240), 'turned: not along x any more');
+    finally
+      Img.Free;
+    end;
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef Bar { rect 220, 230, 200, 20 backcolor 1, 0, 0, 1 shear 0, 1 } }'), 'a sheared window');
+    Img := RenderGui(Gui, nil);
+    try
+      CheckEquals(255, Red(320, 240), 'sheared: the center stays');
+      CheckEquals(255, Red(400, 320), 'sheared 0, 1: its right end goes down 80');
+      CheckEquals(0, Red(400, 240), 'not where it was');
+    finally
+      Img.Free;
+    end;
+  finally
+    Gui.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -7269,6 +7372,8 @@ begin
   TestRoq;
   TestTorsoChannel;
   TestGuiTrigger;
+  TestGuiWidgets;
+  TestGuiTransforms;
   TestImages;
   TestProc;
   TestMapFile;

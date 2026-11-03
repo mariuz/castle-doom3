@@ -2461,6 +2461,33 @@ begin
     RunDemoStep(SecondsPassed);
 end;
 
+{ A key to a GUI: backspace 8, enter 13, escape 27, else the character. }
+function GuiKey(const Gui: TD3Gui; const Event: TInputPressRelease): Boolean;
+var
+  Code: Integer;
+  Ch: Char;
+begin
+  Code := 0;
+  Ch := #0;
+  if Event.Key = keyBackSpace then
+    Code := 8
+  else
+  if Event.Key = keyEnter then
+    Code := 13
+  else
+  if Event.Key = keyEscape then
+    Code := 27
+  else
+  if (Length(Event.KeyString) = 1) and (Event.KeyString[1] >= ' ') then
+    Ch := Event.KeyString[1];
+  if (Code = 0) and (Ch = #0) then
+    Exit(False);
+  { only an edit takes letters; escape goes to the GUI (onEsc) }
+  if (Code <> 27) and (Gui.Focus = nil) then
+    Exit(False);
+  Result := Gui.KeyDown(Code, Ch);
+end;
+
 function TViewPlay.Press(const Event: TInputPressRelease): Boolean;
 begin
   Result := inherited Press(Event);
@@ -2469,6 +2496,17 @@ begin
 
   if Console.Press(Event) then
     Exit(True);
+
+  { GUI keys (idUserInterface::HandleEvent): the PDA GUI while open (an
+    edit types, Escape its onEsc), a world GUI while one of its edits has
+    the focus }
+  if (Event.EventType = itKey) and (Event.Key <> keyTab) then
+  begin
+    if FPdaOpen and (FPdaGui <> nil) and GuiKey(FPdaGui, Event) then
+      Exit(True);
+    if (FGame.GuiFocus <> nil) and (FGame.GuiFocus.Gui.Focus <> nil) and GuiKey(FGame.GuiFocus.Gui, Event) then
+      Exit(True);
+  end;
 
   if Event.IsKey(keyEscape) then
   begin

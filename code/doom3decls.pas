@@ -63,6 +63,8 @@ type
     StageColor: TVector4;
     AlphaTest: Single;
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
+    { noOverlays: no decals on it (idMaterial::AllowOverlays) }
+    NoOverlays: Boolean;
     { A surface parameter that clears the solid contents (water, trigger,
       monsterclip, ikclip, aassolid... like Doom 3's clearSolid parms). }
     ClearsSolid: Boolean;
@@ -1310,6 +1312,9 @@ begin
       else
       if L = 'noshadows' then
         Result.NoShadows := True
+      else
+      if L = 'nooverlays' then
+        Result.NoOverlays := True
       else
       if L = 'playerclip' then
       begin

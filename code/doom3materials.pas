@@ -1651,6 +1651,9 @@ var
 begin
   M := Decls.Material(MaterialName);
   Result := TAppearanceNode.Create;
+  { decals skip it (TD3DecalSystem.ProjectOnto) }
+  if M.NoOverlays then
+    Result.MetadataBoolean['d3_nooverlays'] := True;
   { noshadows: the surface doesn't cast shadow volumes }
   Result.ShadowCaster := not M.NoShadows;
 

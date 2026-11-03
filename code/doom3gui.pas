@@ -69,8 +69,23 @@ type
     Pending: Boolean;
   end;
 
+  { The windowDef kinds with their own behavior (idChoiceWindow,
+    idSliderWindow, idEditWindow, idListWindow, idBindWindow,
+    idRenderWindow) }
+  TD3GuiKind = (gkWindow, gkList, gkChoice, gkSlider, gkEdit, gkBind, gkRender);
+
   TD3GuiWindow = class
     Name: String;
+    Kind: TD3GuiKind;
+    { the keys without a field (choices, values, cvar, low, high, step,
+      thumbshader, maxchars, rotate, shear...): lowercase key=value }
+    Props: TStringList;
+    { runtime: a choiceDef's choice, a sliderDef's value, an editDef's
+      text }
+    Choice: Integer;
+    SliderValue: Single;
+    EditText: String;
+    OnEnter: TD3GuiScript;
     Parent: TD3GuiWindow;
     { left, top, width, height in the 640 x 480 virtual screen, relative
       to the parent window }
@@ -128,6 +143,12 @@ type
     function ListKey: String;
     { A variable (definevec4...) by name, here or in a parent; '' if none. }
     function FindVar(const AName: String; out Value: String): Boolean;
+    { a key of Props ('' if not set) }
+    function Prop(const Key: String; const Default: String = ''): String;
+    { a choiceDef's choices ("a;b;c", string table names translated) and
+      values ('' items: none) }
+    function ChoiceList: TStringArray;
+    function ValueList: TStringArray;
   end;
 
   TD3GuiTransition = record
@@ -154,6 +175,11 @@ type
     FCmd: String;
     FTime: Integer;
     FInteractive: Boolean;
+    { the editDef taking the keys, the sliderDef being dragged }
+    FFocus, FDrag: TD3GuiWindow;
+    procedure InitWidgets(const W: TD3GuiWindow);
+    procedure ApplyChoice(const W: TD3GuiWindow);
+    procedure SliderFromCursor(const W: TD3GuiWindow; const X, Y: Single);
     procedure ResetTime(const W: TD3GuiWindow; const T: Integer);
     procedure RunTimeEvents(const W: TD3GuiWindow);
     procedure RunTransitions;
@@ -209,6 +235,12 @@ type
     function ClickRelease: Boolean;
     { An onNamedEvent (idUserInterface::HandleNamedEvent). }
     function NamedEvent(const AName: String): Boolean;
+    { A key (idUserInterface::HandleEvent SE_KEY / SE_CHAR): the focused
+      editDef types (Ch, or Key: 8 backspace, 13 enter), escape runs the
+      desktop's onEsc. False when nothing used it. }
+    function KeyDown(const Key: Integer; const Ch: Char): Boolean;
+    { the editDef with the keyboard focus (nil: none) }
+    property Focus: TD3GuiWindow read FFocus;
     { idUserInterface::Trigger (its entity activated): the windows'
       onTrigger scripts; False if none has one }
     function Trigger: Boolean;
@@ -246,6 +278,16 @@ const
   GuiImageHeight = 512;
   { idPlayer::UpdateFocus: how far the player's view reaches a GUI }
   GuiFocusDistance = 80;
+
+var
+  { The cvars GUI windows read and write ("cvar" keys of choiceDef,
+    sliderDef, editDef: name=value; the game fills and watches them). }
+  GuiCvars: TStringList;
+  { called when a GUI changes a cvar }
+  OnGuiCvarChanged: procedure (const AName, Value: String) of object;
+
+function GuiCvar(const AName: String; const Default: String = ''): String;
+procedure SetGuiCvar(const AName, Value: String);
 
 { Draw a GUI into a new GuiImageWidth x GuiImageHeight image (caller
   frees), the 640 x 480 virtual screen stretched over it. State (may be
@@ -370,6 +412,7 @@ begin
   Children := specialize TObjectList<TD3GuiWindow>.Create(True);
   Exprs := TStringList.Create;
   Vars := TStringList.Create;
+  Props := TStringList.Create;
   NamedEvents := specialize TObjectDictionary<String, TD3GuiScript>.Create([doOwnsValues]);
 end;
 
@@ -391,6 +434,8 @@ begin
   FreeAndNil(Children);
   FreeAndNil(Exprs);
   FreeAndNil(Vars);
+  FreeAndNil(Props);
+  FreeAndNil(OnEnter);
   inherited Destroy;
 end;
 
@@ -523,15 +568,50 @@ begin
     Font := S
   else
   if Vars.IndexOfName(K) >= 0 then
-    Vars.Values[K] := S;
-  { everything else (menugui, shear, rotate, modal...) is ignored }
+    Vars.Values[K] := S
+  else
+    { the rest (choices, cvar, low, high, rotate, shear, modal...) }
+    Props.Values[K] := S;
+end;
+
+function TD3GuiWindow.Prop(const Key, Default: String): String;
+var
+  I: Integer;
+begin
+  I := Props.IndexOfName(LowerCase(Key));
+  if I >= 0 then
+    Result := Props.ValueFromIndex[I]
+  else
+    Result := Default;
+end;
+
+function SplitChoices(const S: String): TStringArray;
+var
+  I: Integer;
+begin
+  Result := D3LangString(S).Split([';']);
+  for I := 0 to High(Result) do
+    Result[I] := Trim(D3LangString(Trim(Result[I])));
+end;
+
+function TD3GuiWindow.ChoiceList: TStringArray;
+begin
+  Result := SplitChoices(Prop('choices'));
+  if Length(Result) = 0 then
+    Result := ['No Choices Defined'];
+end;
+
+function TD3GuiWindow.ValueList: TStringArray;
+begin
+  Result := SplitChoices(Prop('values'));
 end;
 
 function TD3GuiWindow.Interactive: Boolean;
 var
   C: TD3GuiWindow;
 begin
-  if (OnAction <> nil) or (OnActionRelease <> nil) or (OnMouseEnter <> nil) or (OnMouseExit <> nil) then
+  if (OnAction <> nil) or (OnActionRelease <> nil) or (OnMouseEnter <> nil) or (OnMouseExit <> nil) or
+     (Kind in [gkChoice, gkSlider, gkEdit]) then
     Exit(True);
   for C in Children do
     if C.Interactive then
@@ -717,6 +797,12 @@ begin
       Child := TD3GuiWindow.Create;
       Child.Name := L.NextStr;
       Child.IsList := Key = 'listdef';
+      if Key = 'listdef' then Child.Kind := gkList else
+      if Key = 'choicedef' then Child.Kind := gkChoice else
+      if Key = 'sliderdef' then Child.Kind := gkSlider else
+      if Key = 'editdef' then Child.Kind := gkEdit else
+      if Key = 'binddef' then Child.Kind := gkBind else
+      if Key = 'renderdef' then Child.Kind := gkRender;
       Child.Parent := W;
       W.Children.Add(Child);
       if L.Check('{') then
@@ -772,6 +858,9 @@ begin
         else
         if Key = 'ontrigger' then
           W.OnTrigger := Script
+        else
+        if Key = 'onenter' then
+          W.OnEnter := Script
         else
           Script.Free;
       end;
@@ -954,8 +1043,160 @@ begin
   FTime := TimeMs;
   Active := True;
   if Desktop <> nil then
+  begin
+    InitWidgets(Desktop);
     ActivateWindow(Desktop);
+  end;
   Dirty := True;
+end;
+
+procedure TD3Gui.InitWidgets(const W: TD3GuiWindow);
+var
+  C: TD3GuiWindow;
+  CvarName, V: String;
+  Items: TStringArray;
+  I: Integer;
+begin
+  { idChoiceWindow / idSliderWindow / idEditWindow::InitVars: from the
+    cvar, else the window's own start value }
+  CvarName := W.Prop('cvar');
+  case W.Kind of
+    gkChoice:
+      begin
+        W.Choice := StrToIntDef(W.Prop('currentchoice', '0'), 0);
+        if CvarName <> '' then
+        begin
+          V := GuiCvar(CvarName, '');
+          if StrToIntDef(W.Prop('choicetype', '0'), 0) = 0 then
+            W.Choice := StrToIntDef(V, W.Choice)
+          else
+          begin
+            Items := W.ValueList;
+            if Length(Items) = 0 then
+              Items := W.ChoiceList;
+            for I := 0 to High(Items) do
+              if SameText(Items[I], V) then
+                W.Choice := I;
+          end;
+        end;
+        if (W.Choice < 0) or (W.Choice >= Length(W.ChoiceList)) then
+          W.Choice := 0;
+      end;
+    gkSlider:
+      begin
+        W.SliderValue := D3StrToFloat(W.Prop('low', '0'), 0);
+        if CvarName <> '' then
+          W.SliderValue := D3StrToFloat(GuiCvar(CvarName, ''), W.SliderValue);
+      end;
+    gkEdit:
+      if CvarName <> '' then
+        W.EditText := GuiCvar(CvarName, '');
+  end;
+  for C in W.Children do
+    InitWidgets(C);
+end;
+
+procedure TD3Gui.ApplyChoice(const W: TD3GuiWindow);
+var
+  Items: TStringArray;
+begin
+  { idChoiceWindow::UpdateChoice: the cvar gets the index (choiceType 0),
+    the value or the choice }
+  if W.Prop('cvar') = '' then
+    Exit;
+  if StrToIntDef(W.Prop('choicetype', '0'), 0) = 0 then
+    SetGuiCvar(W.Prop('cvar'), IntToStr(W.Choice))
+  else
+  begin
+    Items := W.ValueList;
+    if Length(Items) = 0 then
+      Items := W.ChoiceList;
+    if W.Choice <= High(Items) then
+      SetGuiCvar(W.Prop('cvar'), Items[W.Choice]);
+  end;
+end;
+
+procedure TD3Gui.SliderFromCursor(const W: TD3GuiWindow; const X, Y: Single);
+var
+  Left, Top, Low, High, Step, F: Single;
+  R: TVector4;
+begin
+  { idSliderWindow::RouteMouseCoords: the value under the cursor, in
+    steps, written to the cvar }
+  WindowAbs(W, Left, Top);
+  R := PropVec4(W, 'rect');
+  Low := D3StrToFloat(W.Prop('low', '0'), 0);
+  High := D3StrToFloat(W.Prop('high', '100'), 100);
+  Step := D3StrToFloat(W.Prop('step', '1'), 1);
+  if D3StrToFloat(W.Prop('vertical', '0'), 0) <> 0 then
+    F := (Y - Top) / Max(1, R.W)
+  else
+    F := (X - Left) / Max(1, R.Z);
+  F := EnsureRange(F, 0, 1);
+  W.SliderValue := Low + (High - Low) * F;
+  if Step > 0 then
+    W.SliderValue := Low + Round((W.SliderValue - Low) / Step) * Step;
+  W.SliderValue := EnsureRange(W.SliderValue, Min(Low, High), Max(Low, High));
+  if W.Prop('cvar') <> '' then
+    SetGuiCvar(W.Prop('cvar'), FormatFloat('0.####', W.SliderValue, DefaultFormatSettings));
+  Dirty := True;
+end;
+
+function TD3Gui.KeyDown(const Key: Integer; const Ch: Char): Boolean;
+var
+  W: TD3GuiWindow;
+  MaxChars: Integer;
+begin
+  Result := False;
+  if Desktop = nil then
+    Exit;
+  W := FFocus;
+  if (W <> nil) and (W.Kind = gkEdit) and (D3StrToFloat(W.Prop('readonly', '0'), 0) = 0) then
+  begin
+    { idEditWindow::HandleEvent }
+    if Key = 8 then
+    begin
+      if W.EditText <> '' then
+        SetLength(W.EditText, Length(W.EditText) - 1);
+      Result := True;
+    end else
+    if Key = 13 then
+    begin
+      if W.OnEnter <> nil then
+        RunScript(W, W.OnEnter)
+      else
+      if W.OnAction <> nil then
+        RunScript(W, W.OnAction);
+      FFocus := nil;
+      Result := True;
+    end else
+    if Key = 27 then
+    begin
+      FFocus := nil;
+      Result := True;
+    end else
+    if Ch >= ' ' then
+    begin
+      MaxChars := StrToIntDef(W.Prop('maxchars', '0'), 0);
+      if ((MaxChars <= 0) or (Length(W.EditText) < MaxChars)) and
+         ((D3StrToFloat(W.Prop('numeric', '0'), 0) = 0) or (Ch in ['0'..'9', '.', '-'])) then
+        W.EditText := W.EditText + Ch;
+      Result := True;
+    end;
+    if Result then
+    begin
+      if W.Prop('cvar') <> '' then
+        SetGuiCvar(W.Prop('cvar'), W.EditText);
+      Dirty := True;
+    end;
+    Exit;
+  end;
+  { idWindow: escape runs the desktop's onEsc }
+  if (Key = 27) and (Desktop.OnEsc <> nil) then
+  begin
+    RunScript(Desktop, Desktop.OnEsc);
+    Result := True;
+  end;
 end;
 
 procedure TD3Gui.ResetTime(const W: TD3GuiWindow; const T: Integer);
@@ -1095,6 +1336,9 @@ begin
   CursorShown := True;
   Dirty := True;
   RouteCursor(Desktop, X, Y);
+  { a slider follows the cursor while held }
+  if FDrag <> nil then
+    SliderFromCursor(FDrag, X, Y);
 end;
 
 procedure TD3Gui.ClearCursor;
@@ -1125,6 +1369,32 @@ begin
       Exit(True);
   end;
   Result := False;
+  if not Release then
+    case W.Kind of
+      gkChoice:
+        begin
+          { idChoiceWindow: the next choice }
+          W.Choice := (W.Choice + 1) mod Length(W.ChoiceList);
+          ApplyChoice(W);
+          Dirty := True;
+          Result := True;
+        end;
+      gkSlider:
+        begin
+          FDrag := W;
+          SliderFromCursor(W, X, Y);
+          Result := True;
+        end;
+      gkEdit:
+        begin
+          FFocus := W;
+          Dirty := True;
+          Result := True;
+        end;
+    end;
+  { a click elsewhere takes the keys from the edit }
+  if (not Release) and (W.Kind <> gkEdit) and (FFocus <> nil) and (W <> Desktop) then
+    FFocus := nil;
   { a listDef: the row under the cursor becomes the selection
     (idListWindow::HandleEvent), then its onAction runs }
   if W.IsList and not Release then
@@ -1198,6 +1468,7 @@ end;
 
 function TD3Gui.ClickRelease: Boolean;
 begin
+  FDrag := nil;
   Result := (Desktop <> nil) and CursorShown and ClickWindow(Desktop, CursorX, CursorY, True);
 end;
 
@@ -1613,7 +1884,26 @@ var
   Key, V: String;
   Win: TD3GuiWindow;
   P: String;
+  Items: TStringArray;
 begin
+  { a choice shows its choice, an edit its text (and the cursor while
+    focused), a bind its cvar's key }
+  if W.Kind = gkChoice then
+  begin
+    Items := W.ChoiceList;
+    if (W.Choice >= 0) and (W.Choice <= High(Items)) then
+      Exit(Items[W.Choice]);
+    Exit('');
+  end;
+  if W.Kind = gkEdit then
+  begin
+    Result := W.EditText;
+    if D3StrToFloat(W.Prop('password', '0'), 0) <> 0 then
+      Result := StringOfChar('*', Length(Result));
+    if FFocus = W then
+      Result := Result + '_';
+    Exit;
+  end;
   Result := W.Text;
   { "gui::name" or "$gui::name": the GUI state (the entity's keys) }
   Key := Result;
@@ -2048,6 +2338,8 @@ end;
 type
   TGuiPainter = class
     Image: TRGBAlphaImage;
+    { the window being drawn by DrawTransformed (not transformed again) }
+    InTransform: TD3GuiWindow;
     Gui: TD3Gui;
     Font: TTextureFontData;
     { pixels per GUI unit }
@@ -2071,6 +2363,10 @@ type
     procedure DrawText(const R: TFloatRectangle; const W: TD3GuiWindow; const S: String);
     procedure DrawList(const R: TFloatRectangle; const W: TD3GuiWindow);
     procedure DrawWindow(const W: TD3GuiWindow; const ParentX, ParentY: Single);
+    procedure DrawSliderThumb(const W: TD3GuiWindow; const R: TFloatRectangle);
+    { a window with rotate / shear: drawn into a scratch image, then mapped
+      onto Image around its center (idWindow::SetupTransforms) }
+    function DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
     procedure DrawCursor;
   end;
 
@@ -2439,6 +2735,131 @@ begin
   end;
 end;
 
+function TGuiPainter.DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
+var
+  Angle, ShearX, ShearY, CosA, SinA, Det, CX, CY, DX, DY, SX, SY: Single;
+  M00, M01, M10, M11, I00, I01, I10, I11: Single;
+  V: TVector4;
+  Scratch, Main: TRGBAlphaImage;
+  Parts: TStringArray;
+  X, Y, PX, PY: Integer;
+  P: PVector4Byte;
+  OuterInTransform: TD3GuiWindow;
+begin
+  Result := False;
+  Angle := 0;
+  if W.Prop('rotate') <> '' then
+    Angle := Gui.Eval(W, W.Prop('rotate'));
+  ShearX := 0;
+  ShearY := 0;
+  if W.Prop('shear') <> '' then
+  begin
+    Parts := StringReplace(W.Prop('shear'), ',', ' ', [rfReplaceAll]).Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if Length(Parts) > 0 then
+      ShearX := Gui.Eval(W, Parts[0]);
+    if Length(Parts) > 1 then
+      ShearY := Gui.Eval(W, Parts[1]);
+  end;
+  if (Abs(Angle) < 0.001) and (Abs(ShearX) < 0.0001) and (Abs(ShearY) < 0.0001) then
+    Exit;
+  Result := True;
+  { the window and its children, untransformed, on a clear scratch image }
+  Main := Image;
+  Scratch := TRGBAlphaImage.Create(Main.Width, Main.Height);
+  try
+    Scratch.Clear(Vector4Byte(0, 0, 0, 0));
+    Image := Scratch;
+    OuterInTransform := InTransform;
+    InTransform := W;
+    try
+      DrawWindow(W, ParentX, ParentY);
+    finally
+      InTransform := OuterInTransform;
+      Image := Main;
+    end;
+    { the center of its rect (pixels); M = rotation * shear (Doom 3's
+      trans *= smat with smat[0][1] = shear.x, smat[1][0] = shear.y) }
+    V := Gui.PropVec4(W, 'rect');
+    CX := (ParentX + V.X + V.Z / 2) * ScaleX;
+    CY := (ParentY + V.Y + V.W / 2) * ScaleY;
+    CosA := Cos(DegToRad(Angle));
+    SinA := Sin(DegToRad(Angle));
+    M00 := CosA + -SinA * ShearY;
+    M01 := CosA * ShearX - SinA;
+    M10 := SinA + CosA * ShearY;
+    M11 := SinA * ShearX + CosA;
+    Det := M00 * M11 - M01 * M10;
+    if Abs(Det) < 1e-6 then
+      Exit;
+    I00 := M11 / Det;
+    I01 := -M01 / Det;
+    I10 := -M10 / Det;
+    I11 := M00 / Det;
+    { every pixel of the clip from where it comes in the scratch image }
+    for Y := ClipY0 to ClipY1 - 1 do
+      for X := ClipX0 to ClipX1 - 1 do
+      begin
+        { in GUI units (the pixels aren't square) }
+        DX := (X + 0.5 - CX) / ScaleX;
+        DY := (Y + 0.5 - CY) / ScaleY;
+        SX := CX + (I00 * DX + I01 * DY) * ScaleX;
+        SY := CY + (I10 * DX + I11 * DY) * ScaleY;
+        PX := Floor(SX);
+        PY := Floor(SY);
+        if (PX < 0) or (PY < 0) or (PX >= Integer(Scratch.Width)) or (PY >= Integer(Scratch.Height)) then
+          Continue;
+        P := Scratch.PixelPtr(PX, Scratch.Height - 1 - PY);
+        { blended onto a clear image its colors are times its alpha }
+        if P^.W > 0 then
+          BlendBytes(X, Y, Min(255, P^.X * 255 div P^.W), Min(255, P^.Y * 255 div P^.W),
+            Min(255, P^.Z * 255 div P^.W), P^.W);
+      end;
+  finally
+    Scratch.Free;
+  end;
+end;
+
+procedure TGuiPainter.DrawSliderThumb(const W: TD3GuiWindow; const R: TFloatRectangle);
+var
+  M: TD3Material;
+  F, ImageName: String;
+  Img: TRGBAlphaImage;
+  Low, High, T, TW, TH: Single;
+  Vertical: Boolean;
+begin
+  M := Decls.Material(W.Prop('thumbshader'));
+  ImageName := M.DiffuseImage;
+  if M.StageImage <> '' then
+    ImageName := M.StageImage;
+  if ImageName = '' then
+    ImageName := W.Prop('thumbshader');
+  F := FindImageFile(ImageName, False);
+  if F = '' then
+    Exit;
+  try
+    Img := GuiSourceImage(F);
+  except
+    Exit;
+  end;
+  if Img = nil then
+    Exit;
+  Low := D3StrToFloat(W.Prop('low', '0'), 0);
+  High := D3StrToFloat(W.Prop('high', '100'), 100);
+  if High = Low then
+    T := 0
+  else
+    T := EnsureRange((W.SliderValue - Low) / (High - Low), 0, 1);
+  TW := Img.Width;
+  TH := Img.Height;
+  Vertical := D3StrToFloat(W.Prop('vertical', '0'), 0) <> 0;
+  if Vertical then
+    DrawImage(FloatRectangle(R.Left + (R.Width - TW) / 2, R.Bottom + T * (R.Height - TH), TW, TH), Img,
+      Gui.PropVec4(W, 'matcolor'))
+  else
+    DrawImage(FloatRectangle(R.Left + T * (R.Width - TW), R.Bottom + (R.Height - TH) / 2, TW, TH), Img,
+      Gui.PropVec4(W, 'matcolor'));
+end;
+
 procedure TGuiPainter.DrawWindow(const W: TD3GuiWindow; const ParentX, ParentY: Single);
 var
   R: TFloatRectangle;
@@ -2451,6 +2872,8 @@ var
   SaveX0, SaveY0, SaveX1, SaveY1, X0, Y0, X1, Y1: Integer;
 begin
   if not Gui.PropVisible(W) then
+    Exit;
+  if (W <> InTransform) and DrawTransformed(W, ParentX, ParentY) then
     Exit;
   { Rect: left, top, width, height; TFloatRectangle's Bottom holds the top
     here (GUI y goes down) }
@@ -2492,6 +2915,10 @@ begin
         WritelnWarning('Doom3Gui', 'Cannot draw "%s": %s', [F, E.Message]);
     end;
   end;
+  { a slider's thumb (idSliderWindow::Draw): its image's size, along the
+    track by the value }
+  if (W.Kind = gkSlider) and (W.Prop('thumbshader') <> '') then
+    DrawSliderThumb(W, R);
   B := Gui.PropFloat(W, 'bordersize');
   V := Gui.PropVec4(W, 'bordercolor');
   if (B > 0) and (V.W > 0) then
@@ -2605,6 +3032,26 @@ begin
   for I := 0 to 6 do
     Points[I] := Vector2(Gui.CursorX + Arrow[I].X * 1.2 + 1, Gui.CursorY + Arrow[I].Y * 1.2 + 1);
   FillPolygon(Self, Points, Vector4(1, 1, 1, 1));
+end;
+
+function GuiCvar(const AName, Default: String): String;
+var
+  I: Integer;
+begin
+  I := GuiCvars.IndexOfName(LowerCase(AName));
+  if I >= 0 then
+    Result := GuiCvars.ValueFromIndex[I]
+  else
+    Result := Default;
+end;
+
+procedure SetGuiCvar(const AName, Value: String);
+begin
+  if GuiCvar(AName, #0) = Value then
+    Exit;
+  GuiCvars.Values[LowerCase(AName)] := Value;
+  if Assigned(OnGuiCvarChanged) then
+    OnGuiCvarChanged(LowerCase(AName), Value);
 end;
 
 function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage;
@@ -2855,7 +3302,9 @@ initialization
   Fonts := specialize TObjectDictionary<String, TD3Font>.Create([doOwnsValues]);
   FontPages := specialize TObjectList<TRGBAlphaImage>.Create(True);
   MissingFonts := TStringList.Create;
+  GuiCvars := TStringList.Create;
 finalization
+  FreeAndNil(GuiCvars);
   if ProtocolRegistered then
     UnregisterUrlProtocol('d3gui');
   FreeAndNil(GuiProtocol);
