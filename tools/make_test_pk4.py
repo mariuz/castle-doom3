@@ -2886,6 +2886,8 @@ entityDef monster_test_blob {
 	"health"				"80"
 	"snd_footstep"			"test_step"
 	"smoke_wound_flesh"		"test_blood.prt"
+	// blood splats on the surface behind a wound (idGameLocal::BloodSplat)
+	"mtr_splat_flesh"		"textures/test/decal_hole"
 	// pain and death: cries by the health left (pain_delay apart), the
 	// pain anim; gibbed past -20 health or by a gibbing damage def
 	"pain_delay"			"0.3"

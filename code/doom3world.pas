@@ -556,6 +556,10 @@ type
     { the box touching picks it up (Doom 3 coordinates, world) }
     Box: TBox3D;
     PickedUp: Boolean;
+    { idMoveableItem: its physics (shots and explosions push it), its
+      pickup box relative to its origin (it follows it) }
+    Moveable: TD3Moveable;
+    BoxRel: TBox3D;
     { triggerFirst / no_touch: not until triggered }
     CanPickUp: Boolean;
     Spin: Boolean;
@@ -852,7 +856,6 @@ type
     procedure RemoveFx(const Index: Integer);
     procedure UpdateTrail(const P: TD3Projectile);
     procedure ExplodeParticles(const P: TD3Projectile; const HitWorld: Boolean; const Normal: TVector3);
-    procedure EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
     function EntityOriginNow(const E: TD3MapEntity): TVector3;
     procedure NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
     procedure UpdateShakes;
@@ -878,9 +881,8 @@ type
     procedure SpawnBindings;
     procedure SpreadLocations;
     procedure SpawnCombatNode(const E: TD3MapEntity);
-    procedure SpawnMoveable(const B: TD3BrushEntity);
+    function SpawnMoveable(const B: TD3BrushEntity): TD3Moveable;
     procedure SpawnItem(const E: TD3MapEntity);
-    function ItemOf(const E: TD3MapEntity): TD3Item;
     procedure UpdateItems;
     procedure InitInventory;
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
@@ -1042,6 +1044,11 @@ type
       to the listener through the portals (a closed one adds 150), the
       straight distance in one area, MaxSingle when it can't get there }
     function SoundPathDistance(const Source, Listener: TVector3): Single;
+    { idAnimatedEntity::AddLocalDamageEffect: the wound's blood particles
+      (smoke_wound_flesh) and a blood splat decal behind it (mtr_splat_flesh*);
+      Direction points back along the shot }
+    procedure EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
+    function ItemOf(const E: TD3MapEntity): TD3Item;
     { idAI::Event_Burn: the time of death, the burn particles, the skins'
       burn-away stages alpha tested from now on }
     procedure ActorBurn(const A: TD3Actor);
@@ -2756,10 +2763,11 @@ begin
   Result := CgeToD3(Brush.Scene.Translation);
 end;
 
-procedure TD3Game.SpawnMoveable(const B: TD3BrushEntity);
+function TD3Game.SpawnMoveable(const B: TD3BrushEntity): TD3Moveable;
 var
   M: TD3Moveable;
   E: TD3MapEntity;
+  Size: TVector3;
 begin
   { idMoveable::Spawn }
   E := B.Entity;
@@ -2772,9 +2780,16 @@ begin
   M.MinDamageVelocity := E.FloatValue('minDamageVelocity', 100);
   M.MaxDamageVelocity := E.FloatValue('maxDamageVelocity', 200);
   M.Mass := Max(1, E.FloatValue('mass', 100));
+  { idPhysics_RigidBody: "density" times the volume (light moveable items) }
+  if not E.HasKey('mass') and E.HasKey('density') then
+  begin
+    Size := B.LocalMax - B.LocalMin;
+    M.Mass := Max(1, E.FloatValue('density') * Abs(Size.X * Size.Y * Size.Z));
+  end;
   M.HalfSize := (B.LocalMax - B.LocalMin) * 0.5;
   M.CenterOffset := (B.LocalMax + B.LocalMin) * 0.5;
   FMoveables.Add(M);
+  Result := M;
 end;
 
 function TD3Game.PushMoveableAt(const Point, Impulse: TVector3): Boolean;
@@ -2851,6 +2866,12 @@ begin
   end;
   if E.BoolValue('start_off') and (It.Brush <> nil) then
     It.Brush.SetHidden(True);
+  { idMoveableItem: a physics object (shots push it; the pickup box goes
+    with it) }
+  It.BoxRel := It.Box.Translate(-It.SpawnOrigin);
+  if (E.Value('spawnclass') = 'idMoveableItem') and not It.Spin and (It.Brush <> nil) and
+     (It.Brush.Scene <> nil) then
+    It.Moveable := SpawnMoveable(It.Brush);
   FItems.Add(It);
 end;
 
@@ -3129,6 +3150,8 @@ begin
       It.Brush.Scene.Translation := D3ToCge(Org);
       SetD3Rotation(It.Brush.Scene, YawMatrix((Ms and 4095) * 360 / -4096));
     end;
+    if (It.Moveable <> nil) and not It.Moveable.AtRest then
+      It.Box := It.BoxRel.Translate(It.Moveable.Origin);
     if It.CanPickUp and not PlayerDead and ((It.Brush = nil) or not It.Brush.Hidden) and
        It.Box.Collision(PlayerBox) then
       PickupItem(It);
@@ -9123,7 +9146,11 @@ end;
 
 procedure TD3Game.EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
 var
-  Key, Who: String;
+  Key, Who: String;  Splats: TStringList;
+  I: Integer;
+  Dir, Normal: TVector3;
+  HitDist: Single;
+
 begin
   { idAnimatedEntity::AddLocalDamageEffect: the hit entity's
     smoke_wound_flesh (the material type is always flesh here) }
@@ -9138,6 +9165,28 @@ begin
     Key := Def.Values['smoke_wound_flesh'];
   if Key <> '' then
     EmitSmoke(Key, Who + ' smoke_wound_flesh', Position, AxisFromDirection(CgeToD3(Direction)));
+  { idGameLocal::BloodSplat: a random mtr_splat_flesh* decal on the surface
+    up to 64 behind the wound, along the shot, 32 to 64 wide }
+  Splats := TStringList.Create;
+  try
+    if E <> nil then
+      for I := 0 to E.Pairs.Count - 1 do
+        if Copy(LowerCase(E.Pairs.Names[I]), 1, 15) = 'mtr_splat_flesh' then
+          Splats.Add(E.Pairs.ValueFromIndex[I]);
+    if (Splats.Count = 0) and (Def <> nil) then
+      for I := 0 to Def.Count - 1 do
+        if Copy(LowerCase(Def.Names[I]), 1, 15) = 'mtr_splat_flesh' then
+          Splats.Add(Def.ValueFromIndex[I]);
+    if (Splats.Count > 0) and not Direction.IsZero then
+    begin
+      Dir := -Direction.Normalize;
+      if WorldHit(Position, Dir, 64, HitDist, Normal) then
+        AddDecal(Splats[Random(Splats.Count)], CgeToD3(Position + Dir * HitDist), CgeToD3(Normal),
+          32 + Random * 32);
+    end;
+  finally
+    Splats.Free;
+  end;
 end;
 
 procedure TD3Game.PlaySoundAt(const ShaderName: String; const Position: TVector3);
