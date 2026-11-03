@@ -336,6 +336,9 @@ type
     BurnTime: Single;
     { its meshes with a burn-away stage, alpha tested from BurnTime on }
     BurnMeshes: array of Integer;
+    { the burning edges' appearances (one per burning mesh with an edge
+      stage, nil without), alpha tested by the edge stage }
+    BurnEdges: array of TAppearanceNode;
     { stopThinking: its threads stopped }
     Thinking: Boolean;
     { the player is its enemy; moving to it }
@@ -4415,7 +4418,7 @@ end;
 procedure TD3Game.UpdateBurns;
 var
   A: TD3Actor;
-  I: Integer;
+  I, J: Integer;
   Ctx: TD3ExprContext;
   M: TD3Material;
   App: TAppearanceNode;
@@ -4429,14 +4432,17 @@ begin
     Ctx := Default(TD3ExprContext);
     Ctx.Time := FTime;
     Ctx.Parms[7] := A.BurnTime;
-    for I in A.BurnMeshes do
+    for J := 0 to High(A.BurnMeshes) do
     begin
+      I := A.BurnMeshes[J];
       if I > High(A.Model.Instance.MeshShapes) then
         Continue;
       M := Decls.Material(A.Model.Instance.MeshMaterials[I]);
       App := A.Model.Instance.MeshShapes[I].Appearance;
       if (M.BurnAlphaTest <> nil) and (App <> nil) then
         App.AlphaCutoff := EnsureRange(M.BurnAlphaTest.Eval(Ctx), 0.001, 1);
+      if (J <= High(A.BurnEdges)) and (A.BurnEdges[J] <> nil) and (M.BurnEdgeAlphaTest <> nil) then
+        A.BurnEdges[J].AlphaCutoff := EnsureRange(M.BurnEdgeAlphaTest.Eval(Ctx), 0.001, 1);
     end;
   end;
 end;
@@ -4448,7 +4454,11 @@ var
   Dash, I: Integer;
   Def: TStringList;
   M: TD3Material;
-  App: TAppearanceNode;
+  App, EdgeApp: TAppearanceNode;
+  Edge: TShapeNode;
+  Unlit: TUnlitMaterialNode;
+  EdgeTex: TImageTextureNode;
+  Depth: TDepthModeNode;
 begin
   { idAI::Event_Burn: the time of death (the materials' burn-away stages
     use it) and "smoke_burnParticleSystem" ("particle-joint") at that
@@ -4458,6 +4468,7 @@ begin
     dissolve image's alpha, alpha tested by the stage's expression
     (UpdateBurns) }
   A.BurnMeshes := nil;
+  A.BurnEdges := nil;
   if A.Model.Instance <> nil then
     for I := 0 to High(A.Model.Instance.MeshShapes) do
     begin
@@ -4472,6 +4483,31 @@ begin
       App.AlphaMode := amMask;
       App.AlphaCutoff := 0.01;
       A.BurnMeshes := Concat(A.BurnMeshes, [I]);
+      { the burning edge: the same triangles with the edge stage's map,
+        unlit, behind the skin (privatePolygonOffset -1), alpha tested a
+        little lower than the skin: it shows where the skin has just gone }
+      EdgeApp := nil;
+      if (M.BurnEdgeAlphaTest <> nil) and (A.Model.Instance.Scene.RootNode <> nil) then
+      begin
+        Edge := TShapeNode.Create;
+        Edge.Geometry := A.Model.Instance.MeshShapes[I].Geometry;
+        EdgeApp := TAppearanceNode.Create;
+        Unlit := TUnlitMaterialNode.Create;
+        EdgeTex := TImageTextureNode.Create;
+        EdgeTex.SetUrl([ImageProgramUrl('castlealphafrom(' + M.BurnEdgeImage + ',' + M.BurnEdgeImage + ')', ikColor)]);
+        Unlit.EmissiveTexture := EdgeTex;
+        EdgeApp.Material := Unlit;
+        EdgeApp.AlphaMode := amMask;
+        EdgeApp.AlphaCutoff := 0.01;
+        EdgeApp.ShadowCaster := False;
+        Depth := TDepthModeNode.Create;
+        Depth.DepthFunc := dmfLessEqual;
+        Depth.PolygonOffset := Vector2(1, 2);
+        EdgeApp.DepthMode := Depth;
+        Edge.Appearance := EdgeApp;
+        A.Model.Instance.Scene.RootNode.AddChildren(Edge);
+      end;
+      A.BurnEdges := Concat(A.BurnEdges, [EdgeApp]);
     end;
   Def := A.Model.EntityDef;
   Value := A.Model.Entity.Value('smoke_burnParticleSystem');
