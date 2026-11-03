@@ -235,6 +235,8 @@ type
     { Joints casting shadows with a box (0 when the mesh itself casts). }
     function ShadowHullCount: Integer;
     function AnimFinished: Boolean;
+    { Seconds into the playing animation. }
+    property AnimTime: Single read FAnimTime;
     procedure Update(const SecondsPassed: Single);
     { Show a pose of the model's joints (model space), holding it (a
       ragdoll's): the animation stops. }

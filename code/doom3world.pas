@@ -7231,8 +7231,14 @@ begin
         { a played animation (not a cycle) at its end, minus the blend
           frames (24 per second) }
         C := ActorChannel(A, ArgF(0));
-        EventResult := D3FloatValue(Ord(not C.AnimLoop and
-          (FTime - C.AnimStart >= C.AnimLength - ArgF(1) / 24)));
+        D := C.AnimLength - ArgF(1) / 24;
+        { the body starts the channel's anim in UpdateActors, up to a frame
+          after the script did: wait for the model's own time too, or the
+          anim's last move (AnimMove) would be lost }
+        EventResult := D3FloatValue(Ord(not C.AnimLoop and (FTime - C.AnimStart >= D) and
+          ((Round(ArgF(0)) = 3) or (A.Model.Instance = nil) or A.Model.Instance.Paused or
+           (A.BodyKey <> C.AnimName + ':' + FloatToStr(C.AnimStart)) or
+           (A.Model.Instance.AnimTime >= D))));
       end;
     'stopAnim': ActorChannel(A, ArgF(0)).AnimName := '';
     'hasAnim':
