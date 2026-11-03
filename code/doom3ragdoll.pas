@@ -12,8 +12,12 @@
   centers. Each body's turn (from its anchors) moves its contained joints;
   other joints follow their parent. Without one every joint is a particle
   linked to its parent (rigid), siblings and grandparent (some give).
-  Doom 3's rigid body solver (idPhysics_AF: masses, friction, contacts) is
-  not reproduced.
+  Like idPhysics_AF, bodies have masses (their density times their model's
+  volume: links move the lighter end more), their linear friction slows
+  them, the world's contacts slide with their contact friction, and bodies
+  with selfCollision keep apart. Doom 3's constraint solver itself (an LCP
+  of the bodies' velocities and inertia) is not reproduced: the particles'
+  positions are corrected instead.
 }
 unit Doom3Ragdoll;
 
@@ -45,6 +49,10 @@ type
     { particles: CGE, world }
     FPos, FPrev: array of TVector3;
     FRadius: array of Single;
+    { inverse masses, per particle linear (air) and contact friction }
+    FInvMass, FDamping, FContactFriction: array of Single;
+    { body centers kept apart (selfCollision): pairs, their distance }
+    FApart: array of TD3RagdollLink;
     { particles' start positions (Doom 3, model space) }
     FStartPos: array of TVector3;
     FLinks: array of TD3RagdollLink;
@@ -164,6 +172,12 @@ begin
   FPos[Result] := FInstance.Scene.LocalToWorld(D3ToCge(ModelPos));
   FPrev[Result] := FPos[Result];
   FRadius[Result] := Radius;
+  SetLength(FInvMass, Result + 1);
+  SetLength(FDamping, Result + 1);
+  SetLength(FContactFriction, Result + 1);
+  FInvMass[Result] := 1;
+  FDamping[Result] := 0.01;
+  FContactFriction[Result] := 0.8;
 end;
 
 procedure TD3Ragdoll.LinkRange(const A, B: Integer; const MinLength, MaxLength: Single);
@@ -223,6 +237,22 @@ var
   V, C1, C2: TVector3;
   A, B, Bend, MaxBend: Single;
   Joints: specialize TArray<Integer>;
+  L: TD3RagdollLink;
+
+  { two bodies with a constraint between them }
+  function Joined(const Body1, Body2: Integer): Boolean;
+  var
+    N, X, Y: Integer;
+  begin
+    for N := 0 to FAF.Constraints.Count - 1 do
+    begin
+      X := FAF.BodyIndex(FAF.Constraints[N].Body1);
+      Y := FAF.BodyIndex(FAF.Constraints[N].Body2);
+      if ((X = Body1) and (Y = Body2)) or ((X = Body2) and (Y = Body1)) then
+        Exit(True);
+    end;
+    Result := False;
+  end;
 
   function JointIndex(const JointName: String): Integer;
   var
@@ -263,6 +293,29 @@ begin
     if not Ok then
       V := Bind[BodyJoint[I]].Position;
     FBodyCenter[I] := AddParticle(FromBind(BodyJoint[I], V), EnsureRange(FAF.Bodies[I].Radius, 1, 16));
+    { idAFBody: mass, friction (the figure's settings without its own) }
+    FInvMass[FBodyCenter[I]] := 1 / FAF.Bodies[I].Mass;
+    if FAF.Bodies[I].HasFriction then
+    begin
+      FDamping[FBodyCenter[I]] := EnsureRange(FAF.Bodies[I].LinearFriction, 0, 0.5);
+      FContactFriction[FBodyCenter[I]] := EnsureRange(FAF.Bodies[I].ContactFriction, 0, 1);
+    end else
+    begin
+      FDamping[FBodyCenter[I]] := EnsureRange(FAF.LinearFriction, 0, 0.5);
+      FContactFriction[FBodyCenter[I]] := EnsureRange(FAF.ContactFriction, 0, 1);
+    end;
+  end;
+  { totalMass: the bodies' masses scaled to it }
+  if FAF.TotalMass > 0 then
+  begin
+    A := 0;
+    for I := 0 to High(FBodyCenter) do
+      if FBodyCenter[I] >= 0 then
+        A := A + 1 / FInvMass[FBodyCenter[I]];
+    if A > 0 then
+      for I := 0 to High(FBodyCenter) do
+        if FBodyCenter[I] >= 0 then
+          FInvMass[FBodyCenter[I]] := FInvMass[FBodyCenter[I]] * A / FAF.TotalMass;
   end;
   for K := 0 to FAF.Constraints.Count - 1 do
   begin
@@ -287,6 +340,10 @@ begin
           end else
             V := Bind[BodyJoint[B2]].Position;
           P := AddParticle(FromBind(BodyJoint[B1], V), 1.5);
+          { the anchor moves with both bodies: as heavy as the lighter }
+          FInvMass[P] := Max(FInvMass[FBodyCenter[B1]], FInvMass[FBodyCenter[B2]]);
+          FDamping[P] := FDamping[FBodyCenter[B2]];
+          FContactFriction[P] := FContactFriction[FBodyCenter[B2]];
           FBodyPoints[B1] := Concat(FBodyPoints[B1], [P]);
           FBodyPoints[B2] := Concat(FBodyPoints[B2], [P]);
           { the bend at the anchor, from straight on (0): body2 may bend up
@@ -321,6 +378,20 @@ begin
         LinkScaled(FBodyPoints[I][J], FBodyPoints[I][K], 1, 1);
     end;
   end;
+  { selfCollision: bodies not joined by a constraint keep their radii
+    apart (not closer than they start) }
+  for I := 0 to High(FBodyCenter) do
+    for J := I + 1 to High(FBodyCenter) do
+    begin
+      if (FBodyCenter[I] < 0) or (FBodyCenter[J] < 0) or not FAF.Bodies[I].SelfCollision or
+         not FAF.Bodies[J].SelfCollision or Joined(I, J) then
+        Continue;
+      L.A := FBodyCenter[I];
+      L.B := FBodyCenter[J];
+      L.MinLength := Min(FRadius[L.A] + FRadius[L.B], (FPos[L.A] - FPos[L.B]).Length);
+      L.MaxLength := MaxSingle;
+      FApart := Concat(FApart, [L]);
+    end;
   { the joints each body moves (the first body naming a joint wins) }
   SetLength(FJointBody, Length(FStart));
   for J := 0 to High(FJointBody) do
@@ -378,14 +449,14 @@ procedure TD3Ragdoll.Step;
 var
   I, K: Integer;
   Old: array of TVector3;
-  D, Corr, Move, Dir, N: TVector3;
-  L, Target, Dist, MaxMove: Single;
+  D, Corr, Move, Dir, N, Slide: TVector3;
+  L, Target, Dist, MaxMove, W, SlideLen: Single;
 begin
   SetLength(Old, Length(FPos));
   for I := 0 to High(FPos) do
   begin
     Old[I] := FPos[I];
-    D := (FPos[I] - FPrev[I]) * 0.99;
+    D := (FPos[I] - FPrev[I]) * (1 - FDamping[I]);
     FPrev[I] := FPos[I];
     FPos[I] := FPos[I] + D - Vector3(0, Gravity * Dt * Dt, 0);
   end;
@@ -399,11 +470,29 @@ begin
       Target := EnsureRange(L, FLinks[I].MinLength, FLinks[I].MaxLength);
       if Target = L then
         Continue;
-      Corr := D * ((L - Target) / L * 0.5);
-      FPos[FLinks[I].A] := FPos[FLinks[I].A] + Corr;
-      FPos[FLinks[I].B] := FPos[FLinks[I].B] - Corr;
+      { the lighter end moves more }
+      W := FInvMass[FLinks[I].A] + FInvMass[FLinks[I].B];
+      if W <= 0 then
+        Continue;
+      Corr := D * ((L - Target) / L);
+      FPos[FLinks[I].A] := FPos[FLinks[I].A] + Corr * (FInvMass[FLinks[I].A] / W);
+      FPos[FLinks[I].B] := FPos[FLinks[I].B] - Corr * (FInvMass[FLinks[I].B] / W);
     end;
-  { the world stops a particle at its radius (no sliding: it lies still) }
+  { selfCollision: bodies keep apart }
+  for I := 0 to High(FApart) do
+  begin
+    D := FPos[FApart[I].B] - FPos[FApart[I].A];
+    L := D.Length;
+    if (L >= FApart[I].MinLength) or (L < 0.0001) then
+      Continue;
+    W := FInvMass[FApart[I].A] + FInvMass[FApart[I].B];
+    Corr := D * ((L - FApart[I].MinLength) / L);
+    FPos[FApart[I].A] := FPos[FApart[I].A] + Corr * (FInvMass[FApart[I].A] / W);
+    FPos[FApart[I].B] := FPos[FApart[I].B] - Corr * (FInvMass[FApart[I].B] / W);
+  end;
+  { the world stops a particle at its radius; the rest of its move slides
+    along the surface, slowed by its contact friction (idAFBody's
+    contactFriction: 1 holds it) }
   MaxMove := 0;
   for I := 0 to High(FPos) do
   begin
@@ -415,7 +504,17 @@ begin
       if Assigned(FWorldHit) and FWorldHit(Old[I], Dir, L + FRadius[I], Dist, N) then
       begin
         FPos[I] := Old[I] + Dir * Max(0, Dist - FRadius[I]);
-        FPrev[I] := FPos[I];
+        { the move's part along the surface, less the friction }
+        Slide := Move - FPos[I] + Old[I];
+        Slide := (Slide - N * TVector3.DotProduct(Slide, N)) * (1 - FContactFriction[I]);
+        SlideLen := Slide.Length;
+        if (SlideLen > 0.0001) and
+           not FWorldHit(FPos[I], Slide / SlideLen, SlideLen + FRadius[I], Dist, N) then
+          FPos[I] := FPos[I] + Slide
+        else
+          Slide := TVector3.Zero;
+        { it keeps that sliding speed, not the speed into the surface }
+        FPrev[I] := FPos[I] - Slide;
       end;
     end;
     MaxMove := Max(MaxMove, (FPos[I] - Old[I]).Length);

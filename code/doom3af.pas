@@ -44,6 +44,16 @@ type
     ModelWidth: Single;
     { "*joint -*other": the joints this body moves ('' = its joint) }
     ContainedJoints: String;
+    { idPhysics_AF: its density (mass = density * the model's volume),
+      friction (linear, angular: of its motion; contact: on the world),
+      whether it collides with the figure's other bodies; HasFriction
+      false: the settings' }
+    Density: Single;
+    LinearFriction, AngularFriction, ContactFriction: Single;
+    HasFriction: Boolean;
+    SelfCollision: Boolean;
+    { mass from the density and the model's volume (1 without a model) }
+    function Mass: Single;
     { the joint indexes ContainedJoints names in a skeleton }
     function JointList(const Pose: TD3JointArray): specialize TArray<Integer>;
     { half the body's smallest extent: its collision radius }
@@ -66,6 +76,11 @@ type
 
   TD3ArticulatedFigure = class
     Name, ModelName: String;
+    { the settings' friction and selfCollision (bodies without their own),
+      totalMass (-1: the bodies' densities) }
+    LinearFriction, AngularFriction, ContactFriction: Single;
+    SelfCollision: Boolean;
+    TotalMass: Single;
     Bodies: specialize TObjectList<TD3AFBody>;
     Constraints: specialize TObjectList<TD3AFConstraint>;
     constructor Create;
@@ -189,6 +204,19 @@ begin
   for I := 0 to High(Marked) do
     if Marked[I] then
       Result := Concat(Result, [I]);
+end;
+
+function TD3AFBody.Mass: Single;
+var
+  Size: TVector3;
+  Volume: Single;
+begin
+  Size := ModelMaxs - ModelMins;
+  Volume := Abs(Size.X * Size.Y * Size.Z);
+  { a bone: a box of its length and width }
+  if ModelKind = 'bone' then
+    Volume := Max(1, Size.Length) * Sqr(Max(1, ModelWidth));
+  Result := Max(0.1, Density * Max(1, Volume));
 end;
 
 function TD3AFBody.Radius: Single;
@@ -400,6 +428,19 @@ begin
       if Key = 'containedjoints' then
         Body.ContainedJoints := StringAt(Values, 0)
       else
+      if Key = 'density' then
+        Body.Density := NumberAt(Values, 0, 0.2)
+      else
+      if Key = 'friction' then
+      begin
+        Body.LinearFriction := NumberAt(Values, 0, 0.01);
+        Body.AngularFriction := NumberAt(Values, 1, 0.01);
+        Body.ContactFriction := NumberAt(Values, 2, 0.8);
+        Body.HasFriction := True;
+      end else
+      if Key = 'selfcollision' then
+        Body.SelfCollision := NumberAt(Values, 0, 1) <> 0
+      else
       if (Key = 'model') and (Values.Count > 0) and (Values[0].Kind = vkCall) then
       begin
         { box( mins, maxs ), cylinder / cone( mins, maxs, sides ),
@@ -478,6 +519,11 @@ var
 begin
   Result := TD3ArticulatedFigure.Create;
   Result.Name := AName;
+  Result.LinearFriction := 0.01;
+  Result.AngularFriction := 0.01;
+  Result.ContactFriction := 0.8;
+  Result.SelfCollision := True;
+  Result.TotalMass := -1;
   Lexer := TDoom3Lexer.Create(Body);
   Values := TD3AFValueList.Create(True);
   try
@@ -493,12 +539,26 @@ begin
           Tok := LowerCase(Lexer.NextStr);
           ReadValues(Lexer, Values);
           if Tok = 'model' then
-            Result.ModelName := StringAt(Values, 0);
+            Result.ModelName := StringAt(Values, 0)
+          else
+          if Tok = 'friction' then
+          begin
+            Result.LinearFriction := NumberAt(Values, 0, 0.01);
+            Result.AngularFriction := NumberAt(Values, 1, 0.01);
+            Result.ContactFriction := NumberAt(Values, 2, 0.8);
+          end else
+          if Tok = 'selfcollision' then
+            Result.SelfCollision := NumberAt(Values, 0, 1) <> 0
+          else
+          if Tok = 'totalmass' then
+            Result.TotalMass := NumberAt(Values, 0, -1);
         end;
       end else
       if Kind = 'body' then
       begin
         B := TD3AFBody.Create;
+        B.Density := 0.2;
+        B.SelfCollision := True;
         B.Name := Lexer.NextStr;
         Result.Bodies.Add(B);
         if Lexer.Check('{') then

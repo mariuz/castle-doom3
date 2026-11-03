@@ -4307,6 +4307,17 @@ begin
   CheckEquals('body', B.JointName, 'the torso''s joint');
   CheckEquals('box', B.ModelKind, 'a box');
   CheckNear(14, B.Radius, 'radius: half its smallest size');
+  { idPhysics_AF: density, friction, selfCollision; the mass from the box }
+  CheckNear(0.2, B.Density, 'the torso''s density');
+  Check(B.HasFriction, 'its own friction');
+  CheckNear(0.8, B.ContactFriction, 'its contact friction');
+  CheckNear(0.01, B.LinearFriction, 'its linear friction');
+  Check(B.SelfCollision, 'selfCollision by default');
+  CheckNear(0.2 * Abs((B.ModelMaxs.X - B.ModelMins.X) * (B.ModelMaxs.Y - B.ModelMins.Y) *
+    (B.ModelMaxs.Z - B.ModelMins.Z)), B.Mass, 'mass: density times the box''s volume', 0.01);
+  CheckNear(0.8, AF.ContactFriction, 'the settings'' contact friction');
+  Check(AF.SelfCollision, 'the settings'' selfCollision');
+  CheckNear(-1, AF.TotalMass, 'no totalMass');
   P := B.Origin.Evaluate(nil, Ok);
   CheckNear(45, P.Z, 'its origin');
   Model := Md5Cache.Model('models/md5/test/blob.md5mesh');
