@@ -83,8 +83,8 @@ type
     FPdaImage: TCastleImageControl;
     FPdaTimeMs: Single;
     FPdaOpenedOnce, FPdaMouseDown: Boolean;
-    { console g_pdaGui 1: use guis/pda.gui (partial: its lists and pages
-      work, parts of it stay empty), else the text panel }
+    { console g_pdaGui (1 by default): guis/pda.gui when the data has it
+      (no video or audio playback), else the text panel }
     FUsePdaGui: Boolean;
     { target_endlevel's next map, loaded FPendingMapIn seconds later }
     FPendingMap: String;
@@ -185,6 +185,7 @@ begin
   MapName := 'testmap';
   FUseReverb := True;
   FEnvProbeScale := 0.5;
+  FUsePdaGui := True;
 end;
 
 destructor TViewPlay.Destroy;
@@ -1196,6 +1197,9 @@ begin
     WalkNavigation.RunMultiplier := 1;
     WalkNavigation.JumpMaxHeight := 0;
   end else
+  if FGame.InfluenceLevel = 2 then
+    WalkNavigation.JumpMaxHeight := 0
+  else
     WalkNavigation.JumpMaxHeight := FBaseJump / WalkNavigation.PreferredHeight;
 end;
 
@@ -1220,7 +1224,7 @@ procedure TViewPlay.UpdateDamageView;
 var
   Blobs: specialize TArray<TD3ScreenBlob>;
   I: Integer;
-  Mat: TD3Material;
+  Mat, InfluenceMat: TD3Material;
   ImageName: String;
 begin
   Hud.DamageAge := FGame.SinceDamage;
@@ -1260,6 +1264,19 @@ begin
   else
     Hud.BerserkImageUrl := '';
   Hud.Invisible := FGame.PowerUpActive(PowerupInvisibility);
+  { a demonic influence's vision material: its stage image at the stage's
+    alpha, or (a colorProcess program) a red tint }
+  Hud.InfluenceAlpha := FGame.InfluenceAlpha;
+  Hud.InfluenceImageUrl := '';
+  if FGame.InfluenceMaterial <> '' then
+  begin
+    InfluenceMat := Decls.Material(FGame.InfluenceMaterial);
+    if InfluenceMat.StageImage <> '' then
+    begin
+      Hud.InfluenceImageUrl := ImageProgramUrl(InfluenceMat.StageImage, ikColor);
+      Hud.InfluenceAlpha := Hud.InfluenceAlpha * InfluenceMat.StageColor.W;
+    end;
+  end;
   { Doom 3's armorViewEffect when the game has it, else the HUD's own }
   if Decls.Material('armorViewEffect').Defined and (Decls.Material('armorViewEffect').StageImage <> '') then
     Hud.ArmorImageUrl := ImageProgramUrl(Decls.Material('armorViewEffect').StageImage, ikColor)
@@ -1747,7 +1764,8 @@ begin
     if (FPdaGui <> nil) and FPdaOpen and (Length(Words) >= 2) then
     begin
       FPdaGui.SetCursor(StrToFloatDef(Words[0], 0), StrToFloatDef(Words[1], 0));
-      FPdaGui.Click;
+      WritelnLog('GameViewPlay', 'PDA click at %s %s: cursor shown %s, %s', [Words[0], Words[1],
+        BoolToStr(FPdaGui.CursorShown, True), BoolToStr(FPdaGui.Click, 'an onAction ran', 'nothing ran')]);
       FPdaGui.ClickRelease;
       FPdaMouseDown := buttonLeft in Container.MousePressed;
       Console.Print(Format('pdaclick %s %s', [Words[0], Words[1]]));
@@ -1772,7 +1790,7 @@ begin
     { Doom 3's PDA GUI instead of the text panel (partial) }
     if Args <> '' then
       FUsePdaGui := StrToIntDef(Args, 0) <> 0;
-    Console.Print('g_pdaGui ' + Iff(FUsePdaGui, '1', '0') + ' (guis/pda.gui, partial; used when the PDA opens)');
+    Console.Print('g_pdaGui ' + Iff(FUsePdaGui, '1', '0') + ' (guis/pda.gui when the data has it, else the text panel)');
   end else
   if Cmd = 'r_prepareresources' then
   begin

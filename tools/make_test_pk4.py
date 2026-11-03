@@ -1426,7 +1426,7 @@ def map_text():
          'texture': 'lights/test_ambient'},
         # Room B lights
         {'classname': 'light', 'name': 'light_3', 'origin': '448 -192 240',
-         'light_radius': '360 360 300', '_color': '0.4 0.6 1'},
+         'light_radius': '360 360 300', '_color': '0.4 0.6 1', 'color_demonic': '1 0 0'},
         {'classname': 'light', 'name': 'light_4', 'origin': '448 192 240',
          'light_radius': '360 360 300', '_color': '1 0.75 0.5',
          'texture': 'lights/test_pulse'},
@@ -1632,6 +1632,12 @@ def map_text():
          'target': 'light_1', 'fadetime': '1'},
         {'classname': 'target_lightfadein', 'name': 'target_lightfadein_1', 'origin': '-200 -140 170',
          'target': 'light_1', 'fadetime': '1'},
+        # a demonic influence: light_3 turns red, the view gets the vision
+        # material, the weapon goes down, the fov narrows; 2 s
+        {'classname': 'target_setinfluence', 'name': 'target_setinfluence_1', 'origin': '-200 -140 180',
+         'targetsOnly': '1', 'target': 'light_3', 'time': '2', 'fade_time': '0.5', 'fov': '70',
+         'fovTime': '0.5', 'leaveFOV': '1', 'influenceLevel': '1', 'effect_vision': '1',
+         'mtrVision': 'textures/test/blood_blob', 'flashIn': '0.2'},
         # powerups (idItemPowerup) in room A's north-west corner
         {'classname': 'item_test_berserk', 'name': 'item_berserk_1', 'origin': '-220 120 0', 'spin': '1'},
         {'classname': 'item_test_invisibility', 'name': 'item_invisibility_1', 'origin': '-220 200 0',
@@ -2851,6 +2857,12 @@ entityDef target_lightfadein {
 
 entityDef target_lightfadeout {
 	"spawnclass"			"idTarget_LightFadeOut"
+}
+
+entityDef target_setinfluence {
+	"spawnclass"			"idTarget_SetInfluence"
+	"effect_all"			"1"
+	"fade_time"				"0.75"
 }
 
 // a thrown weapon: createProjectile holds the grenade at the barrel until

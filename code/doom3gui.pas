@@ -89,6 +89,9 @@ type
     { noevents: the cursor and clicks pass through; notime: no time line;
       nocursor: no cursor drawn over it }
     NoEvents, NoTime, NoCursor: Boolean;
+    { noclip: its text and children may draw outside its rect (Doom 3 clips
+      them to it otherwise) }
+    NoClip: Boolean;
     { a listDef (idListWindow): rows from the GUI state "<name>_item_<i>",
       columns split by tabs at Tabstops, the selection "<name>_sel_0" }
     IsList: Boolean;
@@ -507,6 +510,9 @@ begin
   else
   if K = 'nocursor' then
     NoCursor := D3StrToFloat(S, 0) <> 0
+  else
+  if K = 'noclip' then
+    NoClip := D3StrToFloat(S, 0) <> 0
   else
   if K = 'font' then
     Font := S
@@ -1104,11 +1110,14 @@ var
 begin
   { idWindow::HandleEvent K_MOUSE1: the deepest window under the cursor
     that takes events gets the click }
+  { the children under the cursor, the top one first; one that handles
+    nothing passes the click on (idWindow::HandleEvent tries the next) }
   for I := W.Children.Count - 1 downto 0 do
   begin
     C := W.Children[I];
-    if PropVisible(C) and not C.NoEvents and WindowContains(Self, C, X, Y) then
-      Exit(ClickWindow(C, X, Y, Release));
+    if PropVisible(C) and not C.NoEvents and WindowContains(Self, C, X, Y) and
+       ClickWindow(C, X, Y, Release) then
+      Exit(True);
   end;
   Result := False;
   { a listDef: the row under the cursor becomes the selection
@@ -2015,12 +2024,18 @@ type
     Font: TTextureFontData;
     { pixels per GUI unit }
     ScaleX, ScaleY: Single;
+    { the pixels drawing may touch (idDeviceContext's clip rect: the
+      windows' rects), end exclusive }
+    ClipX0, ClipY0, ClipX1, ClipY1: Integer;
     { blend 0..255 color bytes with alpha 0..255 }
     procedure BlendBytes(const X, Y: Integer; const R, G, B, A: Integer); inline;
     { the pixels a GUI rectangle covers (y down), end exclusive }
     procedure PixelBox(const R: TFloatRectangle; out X0, Y0, X1, Y1: Integer);
     procedure FillRect(const R: TFloatRectangle; const C: TVector4);
-    procedure DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4);
+    { add 0..255 color bytes (blend add) }
+    procedure AddBytes(const X, Y: Integer; const R, G, B: Integer);
+    procedure DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4;
+      const Additive: Boolean = False);
     { a part (S, T .. S2, T2, Doom 3 t down) of an image, its alpha
       scaled, in a color }
     procedure DrawImagePart(const X0, Y0, DstW, DstH: Integer; const Src: TRGBAlphaImage;
@@ -2035,7 +2050,7 @@ procedure TGuiPainter.BlendBytes(const X, Y: Integer; const R, G, B, A: Integer)
 var
   P: PVector4Byte;
 begin
-  if (A <= 0) or (X < 0) or (Y < 0) or (X >= Integer(Image.Width)) or (Y >= Integer(Image.Height)) then
+  if (A <= 0) or (X < ClipX0) or (Y < ClipY0) or (X >= ClipX1) or (Y >= ClipY1) then
     Exit;
   { CGE images are bottom-to-top }
   P := Image.PixelPtr(X, Image.Height - 1 - Y);
@@ -2051,6 +2066,18 @@ begin
   P^.Y := (P^.Y * (255 - A) + G * A + 127) div 255;
   P^.Z := (P^.Z * (255 - A) + B * A + 127) div 255;
   P^.W := P^.W + ((255 - P^.W) * A + 127) div 255;
+end;
+
+procedure TGuiPainter.AddBytes(const X, Y: Integer; const R, G, B: Integer);
+var
+  P: PVector4Byte;
+begin
+  if (X < ClipX0) or (Y < ClipY0) or (X >= ClipX1) or (Y >= ClipY1) then
+    Exit;
+  P := Image.PixelPtr(X, Image.Height - 1 - Y);
+  P^.X := Min(255, P^.X + R);
+  P^.Y := Min(255, P^.Y + G);
+  P^.Z := Min(255, P^.Z + B);
 end;
 
 procedure TGuiPainter.PixelBox(const R: TFloatRectangle; out X0, Y0, X1, Y1: Integer);
@@ -2089,14 +2116,25 @@ begin
       BlendBytes(X, Y, CR, CG, CB, CA);
 end;
 
-procedure TGuiPainter.DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4);
+procedure TGuiPainter.DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4;
+  const Additive: Boolean);
 var
   X, Y, X0, Y0, X1, Y1, SY, TR, TG, TB, TA: Integer;
   Columns: array of Integer;
   Row, P: PVector4Byte;
   Rgba: TRGBAlphaImage;
+  FlipX, FlipY: Boolean;
+  F: Single;
 begin
   PixelBox(R, X0, Y0, X1, Y1);
+  { idDeviceContext::DrawMaterial: a negative width or height mirrors the
+    image over the rect from x (y) to x + abs(w) (y + abs(h)) }
+  FlipX := X1 < X0;
+  if FlipX then
+    X1 := X0 + (X0 - X1);
+  FlipY := Y1 < Y0;
+  if FlipY then
+    Y1 := Y0 + (Y0 - Y1);
   if (X1 <= X0) or (Y1 <= Y0) or not (Src is TRGBAlphaImage) then
     Exit;
   Rgba := TRGBAlphaImage(Src);
@@ -2107,17 +2145,28 @@ begin
   { the source column of each pixel column }
   SetLength(Columns, X1 - X0);
   for X := X0 to X1 - 1 do
-    Columns[X - X0] := Min(Rgba.Width - 1, Trunc((X - X0 + 0.5) / (X1 - X0) * Rgba.Width));
+  begin
+    F := (X - X0 + 0.5) / (X1 - X0);
+    if FlipX then
+      F := 1 - F;
+    Columns[X - X0] := Min(Rgba.Width - 1, Trunc(F * Rgba.Width));
+  end;
   for Y := Max(0, Y0) to Min(Integer(Image.Height), Y1) - 1 do
   begin
     { GUI y goes down, the source image's rows go up }
-    SY := Min(Rgba.Height - 1, Trunc((1 - (Y - Y0 + 0.5) / (Y1 - Y0)) * Rgba.Height));
+    F := (Y - Y0 + 0.5) / (Y1 - Y0);
+    if FlipY then
+      F := 1 - F;
+    SY := Min(Rgba.Height - 1, Trunc((1 - F) * Rgba.Height));
     Row := Rgba.PixelPtr(0, SY);
     for X := Max(0, X0) to Min(Integer(Image.Width), X1) - 1 do
     begin
       P := Row;
       Inc(P, Columns[X - X0]);
-      BlendBytes(X, Y, P^.X * TR div 255, P^.Y * TG div 255, P^.Z * TB div 255, P^.W * TA div 255);
+      if Additive then
+        AddBytes(X, Y, P^.X * TR div 255, P^.Y * TG div 255, P^.Z * TB div 255)
+      else
+        BlendBytes(X, Y, P^.X * TR div 255, P^.Y * TG div 255, P^.Z * TB div 255, P^.W * TA div 255);
     end;
   end;
 end;
@@ -2370,6 +2419,7 @@ var
   C: TD3GuiWindow;
   B: Single;
   V: TVector4;
+  SaveX0, SaveY0, SaveX1, SaveY1, X0, Y0, X1, Y1: Integer;
 begin
   if not Gui.PropVisible(W) then
     Exit;
@@ -2388,7 +2438,9 @@ begin
     F := FindImageFile(ImageName, False);
     if F <> '' then
     try
-      DrawImage(R, GuiSourceImage(F), Gui.PropVec4(W, 'matcolor'));
+      { a "blend add" stage (the PDA's glow overlays) adds its colors }
+      DrawImage(R, GuiSourceImage(F), Gui.PropVec4(W, 'matcolor'),
+        (M.StageImage <> '') and (M.StageBlend = bmAdd));
     except
       on E: Exception do
         WritelnWarning('Doom3Gui', 'Cannot draw "%s": %s', [F, E.Message]);
@@ -2403,12 +2455,36 @@ begin
     FillRect(FloatRectangle(R.Left, R.Bottom + B, B, R.Height - 2 * B), V);
     FillRect(FloatRectangle(R.Left + R.Width - B, R.Bottom + B, B, R.Height - 2 * B), V);
   end;
-  if W.IsList then
-    DrawList(R, W)
-  else
-    DrawText(R, W, Gui.PropText(W));
-  for C in W.Children do
-    DrawWindow(C, R.Left, R.Bottom);
+  { idWindow::Redraw: the text and the children are clipped to the rect
+    (a window shrunk to height 0 hides them: the PDA's objectives) }
+  SaveX0 := ClipX0;
+  SaveY0 := ClipY0;
+  SaveX1 := ClipX1;
+  SaveY1 := ClipY1;
+  if not W.NoClip then
+  begin
+    PixelBox(R, X0, Y0, X1, Y1);
+    ClipX0 := Max(ClipX0, Min(X0, X1));
+    ClipY0 := Max(ClipY0, Min(Y0, Y1));
+    ClipX1 := Min(ClipX1, Max(X0, X1));
+    ClipY1 := Min(ClipY1, Max(Y0, Y1));
+  end;
+  try
+    if (ClipX1 > ClipX0) and (ClipY1 > ClipY0) then
+    begin
+      if W.IsList then
+        DrawList(R, W)
+      else
+        DrawText(R, W, Gui.PropText(W));
+      for C in W.Children do
+        DrawWindow(C, R.Left, R.Bottom);
+    end;
+  finally
+    ClipX0 := SaveX0;
+    ClipY0 := SaveY0;
+    ClipX1 := SaveX1;
+    ClipY1 := SaveY1;
+  end;
 end;
 
 { Fill a polygon (GUI coordinates, y down) with the even-odd rule. }
@@ -2507,6 +2583,10 @@ begin
     Painter.ScaleY := GuiImageHeight / GuiHeight;
     Painter.Gui := Gui;
     Painter.Font := Font_DefaultUi;
+    Painter.ClipX0 := 0;
+    Painter.ClipY0 := 0;
+    Painter.ClipX1 := Result.Width;
+    Painter.ClipY1 := Result.Height;
     Painter.DrawWindow(Gui.Desktop, 0, 0);
     Painter.DrawCursor;
   finally

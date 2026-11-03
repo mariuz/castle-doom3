@@ -43,6 +43,11 @@ type
     { berserk's screen tint (0: off) and its image ('': the HUD's own) }
     BerserkAlpha: Single;
     BerserkImageUrl: String;
+    { target_setinfluence's vision material over the screen (its alpha, 0:
+      off); without an image (a colorProcess program) the view is tinted
+      red }
+    InfluenceAlpha: Single;
+    InfluenceImageUrl: String;
     { invisibility: a cold rim on the screen's edges }
     Invisible: Boolean;
     Blobs: array of TD3HudBlob;
@@ -65,7 +70,7 @@ implementation
 
 uses
   Math,
-  CastleGLUtils, CastleControls, CastleComponentSerialize, CastleImages;
+  CastleGLUtils, CastleControls, CastleComponentSerialize, CastleImages, CastleRenderOptions;
 
 constructor TDoom3Hud.Create(AOwner: TComponent);
 begin
@@ -182,6 +187,20 @@ begin
       Blobs[I].W / 640 * R.Width, Blobs[I].H / 480 * R.Height));
   end;
 
+  { a demonic influence's vision (idPlayerView::InfluenceVision) }
+  if (InfluenceAlpha > 0) and (InfluenceImageUrl <> '') then
+  begin
+    Img := Image(InfluenceImageUrl);
+    if Img <> nil then
+    begin
+      Img.Color := Vector4(1, 1, 1, InfluenceAlpha);
+      Img.Draw(R);
+    end;
+  end else
+  if InfluenceAlpha > 0 then
+    { colorProcess.vfp towards red: the view multiplied by a red }
+    DrawRectangle(R, Vector4(1, 1 - 0.85 * InfluenceAlpha, 1 - 0.85 * InfluenceAlpha, 1),
+      bsDstColor, bdZero, True);
   { berserk (idPlayerView: textures/decals/berserk) }
   if (BerserkAlpha > 0) and not Dead then
   begin
