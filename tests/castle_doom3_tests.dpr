@@ -4389,6 +4389,53 @@ begin
   end;
 end;
 
+{ idMoveableItem: shots push it, its pickup box follows (item_clip_1 made
+  one here) }
+procedure TestMoveableItems;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  I: Integer;
+  It: TD3Item;
+  Far: TVector3;
+  Box0: TBox3D;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for moveable items');
+    for I := 0 to Map.MapFile.Entities.Count - 1 do
+      if Map.MapFile.Entities[I].Name = 'item_clip_1' then
+        Map.MapFile.Entities[I].SetValue('spawnclass', 'idMoveableItem');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    It := Game.ItemOf(Game.FindEntity('item_clip_1'));
+    Check((It <> nil) and (It.Moveable <> nil), 'item_clip_1 has physics');
+    if (It = nil) or (It.Moveable = nil) then
+      Exit;
+    Box0 := It.Box;
+    Far := D3ToCge(Vector3(-200, 100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Check(Game.PushMoveableAt(It.Brush.Scene.BoundingBox.Center, D3ToCge(Vector3(0, 20000, 0))), 'a shot pushes it');
+    for I := 1 to 20 do
+      Game.Update(0.05, Far);
+    Check(CgeToD3(It.Brush.Scene.Translation).Y > -210 + 5, 'it slid along the shot');
+    Check(It.Box.Center.Y - Box0.Center.Y > 5, 'its pickup box went with it');
+    { a wound in front of room A's west wall (x = -256) splats blood on it
+      (blob_1's mtr_splat_flesh) }
+    I := Game.Decals.Decals.Count;
+    Game.EmitWound(Game.FindEntity('blob_1'), nil, D3ToCge(Vector3(-220, 0, 40)), D3ToCge(Vector3(1, 0, 0)));
+    CheckEquals(I + 1, Game.Decals.Decals.Count, 'a blood splat on the wall behind the wound');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { a light bound to a mover rides with it (light_trig bound to lift_1 here) }
 procedure TestLightBinding;
 var
@@ -6920,6 +6967,7 @@ begin
   TestBurnAway;
   TestWeaponTargets;
   TestLightBinding;
+  TestMoveableItems;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;
