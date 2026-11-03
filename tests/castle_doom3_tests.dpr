@@ -4389,6 +4389,58 @@ begin
   end;
 end;
 
+{ a light bound to a mover rides with it (light_trig bound to lift_1 here) }
+procedure TestLightBinding;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  I, L: Integer;
+  Lift: TCastleTransform;
+  Far, Loc0, Lift0: TVector3;
+  Moved: Boolean;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for light bindings');
+    for I := 0 to Map.MapFile.Entities.Count - 1 do
+      if Map.MapFile.Entities[I].Name = 'light_trig' then
+        Map.MapFile.Entities[I].SetValue('bind', 'lift_1');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    L := Map.FindLight('light_trig');
+    Check(L >= 0, 'light_trig');
+    if (L < 0) or (Map.FindBrush('lift_1') = nil) then
+      Exit;
+    Lift := Map.FindBrush('lift_1').Scene;
+    Loc0 := Map.Light(L).Location;
+    Lift0 := Lift.Translation;
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    { the map script moves the lift up 64 and down }
+    Moved := False;
+    for I := 1 to 60 do
+    begin
+      Game.Update(0.05, Far);
+      if (Lift.Translation - Lift0).Length > 10 then
+      begin
+        Moved := True;
+        Break;
+      end;
+    end;
+    Check(Moved, 'the lift moves');
+    CheckNear(0, ((Map.Light(L).Location - Loc0) - (Lift.Translation - Lift0)).Length,
+      'the light moved as much as the lift', 0.5);
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { target_enableweapons (idTarget_EnableLevelWeapons) and target_removeweapons }
 procedure TestWeaponTargets;
 var
@@ -6867,6 +6919,7 @@ begin
   TestSoundShakesAndPaths;
   TestBurnAway;
   TestWeaponTargets;
+  TestLightBinding;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;

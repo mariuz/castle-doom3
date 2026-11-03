@@ -284,6 +284,9 @@ type
     procedure SetLightParm(const I, Parm: Integer; const Value: Single);
     { Scale a light's color (0..1), for fading lights in and out. }
     procedure SetLightFade(const I: Integer; const Value: Single);
+    { Move a light (bound to a mover): its CGE location and light volume
+      matrix (world to the light's texture space) }
+    procedure SetLightPose(const I: Integer; const Location: TVector3; const Matrix: TMatrix4);
     { Set a GUI parameter of an entity (a "gui_parm1"... key, which its
       GUIs show) and redraw its GUI screens (idEntity::Event_SetGuiParm).
       Returns the number of screens redrawn. }
@@ -2452,6 +2455,20 @@ begin
   finally
     FreeAndNil(FGuiTextures);
   end;
+end;
+
+procedure TDoom3Map.SetLightPose(const I: Integer; const Location: TVector3; const Matrix: TMatrix4);
+begin
+  if (I < 0) or (I > High(FLights)) or (FLights[I].Node = nil) then
+    Exit;
+  FLights[I].Location := Location;
+  FLights[I].Matrix := Matrix;
+  if FLights[I].Node is TPointLightNode then
+    TPointLightNode(FLights[I].Node).Location := Location
+  else
+  if FLights[I].Node is TSpotLightNode then
+    TSpotLightNode(FLights[I].Node).Location := Location;
+  SetLightVolumeMatrix(FLights[I].Node, Matrix);
 end;
 
 procedure TDoom3Map.SetLightFade(const I: Integer; const Value: Single);

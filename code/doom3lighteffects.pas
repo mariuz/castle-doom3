@@ -73,6 +73,8 @@ type
   Otherwise its own Effect (CreateLightEffect, Index names the uniform). }
 procedure SetLightVolume(const Light: TAbstractLightNode; var Shared: TD3SharedLightEffects;
   const Index: Integer; const M: TMatrix4; const ProjectionImage: String; const Projected: Boolean);
+{ Move a light's volume (SetLightVolume's matrix) when the light moves. }
+procedure SetLightVolumeMatrix(const Light: TAbstractLightNode; const M: TMatrix4);
 
 { CGE passes light nodes' custom fields to their effects as per-light
   uniforms (light nodes have interface declarations). }
@@ -281,6 +283,29 @@ begin
     end;
   end;
   Result := FSharedAvailable = 1;
+end;
+
+{ A new light volume matrix for a light SetLightVolume made (a light
+  moving with its master): its per-light uniform, or its own effect's. }
+procedure SetLightVolumeMatrix(const Light: TAbstractLightNode; const M: TMatrix4);
+var
+  I, J: Integer;
+  F: TX3DField;
+  E: TX3DNode;
+begin
+  F := Light.Field('d3_light_matrix_');
+  if F is TSFMatrix4f then
+  begin
+    TSFMatrix4f(F).Send(M);
+    Exit;
+  end;
+  for I := 0 to Light.FdEffects.Count - 1 do
+  begin
+    E := Light.FdEffects[I];
+    for J := 0 to E.FieldsCount - 1 do
+      if (Copy(E.Fields[J].X3DName, 1, 16) = 'd3_light_matrix_') and (E.Fields[J] is TSFMatrix4f) then
+        TSFMatrix4f(E.Fields[J]).Send(M);
+  end;
 end;
 
 procedure SetLightVolume(const Light: TAbstractLightNode; var Shared: TD3SharedLightEffects;
