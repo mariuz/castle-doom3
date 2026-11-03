@@ -254,6 +254,9 @@ type
     { Evaluate an expression in a window's context (gui::x, $vars,
       win::prop, arithmetic and comparisons). }
     function Eval(const W: TD3GuiWindow; const S: String): Single;
+    { "a, b, c, d" with an expression in each part (Default's for the
+      missing ones); one part: the first component only }
+    function EvalVec(const W: TD3GuiWindow; const S: String; const Default: TVector4): TVector4;
     { A window property as drawn now: a transition's value, an
       expression's, else the property. }
     function PropVec4(const W: TD3GuiWindow; const Prop: String): TVector4;
@@ -302,6 +305,9 @@ procedure SetGuiCvar(const AName, Value: String);
   frees), the 640 x 480 virtual screen stretched over it. State (may be
   nil) replaces the GUI's gui:: variables first. }
 function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage;
+{ The same over a transparent background (the HUD over the view): not
+  premultiplied, additive stages get the alpha of their brightness. }
+function RenderGuiTransparent(const Gui: TD3Gui): TRGBAlphaImage;
 
 { The texture URL of a GUI drawn with some state, '' when the GUI file is
   missing. Rendered once per (path, state) and cached; static (no events). }
@@ -395,7 +401,7 @@ uses
   Math, StrUtils,
   CastleDownload, CastleUriUtils, CastleLog, CastleTextureFontData, CastleTextureFont_DefaultUi,
   CastleUnicode, CastleUtils,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Roq;
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Roq, Doom3Expressions;
 
 function DynamicImage(const ImageName: String): TRGBAlphaImage; forward;
 
@@ -741,6 +747,99 @@ begin
   end;
 end;
 
+const
+  GuiOpChars = ['+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|', '?', ':'];
+
+{ Tokens up to the matching "]" (the "[" read), joined. }
+function ReadBracketed(const L: TDoom3Lexer): String;
+var
+  Depth: Integer;
+  Tok: String;
+begin
+  Result := '';
+  Depth := 1;
+  while L.Next(Tok) do
+  begin
+    if Tok = '[' then
+      Inc(Depth)
+    else
+    if Tok = ']' then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+        Break;
+    end;
+    if Result <> '' then
+      Result := Result + ' ';
+    Result := Result + Tok;
+  end;
+end;
+
+{ Is the next token an operator continuing an expression ("/", "*", "-",
+  "==", "/3")? A signed number ("-5") is not. }
+function NextIsOperator(const L: TDoom3Lexer): Boolean;
+var
+  T: String;
+begin
+  T := L.Peek;
+  if (T = '') or L.PeekQuoted then
+    Exit(False);
+  Result := T[1] in GuiOpChars;
+  if Result and (Length(T) > 1) and (T[1] in ['-', '+']) and not (T[2] in GuiOpChars) then
+    Result := False;
+end;
+
+function OnlyOpChars(const T: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := T <> '';
+  for I := 1 to Length(T) do
+    if not (T[I] in GuiOpChars) then
+      Exit(False);
+end;
+
+{ One operand of a property's expression: a token, a parenthesized
+  expression, a table lookup "name[ expr ]", with a sign or "!". }
+function ReadOperand(const L: TDoom3Lexer): String;
+var
+  Tok: String;
+  Quoted: Boolean;
+begin
+  Tok := L.NextStr;
+  Quoted := L.WasQuoted;
+  if not Quoted and (Tok = '(') then
+    Exit('(' + ReadParenthesized(L) + ')');
+  if not Quoted and ((Tok = '-') or (Tok = '!')) then
+    Exit(Tok + ReadOperand(L));
+  Result := Tok;
+  if not Quoted and (L.Peek = '[') and not L.PeekQuoted then
+  begin
+    L.NextStr;
+    Result := Result + '[' + ReadBracketed(L) + ']';
+  end;
+end;
+
+{ A property's expression (idWindow::ParseExpression): operands and
+  operators, e.g. pdflick[ time * .0025 ] / 3 or ("gui::x" * 1.33). One
+  plain token stays as it is. }
+function ReadExpression(const L: TDoom3Lexer): String;
+var
+  Op: String;
+begin
+  Result := ReadOperand(L);
+  while NextIsOperator(L) do
+  begin
+    Op := L.NextStr;
+    { "==", ">=": the lexer splits "=" off }
+    while OnlyOpChars(Op) and (L.Peek = '=') and not L.PeekQuoted do
+      Op := Op + L.NextStr;
+    Result := Result + ' ' + Op;
+    if OnlyOpChars(Op) then
+      Result := Result + ' ' + ReadOperand(L);
+  end;
+end;
+
 { A script block after its opening brace: commands up to the closing one. }
 function ParseScript(const L: TDoom3Lexer): TD3GuiScript;
 var
@@ -892,22 +991,20 @@ begin
         VarName := LowerCase(L.NextStr);
         if (VarName <> '') and (VarName[1] = '$') then
           Delete(VarName, 1, 1);
-        Value := L.NextStr;
+        Value := ReadExpression(L);
         while L.Check(',') do
-          Value := Value + ',' + L.NextStr;
+          Value := Value + ',' + ReadExpression(L);
         L.Check(';');
         W.Vars.Values[VarName] := Value;
         Continue;
       end;
       { a property's value: tokens separated by commas, e.g.
         rect 0, 0, 640, 480 / text "abc" / visible "gui::x" }
-      Value := L.NextStr;
-      { visible ("gui::inv_count" == 0): a parenthesized expression }
-      if Value = '(' then
-        Value := ReadParenthesized(L)
-      else
-        while L.Check(',') do
-          Value := Value + ',' + L.NextStr;
+      { visible ("gui::inv_count" == 0), matcolor 1, 1, 1, pdflick[ time ]
+        / 3: an expression in each part }
+      Value := ReadExpression(L);
+      while L.Check(',') do
+        Value := Value + ',' + ReadExpression(L);
       L.Check(';');
       W.SetProp(Key, Value);
     end;
@@ -1598,6 +1695,8 @@ function TGuiExprParser.ParsePrimary: Single;
 var
   Name, V: String;
   Start: Integer;
+  Index: Single;
+  Tab: TD3Table;
   Win: TD3GuiWindow;
   Prop: String;
 begin
@@ -1641,6 +1740,20 @@ begin
   end;
   if (Name <> '') and (Name[1] = '$') then
     Delete(Name, 1, 1);
+  { a table lookup: pdflick[ time * .0025 ] }
+  if Peek = '[' then
+  begin
+    Inc(P);
+    Index := ParseOr;
+    if Peek = ']' then
+      Inc(P);
+    Tab := nil;
+    if Decls <> nil then
+      Tab := Decls.Table(Name);
+    if Tab <> nil then
+      Exit(Tab.Lookup(Index));
+    Exit(0);
+  end;
   if SameText(Copy(Name, 1, 5), 'gui::') then
   begin
     V := Gui.StateValue(Copy(Name, 6, MaxInt));
@@ -1795,6 +1908,42 @@ begin
   end;
 end;
 
+function TD3Gui.EvalVec(const W: TD3GuiWindow; const S: String; const Default: TVector4): TVector4;
+var
+  Parts: array of String;
+  Depth, I, Start: Integer;
+  Part: String;
+begin
+  Result := Default;
+  if IsNumbers(S) then
+    Exit(ParseNumbers(S, Default));
+  { split at the commas outside parentheses and brackets }
+  Parts := nil;
+  Depth := 0;
+  Start := 1;
+  for I := 1 to Length(S) + 1 do
+    if (I > Length(S)) or ((S[I] = ',') and (Depth = 0)) then
+    begin
+      Parts := Concat(Parts, [Trim(Copy(S, Start, I - Start))]);
+      Start := I + 1;
+    end else
+    if S[I] in ['(', '['] then
+      Inc(Depth)
+    else
+    if S[I] in [')', ']'] then
+      Dec(Depth);
+  for I := 0 to Min(3, High(Parts)) do
+  begin
+    Part := Parts[I];
+    if Part = '' then
+      Continue;
+    if IsNumbers(Part) then
+      Result.Data[I] := D3StrToFloat(Part, Default.Data[I])
+    else
+      Result.Data[I] := Eval(W, Part);
+  end;
+end;
+
 function TD3Gui.Eval(const W: TD3GuiWindow; const S: String): Single;
 var
   Parser: TGuiExprParser;
@@ -1861,7 +2010,7 @@ begin
     else
     begin
       if W.FindVar(Prop, V) then
-        Exit(ParseNumbers(V, TVector4.Zero));
+        Exit(EvalVec(W, V, TVector4.Zero));
       Result := TVector4.Zero;
     end;
   end;
@@ -1871,9 +2020,9 @@ begin
     { a variable or another window's property gives 4 components, an
       expression one }
     if (E[1] = '$') and W.FindVar(Copy(E, 2, MaxInt), V) then
-      Exit(ParseNumbers(V, Result));
+      Exit(EvalVec(W, V, Result));
     if W.FindVar(E, V) then
-      Exit(ParseNumbers(V, Result));
+      Exit(EvalVec(W, V, Result));
     Win := ResolveWindow(E, nil, P);
     if (Win <> nil) and (Win <> W) and (P <> '') then
       Exit(PropVec4(Win, P));
@@ -1883,7 +2032,7 @@ begin
       if IsNumbers(V) then
         Exit(ParseNumbers(V, Result));
     end;
-    Result := Vector4(Eval(W, E), Result.Y, Result.Z, Result.W);
+    Result := EvalVec(W, E, Result);
   end;
 end;
 
@@ -2755,12 +2904,13 @@ end;
 
 function TGuiPainter.DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
 var
-  Angle, ShearX, ShearY, CosA, SinA, Det, CX, CY, DX, DY, SX, SY: Single;
+  Angle, ShearX, ShearY, CosA, SinA, Det, CX, CY, DX, DY, SX, SY, Margin: Single;
   M00, M01, M10, M11, I00, I01, I10, I11: Single;
   V: TVector4;
   Scratch, Main: TRGBAlphaImage;
   Parts: TStringArray;
-  X, Y, PX, PY: Integer;
+  X, Y, PX, PY, K, BX0, BY0, BX1, BY1: Integer;
+  SaveX0, SaveY0, SaveX1, SaveY1: Integer;
   P: PVector4Byte;
   OuterInTransform: TD3GuiWindow;
 begin
@@ -2795,17 +2945,19 @@ begin
       InTransform := OuterInTransform;
       Image := Main;
     end;
-    { the center of its rect (pixels); M = rotation * shear (Doom 3's
-      trans *= smat with smat[0][1] = shear.x, smat[1][0] = shear.y) }
+    { the center of its rect (pixels). Doom 3: trans = rotation * smat
+      (smat[0][1] = shear.x, smat[1][0] = shear.y), applied to row vectors
+      (v * trans): on column vectors M = smat^T * rotation^T, so shear.x
+      moves y along x and shear.y x along y (hud.gui's slanted text) }
     V := Gui.PropVec4(W, 'rect');
     CX := (ParentX + V.X + V.Z / 2) * ScaleX;
     CY := (ParentY + V.Y + V.W / 2) * ScaleY;
     CosA := Cos(DegToRad(Angle));
     SinA := Sin(DegToRad(Angle));
-    M00 := CosA + -SinA * ShearY;
-    M01 := CosA * ShearX - SinA;
-    M10 := SinA + CosA * ShearY;
-    M11 := SinA * ShearX + CosA;
+    M00 := CosA + ShearY * SinA;
+    M01 := -SinA + ShearY * CosA;
+    M10 := ShearX * CosA + SinA;
+    M11 := -ShearX * SinA + CosA;
     Det := M00 * M11 - M01 * M10;
     if Abs(Det) < 1e-6 then
       Exit;
@@ -2813,9 +2965,46 @@ begin
     I01 := -M01 / Det;
     I10 := -M10 / Det;
     I11 := M00 / Det;
-    { every pixel of the clip from where it comes in the scratch image }
-    for Y := ClipY0 to ClipY1 - 1 do
-      for X := ClipX0 to ClipX1 - 1 do
+    { only where the transformed rect lands (its corners' bounds, the clip
+      within): children stay in their parent's rect (Doom 3's clip) }
+    BX0 := MaxInt;
+    BY0 := MaxInt;
+    BX1 := -MaxInt;
+    BY1 := -MaxInt;
+    { a transformed window's own text isn't clipped to it (dhewm3 draws
+      hud.gui's 50 wide "100" whole in its 39 wide window): a margin }
+    Margin := 24;
+    for K := 0 to 3 do
+    begin
+      DX := (ParentX + V.X - Margin + (V.Z + 2 * Margin) * (K mod 2)) * ScaleX - CX;
+      DY := (ParentY + V.Y - Margin + (V.W + 2 * Margin) * (K div 2)) * ScaleY - CY;
+      DX := DX / ScaleX;
+      DY := DY / ScaleY;
+      SX := CX + (M00 * DX + M01 * DY) * ScaleX;
+      SY := CY + (M10 * DX + M11 * DY) * ScaleY;
+      BX0 := Min(BX0, Floor(SX) - 2);
+      BY0 := Min(BY0, Floor(SY) - 2);
+      BX1 := Max(BX1, Ceil(SX) + 2);
+      BY1 := Max(BY1, Ceil(SY) + 2);
+    end;
+    { Doom 3 clips before transforming (idDeviceContext::ClipCoords, then
+      the matrix): the scratch drawing was clipped, its result may reach
+      past the parent's clip }
+    BX0 := Max(BX0, 0);
+    BY0 := Max(BY0, 0);
+    BX1 := Min(BX1, Integer(Image.Width));
+    BY1 := Min(BY1, Integer(Image.Height));
+    SaveX0 := ClipX0;
+    SaveY0 := ClipY0;
+    SaveX1 := ClipX1;
+    SaveY1 := ClipY1;
+    ClipX0 := 0;
+    ClipY0 := 0;
+    ClipX1 := Image.Width;
+    ClipY1 := Image.Height;
+    { every pixel there from where it comes in the scratch image }
+    for Y := BY0 to BY1 - 1 do
+      for X := BX0 to BX1 - 1 do
       begin
         { in GUI units (the pixels aren't square) }
         DX := (X + 0.5 - CX) / ScaleX;
@@ -2832,6 +3021,10 @@ begin
           BlendBytes(X, Y, Min(255, P^.X * 255 div P^.W), Min(255, P^.Y * 255 div P^.W),
             Min(255, P^.Z * 255 div P^.W), P^.W);
       end;
+    ClipX0 := SaveX0;
+    ClipY0 := SaveY0;
+    ClipX1 := SaveX1;
+    ClipY1 := SaveY1;
   finally
     Scratch.Free;
   end;
@@ -2966,7 +3159,8 @@ begin
   SaveY0 := ClipY0;
   SaveX1 := ClipX1;
   SaveY1 := ClipY1;
-  if not W.NoClip then
+  { a transformed window: only its parent clips it (see DrawTransformed) }
+  if not W.NoClip and (W <> InTransform) then
   begin
     PixelBox(R, X0, Y0, X1, Y1);
     ClipX0 := Max(ClipX0, Min(X0, X1));
@@ -3157,6 +3351,51 @@ begin
     Painter.Free;
   end;
   Gui.Dirty := False;
+end;
+
+function RenderGuiTransparent(const Gui: TD3Gui): TRGBAlphaImage;
+var
+  Painter: TGuiPainter;
+  P: PVector4Byte;
+  I, A: Integer;
+begin
+  Result := TRGBAlphaImage.Create(GuiImageWidth, GuiImageHeight);
+  Result.Clear(Vector4Byte(0, 0, 0, 0));
+  if (Gui = nil) or (Gui.Desktop = nil) then
+    Exit;
+  Painter := TGuiPainter.Create;
+  try
+    Painter.Image := Result;
+    Painter.ScaleX := GuiImageWidth / GuiWidth;
+    Painter.ScaleY := GuiImageHeight / GuiHeight;
+    Painter.Gui := Gui;
+    Painter.Font := Font_DefaultUi;
+    Painter.ClipX0 := 0;
+    Painter.ClipY0 := 0;
+    Painter.ClipX1 := Result.Width;
+    Painter.ClipY1 := Result.Height;
+    Gui.HasVideo := False;
+    Painter.DrawWindow(Gui.Desktop, 0, 0);
+    Painter.DrawCursor;
+  finally
+    Painter.Free;
+  end;
+  Gui.Dirty := False;
+  { the painter blends over black: the colors are premultiplied; added
+    light over nothing has no alpha yet (its brightness is) }
+  P := Result.PixelPtr(0, 0);
+  for I := 0 to Result.Width * Result.Height - 1 do
+  begin
+    A := Max(P^.W, Max(P^.X, Max(P^.Y, P^.Z)));
+    if (A > 0) and (A < 255) then
+    begin
+      P^.X := Min(255, P^.X * 255 div A);
+      P^.Y := Min(255, P^.Y * 255 div A);
+      P^.Z := Min(255, P^.Z * 255 div A);
+    end;
+    P^.W := A;
+    Inc(P);
+  end;
 end;
 
 { Cache and URL protocol ----------------------------------------------------- }

@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
-  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq,
+  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq, Doom3HudGui,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -478,17 +478,117 @@ begin
       Img.Free;
     end;
     Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
-      'windowDef Bar { rect 220, 230, 200, 20 backcolor 1, 0, 0, 1 shear 0, 1 } }'), 'a sheared window');
+      'windowDef Bar { rect 220, 230, 200, 20 backcolor 1, 0, 0, 1 shear 1, 0 } }'), 'a sheared window');
     Img := RenderGui(Gui, nil);
     try
       CheckEquals(255, Red(320, 240), 'sheared: the center stays');
-      CheckEquals(255, Red(400, 320), 'sheared 0, 1: its right end goes down 80');
+      { Doom 3 transforms row vectors: shear.x moves y along x }
+      CheckEquals(255, Red(400, 320), 'sheared 1, 0: its right end goes down 80');
       CheckEquals(0, Red(400, 240), 'not where it was');
     finally
       Img.Free;
     end;
   finally
     Gui.Free;
+  end;
+end;
+
+{ Doom 3's HUD GUI (guis/hud.gui like): the player's state keys, the
+  named events for changes, per-component expressions with tables, the
+  transparent render }
+procedure TestHudGui;
+const
+  HudText =
+    'windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 0 ' +
+    '  definevec4 "$flick" 1, 0, 0, sinTable[ 0.25 ] / 2 ' +
+    '  onNamedEvent updateArmorHealthAir { ' +
+    '    if ("gui::player_health" <= 35) { set "Health::forecolor" "1 0 0 1" ; } ' +
+    '    else { set "Health::forecolor" "0 1 0 1" ; } } ' +
+    '  windowDef Health { rect 10, 400, 40, 30 text "gui::player_health" textscale 0.38 textalign 1 ' +
+    '    shear 0, -0.33 } ' +
+    '  windowDef Bar { rect 100, 440, ("gui::player_health" * 2), 10 ' +
+    '    backcolor 1, 1, 1, sinTable[ 0.25 ] * 0.5 } ' +
+    '  windowDef Glow { rect 300, 100, 20, 20 backcolor "$flick" } ' +
+    '}';
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Hud: TD3HudGui;
+  A: TD3Actor;
+  M: TD3Monster;
+  RemoveMe: TRemoveType;
+  Img: TRGBAlphaImage;
+  Eye: TVector3;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  Hud := TD3HudGui.Create;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the HUD GUI');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.1, Eye);
+    RemoveMe := rtNone;
+    Map.Update(0.1, RemoveMe);
+
+    Check(Hud.LoadFromText(HudText), 'the HUD GUI parses');
+    CheckEquals(4, Hud.Gui.WindowCount, 'expressions with tables don''t end the desktop');
+    Hud.Update(Game, 0, 'room a');
+    CheckEquals('100', Hud.Gui.StateValue('player_health'), 'player_health');
+    CheckEquals('room a', Hud.Gui.StateValue('location'), 'location');
+    CheckEquals('1', Hud.Gui.StateValue('weapon0'), 'the fists: carried');
+    CheckEquals('2', Hud.Gui.StateValue('weapon1'), 'the pistol: the ideal weapon');
+    CheckEquals('0', Hud.Gui.StateValue('weapon2'), 'no shotgun');
+    Check(Hud.Events.IndexOf('updateArmorHealthAir') >= 0, 'updateArmorHealthAir at the start');
+    Check(Hud.Events.IndexOf('updateAmmo') >= 0, 'updateAmmo at the start');
+    Check(Hud.Events.IndexOf('weaponChange') >= 0, 'weaponChange at the start');
+    CheckNear(1, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Health'), 'forecolor').Y, 'healthy: green');
+    CheckNear(200, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Bar'), 'rect').Z, 'a parenthesized rect part');
+    CheckNear(0.5, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Bar'), 'backcolor').W, 'a table lookup in a part');
+    CheckNear(0.5, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Glow'), 'backcolor').W, 'a variable''s expression');
+
+    { changes send their events }
+    Hud.Events.Clear;
+    Hud.Update(Game, 100, 'room a');
+    CheckEquals(0, Hud.Events.Count, 'nothing changed: no events');
+    Game.Health := 30;
+    Hud.Update(Game, 200, 'room a');
+    Check(Hud.Events.IndexOf('updateArmorHealthAir') >= 0, 'health changed');
+    CheckNear(0, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Health'), 'forecolor').Y, 'low health: red');
+    Game.Health := 60;
+    Hud.Events.Clear;
+    Hud.Update(Game, 300, 'room a');
+    Check(Hud.Events.IndexOf('healthPulse') >= 0, 'healthPulse when health goes up');
+    Hud.Events.Clear;
+    Game.Give('weapon', 'weapon_test_shotgun');
+    Hud.Update(Game, 400, 'room a');
+    CheckEquals('2', Hud.Gui.StateValue('newweapon'), 'newweapon: the shotgun''s slot');
+    Check(Hud.Events.IndexOf('newWeapon') >= 0, 'newWeapon');
+    Hud.Pickup('Test Armor');
+    CheckEquals('Test Armor', Hud.Gui.StateValue('itemtext1'), 'a pickup line');
+    Check(Hud.Events.IndexOf('itemPickup1') >= 0, 'itemPickup1');
+
+    { transparent where nothing is drawn, opaque on the bar }
+    Img := Hud.Render;
+    try
+      CheckEquals(0, PVector4Byte(Img.PixelPtr(Img.Width div 2, Img.Height div 2))^.W, 'clear background');
+      Check(PVector4Byte(Img.PixelPtr(Round(150 * Img.Width / 640), Img.Height - 1 - Round(445 * Img.Height / 480)))^.W > 100,
+        'the bar shows (half transparent)');
+    finally
+      Img.Free;
+    end;
+  finally
+    Hud.Free;
+    Game.Free;
+    World.Free;
   end;
 end;
 
@@ -7441,6 +7541,7 @@ begin
   TestGuiTrigger;
   TestGuiWidgets;
   TestGuiTransforms;
+  TestHudGui;
   TestRemoteViews;
   TestImages;
   TestProc;

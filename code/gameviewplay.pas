@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields, CastleTimeUtils,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui;
 
 type
   TViewPlay = class(TCastleView)
@@ -91,6 +91,13 @@ type
     { console g_pdaGui (1 by default): guis/pda.gui when the data has it
       (no video or audio playback), else the text panel }
     FUsePdaGui: Boolean;
+    { Doom 3's HUD (guis/hud.gui) when the data has it and console
+      g_hudGui is 1 (the default); else our own HUD panels }
+    FHudGui: TD3HudGui;
+    FHudImage: TCastleImageControl;
+    FHudTimeMs: Double;
+    FHudRedraw: Single;
+    FUseHudGui, FHudGuiTried: Boolean;
     { target_endlevel's next map, loaded FPendingMapIn seconds later }
     FPendingMap: String;
     FPendingMapIn: Single;
@@ -123,6 +130,8 @@ type
       UpdateObjectiveInfo) into the PDA GUI's state }
     procedure FillPdaGui(const UpdateSel: Boolean);
     procedure UpdatePdaGui(const SecondsPassed: Single);
+    procedure UpdateHudGui(const SecondsPassed: Single);
+    procedure FreeHudGui;
     procedure HandleConsoleCommand(const Cmd, Args: String);
     { fire the weapon: Once from a demo script, else the button is held }
     procedure Fire(const Once: Boolean);
@@ -200,6 +209,7 @@ begin
   FUseReverb := True;
   FEnvProbeScale := 0.5;
   FUsePdaGui := True;
+  FUseHudGui := True;
 end;
 
 destructor TViewPlay.Destroy;
@@ -396,6 +406,7 @@ begin
   FreeAndNil(FPdaGui);
   { freed with FreeAtStop }
   FPdaImage := nil;
+  FreeHudGui;
   FPdaOpen := False;
   FreeAndNil(FGame);
   inherited Stop;
@@ -538,7 +549,11 @@ end;
 
 procedure TViewPlay.HandleMessage(const Msg: String);
 begin
-  Hud.ShowMessage(Msg);
+  { Doom 3's HUD lists them as pickups }
+  if FHudGui <> nil then
+    FHudGui.Pickup(Msg)
+  else
+    Hud.ShowMessage(Msg);
   Console.Print(Msg);
 end;
 
@@ -868,6 +883,69 @@ begin
     FPdaImage.Image := RenderGui(FPdaGui, nil);
     FPdaImage.OwnsImage := True;
     FPdaGui.Dirty := False;
+  end;
+end;
+
+procedure TViewPlay.FreeHudGui;
+begin
+  FreeAndNil(FHudGui);
+  if FHudImage <> nil then
+    FreeAndNil(FHudImage);
+  FHudGuiTried := False;
+  Hud.GuiHud := False;
+end;
+
+procedure TViewPlay.UpdateHudGui(const SecondsPassed: Single);
+const
+  { software rendered: at most this many redraws a second }
+  RedrawRate = 20;
+var
+  HudParent: TCastleUserInterface;
+begin
+  if not FUseHudGui then
+  begin
+    if FHudGui <> nil then
+      FreeHudGui;
+    Exit;
+  end;
+  if (FHudGui = nil) and not FHudGuiTried then
+  begin
+    FHudGuiTried := True;
+    if D3Fs.FileExists('guis/hud.gui') then
+    begin
+      FHudGui := TD3HudGui.Create;
+      if not FHudGui.Load('guis/hud.gui') then
+        FreeAndNil(FHudGui)
+      else
+      begin
+        { under our HUD (the crosshair, screen effects) and the PDA }
+        FHudImage := TCastleImageControl.Create(nil);
+        FHudImage.Stretch := True;
+        FHudImage.FullSize := True;
+        FHudImage.Color := Vector4(1, 1, 1, 1);
+        HudParent := Hud.Parent;
+        if HudParent <> nil then
+          HudParent.InsertControl(HudParent.IndexOfControl(Hud), FHudImage)
+        else
+          InsertFront(FHudImage);
+        FHudTimeMs := 0;
+        FHudRedraw := 0;
+      end;
+    end;
+  end;
+  if FHudGui = nil then
+    Exit;
+  Hud.GuiHud := True;
+  FHudTimeMs := FHudTimeMs + SecondsPassed * 1000;
+  FHudGui.Update(FGame, Round(FHudTimeMs), D3LangString(FGame.LocationAt(Camera.Translation)));
+  { dead or in a cinematic: no HUD (idPlayer::DrawHUD) }
+  FHudImage.Exists := not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
+  FHudRedraw := FHudRedraw - SecondsPassed;
+  if FHudImage.Exists and ((FHudRedraw <= 0) or (FHudImage.Image = nil)) then
+  begin
+    FHudImage.Image := FHudGui.Render;
+    FHudImage.OwnsImage := True;
+    FHudRedraw := 1 / RedrawRate;
   end;
 end;
 
@@ -1895,6 +1973,17 @@ begin
       SoundOcclusion := StrToIntDef(Args, 1) <> 0;
     Console.Print('s_occlusion ' + Iff(SoundOcclusion, '1', '0'));
   end else
+  if Cmd = 'g_hudgui' then
+  begin
+    { Doom 3's HUD GUI instead of our panels }
+    if Args <> '' then
+      FUseHudGui := StrToIntDef(Args, 0) <> 0;
+    if FHudGui <> nil then
+      Console.Print(Format('g_hudGui %s (guis/hud.gui shown: %d renders, %.1f ms each, %d events)',
+        [Iff(FUseHudGui, '1', '0'), FHudGui.Renders, FHudGui.RenderMs, FHudGui.Events.Count]))
+    else
+      Console.Print('g_hudGui ' + Iff(FUseHudGui, '1', '0') + ' (guis/hud.gui when the data has it, else our HUD)');
+  end else
   if Cmd = 'g_pdagui' then
   begin
     { Doom 3's PDA GUI instead of the text panel (partial) }
@@ -2534,6 +2623,7 @@ begin
   UpdateRemoteViews(SecondsPassed);
   Hud.FlashlightOn := Flashlight.Exists;
   Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
+  UpdateHudGui(SecondsPassed);
 
   if AutoTestPrefix <> '' then
     RunDemoStep(SecondsPassed);

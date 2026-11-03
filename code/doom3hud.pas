@@ -51,6 +51,9 @@ type
       focusCharacter): the crosshair says so }
     TalkCursor: Boolean;
     InfluenceImageUrl: String;
+    { Doom 3's HUD GUI draws the health, ammo, tips, objectives, radio and
+      messages: ours only the crosshair and the screen effects }
+    GuiHud: Boolean;
     { invisibility: a cold rim on the screen's edges }
     Invisible: Boolean;
     Blobs: array of TD3HudBlob;
@@ -283,6 +286,13 @@ begin
   DrawRectangle(FloatRectangle(CX + 3 * S, CY - 1 * S, 5 * S, 2 * S), Cyan);
   if TalkCursor then
     UIFont.PrintRect(FloatRectangle(CX - 100 * S, CY - 40 * S, 200 * S, 24 * S), Cyan, 'TALK', hpMiddle, vpMiddle);
+
+  if GuiHud then
+  begin
+    if InfoText <> '' then
+      UIFont.Print(R.Left + 20 * S, R.Bottom + 100 * S, Vector4(0.7, 0.7, 0.7, 0.8), InfoText);
+    Exit;
+  end;
 
   { health / armor (bottom left) }
   DrawRectangle(FloatRectangle(R.Left + 20 * S, R.Bottom + 20 * S, 300 * S, 70 * S), PanelColor);
