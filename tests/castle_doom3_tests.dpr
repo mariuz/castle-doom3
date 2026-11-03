@@ -4597,6 +4597,9 @@ begin
     for I := 1 to 20 do
       Game.Update(0.05, Far);
     CheckNear(0.05 + 0.3 * 1, App.AlphaCutoff, 'the cutoff after 1 s', 0.03);
+    Check((Length(A.BurnEdges) > 0) and (A.BurnEdges[0] <> nil), 'a burning edge');
+    if (Length(A.BurnEdges) > 0) and (A.BurnEdges[0] <> nil) then
+      CheckNear(0.3 * 1, A.BurnEdges[0].AlphaCutoff, 'the edge''s cutoff after 1 s, a little lower', 0.03);
   finally
     FreeAndNil(Game);
     FreeAndNil(World);

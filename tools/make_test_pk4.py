@@ -2052,6 +2052,13 @@ models/test/blob
 		blend	gl_zero, gl_one
 		map	models/test/blob_bmp.tga
 		alphaTest 0.05 + 0.3 * (time - parm7)
+	}
+	{	// its burning edge, behind the skin
+		if parm7
+		privatePolygonOffset	-1
+		blend	gl_one, gl_zero
+		map	models/test/blob_bmp.tga
+		alphaTest 0.3 * (time - parm7)
 	}
 }
 

@@ -90,6 +90,10 @@ type
       expression (owned); '' / nil without one }
     BurnImage: String;
     BurnAlphaTest: TD3Expr;
+    { the second such stage: the burning edge (its map drawn behind the
+      skin where it has just burnt away); '' / nil without one }
+    BurnEdgeImage: String;
+    BurnEdgeAlphaTest: TD3Expr;
     { The first heat haze stage (program heatHaze*.vfp, reading
       _currentRender): the distortion normal map (fragmentMap 1, '' when
       there is no such stage), the mask (fragmentMap 2 of the WithMask
@@ -337,6 +341,7 @@ var
   I, J: Integer;
 begin
   FreeAndNil(BurnAlphaTest);
+  FreeAndNil(BurnEdgeAlphaTest);
   for I := 0 to High(ExtraStages) do
   begin
     FreeAndNil(ExtraStages[I].Condition);
@@ -1212,6 +1217,12 @@ begin
         begin
           Result.BurnImage := StageMap;
           Result.BurnAlphaTest := StageAlphaTestExpr;
+          StageAlphaTestExpr := nil;
+        end else
+        if (StageAlphaTestExpr <> nil) and (Result.BurnEdgeAlphaTest = nil) and (StageMap <> '') then
+        begin
+          Result.BurnEdgeImage := StageMap;
+          Result.BurnEdgeAlphaTest := StageAlphaTestExpr;
           StageAlphaTestExpr := nil;
         end;
         FreeAndNil(StageAlphaTestExpr);
