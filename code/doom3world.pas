@@ -659,6 +659,14 @@ type
     FMap: TDoom3Map;
     FMovers: specialize TObjectList<TD3Mover>;
     FElevators: specialize TObjectList<TD3Elevator>;
+    { lights bound to a mover ("bind"): the light, its master, the master's
+      transformation and the light's pose at bind time }
+    FLightBindings: array of record
+      Light: Integer;
+      Master: TCastleTransform;
+      MasterStart, LastMaster, Matrix0: TMatrix4;
+      Location0: TVector3;
+    end;
     FMonsters: specialize TObjectList<TD3Monster>;
     FSpeakers: specialize TObjectList<TD3Speaker>;
     FSounds: specialize TObjectDictionary<String, TCastleSound>;
@@ -950,6 +958,7 @@ type
     procedure UpdateMoveablesStep(const SecondsPassed: Single);
     function CombatNodeOf(const E: TD3MapEntity): TD3CombatNode;
     procedure UpdateBindings;
+    procedure UpdateLightBindings;
     function TransformOf(const AName: String): TCastleTransform;
     function FindBinding(const Child: TCastleTransform): TD3Binding;
     procedure Bind(const Child, Parent: TCastleTransform);
@@ -1892,6 +1901,7 @@ begin
   FEntities.Clear;
   FPending.Clear;
   FBindings.Clear;
+  FLightBindings := nil;
   FCounts.Clear;
   FUnsupported.Clear;
   FActors.Clear;
@@ -6185,6 +6195,7 @@ begin
   if not ScriptsPaused then
     UpdateScriptMovers;
   UpdateBindings;
+  UpdateLightBindings;
   UpdateMoveables(SecondsPassed);
   UpdateItems;
   UpdatePowerUps;
@@ -10476,11 +10487,26 @@ end;
 procedure TD3Game.SpawnBindings;
 var
   E: TD3MapEntity;
+  N: Integer;
 begin
   if FMap.MapFile = nil then
     Exit;
-  { lights and other entities are not bound yet }
+  { lights ride with their masters (FLightBindings); other entities that
+    aren't brushes or models are not bound }
   for E in FMap.MapFile.Entities do
+    if (E.Value('bind') <> '') and (TransformOf(E.Name) = nil) and (FMap.FindLight(E.Name) >= 0) and
+       (TransformOf(E.Value('bind')) <> nil) then
+    begin
+      { a light riding with its master (idLight bound to a mover) }
+      N := Length(FLightBindings);
+      SetLength(FLightBindings, N + 1);
+      FLightBindings[N].Light := FMap.FindLight(E.Name);
+      FLightBindings[N].Master := TransformOf(E.Value('bind'));
+      FLightBindings[N].MasterStart := FLightBindings[N].Master.Transform;
+      FLightBindings[N].LastMaster := FLightBindings[N].MasterStart;
+      FLightBindings[N].Matrix0 := FMap.Light(FLightBindings[N].Light).Matrix;
+      FLightBindings[N].Location0 := FMap.Light(FLightBindings[N].Light).Location;
+    end else
     if E.Value('bind') <> '' then
     begin
       { "bindToJoint" with "bind": at that joint of the master's model
@@ -10490,11 +10516,35 @@ begin
            E.Value('bindToJoint'), E.BoolValue('bindOrientated', True)) then
         Bind(TransformOf(E.Name), TransformOf(E.Value('bind')));
     end;
+  if Length(FLightBindings) > 0 then
+    WritelnLog('Doom3World', 'Lights bound to movers: %d', [Length(FLightBindings)]);
 end;
 
 function CompareBindingDepth(constref A, B: TD3Binding): Integer;
 begin
   Result := A.Depth - B.Depth;
+end;
+
+procedure TD3Game.UpdateLightBindings;
+var
+  I: Integer;
+  M, Delta, Inv, InvDelta: TMatrix4;
+begin
+  for I := 0 to High(FLightBindings) do
+  begin
+    M := FLightBindings[I].Master.Transform;
+    if TMatrix4.Equals(M, FLightBindings[I].LastMaster, 0.0001) then
+      Continue;
+    FLightBindings[I].LastMaster := M;
+    { the master's movement since the bind, applied to the light }
+    if not FLightBindings[I].MasterStart.TryInverse(Inv) then
+      Continue;
+    Delta := M * Inv;
+    if not Delta.TryInverse(InvDelta) then
+      Continue;
+    FMap.SetLightPose(FLightBindings[I].Light, Delta.MultPoint(FLightBindings[I].Location0),
+      FLightBindings[I].Matrix0 * InvDelta);
+  end;
 end;
 
 procedure TD3Game.UpdateBindings;
