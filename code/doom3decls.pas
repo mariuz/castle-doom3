@@ -57,6 +57,9 @@ type
       (glows, decals, windows, skies...). }
     StageImage: String;
     StageBlend: TD3BlendMode;
+    { a videomap stage's RoQ file ('' none) and whether it loops }
+    VideoMap: String;
+    VideoLoop: Boolean;
     StageColor: TVector4;
     AlphaTest: Single;
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
@@ -1069,6 +1072,19 @@ begin
           if L = 'map' then
             StageMap := ReadImageProgram(Lexer)
           else
+          if L = 'videomap' then
+          begin
+            { videomap [loop] <file.roq>: a RoQ video (idCinematic) }
+            Line := Lexer.NextStr;
+            if LowerCase(Line) = 'loop' then
+            begin
+              Result.VideoLoop := True;
+              Line := Lexer.NextStr;
+            end;
+            if Result.VideoMap = '' then
+              Result.VideoMap := LowerCase(StringReplace(Line, '\', '/', [rfReplaceAll]));
+            StageSpecial := True;
+          end else
           if L = 'alphatest' then
           begin
             { a number, or an expression of time and parms (burn-away) }
@@ -1109,7 +1125,7 @@ begin
           if L = 'inversevertexcolor' then
             StageInvVC := True
           else
-          if (L = 'cubemap') or (L = 'cameracubemap') or (L = 'videomap') or
+          if (L = 'cubemap') or (L = 'cameracubemap') or
              (L = 'soundmap') or (L = 'remoterendermap') or (L = 'texgen') then
             StageSpecial := True
           else

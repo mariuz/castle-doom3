@@ -172,7 +172,7 @@ uses
   Doom3Sampler,
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
-  Doom3EnvProbes, CastleColors, CastleRectangles;
+  Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq;
 
 const
   LongFrameSeconds = 0.1;
@@ -781,6 +781,8 @@ var
   Down: Boolean;
   Cmd, Part: String;
   Words: TStringArray;
+  Mat: TD3Material;
+  Sel: Integer;
 begin
   if (FPdaGui = nil) or not FPdaOpen then
     Exit;
@@ -824,11 +826,27 @@ begin
             FGame.PlayPdaAudio(FPdaGui.StateValue('pda_personal') <> '1',
               StrToIntDef(FPdaGui.StateValue('listPDA_sel_0'), 0),
               StrToIntDef(FPdaGui.StateValue('listPDAAudio_sel_0'), 0));
-        'stoppdaaudio', 'stoppdavideo', 'playpdavideo':
-          ;
+        'playpdavideo':
+          begin
+            { idPlayer: the selected video starts again with its sound }
+            Mat := Decls.Material(FPdaGui.StateValue('PDAVideoVid'));
+            if Mat.VideoMap <> '' then
+            begin
+              RoqResetTime(Mat.VideoMap);
+              WritelnLog('GameViewPlay', 'PDA video %s (%s)', [FPdaGui.StateValue('PDAVideoVid'), Mat.VideoMap]);
+            end;
+            Sel := StrToIntDef(FPdaGui.StateValue('listPDAVideo_sel_0'), 0);
+            if (Sel >= 0) and (Sel < FGame.Videos.Count) and (VideoDecl(FGame.Videos[Sel]) <> nil) and
+               (VideoDecl(FGame.Videos[Sel]).Audio <> '') then
+              FGame.PlayPdaSound(VideoDecl(FGame.Videos[Sel]).Audio);
+          end;
+        'stoppdaaudio', 'stoppdavideo':
+          FGame.StopPdaSound;
       end;
     end;
   end;
+  if FPdaGui.HasVideo then
+    FPdaGui.Dirty := True;
   if FPdaGui.Dirty then
   begin
     FPdaImage.Image := RenderGui(FPdaGui, nil);

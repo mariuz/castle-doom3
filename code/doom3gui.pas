@@ -172,6 +172,8 @@ type
     NoCursor: Boolean;
     { something to redraw (a property, the state or the cursor changed) }
     Dirty: Boolean;
+    { the last render drew a video (videomap): it changes every frame }
+    HasVideo: Boolean;
     Active: Boolean;
     constructor Create;
     destructor Destroy; override;
@@ -339,7 +341,7 @@ uses
   Math, StrUtils,
   CastleDownload, CastleUriUtils, CastleLog, CastleTextureFontData, CastleTextureFont_DefaultUi,
   CastleUnicode, CastleUtils,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images;
+  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Roq;
 
 { TD3GuiCommand }
 
@@ -2415,7 +2417,8 @@ procedure TGuiPainter.DrawWindow(const W: TD3GuiWindow; const ParentX, ParentY: 
 var
   R: TFloatRectangle;
   M: TD3Material;
-  ImageName, F: String;
+  ImageName, F, Bg: String;
+  Video: TD3RoqVideo;
   C: TD3GuiWindow;
   B: Single;
   V: TVector4;
@@ -2428,10 +2431,27 @@ begin
   V := Gui.PropVec4(W, 'rect');
   R := FloatRectangle(ParentX + V.X, ParentY + V.Y, V.Z, V.W);
   FillRect(R, Gui.PropVec4(W, 'backcolor'));
-  if W.Background <> '' then
+  { a background named by the GUI state ("gui::PDAVideoVid") }
+  Bg := W.Background;
+  if SameText(Copy(Bg, 1, 5), 'gui::') then
+    Bg := Gui.StateValue(Copy(Bg, 6, MaxInt));
+  M := nil;
+  if Bg <> '' then
+    M := Decls.Material(Bg);
+  if (M <> nil) and (M.VideoMap <> '') then
+  begin
+    { a videomap material: the video's frame at its time (idCinematic) }
+    Video := RoqVideo(M.VideoMap);
+    if Video <> nil then
+    begin
+      Video.SeekTime(RoqTime(M.VideoMap), M.VideoLoop);
+      DrawImage(R, Video.Image, Gui.PropVec4(W, 'matcolor'));
+      Gui.HasVideo := True;
+    end;
+  end else
+  if M <> nil then
   begin
     { a material (its diffuse / stage image) or an image }
-    M := Decls.Material(W.Background);
     ImageName := M.DiffuseImage;
     if M.StageImage <> '' then
       ImageName := M.StageImage;
@@ -2587,6 +2607,7 @@ begin
     Painter.ClipY0 := 0;
     Painter.ClipX1 := Result.Width;
     Painter.ClipY1 := Result.Height;
+    Gui.HasVideo := False;
     Painter.DrawWindow(Gui.Desktop, 0, 0);
     Painter.DrawCursor;
   finally

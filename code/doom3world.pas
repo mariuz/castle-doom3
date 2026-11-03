@@ -845,6 +845,7 @@ type
     FFovFrom, FFovTo, FFovStart, FFovTime: Single;
     FEntityFades: specialize TList<TD3EntityFade>;
     FInfluences: specialize TObjectList<TD3Influence>;
+    FPdaPlaying: TCastlePlayingSoundSource;
     { idPlayer's influenceActive (1: no weapon, no monster damage; 2: no
       moving; 3: slow), influenceMaterial over the view, fading in within
       influenceRadius of FInfluencePos (Doom 3 coordinates) }
@@ -1364,6 +1365,9 @@ type
     function ObjectiveCount: Integer;
     { idPlayer's "playpdaaudio": the audio log of a PDA (its list row:
       0 the personal one, else newest first) }
+    { the PDA's sound channel (audio logs, the videos' sound) }
+    procedure PlayPdaSound(const ShaderName: String);
+    procedure StopPdaSound;
     procedure PlayPdaAudio(const OtherPda: Boolean; const PdaRow, AudioIndex: Integer);
     function Objective(const I: Integer): TD3Objective;
     property MissionObjective: String read FMissionObjective;
@@ -1905,6 +1909,7 @@ begin
   FreeAndNil(FVideos);
   FreeAndNil(FEntityFades);
   FreeAndNil(FInfluences);
+  FreeAndNil(FPdaPlaying);
   FreeAndNil(FScript);
   FScriptHost.Free;
   FHandles.Free;
@@ -1998,6 +2003,7 @@ begin
   FFovTime := 0;
   FEntityFades.Clear;
   FInfluences.Clear;
+  StopPdaSound;
   FInfluenceLevel := 0;
   FInfluenceMaterial := '';
   FInfluenceSkin := '';
@@ -8450,6 +8456,7 @@ var
   Down: Boolean;
   E: TD3MapEntity;
   B: TD3BrushEntity;
+  TraceDist: Single;
 begin
   { idPlayer::UpdateFocus: the view ray within 80 units on an interactive
     GUI surface; the cursor goes where it hits, through the surface's
@@ -8459,7 +8466,25 @@ begin
   begin
     Hit := FMap.World.WorldRay(FPlayerEye, PlayerViewDir);
     try
-      if (Hit <> nil) and (Hit.Count > 0) and (Hit.Distance <= GuiFocusDistance) and
+      { the GUI surfaces' own triangles (their entities collide and are
+        picked with their clip models), unless something nearer than the
+        GUI (by more than its clip model's few units) is in the way }
+      if FMap.GuiTrace(FPlayerEye, PlayerViewDir.Normalize, GuiFocusDistance, S, TC, TraceDist) and
+         ((Hit = nil) or (Hit.Count = 0) or (Hit.Distance + 8 >= TraceDist)) then
+      begin
+        if not S.Gui.Interactive then
+          S := nil
+        else
+        begin
+          B := FMap.FindBrush(S.EntityName);
+          if (B <> nil) and B.Hidden then
+            S := nil;
+        end;
+        if S <> nil then
+          S.Gui.SetCursor(Clamped(TC.X * GuiWidth, 0, GuiWidth), Clamped((1 - TC.Y) * GuiHeight, 0, GuiHeight));
+      end else
+      S := nil;
+      if (S = nil) and (Hit <> nil) and (Hit.Count > 0) and (Hit.Distance <= GuiFocusDistance) and
          (Hit[0].Triangle <> nil) and (Hit[0].Triangle^.InternalShape is TShape) then
       begin
         Shape := TShape(Hit[0].Triangle^.InternalShape);
@@ -8631,6 +8656,39 @@ end;
 
 { Player information (roadmap 5f) ------------------------------------------- }
 
+procedure TD3Game.PlayPdaSound(const ShaderName: String);
+var
+  Snd: TCastleSound;
+  T: TCastleTransform;
+  Source: TCastleSoundSource;
+begin
+  { idPlayer's SND_CHANNEL_PDA: one sound at a time, stoppable }
+  StopPdaSound;
+  Snd := SoundFromShader(ShaderName);
+  if Snd = nil then
+    Exit;
+  T := TCastleTransform.Create(nil);
+  T.Translation := FPlayerEye;
+  FMap.Add(T);
+  FSoundTransforms.Add(T);
+  Source := TCastleSoundSource.Create(T);
+  Source.Spatial := False;
+  T.AddBehavior(Source);
+  FPdaPlaying := TCastlePlayingSoundSource.Create(nil);
+  FPdaPlaying.Sound := Snd;
+  Source.Play(FPdaPlaying);
+  WritelnLog('Doom3World', 'PDA sound %s', [ShaderName]);
+end;
+
+procedure TD3Game.StopPdaSound;
+begin
+  if FPdaPlaying <> nil then
+  begin
+    FPdaPlaying.Stop;
+    FreeAndNil(FPdaPlaying);
+  end;
+end;
+
 procedure TD3Game.PlayPdaAudio(const OtherPda: Boolean; const PdaRow, AudioIndex: Integer);
 var
   Pda: TD3PdaDecl;
@@ -8649,7 +8707,7 @@ begin
   if Audio = nil then
     Exit;
   WritelnLog('Doom3World', 'PDA audio log %s (%s)', [Audio.Name, Audio.Audio]);
-  PlaySoundAt(Audio.Audio, FPlayerEye);
+  PlayPdaSound(Audio.Audio);
 end;
 
 function TD3Game.TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;

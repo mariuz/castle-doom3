@@ -269,6 +269,13 @@ type
     property GuiRenders: Integer read FGuiRenders;
     { The live GUI drawn by a texture URL (nil: none). }
     function GuiSurfaceOf(const Url: String): TD3GuiSurface;
+    { idRenderWorld::GuiTrace: the nearest GUI surface the ray (world
+      coordinates, Dir normalized) hits within MaxDistance, through the
+      surfaces' own triangles (solid brush entities collide and are picked
+      with their clip model, so a world ray cast only finds that); its
+      texture coordinate (our v) and distance }
+    function GuiTrace(const Origin, Dir: TVector3; const MaxDistance: Single;
+      out Surface: TD3GuiSurface; out TexCoord: TVector2; out Distance: Single): Boolean;
     property Models: specialize TObjectList<TD3ModelEntity> read FModels;
     { Player start in CGE coordinates (feet) and Doom 3 yaw. }
     property SpawnOrigin: TVector3 read FSpawnOrigin;
@@ -380,8 +387,50 @@ implementation
 uses
   Math, TypInfo,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
-  CastleRenderOptions, CastleFrustum,
+  CastleRenderOptions, CastleFrustum, CastleTriangles, CastleShapes, Doom3Roq,
   Doom3Files, Doom3Images, Doom3StaticModels;
+
+type
+  { GuiTrace's ray against a shape's triangles (scene coordinates) }
+  TGuiTracer = class
+    Origin, Dir: TVector3;
+    Best: Single;
+    BestTexCoord: TVector2;
+    Found: Boolean;
+    procedure Triangle(Shape: TObject; const Position: TTriangle3;
+      const Normal: TTriangle3; const TexCoord: TTriangle4; const Face: TFaceIndex);
+  end;
+
+procedure TGuiTracer.Triangle(Shape: TObject; const Position: TTriangle3;
+  const Normal: TTriangle3; const TexCoord: TTriangle4; const Face: TFaceIndex);
+var
+  E1, E2, P, Q, T: TVector3;
+  Det, U, V, D: Single;
+begin
+  { Moller-Trumbore, both faces }
+  E1 := Position.Data[1] - Position.Data[0];
+  E2 := Position.Data[2] - Position.Data[0];
+  P := TVector3.CrossProduct(Dir, E2);
+  Det := TVector3.DotProduct(E1, P);
+  if Abs(Det) < 1e-8 then
+    Exit;
+  T := Origin - Position.Data[0];
+  U := TVector3.DotProduct(T, P) / Det;
+  if (U < 0) or (U > 1) then
+    Exit;
+  Q := TVector3.CrossProduct(T, E1);
+  V := TVector3.DotProduct(Dir, Q) / Det;
+  if (V < 0) or (U + V > 1) then
+    Exit;
+  D := TVector3.DotProduct(E2, Q) / Det;
+  if (D < 0) or (D >= Best) then
+    Exit;
+  Best := D;
+  Found := True;
+  BestTexCoord := Vector2(
+    TexCoord.Data[0].X * (1 - U - V) + TexCoord.Data[1].X * U + TexCoord.Data[2].X * V,
+    TexCoord.Data[0].Y * (1 - U - V) + TexCoord.Data[1].Y * U + TexCoord.Data[2].Y * V);
+end;
 
 function D3RotateCge(const M: TMatrix3; const V: TVector3): TVector3;
 var
@@ -1827,11 +1876,11 @@ begin
     { but its clip model in the .cm may (Doom 3 collides with idClipModel:
       clip brushes of grates, glass, invisible blockers): an X3D Collision
       node shows the model and collides with that proxy, moving with it.
-      Solid models keep colliding with their render triangles (shots and
-      the GUI focus need them). }
+      Solid models too (Doom 3's traces use the clip models): shots hit
+      the proxy, the GUI focus finds the GUI's triangles with GuiTrace. }
     Cm := nil;
     ClipOnly := False;
-    if (FCollision <> nil) and not Solid and E.BoolValue('solid', True) then
+    if (FCollision <> nil) and E.BoolValue('solid', True) and not E.BoolValue('noclipmodel') then
     begin
       Cm := FCollision.FindModel(E.Value('model', E.Name));
       if (Cm = nil) and (E.Name <> '') then
@@ -1849,8 +1898,10 @@ begin
         CollisionNode.Proxy := CmRoot;
         Root.AddChildren(CollisionNode);
         Inc(FClipModelBrushes);
+        { a model of only nonsolid surfaces: its clip model blocks the
+          player and monsters, not shots (playerclip, grates) }
+        ClipOnly := not Solid;
         Solid := True;
-        ClipOnly := True;
       end else
         FreeAndNil(CmRoot);
     end;
@@ -1884,7 +1935,7 @@ begin
     FBrushes.Add(B);
   end;
   if FClipModelBrushes > 0 then
-    WritelnLog('Doom3Level', 'Brush entities: %d without solid surfaces collide with their clip models', [FClipModelBrushes]);
+    WritelnLog('Doom3Level', 'Brush entities: %d collide with their clip models', [FClipModelBrushes]);
 end;
 
 { Model of an entity (its "model" key or its entityDef's), resolved through
@@ -2376,6 +2427,54 @@ begin
   end;
 end;
 
+function TDoom3Map.GuiTrace(const Origin, Dir: TVector3; const MaxDistance: Single;
+  out Surface: TD3GuiSurface; out TexCoord: TVector2; out Distance: Single): Boolean;
+var
+  S: TD3GuiSurface;
+  Scene: TCastleScene;
+  Sh: TShape;
+  Tex: TAbstractTextureNode;
+  Tracer: TGuiTracer;
+begin
+  Result := False;
+  Surface := nil;
+  TexCoord := TVector2.Zero;
+  Distance := MaxDistance;
+  Tracer := TGuiTracer.Create;
+  try
+    for S in FGuiSurfaces do
+    begin
+      if not (S.Scene is TCastleScene) or not S.Scene.Exists then
+        Continue;
+      Scene := TCastleScene(S.Scene);
+      Tracer.Origin := Scene.WorldToLocal(Origin);
+      Tracer.Dir := Scene.WorldToLocalDirection(Dir);
+      Tracer.Best := Distance;
+      Tracer.Found := False;
+      for Sh in Scene.Shapes.TraverseList(True) do
+      begin
+        if (Sh.Node = nil) or (Sh.Node.Appearance = nil) then
+          Continue;
+        Tex := Sh.Node.Appearance.Texture;
+        if (Tex = nil) and (Sh.Node.Appearance.Material is TUnlitMaterialNode) then
+          Tex := TUnlitMaterialNode(Sh.Node.Appearance.Material).EmissiveTexture;
+        if (Tex = nil) or (S.Nodes.IndexOf(Tex) < 0) then
+          Continue;
+        Sh.Triangulate(@Tracer.Triangle);
+      end;
+      if Tracer.Found then
+      begin
+        Distance := Tracer.Best;
+        Surface := S;
+        TexCoord := Tracer.BestTexCoord;
+        Result := True;
+      end;
+    end;
+  finally
+    Tracer.Free;
+  end;
+end;
+
 function TDoom3Map.GuiSurfaceOf(const Url: String): TD3GuiSurface;
 begin
   Result := GuiSurfaceByUrl(Url);
@@ -2403,6 +2502,9 @@ begin
     if not (S.Gui.CursorShown or (S.Scene = nil) or (S.Scene.Visible and S.Scene.Exists)) then
       Continue;
     S.Gui.Update(TimeMs);
+    { a video on it changes every frame }
+    if S.Gui.HasVideo then
+      S.Gui.Dirty := True;
     if S.Gui.Dirty and (Renders < MaxRenders) and
        ((S.Renders = 0) or (FTime - S.LastRender >= MinInterval) or S.Gui.CursorShown) then
     begin
@@ -2559,6 +2661,8 @@ begin
   inherited Update(SecondsPassed, RemoveMe);
   if not FTimePaused then
     FTime := FTime + SecondsPassed;
+  { the clock of videos (videomap) }
+  RoqClock := FTime;
   { scrolling / rotating textures, pulsing glows }
   if FProc <> nil then
     UpdateAnimatedSurfaces(FTime);

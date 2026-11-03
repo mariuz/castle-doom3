@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
-  Doom3Particles, Doom3Decals, Doom3Pda,
+  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(117, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(118, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -120,7 +120,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(49, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(50, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(65, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
@@ -5438,6 +5438,7 @@ var
   RemoveMe: TRemoveType;
   B: TD3BrushEntity;
   Root: TX3DRootNode;
+  Kids: TMFNode;
   I, Shapes, Hidden, Before: Integer;
   D: TD3Decal;
 
@@ -5458,21 +5459,31 @@ var
   { shapes, and conditional ones (a Switch holding the shape) that are
     hidden (whichChoice -1) }
   procedure CountShapes(const Node: TX3DRootNode; out Shapes, Hidden: Integer);
-  var
-    I: Integer;
+
+    { the shapes of a group; a brush entity's clip model wraps them in a
+      Collision node }
+    procedure CountIn(const Children: TMFNode);
+    var
+      I: Integer;
+    begin
+      for I := 0 to Children.Count - 1 do
+        if Children[I] is TShapeNode then
+          Inc(Shapes)
+        else
+        if Children[I] is TSwitchNode then
+        begin
+          Inc(Shapes);
+          if TSwitchNode(Children[I]).WhichChoice < 0 then
+            Inc(Hidden);
+        end else
+        if Children[I] is TCollisionNode then
+          CountIn(TCollisionNode(Children[I]).FdChildren);
+    end;
+
   begin
     Shapes := 0;
     Hidden := 0;
-    for I := 0 to Node.FdChildren.Count - 1 do
-      if Node.FdChildren[I] is TShapeNode then
-        Inc(Shapes)
-      else
-      if Node.FdChildren[I] is TSwitchNode then
-      begin
-        Inc(Shapes);
-        if TSwitchNode(Node.FdChildren[I]).WhichChoice < 0 then
-          Inc(Hidden);
-      end;
+    CountIn(Node.FdChildren);
   end;
 
 begin
@@ -5632,14 +5643,19 @@ begin
       CountShapes(Root, Shapes, Hidden);
       CheckEquals(2, Shapes, 'crate_2: the lit box and its glow overlay');
       CheckEquals(0, Hidden, 'glow shown with parm7 1');
-      { the conditional shape is the overlay: unlit, additive, blended }
+      { the conditional shape is the overlay: unlit, additive, blended (in
+        the clip model's Collision node) }
+      Kids := Root.FdChildren;
       for I := 0 to Root.FdChildren.Count - 1 do
-        if Root.FdChildren[I] is TSwitchNode then
+        if Root.FdChildren[I] is TCollisionNode then
+          Kids := TCollisionNode(Root.FdChildren[I]).FdChildren;
+      for I := 0 to Kids.Count - 1 do
+        if Kids[I] is TSwitchNode then
         begin
-          Check(TSwitchNode(Root.FdChildren[I]).FdChildren.Count = 1, 'the switch holds one shape');
-          if TSwitchNode(Root.FdChildren[I]).FdChildren[0] is TShapeNode then
+          Check(TSwitchNode(Kids[I]).FdChildren.Count = 1, 'the switch holds one shape');
+          if TSwitchNode(Kids[I]).FdChildren[0] is TShapeNode then
           begin
-            App := TShapeNode(TSwitchNode(Root.FdChildren[I]).FdChildren[0]).Appearance;
+            App := TShapeNode(TSwitchNode(Kids[I]).FdChildren[0]).Appearance;
             Check(App.Material is TUnlitMaterialNode, 'the conditional shape is the unlit overlay');
             Check(App.AlphaMode = amBlend, 'the overlay blends');
             Check((App.BlendMode <> nil) and (App.BlendMode.DestFactor = bdOne), 'the overlay adds');
@@ -6434,6 +6450,9 @@ begin
   if AudioDecl('test_audio_log') <> nil then
     CheckEquals('test_hum', AudioDecl('test_audio_log').Audio, 'audio shader');
   Check((VideoDecl('test_video_intro') <> nil) and (VideoDecl('test_video_intro').VideoName = 'Intro'), 'video parsed');
+  if VideoDecl('test_video_intro') <> nil then
+    CheckEquals('video/test.roq', Decls.Material(VideoDecl('test_video_intro').Video).VideoMap,
+      'the video decl''s material plays video/test.roq');
   Check(PdaDecl('missing') = nil, 'missing pda');
 
   World := TCastleRootTransform.Create(nil);
@@ -7007,7 +7026,124 @@ begin
   end;
 end;
 
+{ RoQ videos (Doom3Roq): video/test.roq of the test PK4 (cells, unchanged
+  blocks keeping the frame before the previous, motion), the videomap
+  material, a GUI background showing it }
+procedure TestRoq;
+var
+  V: TD3RoqVideo;
+  M: TD3Material;
+  Gui: TD3Gui;
+  Img: TRGBAlphaImage;
+
+  { 'r', 'g', 'b' (the strongest channel) of a pixel (y down) }
+  function ColorAt(const Image: TRGBAlphaImage; const X, Y: Integer): Char;
+  var
+    P: PVector4Byte;
+  begin
+    P := Image.PixelPtr(X, Image.Height - 1 - Y);
+    if (P^.X > P^.Y) and (P^.X > P^.Z) then
+      Result := 'r'
+    else
+    if P^.Y > P^.Z then
+      Result := 'g'
+    else
+      Result := 'b';
+  end;
+
 begin
+  V := RoqVideo('video/test.roq');
+  Check(V <> nil, 'video/test.roq loads');
+  if V = nil then
+    Exit;
+  CheckEquals(32, V.Width, 'video width');
+  CheckEquals(16, V.Height, 'video height');
+  CheckEquals(4, V.FrameCount, 'video frames');
+  CheckEquals(30, V.Fps, 'video fps');
+  V.SeekTime(0, False);
+  CheckEquals(0, V.Frame, 'frame 0');
+  Check((ColorAt(V.Image, 4, 4) = 'r') and (ColorAt(V.Image, 20, 12) = 'b'), 'frame 0: red | blue (cells)');
+  V.SeekTime(1.01 / 30, False);
+  Check((ColorAt(V.Image, 4, 4) = 'g') and (ColorAt(V.Image, 20, 12) = 'b'), 'frame 1: green | unchanged blue');
+  V.SeekTime(2.01 / 30, False);
+  Check((ColorAt(V.Image, 4, 4) = 'r') and (ColorAt(V.Image, 20, 12) = 'b'),
+    'frame 2: unchanged blocks keep the frame before the previous');
+  V.SeekTime(3.01 / 30, False);
+  Check((ColorAt(V.Image, 4, 4) = 'g') and (ColorAt(V.Image, 20, 12) = 'r'),
+    'frame 3: the right half moved from the previous frame''s left (motion)');
+  V.SeekTime(0.5, True);
+  CheckEquals(15 mod 4, V.Frame, 'looping: frame 15 of 4 is 3');
+  V.SeekTime(0.5, False);
+  CheckEquals(3, V.Frame, 'not looping: the last frame stays');
+  CheckNear(4 / 30, V.Duration, 'video duration');
+
+  M := Decls.Material('video/test_video');
+  CheckEquals('video/test.roq', M.VideoMap, 'videomap material');
+  Check(not M.VideoLoop, 'videomap without loop');
+
+  { a GUI background from the state, at the video's time }
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef Vid { rect 0, 0, 640, 480 background "gui::vid" matcolor 1, 1, 1, 1 } }'), 'video GUI');
+    Gui.SetState('vid', 'video/test_video');
+    RoqClock := 10;
+    RoqResetTime('video/test.roq');
+    Img := RenderGui(Gui, nil);
+    try
+      Check(Gui.HasVideo, 'the GUI drew a video');
+      Check((ColorAt(Img, Img.Width div 8, Img.Height div 4) = 'r') and
+        (ColorAt(Img, Img.Width * 7 div 8, Img.Height * 3 div 4) = 'b'), 'the GUI shows frame 0 after a reset');
+    finally
+      Img.Free;
+    end;
+    RoqClock := 10 + 3.01 / 30;
+    Img := RenderGui(Gui, nil);
+    try
+      Check(ColorAt(Img, Img.Width * 7 div 8, Img.Height * 3 div 4) = 'r', 'the GUI shows frame 3 0.1 s later');
+    finally
+      Img.Free;
+    end;
+  finally
+    Gui.Free;
+  end;
+  RoqClock := 0;
+end;
+
+{ CD3_ROQ_DUMP=<file.roq>: decode a RoQ, save frames 0, 30, 90 as
+  <file>_<frame>.png (checking the decoder on retail videos) }
+procedure DumpRoq(const FileName: String);
+var
+  V: TD3RoqVideo;
+  S: TFileStream;
+  F: Integer;
+begin
+  V := TD3RoqVideo.Create;
+  S := TFileStream.Create(FileName, fmOpenRead);
+  try
+    if not V.LoadFromStream(S) then
+    begin
+      Writeln('Not a RoQ: ', FileName);
+      Exit;
+    end;
+    Writeln(Format('RoQ %s: %d x %d, %d fps, %d frames', [FileName, V.Width, V.Height, V.Fps, V.FrameCount]));
+    for F in [0, 30, 90] do
+    begin
+      V.SeekTime(F / V.Fps, False);
+      SaveImage(V.Image, ChangeFileExt(FileName, '') + '_' + IntToStr(V.Frame) + '.png');
+    end;
+  finally
+    S.Free;
+    V.Free;
+  end;
+end;
+
+begin
+  if GetEnvironmentVariable('CD3_ROQ_DUMP') <> '' then
+  begin
+    DumpRoq(GetEnvironmentVariable('CD3_ROQ_DUMP'));
+    Exit;
+  end;
   InitializeLog;
   D3Fs.RegisterProtocol;
   RegisterImageProtocol;
@@ -7024,6 +7160,7 @@ begin
   TestGuiLists;
   TestGuiNesting;
   TestGuiClipping;
+  TestRoq;
   TestImages;
   TestProc;
   TestMapFile;
