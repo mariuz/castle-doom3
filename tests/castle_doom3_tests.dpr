@@ -4389,6 +4389,53 @@ begin
   end;
 end;
 
+{ target_enableweapons (idTarget_EnableLevelWeapons) and target_removeweapons }
+procedure TestWeaponTargets;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  T: TD3MapEntity;
+  Far: TVector3;
+  I, Pistol: Integer;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  T := TD3MapEntity.Create;
+  try
+    Map.SpawnModels := False;
+    Check(Map.LoadMap('testmap'), 'load testmap for weapon targets');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 1 to 10 do
+      Game.Update(0.1, Far);
+    Check(not Game.WeaponsDisabled, 'no no_Weapons in the test map');
+    Pistol := Game.WeaponSlot('weapon_test_pistol');
+    Check(Game.HasWeapon(Pistol), 'the pistol at the start');
+    T.SetValue('classname', 'target_enableweapons');
+    T.SetValue('disable', '1');
+    Game.Activate(T);
+    Check(Game.WeaponsDisabled, 'disable 1: weapons disabled');
+    T.SetValue('disable', '0');
+    T.SetValue('weapon', 'weapon_test_fists');
+    Game.Activate(T);
+    Check(not Game.WeaponsDisabled, 'disable 0: enabled again');
+    T.Pairs.Clear;
+    T.SetValue('classname', 'target_removeweapons');
+    T.SetValue('weapon', 'weapon_test_pistol');
+    Game.Activate(T);
+    Check(not Game.HasWeapon(Pistol), 'target_removeweapons removes the pistol');
+  finally
+    T.Free;
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { burn deaths: the material's burn-away stage (alphaTest over time - parm7),
   the skin alpha tested by its dissolve image }
 procedure TestBurnAway;
@@ -6819,6 +6866,7 @@ begin
   TestHitLocations;
   TestSoundShakesAndPaths;
   TestBurnAway;
+  TestWeaponTargets;
   TestScriptVM;
   TestMapScripts;
   TestCinematics;
