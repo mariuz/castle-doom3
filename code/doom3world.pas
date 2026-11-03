@@ -86,6 +86,18 @@ type
     Start, Duration: Single;
   end;
 
+  { A target_setinfluence (idTarget_SetInfluence, the demonic influences):
+    the lights and static entities it recolors, its pending events (-1:
+    none). }
+  TD3Influence = class
+    Entity: TD3MapEntity;
+    Lights, Statics: array of String;
+    { the lights' colors before the influence (restored after it) }
+    LightColors: array of TVector3;
+    Delay, ActivateAt, ClearFlashAt, FlashSeconds, RestoreAt, FovEndAt: Single;
+    RestoreOnTrigger: Boolean;
+  end;
+
   TD3MoverKind = (mkDoor, mkRotating, mkBobbing, mkPendulum);
   TD3DoorState = (dsClosed, dsOpening, dsOpen, dsClosing);
 
@@ -830,6 +842,14 @@ type
     FRadioEntity: TD3MapEntity;
     FFovFrom, FFovTo, FFovStart, FFovTime: Single;
     FEntityFades: specialize TList<TD3EntityFade>;
+    FInfluences: specialize TObjectList<TD3Influence>;
+    { idPlayer's influenceActive (1: no weapon, no monster damage; 2: no
+      moving; 3: slow), influenceMaterial over the view, fading in within
+      influenceRadius of FInfluencePos (Doom 3 coordinates) }
+    FInfluenceLevel: Integer;
+    FInfluenceMaterial: String;
+    FInfluenceRadius: Single;
+    FInfluencePos: TVector3;
     FEndLevelMap: String;
     { idPlayer's hiddenWeapon: the level's "no_Weapons", target_enableweapons
       ("disable"), the player's disableWeapon: lowered, no attacks }
@@ -894,6 +914,11 @@ type
     procedure UpdateGuiCommands;
     procedure HandleGuiCommands(const S: TD3GuiSurface; const Cmd: String);
     procedure UpdatePlayerInfo;
+    procedure FadeEntityColor(const AName: String; const Color: TVector3; const Seconds: Single);
+    procedure ActivateInfluence(const E: TD3MapEntity);
+    procedure ApplyInfluence(const Inf: TD3Influence);
+    procedure RestoreInfluence(const Inf: TD3Influence);
+    procedure UpdateInfluences;
     function ActivatePlayerInfo(const E: TD3MapEntity; const Cls: String): Boolean;
     function TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;
     function BarrelPosition(const W: TD3Weapon): TVector3;
@@ -1358,6 +1383,12 @@ type
     { target_endlevel: the next map it named ('' until then). }
     property EndLevelMap: String read FEndLevelMap;
     property WeaponsDisabled: Boolean read FWeaponsDisabled write FWeaponsDisabled;
+    { target_setinfluence's influenceLevel (0: none) }
+    property InfluenceLevel: Integer read FInfluenceLevel;
+    { target_setinfluence's vision material over the view ('': none) and its
+      strength (idPlayerView::InfluenceVision) }
+    property InfluenceMaterial: String read FInfluenceMaterial;
+    function InfluenceAlpha: Single;
     { idPlayer::RemoveWeapon: the weapon (by def name) leaves the inventory }
     procedure RemoveWeapon(const WeaponName: String);
     { the weapon's flashlight event (weapon scripts) }
@@ -1824,6 +1855,7 @@ begin
   FEmails := TStringList.Create;
   FVideos := TStringList.Create;
   FEntityFades := specialize TList<TD3EntityFade>.Create;
+  FInfluences := specialize TObjectList<TD3Influence>.Create(True);
   Health := 100;
   FIdealSlot := -1;
   ViewBobEnabled := True;
@@ -1865,6 +1897,7 @@ begin
   FreeAndNil(FEmails);
   FreeAndNil(FVideos);
   FreeAndNil(FEntityFades);
+  FreeAndNil(FInfluences);
   FreeAndNil(FScript);
   FScriptHost.Free;
   FHandles.Free;
@@ -1957,6 +1990,10 @@ begin
   FFovTo := 0;
   FFovTime := 0;
   FEntityFades.Clear;
+  FInfluences.Clear;
+  FInfluenceLevel := 0;
+  FInfluenceMaterial := '';
+  FInfluenceRadius := 0;
   FEndLevelMap := '';
   FWeaponsDisabled := False;
   FSelectWeaponName := '';
@@ -3474,13 +3511,15 @@ begin
     end;
     { looking at a GUI, the attack button clicks it (idPlayer::Weapon_GUI) }
     W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil) and
-      not FWeaponsDisabled);
+      not FWeaponsDisabled and (FInfluenceLevel = 0));
     { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus, and
       while weapons are disabled (hiddenWeapon) }
-    if ((FGuiFocus <> nil) or FWeaponsDisabled) and (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
+    if ((FGuiFocus <> nil) or FWeaponsDisabled or (FInfluenceLevel <> 0)) and
+       (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
       W.SetFlag('WEAPON_LOWERWEAPON', True)
     else
-    if (FGuiFocus = nil) and not FWeaponsDisabled and (W.Status = wsHolstered) and (W.Slot = FIdealSlot) and
+    if (FGuiFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0) and (W.Status = wsHolstered) and
+       (W.Slot = FIdealSlot) and
        not PlayerDead then
       W.SetFlag('WEAPON_RAISEWEAPON', True);
     W.SetFlag('WEAPON_RELOAD', FReloadRequested);
@@ -9055,12 +9094,279 @@ begin
     if WeaponSlot('weapon_fists') >= 0 then
       SelectWeapon(WeaponSlot('weapon_fists'));
   end else
-  if IsClass('target_setinfluence', 'idTarget_SetInfluence') or
-     IsClass('target_sessioncommand', 'idTarget_SessionCommand') or
+  if IsClass('target_setinfluence', 'idTarget_SetInfluence') then
+    ActivateInfluence(E)
+  else
+  if IsClass('target_sessioncommand', 'idTarget_SessionCommand') or
      IsClass('target_levelsp', 'idTarget_LevelTrigger') then
     Unsupported('activating ' + Cls)
   else
     Result := False;
+end;
+
+procedure TD3Game.FadeEntityColor(const AName: String; const Color: TVector3; const Seconds: Single);
+var
+  Fade: TD3EntityFade;
+  B: TD3BrushEntity;
+  L, I: Integer;
+begin
+  B := FMap.FindBrush(AName);
+  L := FMap.FindLight(AName);
+  if (B <> nil) and (B.Parms <> nil) then
+    Fade.From := Vector4(B.Parms.Parms[0], B.Parms.Parms[1], B.Parms.Parms[2], B.Parms.Parms[3])
+  else
+  if L >= 0 then
+    Fade.From := Vector4(FMap.Light(L).Parms.Parms[0], FMap.Light(L).Parms.Parms[1], FMap.Light(L).Parms.Parms[2], 1)
+  else
+    Exit;
+  Fade.EntityName := AName;
+  Fade.To_ := Vector4(Color.X, Color.Y, Color.Z, Fade.From.W);
+  Fade.Start := FTime;
+  Fade.Duration := Seconds;
+  for I := FEntityFades.Count - 1 downto 0 do
+    if SameText(FEntityFades[I].EntityName, AName) then
+      FEntityFades.Delete(I);
+  FEntityFades.Add(Fade);
+end;
+
+procedure TD3Game.ActivateInfluence(const E: TD3MapEntity);
+var
+  Inf, I: TD3Influence;
+  Targets: TD3MapEntityArray;
+  T: TD3MapEntity;
+  Lights: Boolean;
+  Radius: Single;
+  B: TD3BrushEntity;
+begin
+  Inf := nil;
+  for I in FInfluences do
+    if I.Entity = E then
+      Inf := I;
+  if Inf = nil then
+  begin
+    { idTarget_SetInfluence::Event_GatherEntities: its targets, or the
+      entities within "radius"; lights and static entities with
+      "color_demonic" }
+    Inf := TD3Influence.Create;
+    Inf.Entity := E;
+    Inf.Delay := E.FloatValue('delay', 0);
+    Inf.ActivateAt := -1;
+    Inf.ClearFlashAt := -1;
+    Inf.RestoreAt := -1;
+    Inf.FovEndAt := -1;
+    FInfluences.Add(Inf);
+    Lights := E.BoolValue('effect_lights') or E.BoolValue('effect_all');
+    if E.BoolValue('targetsonly') then
+      Targets := TargetsOf(E)
+    else
+    begin
+      Targets := nil;
+      Radius := E.FloatValue('radius', 0);
+      for T in FMap.MapFile.Entities do
+        if (T <> E) and (PointsDistance(T.Origin, E.Origin) <= Radius) then
+          Targets := Concat(Targets, [T]);
+    end;
+    for T in Targets do
+    begin
+      if not T.HasKey('color_demonic') then
+        Continue;
+      if FMap.FindLight(T.Name) >= 0 then
+      begin
+        if Lights then
+          Inf.Lights := Concat(Inf.Lights, [T.Name]);
+      end else
+      begin
+        B := FMap.FindBrush(T.Name);
+        if (B <> nil) and (B.Parms <> nil) then
+          Inf.Statics := Concat(Inf.Statics, [T.Name]);
+      end;
+    end;
+  end;
+  if E.BoolValue('triggeractivate') then
+  begin
+    if Inf.RestoreOnTrigger then
+    begin
+      Inf.RestoreOnTrigger := False;
+      RestoreInfluence(Inf);
+      Exit;
+    end;
+    Inf.RestoreOnTrigger := True;
+  end;
+  if Inf.Delay > 0 then
+  begin
+    Inf.ActivateAt := FTime + Inf.Delay;
+    Inf.Delay := 0;
+    Exit;
+  end;
+  ApplyInfluence(Inf);
+end;
+
+procedure TD3Game.ApplyInfluence(const Inf: TD3Influence);
+var
+  E, T: TD3MapEntity;
+  N: String;
+  FadeTime, FlashIn: Single;
+  Fov, L, LightIndex: Integer;
+begin
+  E := Inf.Entity;
+  Inf.ActivateAt := -1;
+  if E.BoolValue('triggertargets') then
+    ActivateTargetsNow(E);
+  { a white flash in and out (Event_Flash) }
+  FlashIn := E.FloatValue('flashin', 0);
+  if FlashIn > 0 then
+  begin
+    StartFade(Vector4(1, 1, 1, 1), FlashIn);
+    Inf.ClearFlashAt := FTime + FlashIn;
+    Inf.FlashSeconds := FlashIn;
+    if E.Value('snd_flashin') <> '' then
+      PlaySoundAt(E.Value('snd_flashin'), FPlayerEye);
+  end;
+  if E.Value('snd_influence') <> '' then
+    PlaySoundAt(E.Value('snd_influence'), FPlayerEye);
+  if E.Value('switchtoview') <> '' then
+  begin
+    T := FindEntity(E.Value('switchtoview'));
+    if T <> nil then
+      Activate(T);
+  end;
+  Fov := E.IntValue('fov', 0);
+  if Fov <> 0 then
+  begin
+    FFovFrom := ViewFov;
+    FFovTo := Fov;
+    FFovTime := E.FloatValue('fovtime', 0);
+    FFovStart := FTime;
+    { Think: back to the default fov once there, unless "leaveFOV" }
+    if not E.BoolValue('leavefov') then
+      Inf.FovEndAt := FTime + FFovTime;
+  end;
+  FadeTime := E.FloatValue('fade_time', 0.25);
+  for N in Inf.Statics do
+  begin
+    T := FindEntity(N);
+    if T <> nil then
+      FadeEntityColor(N, ParseVector3(T.Value('color_demonic'), Vector3(1, 1, 1)), FadeTime);
+  end;
+  if Inf.LightColors = nil then
+  begin
+    SetLength(Inf.LightColors, Length(Inf.Lights));
+    for L := 0 to High(Inf.Lights) do
+    begin
+      LightIndex := FMap.FindLight(Inf.Lights[L]);
+      Inf.LightColors[L] := Vector3(FMap.Light(LightIndex).Parms.Parms[0], FMap.Light(LightIndex).Parms.Parms[1],
+        FMap.Light(LightIndex).Parms.Parms[2]);
+    end;
+  end;
+  for N in Inf.Lights do
+  begin
+    T := FindEntity(N);
+    if T <> nil then
+      FadeEntityColor(N, ParseVector3(T.Value('color_demonic'), ParseVector3(T.Value('_color'), Vector3(1, 1, 1))),
+        FadeTime);
+    if (T <> nil) and (T.Value('mat_demonic') <> '') then
+      Unsupported('light mat_demonic');
+  end;
+  FInfluenceLevel := E.IntValue('influencelevel', 0);
+  if E.HasKey('snapangle') then
+  begin
+    FTeleportPending := True;
+    FTeleportPos := PlayerFeet;
+    FTeleportYaw := E.FloatValue('snapangle', 0);
+  end;
+  if E.BoolValue('effect_vision') then
+  begin
+    FInfluenceMaterial := E.Value('mtrvision');
+    FInfluenceRadius := E.FloatValue('visionradius', 0);
+    FInfluencePos := E.Origin;
+    if E.Value('skinvision') <> '' then
+      Unsupported('target_setinfluence skinVision');
+  end;
+  if E.Value('mtrworld') <> '' then
+    Unsupported('target_setinfluence mtrWorld');
+  if not Inf.RestoreOnTrigger then
+    Inf.RestoreAt := FTime + E.FloatValue('time', 0);
+  WritelnLog('Doom3World', 'Influence %s on: %d lights, %d entities, level %d%s',
+    [E.Name, Length(Inf.Lights), Length(Inf.Statics), FInfluenceLevel,
+     Iff(FInfluenceMaterial <> '', ', vision ' + FInfluenceMaterial, '')]);
+end;
+
+procedure TD3Game.RestoreInfluence(const Inf: TD3Influence);
+var
+  E: TD3MapEntity;
+  N: String;
+  FadeTime, FlashOut: Single;
+  L: Integer;
+begin
+  E := Inf.Entity;
+  Inf.RestoreAt := -1;
+  FlashOut := E.FloatValue('flashout', 0);
+  if FlashOut > 0 then
+  begin
+    StartFade(Vector4(1, 1, 1, 1), FlashOut);
+    Inf.ClearFlashAt := FTime + FlashOut;
+    Inf.FlashSeconds := FlashOut;
+    if E.Value('snd_flashout') <> '' then
+      PlaySoundAt(E.Value('snd_flashout'), FPlayerEye)
+    else
+    if E.Value('snd_flashin') <> '' then
+      PlaySoundAt(E.Value('snd_flashin'), FPlayerEye);
+  end;
+  FadeTime := E.FloatValue('fade_time', 0.25);
+  for N in Inf.Statics do
+    FadeEntityColor(N, Vector3(1, 1, 1), FadeTime);
+  { Doom 3 fades them to "_color"; the colors they had keep lights a script
+    or a fade had changed }
+  for L := 0 to High(Inf.Lights) do
+    if L <= High(Inf.LightColors) then
+      FadeEntityColor(Inf.Lights[L], Inf.LightColors[L], FadeTime);
+  FInfluenceLevel := 0;
+  FInfluenceMaterial := '';
+  FInfluenceRadius := 0;
+  FFovTo := 0;
+  FFovTime := 0;
+  Inf.FovEndAt := -1;
+  WritelnLog('Doom3World', 'Influence %s restored', [E.Name]);
+end;
+
+procedure TD3Game.UpdateInfluences;
+var
+  Inf: TD3Influence;
+begin
+  for Inf in FInfluences do
+  begin
+    if (Inf.ActivateAt >= 0) and (FTime >= Inf.ActivateAt) then
+      ApplyInfluence(Inf);
+    if (Inf.ClearFlashAt >= 0) and (FTime >= Inf.ClearFlashAt) then
+    begin
+      Inf.ClearFlashAt := -1;
+      StartFade(Vector4(0, 0, 0, 0), Inf.FlashSeconds);
+    end;
+    if (Inf.FovEndAt >= 0) and (FTime >= Inf.FovEndAt) then
+    begin
+      Inf.FovEndAt := -1;
+      FFovTo := 0;
+      FFovTime := 0;
+    end;
+    if (Inf.RestoreAt >= 0) and (FTime >= Inf.RestoreAt) then
+      RestoreInfluence(Inf);
+  end;
+end;
+
+function TD3Game.InfluenceAlpha: Single;
+var
+  D: Single;
+begin
+  if FInfluenceMaterial = '' then
+    Exit(0);
+  Result := 1;
+  { idPlayerView::InfluenceVision: stronger nearer the entity }
+  if FInfluenceRadius > 0 then
+  begin
+    D := PointsDistance(CgeToD3(PlayerFeet), FInfluencePos);
+    if D < FInfluenceRadius then
+      Result := 1 - EnsureRange(D / FInfluenceRadius, 0, 1);
+  end;
 end;
 
 procedure TD3Game.UpdatePlayerInfo;
@@ -9095,6 +9401,7 @@ begin
       ActivateTargetsNow(E);
     end;
   end;
+  UpdateInfluences;
   { target_fadeentity fades }
   for I := FEntityFades.Count - 1 downto 0 do
   begin
@@ -11879,7 +12186,8 @@ end;
 procedure TD3Game.DamagePlayerByMonster(const Amount: Integer; const DamageDefName: String;
   const Direction: TVector3);
 begin
-  if PowerUpActive(PowerupBerserk) then
+  { berserk; idPlayer::Damage: none from monsters during influences }
+  if PowerUpActive(PowerupBerserk) or (FInfluenceLevel <> 0) then
     Exit;
   DamagePlayer(Amount, DamageDefName, Direction);
 end;
@@ -11926,6 +12234,12 @@ begin
     Result := 1.7
   else
     Result := 1;
+  { idPlayer: influenceLevel 3 slows the player to a third, 2 stops it }
+  if FInfluenceLevel = 3 then
+    Result := Result * 0.33
+  else
+  if FInfluenceLevel = 2 then
+    Result := Result * 0.001;
 end;
 
 function TD3Game.GivePowerUp(const Powerup: Integer; const Seconds: Single): Boolean;

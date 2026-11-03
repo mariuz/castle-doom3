@@ -121,7 +121,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(49, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(64, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(65, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
@@ -272,6 +272,48 @@ begin
   end;
 end;
 
+{ idWindow clips the text and children to the window's rect (unless
+  noclip): the PDA hides its objectives by shrinking them to height 0. A
+  click passes on to the next window under the cursor when the first
+  handles nothing (the PDA's tabs under a decoration). }
+procedure TestGuiClipping;
+var
+  Gui: TD3Gui;
+  Img: TRGBAlphaImage;
+
+  function Red(const GX, GY: Single): Integer;
+  begin
+    Result := PVector4Byte(Img.PixelPtr(Round(GX * Img.Width / 640),
+      Img.Height - 1 - Round(GY * Img.Height / 480)))^.X;
+  end;
+
+begin
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef Shut { rect 100, 100, 200, 0 windowDef Inner { rect 0, 0, 100, 100 backcolor 1, 0, 0, 1 } } ' +
+      'windowDef Open { rect 400, 100, 50, 50 windowDef Big { rect 0, 0, 100, 100 backcolor 1, 0, 0, 1 } } ' +
+      'windowDef Free { rect 100, 300, 50, 0 noclip 1 windowDef Out { rect 0, 0, 100, 100 backcolor 1, 0, 0, 1 } } ' +
+      'windowDef Tab { rect 500, 300, 100, 50 onAction { set "cmd" "tab" ; } } ' +
+      'windowDef Deco { rect 500, 300, 100, 50 } }'), 'GUI for clipping');
+    Img := RenderGui(Gui, nil);
+    try
+      CheckEquals(0, Red(150, 150), 'a child of a window of height 0 is hidden');
+      CheckEquals(255, Red(420, 120), 'a child inside its parent draws');
+      CheckEquals(0, Red(470, 170), 'a child is clipped to its parent''s rect');
+      CheckEquals(255, Red(120, 320), 'noclip lets a child draw outside');
+    finally
+      Img.Free;
+    end;
+    Gui.Activate(0);
+    Gui.SetCursor(550, 320);
+    Check(Gui.Click, 'a click passes through a window that handles nothing');
+    CheckEquals('tab', Gui.TakeCmd, 'the window below runs its onAction');
+  finally
+    Gui.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -391,7 +433,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(88, MapFile.Entities.Count, 'entity count');
+    CheckEquals(89, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -6494,6 +6536,29 @@ begin
     Step(0.6);
     CheckNear(0, Game.ViewFov, 'back to the default');
 
+    { a demonic influence (target_setinfluence) }
+    L := Map.FindLight('light_3');
+    Check(L >= 0, 'light_3');
+    Activate('target_setinfluence_1');
+    Step(0.1);
+    CheckEquals(1, Game.InfluenceLevel, 'influenceLevel 1');
+    CheckEquals('textures/test/blood_blob', Game.InfluenceMaterial, 'the vision material');
+    CheckNear(1, Game.InfluenceAlpha, 'the vision at full strength (no visionRadius)');
+    Check(Game.FadeColor.W > 0, 'the white flash');
+    Step(0.6);
+    CheckNear(70, Game.ViewFov, 'the influence''s fov');
+    if L >= 0 then
+    begin
+      CheckNear(1, Map.Light(L).Parms.Parms[0], 'light_3 turned red (color_demonic)', 0.01);
+      CheckNear(0, Map.Light(L).Parms.Parms[2], 'no blue left in light_3', 0.01);
+    end;
+    Step(2);
+    CheckEquals(0, Game.InfluenceLevel, 'the influence ended after its time');
+    CheckEquals('', Game.InfluenceMaterial, 'no vision after it');
+    CheckNear(0, Game.ViewFov, 'the default fov after it');
+    if L >= 0 then
+      CheckNear(1, Map.Light(L).Parms.Parms[2], 'light_3 blue again', 0.01);
+
     { damage }
     Mon := nil;
     for Mon in Game.Monsters do
@@ -6941,6 +7006,7 @@ begin
   TestStringsAndSoundFiles;
   TestGuiLists;
   TestGuiNesting;
+  TestGuiClipping;
   TestImages;
   TestProc;
   TestMapFile;
