@@ -92,6 +92,8 @@ type
   TD3Influence = class
     Entity: TD3MapEntity;
     Lights, Statics: array of String;
+    { speakers with snd_demonic, entities with gui_demonic }
+    Speakers, Guis: array of String;
     { the lights' colors before the influence (restored after it) }
     LightColors: array of TVector3;
     Delay, ActivateAt, ClearFlashAt, FlashSeconds, RestoreAt, FovEndAt: Single;
@@ -605,6 +607,8 @@ type
   end;
 
   TD3WeaponStatus = (wsHolstered, wsRising, wsLowering, wsReady, wsOutOfAmmo, wsReload);
+  { the player body's torso channel (ai_player.script's Torso_* states) }
+  TD3TorsoState = (tsNone, tsIdle, tsFire, tsAim, tsReload, tsRaise, tsLower, tsPain);
 
   { The player's weapon (idWeapon): its entityDef (def_weaponN of the
     player def) runs its script object (weapon_pistol...) with the idWeapon
@@ -795,6 +799,12 @@ type
     { the body's crouch state (its crouch_down / crouch_up played), and a
       transition anim playing }
     FBodyCrouched, FBodyTransition: Boolean;
+    { the body's torso channel (ai_player.script's torso states): what it
+      plays, and a shot / melee to show }
+    FTorsoState: TD3TorsoState;
+    FTorsoPrefix: String;
+    FPlayerFired: Boolean;
+    FTorsoPainAge: Single;
     { brass, and when the current weapon ejects the next (-1: none) }
     FBrass: specialize TObjectList<TD3Brass>;
     FBrassDue: Single;
@@ -843,11 +853,14 @@ type
     FFovFrom, FFovTo, FFovStart, FFovTime: Single;
     FEntityFades: specialize TList<TD3EntityFade>;
     FInfluences: specialize TObjectList<TD3Influence>;
+    FPdaPlaying: TCastlePlayingSoundSource;
     { idPlayer's influenceActive (1: no weapon, no monster damage; 2: no
       moving; 3: slow), influenceMaterial over the view, fading in within
       influenceRadius of FInfluencePos (Doom 3 coordinates) }
     FInfluenceLevel: Integer;
     FInfluenceMaterial: String;
+    { skinVision: the player's skin meanwhile }
+    FInfluenceSkin: String;
     FInfluenceRadius: Single;
     FInfluencePos: TVector3;
     FEndLevelMap: String;
@@ -916,6 +929,9 @@ type
     procedure UpdatePlayerInfo;
     procedure FadeEntityColor(const AName: String; const Color: TVector3; const Seconds: Single);
     procedure ActivateInfluence(const E: TD3MapEntity);
+    function SpeakerOf(const AName: String): TD3Speaker;
+    procedure SetSpeakerDemonic(const AName: String; const Demonic: Boolean);
+    procedure SetGuisDemonic(const AName: String; const Demonic: Boolean);
     procedure ApplyInfluence(const Inf: TD3Influence);
     procedure RestoreInfluence(const Inf: TD3Influence);
     procedure UpdateInfluences;
@@ -942,6 +958,9 @@ type
     procedure MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
+    function PlayerBodyAnim(const Base: String; const Prefixed: Boolean): String;
+    function PlayerLegsAnim: String;
+    procedure UpdatePlayerTorso(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
     { place the view model: bob, lag, idle drift, muzzle kick
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
@@ -1357,6 +1376,9 @@ type
     function ObjectiveCount: Integer;
     { idPlayer's "playpdaaudio": the audio log of a PDA (its list row:
       0 the personal one, else newest first) }
+    { the PDA's sound channel (audio logs, the videos' sound) }
+    procedure PlayPdaSound(const ShaderName: String);
+    procedure StopPdaSound;
     procedure PlayPdaAudio(const OtherPda: Boolean; const PdaRow, AudioIndex: Integer);
     function Objective(const I: Integer): TD3Objective;
     property MissionObjective: String read FMissionObjective;
@@ -1898,6 +1920,7 @@ begin
   FreeAndNil(FVideos);
   FreeAndNil(FEntityFades);
   FreeAndNil(FInfluences);
+  FreeAndNil(FPdaPlaying);
   FreeAndNil(FScript);
   FScriptHost.Free;
   FHandles.Free;
@@ -1991,8 +2014,10 @@ begin
   FFovTime := 0;
   FEntityFades.Clear;
   FInfluences.Clear;
+  StopPdaSound;
   FInfluenceLevel := 0;
   FInfluenceMaterial := '';
+  FInfluenceSkin := '';
   FInfluenceRadius := 0;
   FEndLevelMap := '';
   FWeaponsDisabled := False;
@@ -4772,6 +4797,7 @@ begin
       P.Damage := P.Damage * 2;
     P.Fuse := P.Fuse - FuseOffset;
   end;
+  FPlayerFired := True;
   WritelnLog('Doom3World', 'Weapon %s fires %d (clip %d, ammo %d)',
     [W.DefName, Max(1, Count), Clip[W.Slot], AmmoCount(W.AmmoType)]);
 end;
@@ -6342,6 +6368,9 @@ begin
   if Md5 = nil then
     Exit;
   FPlayerModel := TD3Md5Instance.Create(Md5, Decl.Anims, PlayerSkinName);
+  { idAnimator's channels: the torso plays the weapon's anims }
+  FPlayerModel.SetTorsoChannel(Decl.Channels.Values['torso']);
+  FTorsoState := tsNone;
   { the game moves the body (walk anims would carry it away) }
   FPlayerModel.LockOrigin := True;
   FPlayerModel.Scene.Collides := False;
@@ -6367,11 +6396,174 @@ begin
     Exit;
   Base := FPlayerDef.Values['skin'];
   Result := Base;
+  { idPlayer's influenceSkin (target_setinfluence's skinVision) }
+  if (FInfluenceSkin <> '') and (Decls.Skin(FInfluenceSkin) <> nil) then
+    Result := FInfluenceSkin
+  else
   if PowerUpActive(PowerupInvisibility) and (FPlayerDef.Values['skin_invisibility'] <> '') then
     Result := FPlayerDef.Values['skin_invisibility']
   else
   if PowerUpActive(PowerupBerserk) and (Base <> '') and (Decls.Skin(Base + '_berserk') <> nil) then
     Result := Base + '_berserk';
+end;
+
+function TD3Game.PlayerBodyAnim(const Base: String; const Prefixed: Boolean): String;
+begin
+  { idActor::GetAnim: the weapon's "<prefix>_<anim>" first }
+  Result := '';
+  if FPlayerModel = nil then
+    Exit;
+  if (FTorsoPrefix <> '') and FPlayerModel.HasAnim(FTorsoPrefix + '_' + Base) then
+    Exit(FTorsoPrefix + '_' + Base);
+  if not Prefixed and FPlayerModel.HasAnim(Base) then
+    Result := Base;
+end;
+
+function TD3Game.PlayerLegsAnim: String;
+var
+  Axis: TMatrix3;
+  Fwd, Left: Single;
+  Running: Boolean;
+
+  function First(const Names: array of String): String;
+  var
+    N: String;
+  begin
+    for N in Names do
+      if PlayerBodyAnim(N, False) <> '' then
+        Exit(PlayerBodyAnim(N, False));
+    Result := '';
+  end;
+
+begin
+  { ai_player.script's legs states: by the move in view space (forward,
+    backward, strafing), running over the walking speed, crouched; in the
+    air jump / fall }
+  Axis := PlayerViewAxis;
+  Fwd := FPlayerVelocity.X * Axis.Data[0, 0] + FPlayerVelocity.Y * Axis.Data[0, 1];
+  Left := FPlayerVelocity.X * Axis.Data[1, 0] + FPlayerVelocity.Y * Axis.Data[1, 1];
+  Running := FXYSpeed > 170;
+  Result := '';
+  if (PlayerJumping or FFalling) and not FCrouched then
+    Result := First(['fall', 'jump']);
+  if (Result = '') and FCrouched then
+  begin
+    if (FXYSpeed > 20) and (Fwd < -Abs(Left)) then
+      Result := First(['crouch_walk_backwards', 'crouch_walk'])
+    else
+    if FXYSpeed > 20 then
+      Result := First(['crouch_walk'])
+    else
+      Result := First(['crouch']);
+  end;
+  if (Result = '') and (FXYSpeed > 20) then
+  begin
+    if Abs(Fwd) >= Abs(Left) then
+    begin
+      if Fwd >= 0 then
+      begin
+        if Running then
+          Result := First(['run_forward', 'run', 'walk'])
+        else
+          Result := First(['walk']);
+      end else
+      if Running then
+        Result := First(['run_backwards', 'walk_backwards', 'walk'])
+      else
+        Result := First(['walk_backwards', 'walk']);
+    end else
+    if Left > 0 then
+    begin
+      if Running then
+        Result := First(['run_strafe_left', 'walk_strafe_left', 'walk'])
+      else
+        Result := First(['walk_strafe_left', 'walk']);
+    end else
+    if Running then
+      Result := First(['run_strafe_right', 'walk_strafe_right', 'walk'])
+    else
+      Result := First(['walk_strafe_right', 'walk']);
+  end;
+  if Result = '' then
+    Result := First(['idle']);
+  if Result = '' then
+    Result := 'idle';
+end;
+
+procedure TD3Game.UpdatePlayerTorso(const SecondsPassed: Single);
+
+  procedure Play(const State: TD3TorsoState; const Bases: array of String; const Loop: Boolean);
+  var
+    B, Anim: String;
+  begin
+    for B in Bases do
+    begin
+      Anim := PlayerBodyAnim(B, True);
+      if (Anim <> '') and FPlayerModel.PlayTorsoAnim(Anim, Loop) then
+      begin
+        FTorsoState := State;
+        if State <> tsIdle then
+          WritelnLog('Doom3World', 'Player torso plays %s', [Anim]);
+        Exit;
+      end;
+    end;
+    { no such anim: the body's anim plays on the torso too }
+    FPlayerModel.PlayTorsoAnim('');
+    FTorsoState := State;
+  end;
+
+var
+  Prefix: String;
+begin
+  if not FPlayerModel.HasTorsoChannel or PlayerDead or FBodyTransition then
+  begin
+    if FTorsoState <> tsNone then
+      FPlayerModel.PlayTorsoAnim('');
+    FTorsoState := tsNone;
+    FPlayerFired := False;
+    Exit;
+  end;
+  { idPlayer's animPrefix: the weapon's def without "weapon_" }
+  Prefix := '';
+  if FWeapon <> nil then
+  begin
+    Prefix := LowerCase(FWeapon.DefName);
+    if Copy(Prefix, 1, 7) = 'weapon_' then
+      Delete(Prefix, 1, 7);
+  end;
+  if Prefix <> FTorsoPrefix then
+  begin
+    FTorsoPrefix := Prefix;
+    FTorsoState := tsNone;
+  end;
+  FTorsoPainAge := FTorsoPainAge + SecondsPassed;
+  { the events: a shot (Torso_Fire), a reload, a switch, a hit }
+  if FPlayerFired then
+  begin
+    FPlayerFired := False;
+    Play(tsFire, ['fire1', 'fire', 'punch_right', 'throw'], False);
+  end else
+  if (FWeapon <> nil) and (FWeapon.Status = wsReload) and (FTorsoState <> tsReload) then
+    Play(tsReload, ['reload', 'reload_start'], False)
+  else
+  if (FWeapon <> nil) and (FWeapon.Status = wsLowering) and (FTorsoState <> tsLower) then
+    Play(tsLower, ['lower'], False)
+  else
+  if (FWeapon <> nil) and (FWeapon.Status = wsRising) and (FTorsoState <> tsRaise) then
+    Play(tsRaise, ['raise'], False)
+  else
+  if (SinceDamage < 0.1) and (FTorsoPainAge > 0.25) and (FTorsoState in [tsIdle, tsAim, tsNone]) then
+  begin
+    FTorsoPainAge := 0;
+    Play(tsPain, ['pain_chest', 'pain'], False);
+  end else
+  if (FTorsoState = tsFire) and FPlayerModel.TorsoAnimFinished then
+    Play(tsAim, ['aim'], False)
+  else
+  if (FTorsoState = tsNone) or
+     ((FTorsoState in [tsAim, tsReload, tsRaise, tsPain]) and FPlayerModel.TorsoAnimFinished) or
+     ((FTorsoState = tsLower) and (FWeapon <> nil) and (FWeapon.Status <> wsLowering)) then
+    Play(tsIdle, ['idle'], True);
 end;
 
 procedure TD3Game.UpdatePlayerModel(const SecondsPassed: Single);
@@ -6448,22 +6640,11 @@ begin
   end;
   if not PlayerDead and not FBodyTransition then
   begin
-    if FCrouched and (FXYSpeed > 20) and FPlayerModel.HasAnim('crouch_walk') then
-      Anim := 'crouch_walk'
-    else
-    if FCrouched and FPlayerModel.HasAnim('crouch') then
-      Anim := 'crouch'
-    else
-    if (FXYSpeed > 170) and FPlayerModel.HasAnim('run') then
-      Anim := 'run'
-    else
-    if (FXYSpeed > 20) and FPlayerModel.HasAnim('walk') then
-      Anim := 'walk'
-    else
-      Anim := 'idle';
+    Anim := PlayerLegsAnim;
     if (Anim <> FPlayerAnim) and FPlayerModel.PlayAnim(Anim) then
       FPlayerAnim := Anim;
   end;
+  UpdatePlayerTorso(SecondsPassed);
   FPlayerModel.Update(SecondsPassed);
   UpdateWorldWeapon;
 end;
@@ -8438,6 +8619,7 @@ var
   Down: Boolean;
   E: TD3MapEntity;
   B: TD3BrushEntity;
+  TraceDist: Single;
 begin
   { idPlayer::UpdateFocus: the view ray within 80 units on an interactive
     GUI surface; the cursor goes where it hits, through the surface's
@@ -8447,7 +8629,25 @@ begin
   begin
     Hit := FMap.World.WorldRay(FPlayerEye, PlayerViewDir);
     try
-      if (Hit <> nil) and (Hit.Count > 0) and (Hit.Distance <= GuiFocusDistance) and
+      { the GUI surfaces' own triangles (their entities collide and are
+        picked with their clip models), unless something nearer than the
+        GUI (by more than its clip model's few units) is in the way }
+      if FMap.GuiTrace(FPlayerEye, PlayerViewDir.Normalize, GuiFocusDistance, S, TC, TraceDist) and
+         ((Hit = nil) or (Hit.Count = 0) or (Hit.Distance + 8 >= TraceDist)) then
+      begin
+        if not S.Gui.Interactive then
+          S := nil
+        else
+        begin
+          B := FMap.FindBrush(S.EntityName);
+          if (B <> nil) and B.Hidden then
+            S := nil;
+        end;
+        if S <> nil then
+          S.Gui.SetCursor(Clamped(TC.X * GuiWidth, 0, GuiWidth), Clamped((1 - TC.Y) * GuiHeight, 0, GuiHeight));
+      end else
+      S := nil;
+      if (S = nil) and (Hit <> nil) and (Hit.Count > 0) and (Hit.Distance <= GuiFocusDistance) and
          (Hit[0].Triangle <> nil) and (Hit[0].Triangle^.InternalShape is TShape) then
       begin
         Shape := TShape(Hit[0].Triangle^.InternalShape);
@@ -8619,6 +8819,39 @@ end;
 
 { Player information (roadmap 5f) ------------------------------------------- }
 
+procedure TD3Game.PlayPdaSound(const ShaderName: String);
+var
+  Snd: TCastleSound;
+  T: TCastleTransform;
+  Source: TCastleSoundSource;
+begin
+  { idPlayer's SND_CHANNEL_PDA: one sound at a time, stoppable }
+  StopPdaSound;
+  Snd := SoundFromShader(ShaderName);
+  if Snd = nil then
+    Exit;
+  T := TCastleTransform.Create(nil);
+  T.Translation := FPlayerEye;
+  FMap.Add(T);
+  FSoundTransforms.Add(T);
+  Source := TCastleSoundSource.Create(T);
+  Source.Spatial := False;
+  T.AddBehavior(Source);
+  FPdaPlaying := TCastlePlayingSoundSource.Create(nil);
+  FPdaPlaying.Sound := Snd;
+  Source.Play(FPdaPlaying);
+  WritelnLog('Doom3World', 'PDA sound %s', [ShaderName]);
+end;
+
+procedure TD3Game.StopPdaSound;
+begin
+  if FPdaPlaying <> nil then
+  begin
+    FPdaPlaying.Stop;
+    FreeAndNil(FPdaPlaying);
+  end;
+end;
+
 procedure TD3Game.PlayPdaAudio(const OtherPda: Boolean; const PdaRow, AudioIndex: Integer);
 var
   Pda: TD3PdaDecl;
@@ -8637,7 +8870,7 @@ begin
   if Audio = nil then
     Exit;
   WritelnLog('Doom3World', 'PDA audio log %s (%s)', [Audio.Name, Audio.Audio]);
-  PlaySoundAt(Audio.Audio, FPlayerEye);
+  PlayPdaSound(Audio.Audio);
 end;
 
 function TD3Game.TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;
@@ -9135,12 +9368,67 @@ begin
   FEntityFades.Add(Fade);
 end;
 
+function TD3Game.SpeakerOf(const AName: String): TD3Speaker;
+var
+  S: TD3Speaker;
+begin
+  for S in FSpeakers do
+    if SameText(S.Entity.Name, AName) then
+      Exit(S);
+  Result := nil;
+end;
+
+procedure TD3Game.SetSpeakerDemonic(const AName: String; const Demonic: Boolean);
+var
+  S: TD3Speaker;
+begin
+  { idTarget_SetInfluence: "overlayDemonic" plays snd_demonic over the
+    speaker's sound, else it replaces it until restored }
+  S := SpeakerOf(AName);
+  if S = nil then
+    Exit;
+  if Demonic then
+  begin
+    if not S.Entity.BoolValue('overlaydemonic') then
+      S.Transform.Exists := False;
+    PlaySoundAt(S.Entity.Value('snd_demonic'), S.Transform.WorldTranslation);
+  end else
+    S.Transform.Exists := True;
+end;
+
+procedure TD3Game.SetGuisDemonic(const AName: String; const Demonic: Boolean);
+var
+  T: TD3MapEntity;
+  J: Integer;
+  Suffix, Normal, Demon: String;
+begin
+  { gui / gui_demonic, gui2 / gui_demonic2, gui3 / gui_demonic3 }
+  T := FindEntity(AName);
+  if T = nil then
+    Exit;
+  for J := 1 to 3 do
+  begin
+    if J = 1 then
+      Suffix := ''
+    else
+      Suffix := IntToStr(J);
+    Normal := T.Value('gui' + Suffix);
+    Demon := T.Value('gui_demonic' + Suffix);
+    if (Normal = '') or (Demon = '') then
+      Continue;
+    if Demonic then
+      FMap.ReplaceGui(T.Name, Normal, Demon, T.Pairs)
+    else
+      FMap.ReplaceGui(T.Name, Demon, Normal, T.Pairs);
+  end;
+end;
+
 procedure TD3Game.ActivateInfluence(const E: TD3MapEntity);
 var
   Inf, I: TD3Influence;
   Targets: TD3MapEntityArray;
   T: TD3MapEntity;
-  Lights: Boolean;
+  Lights, Sounds, Guis: Boolean;
   Radius: Single;
   B: TD3BrushEntity;
 begin
@@ -9162,6 +9450,8 @@ begin
     Inf.FovEndAt := -1;
     FInfluences.Add(Inf);
     Lights := E.BoolValue('effect_lights') or E.BoolValue('effect_all');
+    Sounds := E.BoolValue('effect_sounds') or E.BoolValue('effect_all');
+    Guis := E.BoolValue('effect_guis') or E.BoolValue('effect_all');
     if E.BoolValue('targetsonly') then
       Targets := TargetsOf(E)
     else
@@ -9174,6 +9464,16 @@ begin
     end;
     for T in Targets do
     begin
+      if Sounds and T.HasKey('snd_demonic') and (SpeakerOf(T.Name) <> nil) then
+      begin
+        Inf.Speakers := Concat(Inf.Speakers, [T.Name]);
+        Continue;
+      end;
+      if Guis and T.HasKey('gui_demonic') and T.HasKey('gui') then
+      begin
+        Inf.Guis := Concat(Inf.Guis, [T.Name]);
+        Continue;
+      end;
       if not T.HasKey('color_demonic') then
         Continue;
       if FMap.FindLight(T.Name) >= 0 then
@@ -9271,8 +9571,12 @@ begin
       FadeEntityColor(N, ParseVector3(T.Value('color_demonic'), ParseVector3(T.Value('_color'), Vector3(1, 1, 1))),
         FadeTime);
     if (T <> nil) and (T.Value('mat_demonic') <> '') then
-      Unsupported('light mat_demonic');
+      FMap.SetLightShader(FMap.FindLight(N), T.Value('mat_demonic'));
   end;
+  for N in Inf.Speakers do
+    SetSpeakerDemonic(N, True);
+  for N in Inf.Guis do
+    SetGuisDemonic(N, True);
   FInfluenceLevel := E.IntValue('influencelevel', 0);
   if E.HasKey('snapangle') then
   begin
@@ -9285,21 +9589,20 @@ begin
     FInfluenceMaterial := E.Value('mtrvision');
     FInfluenceRadius := E.FloatValue('visionradius', 0);
     FInfluencePos := E.Origin;
-    if E.Value('skinvision') <> '' then
-      Unsupported('target_setinfluence skinVision');
+    FInfluenceSkin := E.Value('skinvision');
   end;
   if E.Value('mtrworld') <> '' then
     Unsupported('target_setinfluence mtrWorld');
   if not Inf.RestoreOnTrigger then
     Inf.RestoreAt := FTime + E.FloatValue('time', 0);
-  WritelnLog('Doom3World', 'Influence %s on: %d lights, %d entities, level %d%s',
-    [E.Name, Length(Inf.Lights), Length(Inf.Statics), FInfluenceLevel,
+  WritelnLog('Doom3World', 'Influence %s on: %d lights, %d entities, %d speakers, %d GUIs, level %d%s',
+    [E.Name, Length(Inf.Lights), Length(Inf.Statics), Length(Inf.Speakers), Length(Inf.Guis), FInfluenceLevel,
      Iff(FInfluenceMaterial <> '', ', vision ' + FInfluenceMaterial, '')]);
 end;
 
 procedure TD3Game.RestoreInfluence(const Inf: TD3Influence);
 var
-  E: TD3MapEntity;
+  E, T: TD3MapEntity;
   N: String;
   FadeTime, FlashOut: Single;
   L: Integer;
@@ -9324,10 +9627,21 @@ begin
   { Doom 3 fades them to "_color"; the colors they had keep lights a script
     or a fade had changed }
   for L := 0 to High(Inf.Lights) do
+  begin
     if L <= High(Inf.LightColors) then
       FadeEntityColor(Inf.Lights[L], Inf.LightColors[L], FadeTime);
+    { back to its "texture" unless "leave_demonic_mat" }
+    T := FindEntity(Inf.Lights[L]);
+    if (T <> nil) and (T.Value('mat_demonic') <> '') and not T.BoolValue('leave_demonic_mat') then
+      FMap.SetLightShader(FMap.FindLight(Inf.Lights[L]), T.Value('texture'));
+  end;
+  for N in Inf.Speakers do
+    SetSpeakerDemonic(N, False);
+  for N in Inf.Guis do
+    SetGuisDemonic(N, False);
   FInfluenceLevel := 0;
   FInfluenceMaterial := '';
+  FInfluenceSkin := '';
   FInfluenceRadius := 0;
   FFovTo := 0;
   FFovTime := 0;

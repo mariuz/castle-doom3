@@ -97,6 +97,9 @@ type
     procedure FramePose(const Frame: Integer; var Pose: TD3JointArray);
     { Interpolated pose at a time (seconds), looping or clamped. }
     procedure PoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
+    { The joints relative to their parents (not composed), interpolated. }
+    procedure LocalPoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
+    procedure LocalFramePose(const Frame: Integer; var Pose: TD3JointArray);
   end;
 
   { Caches parsed models and animations by path. }
@@ -160,6 +163,13 @@ type
     FCopyJoints: array of TD3CopyJoint;
     FAnim: TD3Md5Anim;
     FAnimTime: Single;
+    { the torso channel: its joints, anim, time }
+    FTorsoMask: array of Boolean;
+    FTorsoAnimData: TD3Md5Anim;
+    FTorsoTime: Single;
+    FTorsoLoop: Boolean;
+    FTorsoName: String;
+    FTorsoPose: TD3JointArray;
     FLoop: Boolean;
     { the origin joint's position after the last Update (before
       LockOrigin), for LastOriginDelta }
@@ -225,6 +235,16 @@ type
     { Start an animation by name (from the model decl) or path. False when
       it doesn't exist. }
     function PlayAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
+    { idAnimator's torso channel: the joints of Spec (a model decl's
+      "channel torso" list: names, *name with its children, - to leave
+      out) play their own anim over the body's; '' clears the channel. }
+    procedure SetTorsoChannel(const Spec: String);
+    { An anim on the torso channel ('' stops it: the body's anim plays
+      there again). False if there's no such anim or channel. }
+    function PlayTorsoAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
+    function TorsoAnimFinished: Boolean;
+    property TorsoAnim: String read FTorsoName;
+    function HasTorsoChannel: Boolean;
     function HasAnim(const AnimName: String): Boolean;
     function TriangleCount: Integer;
     { Change the skin (idEntity::SetSkin, renderEntity.customSkin): the
@@ -754,6 +774,83 @@ begin
         QuatMultiply(Pose[Hierarchy[I].Parent].Orientation, Pose[I].Orientation));
     end else
       Pose[I].Position := P;
+  end;
+end;
+
+procedure TD3Md5Anim.LocalFramePose(const Frame: Integer; var Pose: TD3JointArray);
+var
+  I, K, F: Integer;
+  P, O: TVector3;
+  Comp: array of Single;
+begin
+  if Length(Pose) <> Length(Hierarchy) then
+    SetLength(Pose, Length(Hierarchy));
+  F := EnsureRange(Frame, 0, NumFrames - 1);
+  Comp := Frames[F];
+  for I := 0 to High(Hierarchy) do
+  begin
+    P := BaseFrame[I].Position;
+    O := BaseFrame[I].Orientation;
+    K := Hierarchy[I].StartIndex;
+    if (Hierarchy[I].Flags and 1) <> 0 then begin P.X := Comp[K]; Inc(K); end;
+    if (Hierarchy[I].Flags and 2) <> 0 then begin P.Y := Comp[K]; Inc(K); end;
+    if (Hierarchy[I].Flags and 4) <> 0 then begin P.Z := Comp[K]; Inc(K); end;
+    if (Hierarchy[I].Flags and 8) <> 0 then begin O.X := Comp[K]; Inc(K); end;
+    if (Hierarchy[I].Flags and 16) <> 0 then begin O.Y := Comp[K]; Inc(K); end;
+    if (Hierarchy[I].Flags and 32) <> 0 then begin O.Z := Comp[K]; end;
+    Pose[I].Name := Hierarchy[I].Name;
+    Pose[I].Parent := Hierarchy[I].Parent;
+    Pose[I].Position := P;
+    Pose[I].Orientation := QuatFromXYZ(O);
+  end;
+end;
+
+procedure TD3Md5Anim.LocalPoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
+var
+  FrameF, T: Single;
+  F0, F1, I: Integer;
+  PoseB: TD3JointArray;
+begin
+  FrameF := Time * FrameRate;
+  if Loop and (NumFrames > 1) then
+    FrameF := FrameF - Floor(FrameF / NumFrames) * NumFrames
+  else
+    FrameF := Min(FrameF, NumFrames - 1);
+  F0 := Trunc(FrameF);
+  T := FrameF - F0;
+  F1 := F0 + 1;
+  if F1 >= NumFrames then
+  begin
+    if Loop then
+      F1 := 0
+    else
+      F1 := NumFrames - 1;
+  end;
+  LocalFramePose(F0, Pose);
+  if (T < 0.001) or (F1 = F0) then
+    Exit;
+  PoseB := nil;
+  LocalFramePose(F1, PoseB);
+  for I := 0 to High(Pose) do
+  begin
+    Pose[I].Position := Lerp(T, Pose[I].Position, PoseB[I].Position);
+    Pose[I].Orientation := QuatNlerp(Pose[I].Orientation, PoseB[I].Orientation, T);
+  end;
+end;
+
+{ Parent-relative joints to model space (parents come first). }
+procedure ComposePose(var Pose: TD3JointArray);
+var
+  I, P: Integer;
+begin
+  for I := 0 to High(Pose) do
+  begin
+    P := Pose[I].Parent;
+    if (P >= 0) and (P < I) then
+    begin
+      Pose[I].Position := Pose[P].Position + QuatRotate(Pose[P].Orientation, Pose[I].Position);
+      Pose[I].Orientation := QuatNormalize(QuatMultiply(Pose[P].Orientation, Pose[I].Orientation));
+    end;
   end;
 end;
 
@@ -1439,6 +1536,88 @@ begin
   Result := Last[0].Position - First[0].Position;
 end;
 
+procedure TD3Md5Instance.SetTorsoChannel(const Spec: String);
+var
+  Words: TStringArray;
+  W, Name: String;
+  I, J: Integer;
+  Exclude, Subtree: Boolean;
+
+  function Below(const Joint, Ancestor: Integer): Boolean;
+  var
+    K: Integer;
+  begin
+    K := Joint;
+    while K >= 0 do
+    begin
+      if K = Ancestor then
+        Exit(True);
+      K := FModel.Joints[K].Parent;
+    end;
+    Result := False;
+  end;
+
+begin
+  FTorsoMask := nil;
+  if Trim(Spec) = '' then
+    Exit;
+  SetLength(FTorsoMask, Length(FModel.Joints));
+  Words := Spec.Split([' '], TStringSplitOptions.ExcludeEmpty);
+  for W in Words do
+  begin
+    Name := W;
+    Exclude := Copy(Name, 1, 1) = '-';
+    if Exclude then
+      Delete(Name, 1, 1);
+    Subtree := Copy(Name, 1, 1) = '*';
+    if Subtree then
+      Delete(Name, 1, 1);
+    for I := 0 to High(FModel.Joints) do
+      if SameText(FModel.Joints[I].Name, Name) then
+        for J := 0 to High(FModel.Joints) do
+          if (J = I) or (Subtree and Below(J, I)) then
+            FTorsoMask[J] := not Exclude;
+  end;
+end;
+
+function TD3Md5Instance.HasTorsoChannel: Boolean;
+begin
+  Result := Length(FTorsoMask) > 0;
+end;
+
+function TD3Md5Instance.PlayTorsoAnim(const AnimName: String; const Loop: Boolean): Boolean;
+var
+  Path, Resolved: String;
+  A: TD3Md5Anim;
+begin
+  Result := False;
+  if AnimName = '' then
+  begin
+    FTorsoAnimData := nil;
+    FTorsoName := '';
+    Exit(True);
+  end;
+  if not HasTorsoChannel then
+    Exit;
+  Resolved := ResolveAnim(AnimName);
+  Path := FAnims.Values[Resolved];
+  if Path = '' then
+    Exit;
+  A := Md5Cache.Anim(Path);
+  if (A = nil) or (Length(A.Hierarchy) <> Length(FModel.Joints)) then
+    Exit;
+  FTorsoAnimData := A;
+  FTorsoTime := 0;
+  FTorsoLoop := Loop;
+  FTorsoName := Resolved;
+  Result := True;
+end;
+
+function TD3Md5Instance.TorsoAnimFinished: Boolean;
+begin
+  Result := (FTorsoAnimData = nil) or (not FTorsoLoop and (FTorsoTime >= FTorsoAnimData.Duration));
+end;
+
 function TD3Md5Instance.PlayAnim(const AnimName: String; const Loop: Boolean): Boolean;
 var
   Path, Resolved: String;
@@ -1591,6 +1770,7 @@ procedure TD3Md5Instance.Update(const SecondsPassed: Single);
 var
   OldTime: Single;
   First, Last: TD3JointArray;
+  I: Integer;
 begin
   if Length(FReplacedAppearances) > 0 then
   begin
@@ -1617,7 +1797,22 @@ begin
     LastOriginDelta := TVector3.Zero;
     Exit;
   end;
-  FAnim.PoseAt(FAnimTime, FLoop, FPose);
+  if (FTorsoAnimData <> nil) and (Length(FTorsoMask) = Length(FModel.Joints)) then
+  begin
+    { the torso channel's joints from its own anim, the rest from the
+      body's, joined relative to their parents }
+    FTorsoTime := FTorsoTime + SecondsPassed;
+    FAnim.LocalPoseAt(FAnimTime, FLoop, FPose);
+    FTorsoAnimData.LocalPoseAt(FTorsoTime, FTorsoLoop, FTorsoPose);
+    for I := 0 to Min(High(FPose), High(FTorsoPose)) do
+      if FTorsoMask[I] then
+      begin
+        FPose[I].Position := FTorsoPose[I].Position;
+        FPose[I].Orientation := FTorsoPose[I].Orientation;
+      end;
+    ComposePose(FPose);
+  end else
+    FAnim.PoseAt(FAnimTime, FLoop, FPose);
   { the origin's move since the last update (across a cycle's wrap: to
     the last frame, then from the first) }
   LastOriginDelta := TVector3.Zero;

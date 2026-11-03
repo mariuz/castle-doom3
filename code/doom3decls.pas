@@ -57,6 +57,9 @@ type
       (glows, decals, windows, skies...). }
     StageImage: String;
     StageBlend: TD3BlendMode;
+    { a videomap stage's RoQ file ('' none) and whether it loops }
+    VideoMap: String;
+    VideoLoop: Boolean;
     StageColor: TVector4;
     AlphaTest: Single;
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
@@ -178,6 +181,9 @@ type
     { Frame commands: lines "animname=frame command arguments" (frame
       1-based), like "melee_attack1=11 melee melee_zombie_maint_Right". }
     FrameCommands: TStringList;
+    { "channel <name> ( joints )": name (lowercase) -> the joint list as
+      written (*joint: with its children, -: without) }
+    Channels: TStringList;
     constructor Create;
     destructor Destroy; override;
     function AnimFile(const AnimName: String): String;
@@ -495,12 +501,14 @@ begin
   inherited Create;
   Anims := TStringList.Create;
   FrameCommands := TStringList.Create;
+  Channels := TStringList.Create;
 end;
 
 destructor TD3ModelDecl.Destroy;
 begin
   Anims.Free;
   FrameCommands.Free;
+  Channels.Free;
   inherited Destroy;
 end;
 
@@ -1069,6 +1077,19 @@ begin
           if L = 'map' then
             StageMap := ReadImageProgram(Lexer)
           else
+          if L = 'videomap' then
+          begin
+            { videomap [loop] <file.roq>: a RoQ video (idCinematic) }
+            Line := Lexer.NextStr;
+            if LowerCase(Line) = 'loop' then
+            begin
+              Result.VideoLoop := True;
+              Line := Lexer.NextStr;
+            end;
+            if Result.VideoMap = '' then
+              Result.VideoMap := LowerCase(StringReplace(Line, '\', '/', [rfReplaceAll]));
+            StageSpecial := True;
+          end else
           if L = 'alphatest' then
           begin
             { a number, or an expression of time and parms (burn-away) }
@@ -1109,7 +1130,7 @@ begin
           if L = 'inversevertexcolor' then
             StageInvVC := True
           else
-          if (L = 'cubemap') or (L = 'cameracubemap') or (L = 'videomap') or
+          if (L = 'cubemap') or (L = 'cameracubemap') or
              (L = 'soundmap') or (L = 'remoterendermap') or (L = 'texgen') then
             StageSpecial := True
           else
@@ -1504,6 +1525,7 @@ begin
           Result.Offset := Parent.Offset;
           Result.Anims.Assign(Parent.Anims);
           Result.FrameCommands.Assign(Parent.FrameCommands);
+          Result.Channels.Assign(Parent.Channels);
         end;
       end else
       if L = 'mesh' then
@@ -1519,9 +1541,21 @@ begin
       end else
       if L = 'channel' then
       begin
-        Lexer.NextStr;
+        AnimName := LowerCase(Lexer.NextStr);
+        Command := '';
         if Lexer.Check('(') then
-          while not Lexer.AtEnd and (Lexer.NextStr <> ')') do ;
+          while not Lexer.AtEnd do
+          begin
+            Tok := Lexer.NextStr;
+            if Tok = ')' then
+              Break;
+            { the lexer splits "-*Waist" into "-", "*", "Waist" }
+            if (Tok = '-') or (Tok = '*') then
+              Command := Command + Tok
+            else
+              Command := Command + Tok + ' ';
+          end;
+        Result.Channels.Values[AnimName] := Trim(Command);
       end else
       if L = 'anim' then
       begin

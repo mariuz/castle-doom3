@@ -56,6 +56,41 @@ def add(path, data):
 
 
 # --------------------------------------------------------------------------
+# A RoQ video (idCinematic's format) for the decoder's checks
+
+def test_roq():
+    """32 x 16, 4 frames at 30 fps: red | blue, then green | (unchanged),
+    then all unchanged (the frame before the previous: red | blue), then
+    (unchanged: green) | the left half of the previous frame moved right
+    (red)."""
+    import struct
+
+    def chunk(cid, arg, data):
+        return struct.pack('<HIH', cid, len(data), arg) + data
+
+    def frame(codes, data, arg=0):
+        # one 16 bit word holds the 8 codes, the highest first
+        word = 0
+        for c in codes:
+            word = (word << 2) | c
+        return chunk(0x1011, arg, struct.pack('<H', word) + bytes(data))
+
+    out = struct.pack('<HIH', 0x1084, 0xFFFFFFFF, 30)
+    out += chunk(0x1001, 0, struct.pack('<HHHH', 32, 16, 8, 4))
+    # 2x2 cells: Y0..Y3, U, V of red, blue, green; 4x4 cells of each
+    cells2 = [(76, 85, 255), (29, 255, 107), (150, 44, 21)]
+    data = b''.join(bytes([y, y, y, y, u, v]) for y, u, v in cells2)
+    data += b''.join(bytes([i, i, i, i]) for i in range(3))
+    out += chunk(0x1002, (3 << 8) | 3, data)
+    out += frame([2, 2, 2, 2, 2, 2, 2, 2], [0, 0, 0, 0, 1, 1, 1, 1])
+    out += frame([2, 2, 2, 2, 0, 0, 0, 0], [2, 2, 2, 2])
+    out += frame([0] * 8, [])
+    # motion: dx = 8 - 15 - 9 = -16, dy = 8 - 8 - 0 = 0
+    out += frame([0, 0, 0, 0, 1, 1, 1, 1], [0xF8] * 4, arg=9 << 8)
+    return out
+
+
+# --------------------------------------------------------------------------
 # Images
 
 def tga(width, height, pixels, alpha=False):
@@ -682,7 +717,7 @@ audio test_audio_log {
 
 video test_video_intro {
 	name	"Intro"
-	video	""
+	video	"video/test_video"
 	info	"The test level, from above."
 	preview	""
 	audio	"test_hum"
@@ -1426,7 +1461,8 @@ def map_text():
          'texture': 'lights/test_ambient'},
         # Room B lights
         {'classname': 'light', 'name': 'light_3', 'origin': '448 -192 240',
-         'light_radius': '360 360 300', '_color': '0.4 0.6 1', 'color_demonic': '1 0 0'},
+         'light_radius': '360 360 300', '_color': '0.4 0.6 1', 'color_demonic': '1 0 0',
+         'mat_demonic': 'lights/test_strobe'},
         {'classname': 'light', 'name': 'light_4', 'origin': '448 192 240',
          'light_radius': '360 360 300', '_color': '1 0.75 0.5',
          'texture': 'lights/test_pulse'},
@@ -1460,7 +1496,7 @@ def map_text():
         {'classname': 'func_static', 'name': 'crate_2', 'model': 'crate_2',
          'origin': '136 -150 88', 'angle': '-15', 'shaderParm7': '1', '_color': '1 0.6 0.2'},
         {'classname': 'func_static', 'name': 'panel_1', 'model': 'panel_1',
-         'origin': '-252 -60 100', 'gui': 'guis/test_panel.gui',
+         'origin': '-252 -60 100', 'gui': 'guis/test_panel.gui', 'gui_demonic': 'guis/test_status.gui',
          'gui_parm1': 'AREA A', 'gui_parm2': 'Welcome to the Castle Doom 3 test level.\\nRoom B is through the door. Mind the creatures.',
          'target': 'light_panel_1'},
         # switched by the panel's GUI (its button's "activate" command)
@@ -1635,7 +1671,7 @@ def map_text():
         # a demonic influence: light_3 turns red, the view gets the vision
         # material, the weapon goes down, the fov narrows; 2 s
         {'classname': 'target_setinfluence', 'name': 'target_setinfluence_1', 'origin': '-200 -140 180',
-         'targetsOnly': '1', 'target': 'light_3', 'time': '2', 'fade_time': '0.5', 'fov': '70',
+         'targetsOnly': '1', 'target': 'light_3', 'target1': 'panel_1', 'time': '2', 'fade_time': '0.5', 'fov': '70',
          'fovTime': '0.5', 'leaveFOV': '1', 'influenceLevel': '1', 'effect_vision': '1',
          'mtrVision': 'textures/test/blood_blob', 'flashIn': '0.2'},
         # powerups (idItemPowerup) in room A's north-west corner
@@ -2008,6 +2044,16 @@ textures/particles/test_flash
 		blend add
 		map textures/particles/test_flash.tga
 		vertexColor
+	}
+}
+
+// a video (a GUI background or a surface; the decoder's checks)
+video/test_video
+{
+	translucent
+	{
+		videomap "video/test.roq"
+		linear
 	}
 }
 
@@ -2609,6 +2655,11 @@ model model_test_player {
 	anim crouch_down		models/md5/test/player_crouch_down.md5anim
 	anim crouch_up			models/md5/test/player_crouch_up.md5anim
 	anim death				models/md5/test/player_death.md5anim
+	// the torso channel (idAnimator): the weapon's anims ("<weapon def
+	// without weapon_>_<anim>", ai_player.script's Torso_Fire) over the legs'
+	channel torso			( *arm_l *arm_r *head )
+	channel legs			( *origin -*arm_l -*arm_r -*head )
+	anim test_pistol_fire1	models/md5/test/blob_pain.md5anim
 }
 
 // the guns in the body's right hand (third person): the weapon defs'
@@ -4963,6 +5014,7 @@ def main():
         add('models/md5/test/player_%s.md5anim' % kind, md5anim_text(kind))
     weapon_models()
     sounds()
+    add('video/test.roq', test_roq())
     add('readme_castle_doom3_test.txt',
         'Castle Doom 3 test data, generated by tools/make_test_pk4.py. MIT license.\n')
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
