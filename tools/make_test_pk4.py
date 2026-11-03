@@ -1668,6 +1668,9 @@ def map_text():
          'target': 'light_1', 'fadetime': '1'},
         {'classname': 'target_lightfadein', 'name': 'target_lightfadein_1', 'origin': '-200 -140 170',
          'target': 'light_1', 'fadetime': '1'},
+        # calls test_walker_1's follow_alternate_path1 (idTarget_CallObjectFunction)
+        {'classname': 'target_ai_followalternatepath1', 'name': 'target_altpath_1', 'origin': '-200 -140 190',
+         'target': 'test_walker_1'},
         # a demonic influence: light_3 turns red, the view gets the vision
         # material, the weapon goes down, the fov narrows; 2 s
         {'classname': 'target_setinfluence', 'name': 'target_setinfluence_1', 'origin': '-200 -140 180',
@@ -2908,6 +2911,11 @@ entityDef target_lightfadein {
 
 entityDef target_lightfadeout {
 	"spawnclass"			"idTarget_LightFadeOut"
+}
+
+entityDef target_ai_followalternatepath1 {
+	"spawnclass"			"idTarget_CallObjectFunction"
+	"call"					"follow_alternate_path1"
 }
 
 entityDef target_setinfluence {
@@ -4467,6 +4475,7 @@ void test_trigger_called() {
 // a state machine in the main thread, an animation state for the legs.
 float walker_done;
 float walker_talks;
+float walker_alt_path;
 
 object character {
     boolean AI_TALK;
@@ -4481,7 +4490,14 @@ object character {
     void    state_Done();
     void    Legs_Idle();
     void    Legs_Walk();
+    void    follow_alternate_path1();
 };
+
+// target_ai_followalternatepath1 (idTarget_CallObjectFunction) calls it
+void character::follow_alternate_path1() {
+    walker_alt_path = walker_alt_path + 1;
+    sys.print( getName() + " follows its alternate path\n" );
+}
 
 void character::init() {
     setNextState( "state_Begin" );

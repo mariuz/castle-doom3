@@ -1292,6 +1292,7 @@ begin
   else
     Hud.BerserkImageUrl := '';
   Hud.Invisible := FGame.PowerUpActive(PowerupInvisibility);
+  Hud.TalkCursor := FGame.TalkFocus <> nil;
   { a demonic influence's vision material: its stage image at the stage's
     alpha, or (a colorProcess program) a red tint }
   Hud.InfluenceAlpha := FGame.InfluenceAlpha;
@@ -1742,6 +1743,10 @@ begin
         BoolToStr(Map.GuiSurfaces[I].Gui.CursorShown, Format(', cursor %d %d', [Round(Map.GuiSurfaces[I].Gui.CursorX),
           Round(Map.GuiSurfaces[I].Gui.CursorY)]), ''),
         BoolToStr(Map.GuiSurfaces[I].Gui.TransitionCount > 0, Format(', %d transitions', [Map.GuiSurfaces[I].Gui.TransitionCount]), '')]);
+      { asleep: its scene out of sight (portal visibility) }
+      if (Map.GuiSurfaces[I].Scene <> nil) and not (Map.GuiSurfaces[I].Scene.Visible and Map.GuiSurfaces[I].Scene.Exists) then
+        S := S + Format(', asleep (%s visible %s, exists %s)', [Map.GuiSurfaces[I].Scene.Name,
+          BoolToStr(Map.GuiSurfaces[I].Scene.Visible, True), BoolToStr(Map.GuiSurfaces[I].Scene.Exists, True)]);
       Console.Print(S);
       WritelnLog('Guis', S);
     end;

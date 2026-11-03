@@ -149,6 +149,8 @@ type
     FGuiTextures: TX3DNodeList;
     { live GUIs (one per scene and GUI texture), updated every frame }
     FGuiSurfaces: specialize TObjectList<TD3GuiSurface>;
+    { where UpdateGuis's redraw budget starts next frame }
+    FGuiRenderStart: Integer;
     FGuiRenders: Integer;
     FLights: array of TD3LightInfo;
     FSpawnOrigin: TVector3;
@@ -2490,13 +2492,20 @@ const
   MinInterval = 0.04;
 var
   S: TD3GuiSurface;
-  Renders: Integer;
+  Renders, N, K: Integer;
   TimeMs: Integer;
 begin
   TimeMs := Round(FTime * 1000);
   Renders := 0;
-  for S in FGuiSurfaces do
+  { the redraw budget goes round: GUIs that change every frame (videos)
+    don't starve the others }
+  N := FGuiSurfaces.Count;
+  if N = 0 then
+    Exit;
+  FGuiRenderStart := FGuiRenderStart mod N;
+  for K := 0 to N - 1 do
   begin
+    S := FGuiSurfaces[(FGuiRenderStart + K) mod N];
     { GUIs out of sight (portal visibility) sleep, like Doom 3's that
       only run when drawn; the one the player looks at always runs }
     if not (S.Gui.CursorShown or (S.Scene = nil) or (S.Scene.Visible and S.Scene.Exists)) then
@@ -2512,6 +2521,9 @@ begin
       S.LastRender := FTime;
       Inc(Renders);
       Inc(FGuiRenders);
+      { the next frame starts after the last one drawn }
+      if Renders = MaxRenders then
+        FGuiRenderStart := (FGuiRenderStart + K + 1) mod N;
     end;
   end;
 end;
