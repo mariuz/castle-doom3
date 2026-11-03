@@ -86,6 +86,9 @@ type
     { console g_pdaGui 1: use guis/pda.gui (partial: its lists and pages
       work, parts of it stay empty), else the text panel }
     FUsePdaGui: Boolean;
+    { target_endlevel's next map, loaded FPendingMapIn seconds later }
+    FPendingMap: String;
+    FPendingMapIn: Single;
     FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
@@ -529,9 +532,14 @@ end;
 
 procedure TViewPlay.HandleEndLevel(const Msg: String);
 begin
-  { idTarget_EndLevel: Doom 3 loads the next map; here the message and
-    the log (console "map <name>" loads it) }
+  { idTarget_EndLevel: the next map loads ("map <nextMap>"), after the
+    message has shown for a moment }
   Hud.ShowMessage('End of level: next map ' + Msg, 6);
+  if (Msg <> '') and D3Fs.FileExists(TDoom3Map.MapBasePath(Msg) + '.map') then
+  begin
+    FPendingMap := Msg;
+    FPendingMapIn := 2;
+  end;
 end;
 
 procedure TViewPlay.SetPdaOpen(const Value: Boolean);
@@ -2309,6 +2317,18 @@ begin
   inherited Update(SecondsPassed, HandleInput);
   if FGame = nil then
     Exit;
+  if FPendingMap <> '' then
+  begin
+    FPendingMapIn := FPendingMapIn - SecondsPassed;
+    if FPendingMapIn <= 0 then
+    begin
+      WritelnLog('GameViewPlay', 'Next map "%s"', [FPendingMap]);
+      Hud.ShowMessage('', 0);
+      LoadLevel(FPendingMap);
+      FPendingMap := '';
+      Exit;
+    end;
+  end;
   UpdatePdaGui(SecondsPassed);
   if (FProfileFrames = 0) and FLastUpdateValid and
      (TimerSeconds(Timer, FLastUpdate) > LongFrameSeconds) then

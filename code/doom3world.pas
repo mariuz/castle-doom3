@@ -816,6 +816,12 @@ type
     FFovFrom, FFovTo, FFovStart, FFovTime: Single;
     FEntityFades: specialize TList<TD3EntityFade>;
     FEndLevelMap: String;
+    { idPlayer's hiddenWeapon: the level's "no_Weapons", target_enableweapons
+      ("disable"), the player's disableWeapon: lowered, no attacks }
+    FWeaponsDisabled: Boolean;
+    { a weapon to select after target_enableweapons (0.5 s later) }
+    FSelectWeaponName: String;
+    FSelectWeaponAt: Single;
     FOnFlashlight: TD3BoolEvent;
     FOnEndLevel: TD3MessageEvent;
     { the interactive GUI the player looks at (idPlayer::focusUI) }
@@ -1332,6 +1338,9 @@ type
     function EntityFadeCount: Integer;
     { target_endlevel: the next map it named ('' until then). }
     property EndLevelMap: String read FEndLevelMap;
+    property WeaponsDisabled: Boolean read FWeaponsDisabled write FWeaponsDisabled;
+    { idPlayer::RemoveWeapon: the weapon (by def name) leaves the inventory }
+    procedure RemoveWeapon(const WeaponName: String);
     { the weapon's flashlight event (weapon scripts) }
     property OnFlashlight: TD3BoolEvent read FOnFlashlight write FOnFlashlight;
     property OnEndLevel: TD3MessageEvent read FOnEndLevel write FOnEndLevel;
@@ -1929,6 +1938,8 @@ begin
   FFovTime := 0;
   FEntityFades.Clear;
   FEndLevelMap := '';
+  FWeaponsDisabled := False;
+  FSelectWeaponName := '';
   ProjectilesLaunched := 0;
   ClearScriptSounds;
   FTime := 0;
@@ -3334,6 +3345,17 @@ begin
     BoolToStr(W.Scripted, 'script ' + W.ScriptObjectName, 'built-in pistol'), Clip[Slot]]);
 end;
 
+procedure TD3Game.RemoveWeapon(const WeaponName: String);
+var
+  Slot: Integer;
+begin
+  Slot := WeaponSlot(Trim(WeaponName));
+  if Slot < 0 then
+    Exit;
+  WeaponBits := WeaponBits and not (Cardinal(1) shl Slot);
+  WritelnLog('Doom3World', 'Weapon %s removed', [Trim(WeaponName)]);
+end;
+
 procedure TD3Game.SelectWeapon(const Slot: Integer);
 begin
   if HasWeapon(Slot) then
@@ -3415,17 +3437,27 @@ begin
       FScript.RestartThread(W.Thread, W.IdealFunction, WeaponHandle);
     end;
     { looking at a GUI, the attack button clicks it (idPlayer::Weapon_GUI) }
-    W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil));
-    { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus }
-    if (FGuiFocus <> nil) and (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
+    W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil) and
+      not FWeaponsDisabled);
+    { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus, and
+      while weapons are disabled (hiddenWeapon) }
+    if ((FGuiFocus <> nil) or FWeaponsDisabled) and (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
       W.SetFlag('WEAPON_LOWERWEAPON', True)
     else
-    if (FGuiFocus = nil) and (W.Status = wsHolstered) and (W.Slot = FIdealSlot) and not PlayerDead then
+    if (FGuiFocus = nil) and not FWeaponsDisabled and (W.Status = wsHolstered) and (W.Slot = FIdealSlot) and
+       not PlayerDead then
       W.SetFlag('WEAPON_RAISEWEAPON', True);
     W.SetFlag('WEAPON_RELOAD', FReloadRequested);
   end;
   FReloadRequested := False;
   FAttackPulse := Max(0, FAttackPulse - SecondsPassed);
+  { target_enableweapons' weapon, selected 0.5 s later }
+  if (FSelectWeaponName <> '') and (FTime >= FSelectWeaponAt) then
+  begin
+    if WeaponSlot(FSelectWeaponName) >= 0 then
+      SelectWeapon(WeaponSlot(FSelectWeaponName));
+    FSelectWeaponName := '';
+  end;
 
   { its sounds follow the player }
   if FSoundSources.TryGetValue(WeaponHandle, Source) and (Source.Parent <> nil) then
@@ -5363,6 +5395,15 @@ var
 begin
   Clear;
   FDeadTime := 0;
+  { idPlayer::Spawn: the level's "no_Weapons" (Mars City 1 before the
+    player gets them) }
+  if FMap.MapFile <> nil then
+    for E in FMap.MapFile.Entities do
+      if SameText(E.ClassName_, 'worldspawn') then
+      begin
+        FWeaponsDisabled := E.BoolValue('no_Weapons');
+        Break;
+      end;
   if FMap.MapName <> '' then
   begin
     FAas := TD3AasFile.Create;
@@ -8923,8 +8964,28 @@ begin
     end;
   end else
   if IsClass('target_enablelevelweapons', 'idTarget_EnableLevelWeapons') or
-     IsClass('target_removeweapons', 'idTarget_RemoveWeapons') or
-     IsClass('target_setinfluence', 'idTarget_SetInfluence') or
+     IsClass('target_enableweapons', 'idTarget_EnableLevelWeapons') then
+  begin
+    { idTarget_EnableLevelWeapons: "disable" 1 hides the weapons, else they
+      come back and "weapon" is selected 0.5 s later }
+    FWeaponsDisabled := E.BoolValue('disable');
+    if not FWeaponsDisabled and (E.Value('weapon') <> '') then
+    begin
+      FSelectWeaponName := E.Value('weapon');
+      FSelectWeaponAt := FTime + 0.5;
+    end;
+    WritelnLog('Doom3World', 'Weapons %s (%s)', [Iff(FWeaponsDisabled, 'disabled', 'enabled'), E.Name]);
+  end else
+  if IsClass('target_removeweapons', 'idTarget_RemoveWeapons') then
+  begin
+    { idTarget_RemoveWeapons: every "weapon*" key, then the fists }
+    for I := 0 to E.Pairs.Count - 1 do
+      if Copy(LowerCase(E.Pairs.Names[I]), 1, 6) = 'weapon' then
+        RemoveWeapon(E.Pairs.ValueFromIndex[I]);
+    if WeaponSlot('weapon_fists') >= 0 then
+      SelectWeapon(WeaponSlot('weapon_fists'));
+  end else
+  if IsClass('target_setinfluence', 'idTarget_SetInfluence') or
      IsClass('target_sessioncommand', 'idTarget_SessionCommand') or
      IsClass('target_levelsp', 'idTarget_LevelTrigger') then
     Unsupported('activating ' + Cls)
@@ -11025,6 +11086,12 @@ begin
         EventResult := D3VectorValue(CgeToD3(PlayerFeet));
       'getName': EventResult := D3StringValue('player1');
       'getHealth': EventResult := D3FloatValue(Health);
+      { idPlayer::Event_EnableWeapon / DisableWeapon / SelectWeapon }
+      'enableWeapon': FWeaponsDisabled := False;
+      'disableWeapon': FWeaponsDisabled := True;
+      'selectWeapon':
+        if WeaponSlot(D3ValueToString(Args[0])) >= 0 then
+          SelectWeapon(WeaponSlot(D3ValueToString(Args[0])));
       else
         Result := False;
     end;
