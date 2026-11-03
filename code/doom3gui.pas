@@ -209,6 +209,9 @@ type
     function ClickRelease: Boolean;
     { An onNamedEvent (idUserInterface::HandleNamedEvent). }
     function NamedEvent(const AName: String): Boolean;
+    { idUserInterface::Trigger (its entity activated): the windows'
+      onTrigger scripts; False if none has one }
+    function Trigger: Boolean;
     { The commands collected for the entity ("activate ; runScript x"),
       cleared. }
     function TakeCmd: String;
@@ -1212,6 +1215,29 @@ begin
   for C in W.Children do
     if NamedEventIn(Gui, C, AName) then
       Result := True;
+end;
+
+function TriggerIn(const Gui: TD3Gui; const W: TD3GuiWindow): Boolean;
+var
+  C: TD3GuiWindow;
+begin
+  { idWindow::Trigger: its onTrigger, then the children's }
+  Result := False;
+  if W.OnTrigger <> nil then
+  begin
+    Gui.RunScript(W, W.OnTrigger);
+    Result := True;
+  end;
+  for C in W.Children do
+    if TriggerIn(Gui, C) then
+      Result := True;
+end;
+
+function TD3Gui.Trigger: Boolean;
+begin
+  Result := (Desktop <> nil) and TriggerIn(Self, Desktop);
+  if Result then
+    Dirty := True;
 end;
 
 function TD3Gui.NamedEvent(const AName: String): Boolean;

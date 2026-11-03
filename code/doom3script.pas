@@ -142,6 +142,8 @@ type
     { Wait until TD3ScriptHost.EntityBusy(E) is false (sys.waitFor). }
     procedure WaitFor(const E: Integer);
     property FrameDepth: Integer read FrameCount;
+    { "a > b > c": the functions it is in (debugging), and its state }
+    function CallStack: String;
   end;
 
   { What the game provides to scripts. Entity handles are > 0. }
@@ -256,7 +258,7 @@ function D3FloatToStr(const F: Single): String;
 implementation
 
 uses
-  Math, CastleLog, Doom3Files;
+  Math, TypInfo, CastleLog, Doom3Files;
 
 const
   MaxInstructionsPerUpdate = 1000000;
@@ -459,6 +461,21 @@ begin
 end;
 
 { TD3ScriptThread ------------------------------------------------------------ }
+
+function TD3ScriptThread.CallStack: String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to FrameCount - 1 do
+    if Frames[I].Func <> nil then
+    begin
+      if Result <> '' then
+        Result := Result + ' > ';
+      Result := Result + Frames[I].Func.Name;
+    end;
+  Result := Result + ' (' + GetEnumName(TypeInfo(TD3ScriptThreadState), Ord(State)) + ')';
+end;
 
 procedure TD3ScriptThread.Yield;
 begin

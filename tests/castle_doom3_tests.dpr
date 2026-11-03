@@ -121,7 +121,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(50, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(65, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(66, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
@@ -365,6 +365,30 @@ begin
   end;
 end;
 
+{ idWindow::Trigger: onTrigger scripts with a window variable (the Mars City
+  bio scanners: the first trigger opens the screen, the second scans) }
+procedure TestGuiTrigger;
+var
+  Gui: TD3Gui;
+begin
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 float "trigone" 0 ' +
+      'onTrigger { if ("trigone" == 1) { set "Second::text" "two" ; } else { set "trigone" "1" ; ' +
+      'set "First::text" "one" ; } } ' +
+      'windowDef First { rect 0, 0, 10, 10 text "" } windowDef Second { rect 0, 10, 10, 10 text "" } }'),
+      'a GUI with onTrigger');
+    Gui.Activate(0);
+    Check(Gui.Trigger, 'onTrigger ran');
+    CheckEquals('one', Gui.PropText(Gui.FindWindow('First')), 'the first trigger: the else branch');
+    CheckEquals('', Gui.PropText(Gui.FindWindow('Second')), 'not the second yet');
+    Gui.Trigger;
+    CheckEquals('two', Gui.PropText(Gui.FindWindow('Second')), 'the second trigger sees "trigone" == 1');
+  finally
+    Gui.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -484,7 +508,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(89, MapFile.Entities.Count, 'entity count');
+    CheckEquals(90, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -2021,7 +2045,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(44, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(45, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -2253,6 +2277,26 @@ begin
     end;
     CheckNear(1, Game.Script.GlobalValue('walker_talks').F, 'it said its line (head talk_primary) once');
     CheckEquals(0, A.TalkTarget, 'setTalkTarget( $null_entity ) ended the talk');
+    { idPlayer::UpdateFocus / Weapon_NPC: looking at it within 80, the attack
+      button talks (the talk cursor, the weapon lowered) }
+    Pos := CgeToD3(A.Model.Holder.Translation);
+    Away := D3ToCge(Pos + Vector3(0, 60, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.PlayerViewDir := D3ToCge(Vector3(0, -1, -0.3)).Normalize;
+    for I := 1 to 3 do
+      Game.Update(0.1, Away);
+    Check(Game.TalkFocus = A, 'looking at it: the talk focus');
+    Game.Attack := True;
+    Game.Update(0.1, Away);
+    Game.Attack := False;
+    CheckEquals(PlayerHandle, A.TalkTarget, 'the attack button talked to it');
+    Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
+    Game.Update(0.1, Away);
+    Check(Game.TalkFocus = nil, 'looking away: no talk focus');
+    { idTarget_CallObjectFunction: target_altpath_1 runs its method }
+    Game.Activate(Game.FindEntity('target_altpath_1'));
+    for I := 1 to 2 do
+      Game.Update(0.1, Away);
+    CheckNear(1, Game.Script.GlobalValue('walker_alt_path').F, 'target_ai_followalternatepath1 called follow_alternate_path1');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
@@ -7224,6 +7268,7 @@ begin
   TestGuiClipping;
   TestRoq;
   TestTorsoChannel;
+  TestGuiTrigger;
   TestImages;
   TestProc;
   TestMapFile;

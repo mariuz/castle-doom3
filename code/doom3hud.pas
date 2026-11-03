@@ -47,6 +47,9 @@ type
       off); without an image (a colorProcess program) the view is tinted
       red }
     InfluenceAlpha: Single;
+    { a character ready to talk in front of the view (idPlayer's
+      focusCharacter): the crosshair says so }
+    TalkCursor: Boolean;
     InfluenceImageUrl: String;
     { invisibility: a cold rim on the screen's edges }
     Invisible: Boolean;
@@ -278,6 +281,8 @@ begin
   DrawRectangle(FloatRectangle(CX - 1 * S, CY + 3 * S, 2 * S, 5 * S), Cyan);
   DrawRectangle(FloatRectangle(CX - 8 * S, CY - 1 * S, 5 * S, 2 * S), Cyan);
   DrawRectangle(FloatRectangle(CX + 3 * S, CY - 1 * S, 5 * S, 2 * S), Cyan);
+  if TalkCursor then
+    UIFont.PrintRect(FloatRectangle(CX - 100 * S, CY - 40 * S, 200 * S, 24 * S), Cyan, 'TALK', hpMiddle, vpMiddle);
 
   { health / armor (bottom left) }
   DrawRectangle(FloatRectangle(R.Left + 20 * S, R.Bottom + 20 * S, 300 * S, 70 * S), PanelColor);

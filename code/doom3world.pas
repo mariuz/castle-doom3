@@ -873,6 +873,8 @@ type
     FOnFlashlight: TD3BoolEvent;
     FOnEndLevel: TD3MessageEvent;
     { the interactive GUI the player looks at (idPlayer::focusUI) }
+    FTalkFocus: TD3Actor;
+    FTalkAttackDown: Boolean;
     FGuiFocus: TD3GuiSurface;
     FGuiAttackDown: Boolean;
     FGuiClicks: Integer;
@@ -924,6 +926,11 @@ type
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
     procedure UpdateWeapon(const SecondsPassed: Single);
     procedure UpdateGuiFocus;
+    { idPlayer::UpdateFocus for characters: one ready to talk in front of
+      the view (FTalkFocus); its Weapon_NPC: the attack button talks }
+    procedure UpdateTalkFocus;
+    function TalkCandidate(const Origin, Dir: TVector3; const MaxDistance: Single): TD3Actor;
+    procedure TalkTo(const A: TD3Actor);
     procedure UpdateGuiCommands;
     procedure HandleGuiCommands(const S: TD3GuiSurface; const Cmd: String);
     procedure UpdatePlayerInfo;
@@ -1360,6 +1367,8 @@ type
       GuiFocusDistance): the cursor shows on it, the attack button clicks,
       the weapon is lowered. }
     property GuiFocus: TD3GuiSurface read FGuiFocus;
+    { the character the attack button talks to ('nil': none) }
+    property TalkFocus: TD3Actor read FTalkFocus;
     property GuiClicks: Integer read FGuiClicks;
 
     { Player information (roadmap 5f). PDAs carried (pda decl names; the
@@ -1999,6 +2008,7 @@ begin
   FEmitters.Clear;
   FDecals.Clear;
   FGuiFocus := nil;
+  FTalkFocus := nil;
   FGuiAttackDown := False;
   FPdas.Clear;
   FEmails.Clear;
@@ -3536,14 +3546,15 @@ begin
     end;
     { looking at a GUI, the attack button clicks it (idPlayer::Weapon_GUI) }
     W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil) and
-      not FWeaponsDisabled and (FInfluenceLevel = 0));
+      (FTalkFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0));
     { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus, and
       while weapons are disabled (hiddenWeapon) }
-    if ((FGuiFocus <> nil) or FWeaponsDisabled or (FInfluenceLevel <> 0)) and
+    if ((FGuiFocus <> nil) or (FTalkFocus <> nil) or FWeaponsDisabled or (FInfluenceLevel <> 0)) and
        (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
       W.SetFlag('WEAPON_LOWERWEAPON', True)
     else
-    if (FGuiFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0) and (W.Status = wsHolstered) and
+    if (FGuiFocus = nil) and (FTalkFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0) and
+       (W.Status = wsHolstered) and
        (W.Slot = FIdealSlot) and
        not PlayerDead then
       W.SetFlag('WEAPON_RAISEWEAPON', True);
@@ -5792,10 +5803,22 @@ var
   Handled: Boolean;
   SpawnClass: String;
   Em: TD3EmitterEntity;
+  GS: TD3GuiSurface;
 begin
   Inc(ActivationCount);
   Cls := LowerCase(E.ClassName_);
   Handled := False;
+  { idEntity::ActivateTargets: an activated entity's GUIs get onTrigger }
+  if FMap <> nil then
+    for GS in FMap.GuiSurfaces do
+      if SameText(GS.EntityName, E.Name) then
+      begin
+        { a GUI out of sight sleeps: its clock first, so the time lines its
+          onTrigger starts run from now }
+        GS.Gui.Update(Round(FMap.Time * 1000));
+        if GS.Gui.Trigger then
+          WritelnLog('Doom3World', 'GUI %s (%s) triggered', [GS.Gui.Name, E.Name]);
+      end;
 
   Em := EmitterEntityOf(E);
   if Em <> nil then
@@ -6336,6 +6359,7 @@ begin
   if (FScript <> nil) and not ScriptsPaused then
     UpdateActors(SecondsPassed);
   UpdateGuiFocus;
+  UpdateTalkFocus;
   UpdateGuiCommands;
   UpdatePlayerInfo;
   UpdateWeapon(SecondsPassed);
@@ -9088,6 +9112,8 @@ var
   C: TVector3;
   Fade: TD3EntityFade;
   Color: TVector4;
+  Act: TD3Actor;
+  F: TD3ScriptFunction;
 
   function IsClass(const AClass, ASpawnClass: String): Boolean;
   begin
@@ -9336,6 +9362,23 @@ begin
   if IsClass('target_setinfluence', 'idTarget_SetInfluence') then
     ActivateInfluence(E)
   else
+  if SameText(SC, 'idTarget_CallObjectFunction') then
+  begin
+    { idTarget_CallObjectFunction (target_ai_followalternatepath1...): its
+      "call" method of each target's script object, in a thread of its own }
+    for T in TargetsOf(E) do
+      for Act in FActors do
+        if SameText(Act.Model.Entity.Name, T.Name) and (Act.Obj <> nil) then
+        begin
+          F := Act.Obj.Typ.FindMethodToRun(E.Value('call'));
+          if F <> nil then
+          begin
+            FScript.StartThread(F, Act.Handle);
+            WritelnLog('Doom3World', '%s calls %s.%s', [E.Name, T.Name, E.Value('call')]);
+          end else
+            WritelnWarning('Doom3World', '%s: %s has no method %s', [E.Name, T.Name, E.Value('call')]);
+        end;
+  end else
   if IsClass('target_sessioncommand', 'idTarget_SessionCommand') or
      IsClass('target_levelsp', 'idTarget_LevelTrigger') then
     Unsupported('activating ' + Cls)
@@ -10519,6 +10562,7 @@ end;
 procedure TD3Game.ActorFrameCommand(const Sender: TD3Md5Instance; const Command: String);
 var
   A, Found: TD3Actor;
+  Chan: Integer;
   Cmd, Arg, Shader: String;
   Target: TD3MapEntity;
   F: TD3ScriptFunction;
@@ -10539,7 +10583,33 @@ begin
     Shader := A.Model.Entity.Value(Arg);
     if Shader = '' then
       Shader := Arg;
-    StartScriptSound(A.Handle, Shader, 0);
+    { idAnimBlend::CallFrameCommands: sound_voice on SND_CHANNEL_VOICE (so
+      the script's stopSound ends a line), sound_body on BODY... }
+    if Cmd = 'sound_voice' then
+      Chan := 1
+    else
+    if Cmd = 'sound_voice2' then
+      Chan := 2
+    else
+    if Cmd = 'sound_body' then
+      Chan := 3
+    else
+    if Cmd = 'sound_body2' then
+      Chan := 4
+    else
+    if Cmd = 'sound_body3' then
+      Chan := 5
+    else
+    if Cmd = 'sound_weapon' then
+      Chan := 6
+    else
+    if Cmd = 'sound_item' then
+      Chan := 7
+    else
+      Chan := 0;
+    StartScriptSound(A.Handle, Shader, Chan);
+    if Chan in [1, 2] then
+      WritelnLog('Doom3World', '%s says %s', [A.Model.Entity.Name, Shader]);
   end else
   if Cmd = 'fx' then
   begin
@@ -11021,6 +11091,8 @@ begin
     if not A.LookAngles.IsZero then
       Result := Result + Format(', yaw %.0f, looks %.0f %.0f (focus %d for %.2f s)',
         [A.Yaw, A.LookAngles.X, A.LookAngles.Y, A.FocusTarget, A.FocusUntil - FTime]);
+    if A.Main <> nil then
+      Result := Result + ', in ' + A.Main.CallStack;
     Result := Result + LineEnding;
   end;
 end;
@@ -12265,37 +12337,84 @@ begin
     DamageMonster(Best, PistolDamage);
 end;
 
+function TD3Game.TalkCandidate(const Origin, Dir: TVector3; const MaxDistance: Single): TD3Actor;
+var
+  A: TD3Actor;
+  ToActor, D: TVector3;
+  T, BestT: Single;
+begin
+  { a character in front of the view, within reach, ready to talk
+    (TALK_OK): its body from the feet to the head, 32 around }
+  Result := nil;
+  BestT := MaxDistance;
+  if Dir.IsZero then
+    Exit;
+  D := Dir.Normalize;
+  for A in FActors do
+  begin
+    if (A.Monster <> nil) or not A.Thinking or not A.Model.Holder.Exists or (A.TalkState <> 2) then
+      Continue;
+    ToActor := A.Model.Holder.Translation + Vector3(0, 48, 0) - Origin;
+    T := TVector3.DotProduct(ToActor, D);
+    if (T > 0) and (T < BestT) and ((ToActor - D * T).Length < 32) then
+    begin
+      Result := A;
+      BestT := T;
+    end;
+  end;
+end;
+
+procedure TD3Game.TalkTo(const A: TD3Actor);
+begin
+  { idAI::TalkTo: its script sees AI_TALK }
+  A.TalkTarget := PlayerHandle;
+  A.SetFlag('AI_TALK', 1);
+  WritelnLog('Doom3World', 'Talking to %s', [A.Model.Entity.Name]);
+end;
+
+procedure TD3Game.UpdateTalkFocus;
+var
+  A: TD3Actor;
+  Down: Boolean;
+begin
+  { idPlayer::UpdateFocus: characters within 80 of the eye, not while a GUI
+    has the focus }
+  A := nil;
+  if (FMap <> nil) and (FGuiFocus = nil) and not PlayerDead and not CinematicActive then
+    A := TalkCandidate(FPlayerEye, PlayerViewDir, GuiFocusDistance);
+  if A <> FTalkFocus then
+  begin
+    FTalkFocus := A;
+    FTalkAttackDown := Attack or (FAttackPulse > 0);
+    if A <> nil then
+      WritelnLog('Doom3World', 'Talk focus: %s', [A.Model.Entity.Name])
+    else
+      WritelnLog('Doom3World', 'Talk focus lost');
+  end;
+  if FTalkFocus = nil then
+    Exit;
+  { idPlayer::Weapon_NPC: the attack button talks }
+  Down := (Attack or (FAttackPulse > 0)) and not PlayerDead;
+  if Down and not FTalkAttackDown then
+  begin
+    TalkTo(FTalkFocus);
+    FAttackPulse := 0;
+  end;
+  FTalkAttackDown := Down;
+end;
+
 procedure TD3Game.Use(const Origin, Dir: TVector3);
 const
   TalkDistance = 128;
 var
   Mover: TD3Mover;
   Ray: TBox3D;
-  A, Best: TD3Actor;
-  ToActor: TVector3;
-  T, BestT: Single;
+  Best: TD3Actor;
 begin
-  { a character in front of the player, within reach, ready to talk }
-  Best := nil;
-  BestT := TalkDistance;
-  for A in FActors do
-  begin
-    if (A.Monster <> nil) or not A.Thinking or not A.Model.Holder.Exists or (A.TalkState <> 2) then
-      Continue;
-    ToActor := A.Model.Holder.Translation + Vector3(0, 48, 0) - Origin;
-    T := TVector3.DotProduct(ToActor, Dir.Normalize);
-    if (T > 0) and (T < BestT) and ((ToActor - Dir.Normalize * T).Length < 32) then
-    begin
-      Best := A;
-      BestT := T;
-    end;
-  end;
+  Best := TalkCandidate(Origin, Dir, TalkDistance);
   if Best <> nil then
   begin
-    { idAI::TalkTo: its script sees AI_TALK }
-    Best.TalkTarget := PlayerHandle;
-    Best.SetFlag('AI_TALK', 1);
-    WritelnLog('Doom3World', 'Talking to %s', [Best.Model.Entity.Name]);
+    TalkTo(Best);
     Exit;
   end;
   Ray := TBox3D.Empty;
