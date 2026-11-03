@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields, CastleTimeUtils,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui;
 
 type
   TViewPlay = class(TCastleView)
@@ -41,6 +41,11 @@ type
     { environment probes (r_envProbes): one EnvironmentLight per area,
       baked from the map; nil until baked for the current map }
     FEnvProbes: TCastleScene;
+    { security monitors (remoteRenderMap): a viewport over the same world
+      rendering the cameras GUIs show, a few times a second }
+    FRemoteViewport: TCastleViewport;
+    FRemoteCamera: TCastleCamera;
+    FRemoteTime: Single;
     FEnvProbesOn: Boolean;
     { don't prepare the map's rendering resources at load (console
       r_prepareResources 0, env CD3_PREPARE_RESOURCES=0): they are then
@@ -86,6 +91,13 @@ type
     { console g_pdaGui (1 by default): guis/pda.gui when the data has it
       (no video or audio playback), else the text panel }
     FUsePdaGui: Boolean;
+    { Doom 3's HUD (guis/hud.gui) when the data has it and console
+      g_hudGui is 1 (the default); else our own HUD panels }
+    FHudGui: TD3HudGui;
+    FHudImage: TCastleImageControl;
+    FHudTimeMs: Double;
+    FHudRedraw: Single;
+    FUseHudGui, FHudGuiTried: Boolean;
     { target_endlevel's next map, loaded FPendingMapIn seconds later }
     FPendingMap: String;
     FPendingMapIn: Single;
@@ -118,6 +130,8 @@ type
       UpdateObjectiveInfo) into the PDA GUI's state }
     procedure FillPdaGui(const UpdateSel: Boolean);
     procedure UpdatePdaGui(const SecondsPassed: Single);
+    procedure UpdateHudGui(const SecondsPassed: Single);
+    procedure FreeHudGui;
     procedure HandleConsoleCommand(const Cmd, Args: String);
     { fire the weapon: Once from a demo script, else the button is held }
     procedure Fire(const Once: Boolean);
@@ -126,6 +140,7 @@ type
     procedure UpdateMuzzleFlash;
     { the HUD's tunnel vision and blood blobs from the game's damage }
     procedure UpdateDamageView;
+    procedure UpdateRemoteViews(const SecondsPassed: Single);
     { walk navigation falls at Doom 3's speed (TD3Game.FallSpeed) }
     procedure UpdateFallSpeed(const SecondsPassed: Single);
     { knockback moves the camera (with collisions) }
@@ -194,6 +209,7 @@ begin
   FUseReverb := True;
   FEnvProbeScale := 0.5;
   FUsePdaGui := True;
+  FUseHudGui := True;
 end;
 
 destructor TViewPlay.Destroy;
@@ -390,6 +406,7 @@ begin
   FreeAndNil(FPdaGui);
   { freed with FreeAtStop }
   FPdaImage := nil;
+  FreeHudGui;
   FPdaOpen := False;
   FreeAndNil(FGame);
   inherited Stop;
@@ -532,7 +549,11 @@ end;
 
 procedure TViewPlay.HandleMessage(const Msg: String);
 begin
-  Hud.ShowMessage(Msg);
+  { Doom 3's HUD lists them as pickups }
+  if FHudGui <> nil then
+    FHudGui.Pickup(Msg)
+  else
+    Hud.ShowMessage(Msg);
   Console.Print(Msg);
 end;
 
@@ -862,6 +883,69 @@ begin
     FPdaImage.Image := RenderGui(FPdaGui, nil);
     FPdaImage.OwnsImage := True;
     FPdaGui.Dirty := False;
+  end;
+end;
+
+procedure TViewPlay.FreeHudGui;
+begin
+  FreeAndNil(FHudGui);
+  if FHudImage <> nil then
+    FreeAndNil(FHudImage);
+  FHudGuiTried := False;
+  Hud.GuiHud := False;
+end;
+
+procedure TViewPlay.UpdateHudGui(const SecondsPassed: Single);
+const
+  { software rendered: at most this many redraws a second }
+  RedrawRate = 20;
+var
+  HudParent: TCastleUserInterface;
+begin
+  if not FUseHudGui then
+  begin
+    if FHudGui <> nil then
+      FreeHudGui;
+    Exit;
+  end;
+  if (FHudGui = nil) and not FHudGuiTried then
+  begin
+    FHudGuiTried := True;
+    if D3Fs.FileExists('guis/hud.gui') then
+    begin
+      FHudGui := TD3HudGui.Create;
+      if not FHudGui.Load('guis/hud.gui') then
+        FreeAndNil(FHudGui)
+      else
+      begin
+        { under our HUD (the crosshair, screen effects) and the PDA }
+        FHudImage := TCastleImageControl.Create(nil);
+        FHudImage.Stretch := True;
+        FHudImage.FullSize := True;
+        FHudImage.Color := Vector4(1, 1, 1, 1);
+        HudParent := Hud.Parent;
+        if HudParent <> nil then
+          HudParent.InsertControl(HudParent.IndexOfControl(Hud), FHudImage)
+        else
+          InsertFront(FHudImage);
+        FHudTimeMs := 0;
+        FHudRedraw := 0;
+      end;
+    end;
+  end;
+  if FHudGui = nil then
+    Exit;
+  Hud.GuiHud := True;
+  FHudTimeMs := FHudTimeMs + SecondsPassed * 1000;
+  FHudGui.Update(FGame, Round(FHudTimeMs), D3LangString(FGame.LocationAt(Camera.Translation)));
+  { dead or in a cinematic: no HUD (idPlayer::DrawHUD) }
+  FHudImage.Exists := not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
+  FHudRedraw := FHudRedraw - SecondsPassed;
+  if FHudImage.Exists and ((FHudRedraw <= 0) or (FHudImage.Image = nil)) then
+  begin
+    FHudImage.Image := FHudGui.Render;
+    FHudImage.OwnsImage := True;
+    FHudRedraw := 1 / RedrawRate;
   end;
 end;
 
@@ -1246,6 +1330,77 @@ begin
   WalkNavigation.FallSpeedStart := FGame.FallSpeed(FFallTime + SecondsPassed * 0.5) /
     (WalkNavigation.MoveSpeed * WalkNavigation.MoveVerticalSpeed);
   WalkNavigation.Falling := False;
+end;
+
+procedure TViewPlay.UpdateRemoteViews(const SecondsPassed: Single);
+const
+  { idRenderWorld renders remote views every frame; 5 a second here }
+  Interval = 0.2;
+var
+  Wanted: TStringArray;
+  RV: TD3RemoteView;
+  Img: TRGBImage;
+  Rgba: TRGBAlphaImage;
+  W: String;
+  Want: Boolean;
+begin
+  FRemoteTime := FRemoteTime + SecondsPassed;
+  if (FRemoteTime < Interval) or (Map.RemoteViews.Count = 0) then
+    Exit;
+  FRemoteTime := 0;
+  Wanted := TakeWantedDynamicImages;
+  if Length(Wanted) = 0 then
+    Exit;
+  if FRemoteViewport = nil then
+  begin
+    FRemoteViewport := TCastleViewport.Create(FreeAtStop);
+    FRemoteViewport.FullSize := False;
+    FRemoteViewport.Items := MainViewport.Items;
+    FRemoteCamera := TCastleCamera.Create(FreeAtStop);
+    MainViewport.Items.Add(FRemoteCamera);
+    FRemoteViewport.Camera := FRemoteCamera;
+    FRemoteViewport.BackgroundColor := Black;
+  end;
+  for RV in Map.RemoteViews do
+  begin
+    { a GUI switched the monitor's cameraTarget (setkeyval) }
+    if (RV.Owner <> nil) and not SameText(RV.Owner.Value('cameratarget'), RV.CameraName) and
+       (Map.MapFile.FindByName(RV.Owner.Value('cameratarget')) <> nil) then
+    begin
+      Map.AimRemoteView(RV, Map.MapFile.FindByName(RV.Owner.Value('cameratarget')));
+      WritelnLog('GameViewPlay', 'Remote view %s looks from %s', [RV.Image, RV.CameraName]);
+    end;
+    Want := False;
+    for W in Wanted do
+      if SameText(W, ChangeFileExt(RV.Image, '')) then
+        Want := True;
+    if not Want then
+      Continue;
+    FRemoteViewport.Width := RV.Width;
+    FRemoteViewport.Height := RV.Height;
+    { portal visibility from the security camera, the player's again after }
+    FRemoteCamera.SetView(RV.Position, RV.Direction, RV.Up);
+    Map.UpdateVisibility(FRemoteCamera);
+    try
+      Img := CaptureView(Container, FRemoteViewport, RV.Position, RV.Direction, RV.Up, RV.FieldOfView,
+        RV.Width, RV.Height);
+    finally
+      Map.UpdateVisibility(MainViewport.Camera);
+    end;
+    try
+      { env CD3_REMOTE_DUMP=<dir>: the captured views as PNGs (debugging) }
+      if GetEnvironmentVariable('CD3_REMOTE_DUMP') <> '' then
+        SaveImage(Img, InclPathDelim(GetEnvironmentVariable('CD3_REMOTE_DUMP')) + RV.CameraName + '.png');
+      Rgba := Img.ToRGBAlphaImage;
+      try
+        SetGuiDynamicImage(ChangeFileExt(RV.Image, ''), Rgba);
+      finally
+        Rgba.Free;
+      end;
+    finally
+      Img.Free;
+    end;
+  end;
 end;
 
 procedure TViewPlay.UpdateDamageView;
@@ -1817,6 +1972,17 @@ begin
     if Args <> '' then
       SoundOcclusion := StrToIntDef(Args, 1) <> 0;
     Console.Print('s_occlusion ' + Iff(SoundOcclusion, '1', '0'));
+  end else
+  if Cmd = 'g_hudgui' then
+  begin
+    { Doom 3's HUD GUI instead of our panels }
+    if Args <> '' then
+      FUseHudGui := StrToIntDef(Args, 0) <> 0;
+    if FHudGui <> nil then
+      Console.Print(Format('g_hudGui %s (guis/hud.gui shown: %d renders, %.1f ms each, %d events)',
+        [Iff(FUseHudGui, '1', '0'), FHudGui.Renders, FHudGui.RenderMs, FHudGui.Events.Count]))
+    else
+      Console.Print('g_hudGui ' + Iff(FUseHudGui, '1', '0') + ' (guis/hud.gui when the data has it, else our HUD)');
   end else
   if Cmd = 'g_pdagui' then
   begin
@@ -2454,11 +2620,40 @@ begin
   Hud.Stamina := FGame.StaminaPercent;
   Hud.Dead := FGame.PlayerDead;
   UpdateDamageView;
+  UpdateRemoteViews(SecondsPassed);
   Hud.FlashlightOn := Flashlight.Exists;
   Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
+  UpdateHudGui(SecondsPassed);
 
   if AutoTestPrefix <> '' then
     RunDemoStep(SecondsPassed);
+end;
+
+{ A key to a GUI: backspace 8, enter 13, escape 27, else the character. }
+function GuiKey(const Gui: TD3Gui; const Event: TInputPressRelease): Boolean;
+var
+  Code: Integer;
+  Ch: Char;
+begin
+  Code := 0;
+  Ch := #0;
+  if Event.Key = keyBackSpace then
+    Code := 8
+  else
+  if Event.Key = keyEnter then
+    Code := 13
+  else
+  if Event.Key = keyEscape then
+    Code := 27
+  else
+  if (Length(Event.KeyString) = 1) and (Event.KeyString[1] >= ' ') then
+    Ch := Event.KeyString[1];
+  if (Code = 0) and (Ch = #0) then
+    Exit(False);
+  { only an edit takes letters; escape goes to the GUI (onEsc) }
+  if (Code <> 27) and (Gui.Focus = nil) then
+    Exit(False);
+  Result := Gui.KeyDown(Code, Ch);
 end;
 
 function TViewPlay.Press(const Event: TInputPressRelease): Boolean;
@@ -2469,6 +2664,17 @@ begin
 
   if Console.Press(Event) then
     Exit(True);
+
+  { GUI keys (idUserInterface::HandleEvent): the PDA GUI while open (an
+    edit types, Escape its onEsc), a world GUI while one of its edits has
+    the focus }
+  if (Event.EventType = itKey) and (Event.Key <> keyTab) then
+  begin
+    if FPdaOpen and (FPdaGui <> nil) and GuiKey(FPdaGui, Event) then
+      Exit(True);
+    if (FGame.GuiFocus <> nil) and (FGame.GuiFocus.Gui.Focus <> nil) and GuiKey(FGame.GuiFocus.Gui, Event) then
+      Exit(True);
+  end;
 
   if Event.IsKey(keyEscape) then
   begin

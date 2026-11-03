@@ -39,6 +39,10 @@ procedure CubeFaceCamera(const Face: TD3CubeFace; out Direction, Up: TVector3);
 function CaptureCubeFaces(const Container: TCastleContainer;
   const Viewport: TCastleViewport; const Position: TVector3;
   const Size: Integer): TD3CubeImages;
+{ The view from a camera (vertical fov in radians) into a new image of
+  Width x Height (caller frees): remoteRenderMap's security monitors. }
+function CaptureView(const Container: TCastleContainer; const Viewport: TCastleViewport;
+  const Position, Direction, Up: TVector3; const FovY: Single; const Width, Height: Integer): TRGBImage;
 
 { Spherical harmonics of the radiance in the cube map faces
   (each texel weighted by its solid angle). }
@@ -139,6 +143,30 @@ begin
       RenderToTexture.RenderEnd;
     end;
   finally FreeAndNil(RenderToTexture) end;
+end;
+
+function CaptureView(const Container: TCastleContainer; const Viewport: TCastleViewport;
+  const Position, Direction, Up: TVector3; const FovY: Single; const Width, Height: Integer): TRGBImage;
+var
+  RenderToTexture: TGLRenderToTexture;
+  Rect: TRectangle;
+begin
+  Viewport.Camera.ProjectionType := ptPerspective;
+  Viewport.Camera.Perspective.FieldOfView := FovY;
+  Viewport.Camera.Perspective.FieldOfViewAxis := faVertical;
+  Viewport.Camera.SetView(Position, Direction, Up);
+  Rect := Rectangle(0, 0, Width, Height);
+  RenderToTexture := TGLRenderToTexture.Create(Width, Height);
+  try
+    RenderToTexture.Buffer := tbNone;
+    RenderToTexture.GLContextOpen;
+    RenderToTexture.RenderBegin;
+    Container.RenderControl(Viewport, Rect);
+    Result := SaveScreen_NoFlush(TRGBImage, Rect, RenderToTexture.ColorBuffer) as TRGBImage;
+    RenderToTexture.RenderEnd;
+  finally
+    FreeAndNil(RenderToTexture);
+  end;
 end;
 
 { Real spherical harmonics basis (order 2) for the unit direction D. }

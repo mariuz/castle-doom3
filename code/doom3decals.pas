@@ -584,6 +584,9 @@ begin
       glass, sprites, particles or other decals }
     if (Node.Appearance.DepthMode <> nil) or (Node.Appearance.AlphaMode = amBlend) or not Node.Visible then
       Continue;
+    { noOverlays materials }
+    if Node.Appearance.MetadataBoolean['d3_nooverlays'] then
+      Continue;
     if not Shape.BoundingBox.Collides(Box) then
       Continue;
     Shape.Triangulate({$ifdef FPC}@{$endif} ProjectTriangle, True);

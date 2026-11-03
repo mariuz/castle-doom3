@@ -915,6 +915,9 @@ begin
       GuiUrl := GuiSurfaceUrl(M.GuiSurf, EntityKeys);
     if (M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass) or (Length(S.Indexes) < 3) then
       Continue;
+    { deform particle: its particles instead (TD3Game.SpawnParticleDeforms) }
+    if (M.Deform = 'particle') or (M.Deform = 'particle2') then
+      Continue;
     SetLength(Coords, Length(S.Positions));
     for I := 0 to High(S.Positions) do
       Coords[I] := D3ToCge(S.Positions[I]);

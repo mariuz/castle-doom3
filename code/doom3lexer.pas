@@ -36,6 +36,8 @@ type
     function NextStr: String;
     { Look at the next token without consuming it ('' at the end). }
     function Peek: String;
+    { Is the next token (Peek's) a quoted string? }
+    function PeekQuoted: Boolean;
     function AtEnd: Boolean;
     { Read the next token and check it (case-insensitive). }
     function Expect(const S: String): Boolean;
@@ -203,6 +205,12 @@ begin
     FPeeked := True;
   end;
   Result := FPeekToken;
+end;
+
+function TDoom3Lexer.PeekQuoted: Boolean;
+begin
+  Peek;
+  Result := FPeekQuoted;
 end;
 
 function TDoom3Lexer.AtEnd: Boolean;

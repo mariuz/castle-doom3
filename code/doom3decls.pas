@@ -63,6 +63,8 @@ type
     StageColor: TVector4;
     AlphaTest: Single;
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
+    { noOverlays: no decals on it (idMaterial::AllowOverlays) }
+    NoOverlays: Boolean;
     { A surface parameter that clears the solid contents (water, trigger,
       monsterclip, ikclip, aassolid... like Doom 3's clearSolid parms). }
     ClearsSolid: Boolean;
@@ -119,6 +121,13 @@ type
       already 0..1. }
     MirrorWidth, MirrorHeight: Integer;
     MirrorBlend: TD3BlendMode;
+    { a remoteRenderMap stage (security monitors: the view of the entity's
+      cameraTarget) and its blend; 0: none }
+    RemoteWidth, RemoteHeight: Integer;
+    RemoteBlend: TD3BlendMode;
+    { the image the view renders into (the stage's map, e.g.
+      textures/dynamic/camera1: GUIs show it by a material mapping it) }
+    RemoteImage: String;
     MirrorColorExpr: array [0..3] of TD3Expr;
     { "deform sprite", "deform tube"...: the deform kind, lowercase, and
       its parameters: a flare's size ("deform flare 24"), expand's and
@@ -900,7 +909,7 @@ var
   StageSpecial, HasBlend, HasStageColor, StageSkyTexGen, StageVC, StageInvVC: Boolean;
   StageCubeMap: String;
   StageCameraCubeMap, StageReflectTexGen: Boolean;
-  StageMirrorW, StageMirrorH: Integer;
+  StageMirrorW, StageMirrorH, StageRemoteW, StageRemoteH: Integer;
   StageProgram: String;
   StageFragmentMaps: array [0..2] of String;
   StageVertexParms: array [0..1] of String;
@@ -968,6 +977,8 @@ begin
         StageSkyTexGen := False;
         StageReflectTexGen := False;
         StageMirrorW := 0;
+        StageRemoteW := 0;
+        StageRemoteH := 0;
         StageMirrorH := 0;
         StageProgram := '';
         for I := 0 to High(StageFragmentMaps) do
@@ -1116,6 +1127,14 @@ begin
             StageReflectTexGen := True;
             StageSpecial := True;
           end else
+          if L = 'remoterendermap' then
+          begin
+            { remoteRenderMap <width> <height>: the scene from the entity's
+              cameraTarget }
+            StageRemoteW := Lexer.ReadInt;
+            StageRemoteH := Lexer.ReadInt;
+            StageSpecial := True;
+          end else
           if L = 'mirrorrendermap' then
           begin
             { mirrorRenderMap <width> <height>: the scene rendered from the
@@ -1162,6 +1181,17 @@ begin
             Result.ReflectColorExpr[I] := Regs[I];
             Regs[I] := nil;
           end;
+        end;
+        { a remote view: the first remoteRenderMap stage }
+        if (StageRemoteW > 0) and (StageRemoteH > 0) and (Result.RemoteWidth = 0) then
+        begin
+          Result.RemoteWidth := StageRemoteW;
+          Result.RemoteImage := LowerCase(StageMap);
+          Result.RemoteHeight := StageRemoteH;
+          if HasBlend then
+            Result.RemoteBlend := StageBlendMode
+          else
+            Result.RemoteBlend := bmOpaque;
         end;
         { a mirror: the first mirrorRenderMap stage }
         if (StageMirrorW > 0) and (StageMirrorH > 0) and not Result.HasMirror then
@@ -1310,6 +1340,9 @@ begin
       else
       if L = 'noshadows' then
         Result.NoShadows := True
+      else
+      if L = 'nooverlays' then
+        Result.NoOverlays := True
       else
       if L = 'playerclip' then
       begin

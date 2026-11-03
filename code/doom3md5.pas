@@ -140,6 +140,9 @@ type
     FModel: TD3Md5Model;
     FScene: TCastleScene;
     FCoords: array of TCoordinateNode;
+    { decal overlays (idRenderModelOverlay): shapes sharing a mesh's
+      coordinates, the oldest first }
+    FOverlays: array of TShapeNode;
     FEyeballs: array of TD3Md5Eyeball;
     FMatrices: TD3JointMatrixArray;
     { the pose changed since the meshes were last skinned }
@@ -235,6 +238,13 @@ type
     { Start an animation by name (from the model decl) or path. False when
       it doesn't exist. }
     function PlayAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
+    { idRenderModelOverlay::CreateOverlay: a decal material over the mesh
+      triangles in a Size wide box around Center facing Normal (the scene's
+      coordinates, the current pose); it moves with the mesh. The number of
+      triangles it covers (0: none). }
+    function AddOverlay(const MaterialName: String; const Center, Normal: TVector3; const Size: Single): Integer;
+    function OverlayCount: Integer;
+    procedure ClearOverlays;
     { idAnimator's torso channel: the joints of Spec (a model decl's
       "channel torso" list: names, *name with its children, - to leave
       out) play their own anim over the body's; '' clears the channel. }
@@ -1616,6 +1626,144 @@ end;
 function TD3Md5Instance.TorsoAnimFinished: Boolean;
 begin
   Result := (FTorsoAnimData = nil) or (not FTorsoLoop and (FTorsoTime >= FTorsoAnimData.Duration));
+end;
+
+procedure TD3Md5Instance.ClearOverlays;
+var
+  O: TShapeNode;
+begin
+  if (FScene <> nil) and (FScene.RootNode <> nil) then
+    for O in FOverlays do
+      FScene.RootNode.RemoveChildren(O);
+  FOverlays := nil;
+end;
+
+function TD3Md5Instance.OverlayCount: Integer;
+begin
+  Result := Length(FOverlays);
+end;
+
+function TD3Md5Instance.AddOverlay(const MaterialName: String; const Center, Normal: TVector3;
+  const Size: Single): Integer;
+const
+  { idRenderModelOverlay's MAX_OVERLAYS }
+  MaxOverlays = 6;
+var
+  I, T, K, V: Integer;
+  N, Axis0, Axis1, P, A, B, C: TVector3;
+  Half, Depth: Single;
+  Points: TVector3List;
+  UVs: array of TVector2;
+  Used: array of Boolean;
+  Indexes: TInt32List;
+  Geometry: TIndexedTriangleSetNode;
+  TexCoord: TTextureCoordinateNode;
+  Shape: TShapeNode;
+  App: TAppearanceNode;
+  DepthMode: TDepthModeNode;
+  Bits, VBits: Integer;
+begin
+  Result := 0;
+  if (FScene = nil) or (FScene.RootNode = nil) or Normal.IsZero then
+    Exit;
+  N := Normal.Normalize;
+  { the decal's axes across the surface }
+  if Abs(N.Y) < 0.9 then
+    Axis0 := TVector3.CrossProduct(N, Vector3(0, 1, 0)).Normalize
+  else
+    Axis0 := TVector3.CrossProduct(N, Vector3(1, 0, 0)).Normalize;
+  Axis1 := TVector3.CrossProduct(N, Axis0);
+  Half := Size / 2;
+  Depth := Size;
+  for I := 0 to High(FCoords) do
+  begin
+    if (FCoords[I] = nil) or (I >= Length(MeshShapes)) or (MeshShapes[I] = nil) or not MeshShapes[I].Visible then
+      Continue;
+    Points := FCoords[I].FdPoint.Items;
+    if Points.Count = 0 then
+      Continue;
+    SetLength(UVs, Points.Count);
+    SetLength(Used, Points.Count);
+    for V := 0 to Points.Count - 1 do
+    begin
+      P := Points.L[V] - Center;
+      UVs[V] := Vector2(TVector3.DotProduct(P, Axis0) / Size + 0.5, TVector3.DotProduct(P, Axis1) / Size + 0.5);
+      Used[V] := False;
+    end;
+    Indexes := TInt32List.Create;
+    try
+      for T := 0 to Length(FModel.Meshes[I].Tris) div 3 - 1 do
+      begin
+        A := Points.L[FModel.Meshes[I].Tris[T * 3]];
+        B := Points.L[FModel.Meshes[I].Tris[T * 3 + 1]];
+        C := Points.L[FModel.Meshes[I].Tris[T * 3 + 2]];
+        { facing the hit (either winding: Doom 3's are clockwise), a
+          corner in the box }
+        if Abs(TVector3.DotProduct(TVector3.CrossProduct(B - A, C - A), N)) < 1e-6 then
+          Continue;
+        { idRenderModelOverlay::CreateOverlay: out when its three corners are
+          past the same side of the box (bits of the six sides) }
+        Bits := 63;
+        for K := 0 to 2 do
+        begin
+          P := Points.L[FModel.Meshes[I].Tris[T * 3 + K]] - Center;
+          VBits := 0;
+          if TVector3.DotProduct(P, Axis0) < -Half then VBits := VBits or 1;
+          if TVector3.DotProduct(P, Axis0) > Half then VBits := VBits or 2;
+          if TVector3.DotProduct(P, Axis1) < -Half then VBits := VBits or 4;
+          if TVector3.DotProduct(P, Axis1) > Half then VBits := VBits or 8;
+          if TVector3.DotProduct(P, N) < -Depth then VBits := VBits or 16;
+          if TVector3.DotProduct(P, N) > Depth then VBits := VBits or 32;
+          Bits := Bits and VBits;
+        end;
+        if Bits <> 0 then
+          Continue;
+        if TVector3.DotProduct(TVector3.CrossProduct(B - A, C - A), N) > 0 then
+          Continue;
+        for K := 0 to 2 do
+        begin
+          Indexes.Add(FModel.Meshes[I].Tris[T * 3 + K]);
+          Used[FModel.Meshes[I].Tris[T * 3 + K]] := True;
+        end;
+      end;
+      if Indexes.Count = 0 then
+        Continue;
+      Inc(Result, Indexes.Count div 3);
+      Geometry := TIndexedTriangleSetNode.Create;
+      Geometry.Coord := FCoords[I];
+      TexCoord := TTextureCoordinateNode.Create;
+      TexCoord.SetPoint(UVs);
+      Geometry.TexCoord := TexCoord;
+      Geometry.SetIndex(Indexes);
+      { the mesh's winding (Doom 3's clockwise front faces) }
+      Geometry.Ccw := False;
+      App := MaterialAppearance(MaterialName);
+      App.ShadowCaster := False;
+      { over the skin (polygonOffset), clamped at its edges }
+      DepthMode := TDepthModeNode.Create;
+      DepthMode.PolygonOffset := Vector2(-1, -2);
+      DepthMode.DepthFunc := dmfLessEqual;
+      App.DepthMode := DepthMode;
+      if App.Texture is TImageTextureNode then
+      begin
+        TImageTextureNode(App.Texture).RepeatS := False;
+        TImageTextureNode(App.Texture).RepeatT := False;
+      end;
+      Shape := TShapeNode.Create;
+      Shape.Geometry := Geometry;
+      Shape.Appearance := App;
+      FScene.RootNode.AddChildren(Shape);
+      FOverlays := Concat(FOverlays, [Shape]);
+      { the oldest goes }
+      while Length(FOverlays) > MaxOverlays do
+      begin
+        FScene.RootNode.RemoveChildren(FOverlays[0]);
+        Delete(FOverlays, 0, 1);
+      end;
+    finally
+      Indexes.Free;
+    end;
+  end;
 end;
 
 function TD3Md5Instance.PlayAnim(const AnimName: String; const Loop: Boolean): Boolean;

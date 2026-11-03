@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
-  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq,
+  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq, Doom3HudGui,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
 
 var
@@ -120,10 +120,10 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(50, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(53, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(66, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
-  CheckEquals(3, Decls.DeclCount(dtSkin), 'skin count');
+  CheckEquals(4, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
     'the berserk skin remaps the body');
@@ -389,6 +389,249 @@ begin
   end;
 end;
 
+{ choiceDef, sliderDef, editDef (idChoiceWindow, idSliderWindow,
+  idEditWindow) with their cvars; keys, focus, onEsc }
+procedure TestGuiWidgets;
+var
+  Gui: TD3Gui;
+begin
+  GuiCvars.Clear;
+  GuiCvars.Values['ui_skill'] := '1';
+  Gui := TD3Gui.Create;
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 onEsc { set "cmd" "close" ; } ' +
+      'choiceDef Skill { rect 0, 0, 200, 40 choices "Easy;Medium;Hard" cvar "ui_skill" } ' +
+      'choiceDef Mode { rect 0, 50, 200, 40 choices "On;Off" values "1;0" choiceType 1 cvar "ui_mode" } ' +
+      'sliderDef Vol { rect 0, 100, 200, 20 low 0 high 10 step 1 cvar "s_volume" } ' +
+      'editDef Name { rect 0, 200, 200, 30 maxchars 4 cvar "ui_name" onEnter { set "cmd" "entered" ; } } }'),
+      'a GUI with widgets');
+    Gui.Activate(0);
+    CheckEquals('Medium', Gui.PropText(Gui.FindWindow('Skill')), 'the choice from its cvar');
+    Gui.SetCursor(100, 20);
+    Check(Gui.Click, 'a click on the choice');
+    CheckEquals('Hard', Gui.PropText(Gui.FindWindow('Skill')), 'the next choice');
+    CheckEquals('2', GuiCvar('ui_skill'), 'choiceType 0: the cvar gets the index');
+    Gui.Click;
+    CheckEquals('Easy', Gui.PropText(Gui.FindWindow('Skill')), 'around to the first');
+    Gui.SetCursor(100, 70);
+    Gui.Click;
+    CheckEquals('0', GuiCvar('ui_mode'), 'choiceType 1: the cvar gets the value');
+    { the slider: a click at 30 percent, then dragged to the end }
+    Gui.SetCursor(60, 110);
+    Gui.Click;
+    CheckEquals('3', GuiCvar('s_volume'), 'the slider''s value under the cursor (in steps)');
+    Gui.SetCursor(250, 110);
+    CheckEquals('10', GuiCvar('s_volume'), 'dragged to the end');
+    Gui.ClickRelease;
+    Gui.SetCursor(60, 110);
+    CheckEquals('10', GuiCvar('s_volume'), 'released: no more dragging');
+    { the edit: focus, typing (up to maxchars), backspace, enter }
+    Gui.SetCursor(50, 210);
+    Gui.Click;
+    Check(Gui.Focus = Gui.FindWindow('Name'), 'a click focuses the edit');
+    Gui.KeyDown(0, 'a');
+    Gui.KeyDown(0, 'b');
+    Gui.KeyDown(0, 'c');
+    Gui.KeyDown(8, #0);
+    Gui.KeyDown(0, 'd');
+    Gui.KeyDown(0, 'e');
+    Gui.KeyDown(0, 'f');
+    CheckEquals('abde', GuiCvar('ui_name'), 'typed, backspaced, up to maxchars 4');
+    CheckEquals('abde_', Gui.PropText(Gui.FindWindow('Name')), 'the edit shows its cursor while focused');
+    Gui.KeyDown(13, #0);
+    CheckEquals('entered', Gui.TakeCmd, 'enter runs onEnter');
+    Check(Gui.Focus = nil, 'enter ends the focus');
+    Check(Gui.KeyDown(27, #0), 'escape');
+    CheckEquals('close', Gui.TakeCmd, 'escape runs the desktop''s onEsc');
+  finally
+    Gui.Free;
+    GuiCvars.Clear;
+  end;
+end;
+
+{ rotate / shear (idWindow::SetupTransforms): a window turned around its
+  center }
+procedure TestGuiTransforms;
+var
+  Gui: TD3Gui;
+  Img: TRGBAlphaImage;
+
+  function Red(const GX, GY: Single): Integer;
+  begin
+    Result := PVector4Byte(Img.PixelPtr(Round(GX * Img.Width / 640),
+      Img.Height - 1 - Round(GY * Img.Height / 480)))^.X;
+  end;
+
+begin
+  Gui := TD3Gui.Create;
+  try
+    { a bar 200 wide, 20 high around (320, 240); turned 90 degrees it is
+      20 wide and 200 high }
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef Bar { rect 220, 230, 200, 20 backcolor 1, 0, 0, 1 rotate 90 } }'), 'a rotated window');
+    Img := RenderGui(Gui, nil);
+    try
+      CheckEquals(255, Red(320, 240), 'the center stays');
+      CheckEquals(255, Red(320, 320), 'turned: it reaches down');
+      CheckEquals(0, Red(400, 240), 'turned: not along x any more');
+    finally
+      Img.Free;
+    end;
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef Bar { rect 220, 230, 200, 20 backcolor 1, 0, 0, 1 shear 1, 0 } }'), 'a sheared window');
+    Img := RenderGui(Gui, nil);
+    try
+      CheckEquals(255, Red(320, 240), 'sheared: the center stays');
+      { Doom 3 transforms row vectors: shear.x moves y along x }
+      CheckEquals(255, Red(400, 320), 'sheared 1, 0: its right end goes down 80');
+      CheckEquals(0, Red(400, 240), 'not where it was');
+    finally
+      Img.Free;
+    end;
+  finally
+    Gui.Free;
+  end;
+end;
+
+{ Doom 3's HUD GUI (guis/hud.gui like): the player's state keys, the
+  named events for changes, per-component expressions with tables, the
+  transparent render }
+procedure TestHudGui;
+const
+  HudText =
+    'windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 0 ' +
+    '  definevec4 "$flick" 1, 0, 0, sinTable[ 0.25 ] / 2 ' +
+    '  onNamedEvent updateArmorHealthAir { ' +
+    '    if ("gui::player_health" <= 35) { set "Health::forecolor" "1 0 0 1" ; } ' +
+    '    else { set "Health::forecolor" "0 1 0 1" ; } } ' +
+    '  windowDef Health { rect 10, 400, 40, 30 text "gui::player_health" textscale 0.38 textalign 1 ' +
+    '    shear 0, -0.33 } ' +
+    '  windowDef Bar { rect 100, 440, ("gui::player_health" * 2), 10 ' +
+    '    backcolor 1, 1, 1, sinTable[ 0.25 ] * 0.5 } ' +
+    '  windowDef Glow { rect 300, 100, 20, 20 backcolor "$flick" } ' +
+    '}';
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Hud: TD3HudGui;
+  A: TD3Actor;
+  M: TD3Monster;
+  RemoveMe: TRemoveType;
+  Img: TRGBAlphaImage;
+  Eye: TVector3;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  Hud := TD3HudGui.Create;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the HUD GUI');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    for A in Game.Actors do
+      A.Thinking := False;
+    for M in Game.Monsters do
+      M.Dormant := True;
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.1, Eye);
+    RemoveMe := rtNone;
+    Map.Update(0.1, RemoveMe);
+
+    Check(Hud.LoadFromText(HudText), 'the HUD GUI parses');
+    CheckEquals(4, Hud.Gui.WindowCount, 'expressions with tables don''t end the desktop');
+    Hud.Update(Game, 0, 'room a');
+    CheckEquals('100', Hud.Gui.StateValue('player_health'), 'player_health');
+    CheckEquals('room a', Hud.Gui.StateValue('location'), 'location');
+    CheckEquals('1', Hud.Gui.StateValue('weapon0'), 'the fists: carried');
+    CheckEquals('2', Hud.Gui.StateValue('weapon1'), 'the pistol: the ideal weapon');
+    CheckEquals('0', Hud.Gui.StateValue('weapon2'), 'no shotgun');
+    Check(Hud.Events.IndexOf('updateArmorHealthAir') >= 0, 'updateArmorHealthAir at the start');
+    Check(Hud.Events.IndexOf('updateAmmo') >= 0, 'updateAmmo at the start');
+    Check(Hud.Events.IndexOf('weaponChange') >= 0, 'weaponChange at the start');
+    CheckNear(1, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Health'), 'forecolor').Y, 'healthy: green');
+    CheckNear(200, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Bar'), 'rect').Z, 'a parenthesized rect part');
+    CheckNear(0.5, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Bar'), 'backcolor').W, 'a table lookup in a part');
+    CheckNear(0.5, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Glow'), 'backcolor').W, 'a variable''s expression');
+
+    { changes send their events }
+    Hud.Events.Clear;
+    Hud.Update(Game, 100, 'room a');
+    CheckEquals(0, Hud.Events.Count, 'nothing changed: no events');
+    Game.Health := 30;
+    Hud.Update(Game, 200, 'room a');
+    Check(Hud.Events.IndexOf('updateArmorHealthAir') >= 0, 'health changed');
+    CheckNear(0, Hud.Gui.PropVec4(Hud.Gui.FindWindow('Health'), 'forecolor').Y, 'low health: red');
+    Game.Health := 60;
+    Hud.Events.Clear;
+    Hud.Update(Game, 300, 'room a');
+    Check(Hud.Events.IndexOf('healthPulse') >= 0, 'healthPulse when health goes up');
+    Hud.Events.Clear;
+    Game.Give('weapon', 'weapon_test_shotgun');
+    Hud.Update(Game, 400, 'room a');
+    CheckEquals('2', Hud.Gui.StateValue('newweapon'), 'newweapon: the shotgun''s slot');
+    Check(Hud.Events.IndexOf('newWeapon') >= 0, 'newWeapon');
+    Hud.Pickup('Test Armor');
+    CheckEquals('Test Armor', Hud.Gui.StateValue('itemtext1'), 'a pickup line');
+    Check(Hud.Events.IndexOf('itemPickup1') >= 0, 'itemPickup1');
+
+    { transparent where nothing is drawn, opaque on the bar }
+    Img := Hud.Render;
+    try
+      CheckEquals(0, PVector4Byte(Img.PixelPtr(Img.Width div 2, Img.Height div 2))^.W, 'clear background');
+      Check(PVector4Byte(Img.PixelPtr(Round(150 * Img.Width / 640), Img.Height - 1 - Round(445 * Img.Height / 480)))^.W > 100,
+        'the bar shows (half transparent)');
+    finally
+      Img.Free;
+    end;
+  finally
+    Hud.Free;
+    Game.Free;
+    World.Free;
+  end;
+end;
+
+{ remoteRenderMap: the stage's size and dynamic image; a GUI background
+  mapping a dynamic image draws what the game rendered into it }
+procedure TestRemoteViews;
+var
+  M: TD3Material;
+  Gui: TD3Gui;
+  Img, Cam: TRGBAlphaImage;
+  Wanted: TStringArray;
+begin
+  M := Decls.Material('textures/test/remotecam');
+  CheckEquals(128, M.RemoteWidth, 'remoteRenderMap width');
+  CheckEquals(64, M.RemoteHeight, 'remoteRenderMap height');
+  CheckEquals('textures/dynamic/testcam.tga', M.RemoteImage, 'remoteRenderMap image');
+  Check(M.IsInvisible, 'an rgba 0 stage draws nothing itself');
+  Gui := TD3Gui.Create;
+  Cam := TRGBAlphaImage.Create(4, 4);
+  try
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 backcolor 0, 0, 0, 1 ' +
+      'windowDef View { rect 0, 0, 640, 480 background "textures/test/remoteview" matcolor 1, 1, 1, 1 } }'),
+      'a GUI showing a camera');
+    TakeWantedDynamicImages;
+    Img := RenderGui(Gui, nil);
+    Img.Free;
+    Wanted := TakeWantedDynamicImages;
+    Check((Length(Wanted) = 1) and (Wanted[0] = 'textures/dynamic/testcam'), 'the GUI asks for the camera''s image');
+    Check(Gui.HasVideo, 'it redraws while shown');
+    Cam.Clear(Vector4Byte(0, 255, 0, 255));
+    SetGuiDynamicImage('textures/dynamic/testcam', Cam);
+    Img := RenderGui(Gui, nil);
+    try
+      Check(PVector4Byte(Img.PixelPtr(Img.Width div 2, Img.Height div 2))^.Y > 200, 'it shows the rendered image');
+    finally
+      Img.Free;
+    end;
+  finally
+    Cam.Free;
+    Gui.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -508,7 +751,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(90, MapFile.Entities.Count, 'entity count');
+    CheckEquals(91, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -6156,6 +6399,22 @@ begin
       projected from the skinned positions }
     ME := Map.FindModelEntity('blob_1');
     Check(ME <> nil, 'blob_1 has a model');
+    { a wound (idRenderModelOverlay) on its +x side: a shape sharing the
+      mesh's coordinates, so it moves with the animation; 6 at most }
+    if ME <> nil then
+    begin
+      CheckEquals(0, ME.Instance.OverlayCount, 'no overlays yet');
+      Check(ME.Instance.AddOverlay('textures/test/decal_hole',
+        ME.Instance.Scene.WorldToLocal(ME.Holder.Translation + Vector3(0, 45, 0)), D3ToCge(Vector3(1, 0, 0)), 20) > 0,
+        'a wound overlay covers some triangles');
+      CheckEquals(1, ME.Instance.OverlayCount, 'one overlay');
+      for I := 1 to 8 do
+        ME.Instance.AddOverlay('textures/test/decal_hole',
+          ME.Instance.Scene.WorldToLocal(ME.Holder.Translation + Vector3(0, 45, 0)), D3ToCge(Vector3(1, 0, 0)), 20);
+      Check(ME.Instance.OverlayCount <= 6, 'the oldest overlays go (6 at most)');
+      ME.Instance.ClearOverlays;
+      CheckEquals(0, ME.Instance.OverlayCount, 'overlays cleared');
+    end;
     if ME <> nil then
     begin
       Found := 0;
@@ -7018,6 +7277,17 @@ begin
     Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
     Game.PlayerViewDir := D3ToCge(Vector3(1, 0, 0));
 
+    { deform particle: emitbox_1's top (its skin's emitfrompoly) emits
+      test_steam from its triangles, over the box at (20, 140, 10) }
+    Check((Map.ParticleDeforms.Count = 1) and (Map.ParticleDeforms[0].EntityName = 'emitbox_1'),
+      'a deform particle surface (emitbox_1)');
+    if Map.ParticleDeforms.Count = 1 then
+    begin
+      CheckEquals('test_steam', Map.ParticleDeforms[0].Decl, 'its particle decl');
+      CheckEquals(2, Length(Map.ParticleDeforms[0].Points), 'its top''s two triangles');
+      if Length(Map.ParticleDeforms[0].Points) > 0 then
+        CheckNear(10, Map.ParticleDeforms[0].Points[0].Z, 'on the box''s top (10 high)');
+    end;
     CheckEquals(2, Game.EmitterEntities.Count, 'two emitter entities (func_emitter with .prt models)');
     if Game.EmitterEntities.Count <> 2 then
       Exit;
@@ -7269,6 +7539,10 @@ begin
   TestRoq;
   TestTorsoChannel;
   TestGuiTrigger;
+  TestGuiWidgets;
+  TestGuiTransforms;
+  TestHudGui;
+  TestRemoteViews;
   TestImages;
   TestProc;
   TestMapFile;

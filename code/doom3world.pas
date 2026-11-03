@@ -885,6 +885,7 @@ type
     FDeadTime: Single;
     procedure Message(const S: String);
     procedure SpawnEmitters;
+    procedure SpawnParticleDeforms;
     function AddEmitter(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
       const OneShot: Boolean; const Who: String): TD3ParticleEmitter;
     function EmitterEntityOf(const E: TD3MapEntity): TD3EmitterEntity;
@@ -5594,6 +5595,7 @@ begin
         SpawnItem(E);
     end;
   SpawnEmitters;
+  SpawnParticleDeforms;
   InitInventory;
   { Doom 3 gives the player the "personal" PDA }
   if PdaDecl('personal') <> nil then
@@ -8337,6 +8339,61 @@ begin
     Result := E.Origin;
 end;
 
+procedure TD3Game.SpawnParticleDeforms;
+var
+  D: TD3ParticleDeform;
+  I, Count: Integer;
+  E: TD3MapEntity;
+  Rot: TMatrix3;
+  P, N, Fwd, Lft: TVector3;
+  Ax: TD3Axis;
+  K: Integer;
+  Em: TD3ParticleEmitter;
+begin
+  { R_ParticleDeform: each triangle kept emits the material's particles
+    along its normal (brush entities: placed at spawn, by their origin and
+    rotation) }
+  Count := 0;
+  for D in FMap.ParticleDeforms do
+  begin
+    E := nil;
+    if D.EntityName <> '' then
+      E := FindEntity(D.EntityName);
+    for I := 0 to High(D.Points) do
+    begin
+      P := D.Points[I];
+      N := D.Normals[I];
+      if E <> nil then
+      begin
+        Rot := E.Rotation;
+        P := E.Origin + D3VecMat(P, Rot);
+        N := D3VecMat(N, Rot);
+      end;
+      { R_ParticleDeform: the triangle's normal is the system's up (z) }
+      N := N.Normalize;
+      if Abs(N.Z) < 0.9 then
+        Fwd := TVector3.CrossProduct(N, Vector3(0, 0, 1)).Normalize
+      else
+        Fwd := TVector3.CrossProduct(N, Vector3(0, 1, 0)).Normalize;
+      Lft := TVector3.CrossProduct(N, Fwd);
+      for K := 0 to 2 do
+      begin
+        Ax.Data[0, K] := Fwd.Data[K];
+        Ax.Data[1, K] := Lft.Data[K];
+        Ax.Data[2, K] := N.Data[K];
+      end;
+      Em := AddEmitter(D.Decl, P, Ax, False, 'deform particle ' + D.Decl);
+      if Em <> nil then
+      begin
+        Em.Persistent := True;
+        Inc(Count);
+      end;
+    end;
+  end;
+  if FMap.ParticleDeforms.Count > 0 then
+    WritelnLog('Doom3World', 'Deform particles: %d surfaces, %d emitters', [FMap.ParticleDeforms.Count, Count]);
+end;
+
 procedure TD3Game.SpawnEmitters;
 var
   E: TD3MapEntity;
@@ -8806,6 +8863,10 @@ begin
         if Length(Words) > 3 then
         begin
           Other := FindEntity(Words[1]);
+          { gui_ keys reach the entity's GUIs (like target_setkeyval) }
+          if (Other <> nil) and (Copy(LowerCase(Words[2]), 1, 4) = 'gui_') then
+            FMap.SetGuiParm(Other, Words[2], Words[3])
+          else
           if Other <> nil then
             Other.SetValue(Words[2], Words[3]);
         end;
@@ -9853,7 +9914,8 @@ end;
 procedure TD3Game.EmitWound(const E: TD3MapEntity; const Def: TStringList; const Position, Direction: TVector3);
 var
   Key, Who: String;  Splats: TStringList;
-  I: Integer;
+  I, Tris: Integer;
+  ME: TD3ModelEntity;
   Dir, Normal: TVector3;
   HitDist: Single;
 
@@ -9871,6 +9933,21 @@ begin
     Key := Def.Values['smoke_wound_flesh'];
   if Key <> '' then
     EmitSmoke(Key, Who + ' smoke_wound_flesh', Position, AxisFromDirection(CgeToD3(Direction)));
+  { idActor::AddDamageEffect: the wound decal on the model
+    (idRenderModelOverlay: mtr_wound_flesh projected along the shot, it
+    moves with the mesh) }
+  if (E <> nil) and (E.Value('mtr_wound_flesh') <> '') and not Direction.IsZero then
+  begin
+    ME := FMap.FindModelEntity(E.Name);
+    if (ME <> nil) and (ME.Instance <> nil) and (ME.Instance.Scene <> nil) then
+    begin
+      Tris := ME.Instance.AddOverlay(E.Value('mtr_wound_flesh'), ME.Instance.Scene.WorldToLocal(Position),
+        ME.Instance.Scene.WorldToLocalDirection(-Direction), 20);
+      if Tris > 0 then
+        WritelnLog('Doom3World', 'Wound %s on %s (%d triangles, %d overlays)',
+          [E.Value('mtr_wound_flesh'), E.Name, Tris, ME.Instance.OverlayCount]);
+    end;
+  end;
   { idGameLocal::BloodSplat: a random mtr_splat_flesh* decal on the surface
     up to 64 behind the wound, along the shot, 32 to 64 wide }
   Splats := TStringList.Create;
