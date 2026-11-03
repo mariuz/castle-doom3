@@ -92,6 +92,8 @@ type
   TD3Influence = class
     Entity: TD3MapEntity;
     Lights, Statics: array of String;
+    { speakers with snd_demonic, entities with gui_demonic }
+    Speakers, Guis: array of String;
     { the lights' colors before the influence (restored after it) }
     LightColors: array of TVector3;
     Delay, ActivateAt, ClearFlashAt, FlashSeconds, RestoreAt, FovEndAt: Single;
@@ -848,6 +850,8 @@ type
       influenceRadius of FInfluencePos (Doom 3 coordinates) }
     FInfluenceLevel: Integer;
     FInfluenceMaterial: String;
+    { skinVision: the player's skin meanwhile }
+    FInfluenceSkin: String;
     FInfluenceRadius: Single;
     FInfluencePos: TVector3;
     FEndLevelMap: String;
@@ -916,6 +920,9 @@ type
     procedure UpdatePlayerInfo;
     procedure FadeEntityColor(const AName: String; const Color: TVector3; const Seconds: Single);
     procedure ActivateInfluence(const E: TD3MapEntity);
+    function SpeakerOf(const AName: String): TD3Speaker;
+    procedure SetSpeakerDemonic(const AName: String; const Demonic: Boolean);
+    procedure SetGuisDemonic(const AName: String; const Demonic: Boolean);
     procedure ApplyInfluence(const Inf: TD3Influence);
     procedure RestoreInfluence(const Inf: TD3Influence);
     procedure UpdateInfluences;
@@ -1993,6 +2000,7 @@ begin
   FInfluences.Clear;
   FInfluenceLevel := 0;
   FInfluenceMaterial := '';
+  FInfluenceSkin := '';
   FInfluenceRadius := 0;
   FEndLevelMap := '';
   FWeaponsDisabled := False;
@@ -6367,6 +6375,10 @@ begin
     Exit;
   Base := FPlayerDef.Values['skin'];
   Result := Base;
+  { idPlayer's influenceSkin (target_setinfluence's skinVision) }
+  if (FInfluenceSkin <> '') and (Decls.Skin(FInfluenceSkin) <> nil) then
+    Result := FInfluenceSkin
+  else
   if PowerUpActive(PowerupInvisibility) and (FPlayerDef.Values['skin_invisibility'] <> '') then
     Result := FPlayerDef.Values['skin_invisibility']
   else
@@ -9135,12 +9147,67 @@ begin
   FEntityFades.Add(Fade);
 end;
 
+function TD3Game.SpeakerOf(const AName: String): TD3Speaker;
+var
+  S: TD3Speaker;
+begin
+  for S in FSpeakers do
+    if SameText(S.Entity.Name, AName) then
+      Exit(S);
+  Result := nil;
+end;
+
+procedure TD3Game.SetSpeakerDemonic(const AName: String; const Demonic: Boolean);
+var
+  S: TD3Speaker;
+begin
+  { idTarget_SetInfluence: "overlayDemonic" plays snd_demonic over the
+    speaker's sound, else it replaces it until restored }
+  S := SpeakerOf(AName);
+  if S = nil then
+    Exit;
+  if Demonic then
+  begin
+    if not S.Entity.BoolValue('overlaydemonic') then
+      S.Transform.Exists := False;
+    PlaySoundAt(S.Entity.Value('snd_demonic'), S.Transform.WorldTranslation);
+  end else
+    S.Transform.Exists := True;
+end;
+
+procedure TD3Game.SetGuisDemonic(const AName: String; const Demonic: Boolean);
+var
+  T: TD3MapEntity;
+  J: Integer;
+  Suffix, Normal, Demon: String;
+begin
+  { gui / gui_demonic, gui2 / gui_demonic2, gui3 / gui_demonic3 }
+  T := FindEntity(AName);
+  if T = nil then
+    Exit;
+  for J := 1 to 3 do
+  begin
+    if J = 1 then
+      Suffix := ''
+    else
+      Suffix := IntToStr(J);
+    Normal := T.Value('gui' + Suffix);
+    Demon := T.Value('gui_demonic' + Suffix);
+    if (Normal = '') or (Demon = '') then
+      Continue;
+    if Demonic then
+      FMap.ReplaceGui(T.Name, Normal, Demon, T.Pairs)
+    else
+      FMap.ReplaceGui(T.Name, Demon, Normal, T.Pairs);
+  end;
+end;
+
 procedure TD3Game.ActivateInfluence(const E: TD3MapEntity);
 var
   Inf, I: TD3Influence;
   Targets: TD3MapEntityArray;
   T: TD3MapEntity;
-  Lights: Boolean;
+  Lights, Sounds, Guis: Boolean;
   Radius: Single;
   B: TD3BrushEntity;
 begin
@@ -9162,6 +9229,8 @@ begin
     Inf.FovEndAt := -1;
     FInfluences.Add(Inf);
     Lights := E.BoolValue('effect_lights') or E.BoolValue('effect_all');
+    Sounds := E.BoolValue('effect_sounds') or E.BoolValue('effect_all');
+    Guis := E.BoolValue('effect_guis') or E.BoolValue('effect_all');
     if E.BoolValue('targetsonly') then
       Targets := TargetsOf(E)
     else
@@ -9174,6 +9243,16 @@ begin
     end;
     for T in Targets do
     begin
+      if Sounds and T.HasKey('snd_demonic') and (SpeakerOf(T.Name) <> nil) then
+      begin
+        Inf.Speakers := Concat(Inf.Speakers, [T.Name]);
+        Continue;
+      end;
+      if Guis and T.HasKey('gui_demonic') and T.HasKey('gui') then
+      begin
+        Inf.Guis := Concat(Inf.Guis, [T.Name]);
+        Continue;
+      end;
       if not T.HasKey('color_demonic') then
         Continue;
       if FMap.FindLight(T.Name) >= 0 then
@@ -9271,8 +9350,12 @@ begin
       FadeEntityColor(N, ParseVector3(T.Value('color_demonic'), ParseVector3(T.Value('_color'), Vector3(1, 1, 1))),
         FadeTime);
     if (T <> nil) and (T.Value('mat_demonic') <> '') then
-      Unsupported('light mat_demonic');
+      FMap.SetLightShader(FMap.FindLight(N), T.Value('mat_demonic'));
   end;
+  for N in Inf.Speakers do
+    SetSpeakerDemonic(N, True);
+  for N in Inf.Guis do
+    SetGuisDemonic(N, True);
   FInfluenceLevel := E.IntValue('influencelevel', 0);
   if E.HasKey('snapangle') then
   begin
@@ -9285,21 +9368,20 @@ begin
     FInfluenceMaterial := E.Value('mtrvision');
     FInfluenceRadius := E.FloatValue('visionradius', 0);
     FInfluencePos := E.Origin;
-    if E.Value('skinvision') <> '' then
-      Unsupported('target_setinfluence skinVision');
+    FInfluenceSkin := E.Value('skinvision');
   end;
   if E.Value('mtrworld') <> '' then
     Unsupported('target_setinfluence mtrWorld');
   if not Inf.RestoreOnTrigger then
     Inf.RestoreAt := FTime + E.FloatValue('time', 0);
-  WritelnLog('Doom3World', 'Influence %s on: %d lights, %d entities, level %d%s',
-    [E.Name, Length(Inf.Lights), Length(Inf.Statics), FInfluenceLevel,
+  WritelnLog('Doom3World', 'Influence %s on: %d lights, %d entities, %d speakers, %d GUIs, level %d%s',
+    [E.Name, Length(Inf.Lights), Length(Inf.Statics), Length(Inf.Speakers), Length(Inf.Guis), FInfluenceLevel,
      Iff(FInfluenceMaterial <> '', ', vision ' + FInfluenceMaterial, '')]);
 end;
 
 procedure TD3Game.RestoreInfluence(const Inf: TD3Influence);
 var
-  E: TD3MapEntity;
+  E, T: TD3MapEntity;
   N: String;
   FadeTime, FlashOut: Single;
   L: Integer;
@@ -9324,10 +9406,21 @@ begin
   { Doom 3 fades them to "_color"; the colors they had keep lights a script
     or a fade had changed }
   for L := 0 to High(Inf.Lights) do
+  begin
     if L <= High(Inf.LightColors) then
       FadeEntityColor(Inf.Lights[L], Inf.LightColors[L], FadeTime);
+    { back to its "texture" unless "leave_demonic_mat" }
+    T := FindEntity(Inf.Lights[L]);
+    if (T <> nil) and (T.Value('mat_demonic') <> '') and not T.BoolValue('leave_demonic_mat') then
+      FMap.SetLightShader(FMap.FindLight(Inf.Lights[L]), T.Value('texture'));
+  end;
+  for N in Inf.Speakers do
+    SetSpeakerDemonic(N, False);
+  for N in Inf.Guis do
+    SetGuisDemonic(N, False);
   FInfluenceLevel := 0;
   FInfluenceMaterial := '';
+  FInfluenceSkin := '';
   FInfluenceRadius := 0;
   FFovTo := 0;
   FFovTime := 0;

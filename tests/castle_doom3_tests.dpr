@@ -6392,6 +6392,16 @@ var
       Game.Activate(Game.FindEntity(AName));
   end;
 
+  function PanelGuiName: String;
+  var
+    S: TD3GuiSurface;
+  begin
+    Result := '';
+    for S in Map.GuiSurfaces do
+      if S.EntityName = 'panel_1' then
+        Exit(S.Gui.Name);
+  end;
+
 begin
   { the PDA decls }
   CheckEquals(2, Decls.DeclCount(dtPda), 'pda decls (pdas/test.pda)');
@@ -6549,6 +6559,9 @@ begin
     CheckNear(70, Game.ViewFov, 'the influence''s fov');
     if L >= 0 then
     begin
+      Check((Map.Light(L).Shader <> nil) and (Map.Light(L).Shader.Name = 'lights/test_strobe'),
+        'light_3 has its mat_demonic shader');
+      CheckEquals('guis/test_status.gui', PanelGuiName, 'panel_1 shows its gui_demonic');
       CheckNear(1, Map.Light(L).Parms.Parms[0], 'light_3 turned red (color_demonic)', 0.01);
       CheckNear(0, Map.Light(L).Parms.Parms[2], 'no blue left in light_3', 0.01);
     end;
@@ -6557,7 +6570,11 @@ begin
     CheckEquals('', Game.InfluenceMaterial, 'no vision after it');
     CheckNear(0, Game.ViewFov, 'the default fov after it');
     if L >= 0 then
+    begin
       CheckNear(1, Map.Light(L).Parms.Parms[2], 'light_3 blue again', 0.01);
+      Check(Map.Light(L).Shader = nil, 'light_3 back to its default shader');
+    end;
+    CheckEquals('guis/test_panel.gui', PanelGuiName, 'panel_1 shows its gui again');
 
     { damage }
     Mon := nil;

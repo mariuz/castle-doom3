@@ -1426,7 +1426,8 @@ def map_text():
          'texture': 'lights/test_ambient'},
         # Room B lights
         {'classname': 'light', 'name': 'light_3', 'origin': '448 -192 240',
-         'light_radius': '360 360 300', '_color': '0.4 0.6 1', 'color_demonic': '1 0 0'},
+         'light_radius': '360 360 300', '_color': '0.4 0.6 1', 'color_demonic': '1 0 0',
+         'mat_demonic': 'lights/test_strobe'},
         {'classname': 'light', 'name': 'light_4', 'origin': '448 192 240',
          'light_radius': '360 360 300', '_color': '1 0.75 0.5',
          'texture': 'lights/test_pulse'},
@@ -1460,7 +1461,7 @@ def map_text():
         {'classname': 'func_static', 'name': 'crate_2', 'model': 'crate_2',
          'origin': '136 -150 88', 'angle': '-15', 'shaderParm7': '1', '_color': '1 0.6 0.2'},
         {'classname': 'func_static', 'name': 'panel_1', 'model': 'panel_1',
-         'origin': '-252 -60 100', 'gui': 'guis/test_panel.gui',
+         'origin': '-252 -60 100', 'gui': 'guis/test_panel.gui', 'gui_demonic': 'guis/test_status.gui',
          'gui_parm1': 'AREA A', 'gui_parm2': 'Welcome to the Castle Doom 3 test level.\\nRoom B is through the door. Mind the creatures.',
          'target': 'light_panel_1'},
         # switched by the panel's GUI (its button's "activate" command)
@@ -1635,7 +1636,7 @@ def map_text():
         # a demonic influence: light_3 turns red, the view gets the vision
         # material, the weapon goes down, the fov narrows; 2 s
         {'classname': 'target_setinfluence', 'name': 'target_setinfluence_1', 'origin': '-200 -140 180',
-         'targetsOnly': '1', 'target': 'light_3', 'time': '2', 'fade_time': '0.5', 'fov': '70',
+         'targetsOnly': '1', 'target': 'light_3', 'target1': 'panel_1', 'time': '2', 'fade_time': '0.5', 'fov': '70',
          'fovTime': '0.5', 'leaveFOV': '1', 'influenceLevel': '1', 'effect_vision': '1',
          'mtrVision': 'textures/test/blood_blob', 'flashIn': '0.2'},
         # powerups (idItemPowerup) in room A's north-west corner

@@ -287,6 +287,13 @@ type
     { Move a light (bound to a mover): its CGE location and light volume
       matrix (world to the light's texture space) }
     procedure SetLightPose(const I: Integer; const Location: TVector3; const Matrix: TMatrix4);
+    { idLight::SetShader: the light's shader by name ('' or undeclared:
+      Doom 3's default); its color animates from then on (the projection
+      image stays) }
+    procedure SetLightShader(const I: Integer; const ShaderName: String);
+    { An entity's GUI file replaced (gui_demonic): the live GUIs of the
+      entity showing OldPath show NewPath; False if none }
+    function ReplaceGui(const EntityName, OldPath, NewPath: String; const Keys: TStrings): Boolean;
     { Set a GUI parameter of an entity (a "gui_parm1"... key, which its
       GUIs show) and redraw its GUI screens (idEntity::Event_SetGuiParm).
       Returns the number of screens redrawn. }
@@ -2455,6 +2462,47 @@ begin
   finally
     FreeAndNil(FGuiTextures);
   end;
+end;
+
+procedure TDoom3Map.SetLightShader(const I: Integer; const ShaderName: String);
+var
+  Shader: TD3Material;
+begin
+  if (I < 0) or (I > High(FLights)) then
+    Exit;
+  Shader := nil;
+  if ShaderName <> '' then
+    Shader := Decls.Material(ShaderName);
+  if (Shader <> nil) and not Shader.Defined then
+    Shader := nil;
+  FLights[I].Shader := Shader;
+  FLights[I].Animated := (Shader <> nil) and Shader.StageColorAnimated;
+  ApplyLightColor(I, LightShaderColor(I));
+end;
+
+function TDoom3Map.ReplaceGui(const EntityName, OldPath, NewPath: String; const Keys: TStrings): Boolean;
+var
+  S: TD3GuiSurface;
+  Gui: TD3Gui;
+begin
+  Result := False;
+  for S in FGuiSurfaces do
+    if SameText(S.EntityName, EntityName) and SameText(S.Gui.Name, OldPath) then
+    begin
+      Gui := TD3Gui.Create;
+      if not Gui.LoadFromVfs(NewPath) then
+      begin
+        Gui.Free;
+        Continue;
+      end;
+      if Keys <> nil then
+        Gui.StateFromKeys(Keys);
+      Gui.Activate(Round(FTime * 1000));
+      S.Gui.Free;
+      S.Gui := Gui;
+      S.Gui.Dirty := True;
+      Result := True;
+    end;
 end;
 
 procedure TDoom3Map.SetLightPose(const I: Integer; const Location: TVector3; const Matrix: TMatrix4);
