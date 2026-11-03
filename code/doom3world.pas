@@ -607,6 +607,8 @@ type
   end;
 
   TD3WeaponStatus = (wsHolstered, wsRising, wsLowering, wsReady, wsOutOfAmmo, wsReload);
+  { the player body's torso channel (ai_player.script's Torso_* states) }
+  TD3TorsoState = (tsNone, tsIdle, tsFire, tsAim, tsReload, tsRaise, tsLower, tsPain);
 
   { The player's weapon (idWeapon): its entityDef (def_weaponN of the
     player def) runs its script object (weapon_pistol...) with the idWeapon
@@ -797,6 +799,12 @@ type
     { the body's crouch state (its crouch_down / crouch_up played), and a
       transition anim playing }
     FBodyCrouched, FBodyTransition: Boolean;
+    { the body's torso channel (ai_player.script's torso states): what it
+      plays, and a shot / melee to show }
+    FTorsoState: TD3TorsoState;
+    FTorsoPrefix: String;
+    FPlayerFired: Boolean;
+    FTorsoPainAge: Single;
     { brass, and when the current weapon ejects the next (-1: none) }
     FBrass: specialize TObjectList<TD3Brass>;
     FBrassDue: Single;
@@ -950,6 +958,9 @@ type
     procedure MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
+    function PlayerBodyAnim(const Base: String; const Prefixed: Boolean): String;
+    function PlayerLegsAnim: String;
+    procedure UpdatePlayerTorso(const SecondsPassed: Single);
     procedure PlayerSound(const Key: String);
     { place the view model: bob, lag, idle drift, muzzle kick
       (idPlayer::CalculateViewWeaponPos, idWeapon::MuzzleRise); its flash
@@ -4786,6 +4797,7 @@ begin
       P.Damage := P.Damage * 2;
     P.Fuse := P.Fuse - FuseOffset;
   end;
+  FPlayerFired := True;
   WritelnLog('Doom3World', 'Weapon %s fires %d (clip %d, ammo %d)',
     [W.DefName, Max(1, Count), Clip[W.Slot], AmmoCount(W.AmmoType)]);
 end;
@@ -6356,6 +6368,9 @@ begin
   if Md5 = nil then
     Exit;
   FPlayerModel := TD3Md5Instance.Create(Md5, Decl.Anims, PlayerSkinName);
+  { idAnimator's channels: the torso plays the weapon's anims }
+  FPlayerModel.SetTorsoChannel(Decl.Channels.Values['torso']);
+  FTorsoState := tsNone;
   { the game moves the body (walk anims would carry it away) }
   FPlayerModel.LockOrigin := True;
   FPlayerModel.Scene.Collides := False;
@@ -6390,6 +6405,165 @@ begin
   else
   if PowerUpActive(PowerupBerserk) and (Base <> '') and (Decls.Skin(Base + '_berserk') <> nil) then
     Result := Base + '_berserk';
+end;
+
+function TD3Game.PlayerBodyAnim(const Base: String; const Prefixed: Boolean): String;
+begin
+  { idActor::GetAnim: the weapon's "<prefix>_<anim>" first }
+  Result := '';
+  if FPlayerModel = nil then
+    Exit;
+  if (FTorsoPrefix <> '') and FPlayerModel.HasAnim(FTorsoPrefix + '_' + Base) then
+    Exit(FTorsoPrefix + '_' + Base);
+  if not Prefixed and FPlayerModel.HasAnim(Base) then
+    Result := Base;
+end;
+
+function TD3Game.PlayerLegsAnim: String;
+var
+  Axis: TMatrix3;
+  Fwd, Left: Single;
+  Running: Boolean;
+
+  function First(const Names: array of String): String;
+  var
+    N: String;
+  begin
+    for N in Names do
+      if PlayerBodyAnim(N, False) <> '' then
+        Exit(PlayerBodyAnim(N, False));
+    Result := '';
+  end;
+
+begin
+  { ai_player.script's legs states: by the move in view space (forward,
+    backward, strafing), running over the walking speed, crouched; in the
+    air jump / fall }
+  Axis := PlayerViewAxis;
+  Fwd := FPlayerVelocity.X * Axis.Data[0, 0] + FPlayerVelocity.Y * Axis.Data[0, 1];
+  Left := FPlayerVelocity.X * Axis.Data[1, 0] + FPlayerVelocity.Y * Axis.Data[1, 1];
+  Running := FXYSpeed > 170;
+  Result := '';
+  if (PlayerJumping or FFalling) and not FCrouched then
+    Result := First(['fall', 'jump']);
+  if (Result = '') and FCrouched then
+  begin
+    if (FXYSpeed > 20) and (Fwd < -Abs(Left)) then
+      Result := First(['crouch_walk_backwards', 'crouch_walk'])
+    else
+    if FXYSpeed > 20 then
+      Result := First(['crouch_walk'])
+    else
+      Result := First(['crouch']);
+  end;
+  if (Result = '') and (FXYSpeed > 20) then
+  begin
+    if Abs(Fwd) >= Abs(Left) then
+    begin
+      if Fwd >= 0 then
+      begin
+        if Running then
+          Result := First(['run_forward', 'run', 'walk'])
+        else
+          Result := First(['walk']);
+      end else
+      if Running then
+        Result := First(['run_backwards', 'walk_backwards', 'walk'])
+      else
+        Result := First(['walk_backwards', 'walk']);
+    end else
+    if Left > 0 then
+    begin
+      if Running then
+        Result := First(['run_strafe_left', 'walk_strafe_left', 'walk'])
+      else
+        Result := First(['walk_strafe_left', 'walk']);
+    end else
+    if Running then
+      Result := First(['run_strafe_right', 'walk_strafe_right', 'walk'])
+    else
+      Result := First(['walk_strafe_right', 'walk']);
+  end;
+  if Result = '' then
+    Result := First(['idle']);
+  if Result = '' then
+    Result := 'idle';
+end;
+
+procedure TD3Game.UpdatePlayerTorso(const SecondsPassed: Single);
+
+  procedure Play(const State: TD3TorsoState; const Bases: array of String; const Loop: Boolean);
+  var
+    B, Anim: String;
+  begin
+    for B in Bases do
+    begin
+      Anim := PlayerBodyAnim(B, True);
+      if (Anim <> '') and FPlayerModel.PlayTorsoAnim(Anim, Loop) then
+      begin
+        FTorsoState := State;
+        if State <> tsIdle then
+          WritelnLog('Doom3World', 'Player torso plays %s', [Anim]);
+        Exit;
+      end;
+    end;
+    { no such anim: the body's anim plays on the torso too }
+    FPlayerModel.PlayTorsoAnim('');
+    FTorsoState := State;
+  end;
+
+var
+  Prefix: String;
+begin
+  if not FPlayerModel.HasTorsoChannel or PlayerDead or FBodyTransition then
+  begin
+    if FTorsoState <> tsNone then
+      FPlayerModel.PlayTorsoAnim('');
+    FTorsoState := tsNone;
+    FPlayerFired := False;
+    Exit;
+  end;
+  { idPlayer's animPrefix: the weapon's def without "weapon_" }
+  Prefix := '';
+  if FWeapon <> nil then
+  begin
+    Prefix := LowerCase(FWeapon.DefName);
+    if Copy(Prefix, 1, 7) = 'weapon_' then
+      Delete(Prefix, 1, 7);
+  end;
+  if Prefix <> FTorsoPrefix then
+  begin
+    FTorsoPrefix := Prefix;
+    FTorsoState := tsNone;
+  end;
+  FTorsoPainAge := FTorsoPainAge + SecondsPassed;
+  { the events: a shot (Torso_Fire), a reload, a switch, a hit }
+  if FPlayerFired then
+  begin
+    FPlayerFired := False;
+    Play(tsFire, ['fire1', 'fire', 'punch_right', 'throw'], False);
+  end else
+  if (FWeapon <> nil) and (FWeapon.Status = wsReload) and (FTorsoState <> tsReload) then
+    Play(tsReload, ['reload', 'reload_start'], False)
+  else
+  if (FWeapon <> nil) and (FWeapon.Status = wsLowering) and (FTorsoState <> tsLower) then
+    Play(tsLower, ['lower'], False)
+  else
+  if (FWeapon <> nil) and (FWeapon.Status = wsRising) and (FTorsoState <> tsRaise) then
+    Play(tsRaise, ['raise'], False)
+  else
+  if (SinceDamage < 0.1) and (FTorsoPainAge > 0.25) and (FTorsoState in [tsIdle, tsAim, tsNone]) then
+  begin
+    FTorsoPainAge := 0;
+    Play(tsPain, ['pain_chest', 'pain'], False);
+  end else
+  if (FTorsoState = tsFire) and FPlayerModel.TorsoAnimFinished then
+    Play(tsAim, ['aim'], False)
+  else
+  if (FTorsoState = tsNone) or
+     ((FTorsoState in [tsAim, tsReload, tsRaise, tsPain]) and FPlayerModel.TorsoAnimFinished) or
+     ((FTorsoState = tsLower) and (FWeapon <> nil) and (FWeapon.Status <> wsLowering)) then
+    Play(tsIdle, ['idle'], True);
 end;
 
 procedure TD3Game.UpdatePlayerModel(const SecondsPassed: Single);
@@ -6466,22 +6640,11 @@ begin
   end;
   if not PlayerDead and not FBodyTransition then
   begin
-    if FCrouched and (FXYSpeed > 20) and FPlayerModel.HasAnim('crouch_walk') then
-      Anim := 'crouch_walk'
-    else
-    if FCrouched and FPlayerModel.HasAnim('crouch') then
-      Anim := 'crouch'
-    else
-    if (FXYSpeed > 170) and FPlayerModel.HasAnim('run') then
-      Anim := 'run'
-    else
-    if (FXYSpeed > 20) and FPlayerModel.HasAnim('walk') then
-      Anim := 'walk'
-    else
-      Anim := 'idle';
+    Anim := PlayerLegsAnim;
     if (Anim <> FPlayerAnim) and FPlayerModel.PlayAnim(Anim) then
       FPlayerAnim := Anim;
   end;
+  UpdatePlayerTorso(SecondsPassed);
   FPlayerModel.Update(SecondsPassed);
   UpdateWorldWeapon;
 end;

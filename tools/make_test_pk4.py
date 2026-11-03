@@ -2655,6 +2655,11 @@ model model_test_player {
 	anim crouch_down		models/md5/test/player_crouch_down.md5anim
 	anim crouch_up			models/md5/test/player_crouch_up.md5anim
 	anim death				models/md5/test/player_death.md5anim
+	// the torso channel (idAnimator): the weapon's anims ("<weapon def
+	// without weapon_>_<anim>", ai_player.script's Torso_Fire) over the legs'
+	channel torso			( *arm_l *arm_r *head )
+	channel legs			( *origin -*arm_l -*arm_r -*head )
+	anim test_pistol_fire1	models/md5/test/blob_pain.md5anim
 }
 
 // the guns in the body's right hand (third person): the weapon defs'

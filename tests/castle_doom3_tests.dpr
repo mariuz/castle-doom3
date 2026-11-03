@@ -314,6 +314,57 @@ begin
   end;
 end;
 
+{ idAnimator's torso channel: the model decl's "channel torso" joints play
+  their own anim over the body's (the player body's weapon anims) }
+procedure TestTorsoChannel;
+var
+  Decl: TD3ModelDecl;
+  Both, Legs, Torso: TD3Md5Instance;
+  Md5: TD3Md5Model;
+  A, B: TVector3;
+  MA, MB: TMatrix4;
+begin
+  Decl := Decls.ModelDecl('model_test_player');
+  Check(Decl <> nil, 'model_test_player');
+  if Decl = nil then
+    Exit;
+  CheckEquals('*arm_l *arm_r *head', Decl.Channels.Values['torso'], 'the torso channel''s joints');
+  CheckEquals('*origin -*arm_l -*arm_r -*head', Decl.Channels.Values['legs'], 'the legs channel''s joints');
+  Md5 := Md5Cache.Model(Decl.Mesh);
+  Both := TD3Md5Instance.Create(Md5, Decl.Anims);
+  Legs := TD3Md5Instance.Create(Md5, Decl.Anims);
+  Torso := TD3Md5Instance.Create(Md5, Decl.Anims);
+  try
+    Both.SetTorsoChannel(Decl.Channels.Values['torso']);
+    Check(Both.HasTorsoChannel, 'a torso channel');
+    Check(not Legs.PlayTorsoAnim('test_pistol_fire1'), 'no torso anim without a channel');
+    Check(Both.PlayAnim('idle') and Legs.PlayAnim('idle'), 'idle');
+    Check(Both.PlayTorsoAnim('test_pistol_fire1', False), 'test_pistol_fire1 on the torso');
+    CheckEquals('test_pistol_fire1', Both.TorsoAnim, 'the torso anim');
+    Check(Torso.PlayAnim('test_pistol_fire1', False), 'test_pistol_fire1 alone');
+    Both.Update(0.2);
+    Legs.Update(0.2);
+    Torso.Update(0.2);
+    Check(Both.JointPosition('leg_l', A) and Legs.JointPosition('leg_l', B), 'leg_l');
+    CheckVec3(B, A, 'the legs play the body''s anim');
+    { the arm's own move from the torso's anim, relative to its parent (the
+      body, on the legs' anim) }
+    Check(Both.JointTransform('arm_r', MA) and Legs.JointTransform('arm_r', MB), 'arm_r');
+    A := MA.MultDirection(Vector3(0, 0, -1));
+    B := MB.MultDirection(Vector3(0, 0, -1));
+    Check(PointsDistance(A, B) > 0.1, 'the arms play the torso''s anim (they turn)');
+    Check(not Both.TorsoAnimFinished, 'the torso anim plays');
+    Both.Update(5);
+    Check(Both.TorsoAnimFinished, 'the torso anim finished');
+    Check(Both.PlayTorsoAnim(''), 'the torso channel stops');
+    CheckEquals('', Both.TorsoAnim, 'no torso anim');
+  finally
+    Both.Free;
+    Legs.Free;
+    Torso.Free;
+  end;
+end;
+
 procedure TestStringsAndSoundFiles;
 var
   Snd: TD3SoundShader;
@@ -7161,6 +7212,7 @@ begin
   TestGuiNesting;
   TestGuiClipping;
   TestRoq;
+  TestTorsoChannel;
   TestImages;
   TestProc;
   TestMapFile;
