@@ -174,6 +174,14 @@ uses
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
   Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq;
 
+{ idGameLocal::CalcFov: Doom 3's fov (degrees) is the horizontal one of a
+  4:3 view; wider screens keep its vertical fov and see more on the sides
+  (like dhewm3 and Doom 3 with r_aspectRatio). Radians. }
+function D3VerticalFov(const FovX: Single): Single;
+begin
+  Result := 2 * ArcTan(Tan(DegToRad(EnsureRange(FovX, 1, 170)) / 2) * 3 / 4);
+end;
+
 const
   LongFrameSeconds = 0.1;
 
@@ -202,6 +210,9 @@ begin
   FGame.OnMessage := @HandleMessage;
   FGame.OnFlashlight := @HandleFlashlight;
   FGame.OnEndLevel := @HandleEndLevel;
+  { g_fov 90 (the design's horizontal fov) the way Doom 3 means it }
+  Camera.Perspective.FieldOfView := D3VerticalFov(RadToDeg(Camera.Perspective.FieldOfView));
+  Camera.Perspective.FieldOfViewAxis := faVertical;
   FDefaultFov := Camera.Perspective.FieldOfView;
   FDefaultFovAxis := Camera.Perspective.FieldOfViewAxis;
   { the PDA screen }
@@ -422,9 +433,8 @@ begin
     end;
     FGame.CinematicView(P, D, U, Fov);
     Camera.SetWorldView(P, D, U);
-    { Doom 3's fov is horizontal }
-    Camera.Perspective.FieldOfViewAxis := faHorizontal;
-    Camera.Perspective.FieldOfView := DegToRad(EnsureRange(Fov, 1, 170));
+    Camera.Perspective.FieldOfViewAxis := faVertical;
+    Camera.Perspective.FieldOfView := D3VerticalFov(Fov);
   end else
   if FInCinematic then
   begin
@@ -1254,13 +1264,13 @@ begin
   Hud.ObjectiveText := FGame.ObjectiveNoticeText;
   Hud.RadioChatter := FGame.RadioChatter;
   Hud.RadioTime := Hud.RadioTime + Container.Fps.SecondsPassed;
-  { target_setfov: Doom 3's fov is horizontal }
+  { target_setfov (Doom 3's fov: D3VerticalFov) }
   if not FInCinematic then
   begin
     if FGame.ViewFov > 0 then
     begin
-      Camera.Perspective.FieldOfViewAxis := faHorizontal;
-      Camera.Perspective.FieldOfView := DegToRad(EnsureRange(FGame.ViewFov, 1, 170));
+      Camera.Perspective.FieldOfViewAxis := faVertical;
+      Camera.Perspective.FieldOfView := D3VerticalFov(FGame.ViewFov);
       FFovApplied := True;
     end else
     if FFovApplied then
