@@ -118,7 +118,14 @@ jobs:
           run_test fight testmap "W:1,O:notarget,G:400 -100 0,N:0,W:0.3,Y,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,X,W:0.4,S,W:3,S,Q"
           grep -q 'Ragdoll of blob_1: articulated figure "test_blob": 6 bodies, 5 constraints' test_output/fight.log || { echo "::error::the killed blob should fall as its articulated figure (af/test_creatures.af)"; exit 1; }
           grep -q "Ragdoll of blob_1 settled" test_output/fight.log || { echo "::error::the blob's ragdoll should settle"; exit 1; }
-          run_test menu MENU "Q"
+          run_test menu MENU "W:1,S,C:320 300,W:0.5,S,Q"
+          grep -q 'Menu GUI "guis/mainmenu.gui" (6 windows)' test_output/menu.log || { echo "::error::the title menu GUI (with its #include, past the stray */) should load"; exit 1; }
+          grep -q 'Menu GUI: "maplist"' test_output/menu.log || { echo "::error::MAP LIST should switch to the map list"; exit 1; }
+          run_test menunew MENU "W:1,C:320 240,W:0.5,Q"
+          grep -q 'Start map "testmap"' test_output/menunew.log || { echo "::error::NEW GAME should start the test map"; exit 1; }
+          run_test ingamemenu testmap "W:1,O:menu,W:0.5,S,O:menu esc,W:0.5,S,Q"
+          grep -q 'Menu GUI "guis/mainmenu.gui" (6 windows, in game)' test_output/ingamemenu.log || { echo "::error::console menu should open the menu over the game"; exit 1; }
+          grep -q 'Menu GUI: "close"' test_output/ingamemenu.log || { echo "::error::escape in the menu should close it"; exit 1; }
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -q "16 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
