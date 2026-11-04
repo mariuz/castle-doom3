@@ -304,7 +304,9 @@ procedure SetGuiCvar(const AName, Value: String);
 { Draw a GUI into a new GuiImageWidth x GuiImageHeight image (caller
   frees), the 640 x 480 virtual screen stretched over it. State (may be
   nil) replaces the GUI's gui:: variables first. }
-function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage;
+function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage; overload;
+{ The same at another size (the full screen main menu) }
+function RenderGui(const Gui: TD3Gui; const State: TStrings; const Width, Height: Integer): TRGBAlphaImage; overload;
 { The same over a transparent background (the HUD over the view): not
   premultiplied, additive stages get the alpha of their brightness. }
 function RenderGuiTransparent(const Gui: TD3Gui): TRGBAlphaImage;
@@ -784,7 +786,8 @@ begin
   T := L.Peek;
   if (T = '') or L.PeekQuoted then
     Exit(False);
-  Result := T[1] in GuiOpChars;
+  { a stray comment end ("*/") is no operator }
+  Result := (T[1] in GuiOpChars) and (T <> '*/');
   if Result and (Length(T) > 1) and (T[1] in ['-', '+']) and not (T[2] in GuiOpChars) then
     Result := False;
 end;
@@ -899,6 +902,7 @@ var
   Child: TD3GuiWindow;
   Script: TD3GuiScript;
   T: Integer;
+  Included: TDoom3Lexer;
 begin
   while L.Next(Tok) and (Tok <> '}') do
   begin
@@ -981,6 +985,27 @@ begin
     end else
     if Tok = '{' then
       L.SkipBracedSection
+    else
+    { #include "file": its windows and properties here (idParser; the
+      main menu's guis/test/grid2b.pd) }
+    if not L.WasQuoted and SameText(Tok, '#include') then
+    begin
+      VarName := L.NextStr;
+      if D3Fs.FileExists(VarName) then
+      begin
+        Included := TDoom3Lexer.Create(D3Fs.ReadText(VarName));
+        try
+          ParseWindow(Included, W);
+        finally
+          Included.Free;
+        end;
+      end else
+        WritelnLog('Doom3Gui', 'GUI #include "%s" not found', [VarName]);
+    end else
+    { a stray token that can't be a key (mainmenu.gui's lone "*/"): Doom 3
+      warns and goes on with the next one }
+    if not L.WasQuoted and not (Tok[1] in ['a'..'z', 'A'..'Z', '_']) then
+      Continue
     else
     begin
       { variable declarations name the variable before the value:
@@ -2591,9 +2616,28 @@ begin
     Result := Round(F * 255);
 end;
 
+{ Blend a color over a destination pixel (BlendBytes without the clip
+  check and address computation: the hot loops' inner step). }
+procedure BlendInto(const D: PVector4Byte; const R, G, B, A: Integer);
+begin
+  if A >= 255 then
+  begin
+    D^.X := R;
+    D^.Y := G;
+    D^.Z := B;
+    D^.W := 255;
+    Exit;
+  end;
+  D^.X := (D^.X * (255 - A) + R * A + 127) div 255;
+  D^.Y := (D^.Y * (255 - A) + G * A + 127) div 255;
+  D^.Z := (D^.Z * (255 - A) + B * A + 127) div 255;
+  D^.W := D^.W + ((255 - D^.W) * A + 127) div 255;
+end;
+
 procedure TGuiPainter.FillRect(const R: TFloatRectangle; const C: TVector4);
 var
   X, Y, X0, Y0, X1, Y1, CR, CG, CB, CA: Integer;
+  D: PVector4Byte;
 begin
   if C.W <= 0 then
     Exit;
@@ -2602,9 +2646,21 @@ begin
   CG := ColorByte(C.Y);
   CB := ColorByte(C.Z);
   CA := ColorByte(C.W);
-  for Y := Max(0, Y0) to Min(Integer(Image.Height), Y1) - 1 do
-    for X := Max(0, X0) to Min(Integer(Image.Width), X1) - 1 do
-      BlendBytes(X, Y, CR, CG, CB, CA);
+  { only inside the clip (BlendBytes checks it too) }
+  X0 := Max(ClipX0, X0);
+  X1 := Min(ClipX1, X1);
+  if X1 <= X0 then
+    Exit;
+  for Y := Max(ClipY0, Y0) to Min(ClipY1, Y1) - 1 do
+  begin
+    { CGE images are bottom-to-top }
+    D := Image.PixelPtr(X0, Image.Height - 1 - Y);
+    for X := X0 to X1 - 1 do
+    begin
+      BlendInto(D, CR, CG, CB, CA);
+      Inc(D);
+    end;
+  end;
 end;
 
 procedure TGuiPainter.DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4;
@@ -2612,10 +2668,11 @@ procedure TGuiPainter.DrawImage(const R: TFloatRectangle; const Src: TCastleImag
 var
   X, Y, X0, Y0, X1, Y1, SY, TR, TG, TB, TA: Integer;
   Columns: array of Integer;
-  Row, P: PVector4Byte;
+  Row, P, D: PVector4Byte;
   Rgba: TRGBAlphaImage;
   FlipX, FlipY: Boolean;
   F: Single;
+  CX0, CX1, SR, SG, SB, SA, V: Integer;
 begin
   PixelBox(R, X0, Y0, X1, Y1);
   { idDeviceContext::DrawMaterial: a negative width or height mirrors the
@@ -2633,6 +2690,12 @@ begin
   TG := ColorByte(Tint.Y);
   TB := ColorByte(Tint.Z);
   TA := ColorByte(Tint.W);
+  { nothing to draw: transparent, or adding black (the menu's many hidden
+    highlight layers) }
+  if (not Additive and (TA = 0)) or (Additive and (TR = 0) and (TG = 0) and (TB = 0)) then
+    Exit;
+  if (Max(ClipX0, X0) >= Min(ClipX1, X1)) or (Max(ClipY0, Y0) >= Min(ClipY1, Y1)) then
+    Exit;
   { the source column of each pixel column }
   SetLength(Columns, X1 - X0);
   for X := X0 to X1 - 1 do
@@ -2642,7 +2705,7 @@ begin
       F := 1 - F;
     Columns[X - X0] := Min(Rgba.Width - 1, Trunc(F * Rgba.Width));
   end;
-  for Y := Max(0, Y0) to Min(Integer(Image.Height), Y1) - 1 do
+  for Y := Max(ClipY0, Y0) to Min(ClipY1, Y1) - 1 do
   begin
     { GUI y goes down, the source image's rows go up }
     F := (Y - Y0 + 0.5) / (Y1 - Y0);
@@ -2650,14 +2713,59 @@ begin
       F := 1 - F;
     SY := Min(Rgba.Height - 1, Trunc((1 - F) * Rgba.Height));
     Row := Rgba.PixelPtr(0, SY);
-    for X := Max(0, X0) to Min(Integer(Image.Width), X1) - 1 do
+    CX0 := Max(ClipX0, X0);
+    CX1 := Min(ClipX1, X1);
+    D := Image.PixelPtr(CX0, Image.Height - 1 - Y);
+    for X := CX0 to CX1 - 1 do
     begin
       P := Row;
       Inc(P, Columns[X - X0]);
+      { the blend written out (the menu's full screen layers make this the
+        hot loop); V div 255 as (V + 1 + V shr 8) shr 8 }
       if Additive then
-        AddBytes(X, Y, P^.X * TR div 255, P^.Y * TG div 255, P^.Z * TB div 255)
-      else
-        BlendBytes(X, Y, P^.X * TR div 255, P^.Y * TG div 255, P^.Z * TB div 255, P^.W * TA div 255);
+      begin
+        SR := D^.X + (P^.X * TR + 128 + ((P^.X * TR + 128) shr 8)) shr 8;
+        SG := D^.Y + (P^.Y * TG + 128 + ((P^.Y * TG + 128) shr 8)) shr 8;
+        SB := D^.Z + (P^.Z * TB + 128 + ((P^.Z * TB + 128) shr 8)) shr 8;
+        if SR > 255 then SR := 255;
+        if SG > 255 then SG := 255;
+        if SB > 255 then SB := 255;
+        D^.X := SR;
+        D^.Y := SG;
+        D^.Z := SB;
+      end else
+      if P^.W <> 0 then
+      begin
+        SA := P^.W * TA;
+        SA := (SA + 128 + ((SA + 128) shr 8)) shr 8;
+        if SA > 0 then
+        begin
+          SR := P^.X * TR;
+          SR := (SR + 128 + ((SR + 128) shr 8)) shr 8;
+          SG := P^.Y * TG;
+          SG := (SG + 128 + ((SG + 128) shr 8)) shr 8;
+          SB := P^.Z * TB;
+          SB := (SB + 128 + ((SB + 128) shr 8)) shr 8;
+          if SA >= 255 then
+          begin
+            D^.X := SR;
+            D^.Y := SG;
+            D^.Z := SB;
+            D^.W := 255;
+          end else
+          begin
+            V := D^.X * (255 - SA) + SR * SA + 128;
+            D^.X := (V + (V shr 8)) shr 8;
+            V := D^.Y * (255 - SA) + SG * SA + 128;
+            D^.Y := (V + (V shr 8)) shr 8;
+            V := D^.Z * (255 - SA) + SB * SA + 128;
+            D^.Z := (V + (V shr 8)) shr 8;
+            V := (255 - D^.W) * SA + 128;
+            D^.W := D^.W + (V + (V shr 8)) shr 8;
+          end;
+        end;
+      end;
+      Inc(D);
     end;
   end;
 end;
@@ -3319,11 +3427,16 @@ begin
 end;
 
 function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage;
+begin
+  Result := RenderGui(Gui, State, GuiImageWidth, GuiImageHeight);
+end;
+
+function RenderGui(const Gui: TD3Gui; const State: TStrings; const Width, Height: Integer): TRGBAlphaImage;
 var
   Painter: TGuiPainter;
   I: Integer;
 begin
-  Result := TRGBAlphaImage.Create(GuiImageWidth, GuiImageHeight);
+  Result := TRGBAlphaImage.Create(Width, Height);
   Result.Clear(Vector4Byte(0, 0, 0, 255));
   if (Gui = nil) or (Gui.Desktop = nil) then
     Exit;
@@ -3336,8 +3449,8 @@ begin
   Painter := TGuiPainter.Create;
   try
     Painter.Image := Result;
-    Painter.ScaleX := GuiImageWidth / GuiWidth;
-    Painter.ScaleY := GuiImageHeight / GuiHeight;
+    Painter.ScaleX := Width / GuiWidth;
+    Painter.ScaleY := Height / GuiHeight;
     Painter.Gui := Gui;
     Painter.Font := Font_DefaultUi;
     Painter.ClipX0 := 0;

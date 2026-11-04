@@ -93,7 +93,7 @@ var
   S: TStream;
   Maps: TStringList;
 begin
-  CheckEquals(118, D3Fs.FileCount, 'PK4 file count');
+  CheckEquals(120, D3Fs.FileCount, 'PK4 file count');
   Check(D3Fs.FileExists('maps/testmap.proc'), 'maps/testmap.proc exists');
   Check(D3Fs.FileExists('MAPS\TestMap.PROC'), 'lookups are case-insensitive, accept backslashes');
   Check(not D3Fs.FileExists('maps/mars_city1.proc'), 'no Doom 3 data in the test PK4');
@@ -446,6 +446,44 @@ begin
   finally
     Gui.Free;
     GuiCvars.Clear;
+  end;
+end;
+
+{ The title menu GUI (guis/mainmenu.gui): a stray "*/" is skipped like
+  Doom 3 does, #include brings another file's windows in, NoIntro and the
+  buttons' commands; property values with table lookups and operators }
+procedure TestMenuGui;
+var
+  Gui: TD3Gui;
+begin
+  Gui := TD3Gui.Create;
+  try
+    { the retail main menu's lone "*/" ate the next "windowDef" (the rest
+      of the file was lost) }
+    Check(Gui.LoadFromText('windowDef Desktop { rect 0, 0, 640, 480 */ windowDef A { rect 1, 2, 3, 4 } ' +
+      'windowDef B { rect 5, 6, 7, 8 } }'), 'a stray token');
+    CheckEquals(3, Gui.WindowCount, 'a stray "*/" is skipped');
+    Check(Gui.LoadFromText('windowDef Desktop { #include "guis/none.pd" windowDef A { rect 1, 2, 3, 4 } }'),
+      'a missing include');
+    CheckEquals(2, Gui.WindowCount, 'a missing #include is skipped');
+
+    Check(Gui.LoadFromVfs('guis/mainmenu.gui'), 'the test title menu loads');
+    CheckEquals(6, Gui.WindowCount, 'the menu''s windows with the included bar');
+    Check(Gui.FindWindow('menubar') <> nil, '#include "guis/test_menu_bar.pd"');
+    Check(Gui.FindWindow('quit') <> nil, 'the windows after the stray "*/"');
+    Gui.Activate(0);
+    Gui.NamedEvent('NoIntro');
+    CheckNear(0.8, Gui.PropVec4(Gui.FindWindow('title'), 'forecolor').Y, 'NoIntro ran');
+    Gui.SetCursor(320, 240);
+    Check(Gui.Click, 'NEW GAME clicked');
+    CheckEquals('startgame testmap', Gui.TakeCmd, 'NEW GAME: startgame');
+    Gui.SetCursor(320, 300);
+    Gui.Click;
+    CheckEquals('maplist', Gui.TakeCmd, 'MAP LIST');
+    Check(Gui.KeyDown(27, #0), 'escape: onESC');
+    CheckEquals('close', Gui.TakeCmd, 'escape: close');
+  finally
+    Gui.Free;
   end;
 end;
 
@@ -7541,6 +7579,7 @@ begin
   TestGuiTrigger;
   TestGuiWidgets;
   TestGuiTransforms;
+  TestMenuGui;
   TestHudGui;
   TestRemoteViews;
   TestImages;

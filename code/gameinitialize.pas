@@ -144,6 +144,7 @@ begin
   if SameText(AutoTestMap, 'MENU') then
   begin
     ViewMenu.AutoTestPrefix := AutoTestPrefix;
+    ViewMenu.AutoTestDemo := AutoTestDemo;
     Window.Container.View := ViewMenu;
   end else
   if AutoTestMap <> '' then

@@ -98,6 +98,9 @@ type
     FHudTimeMs: Double;
     FHudRedraw: Single;
     FUseHudGui, FHudGuiTried: Boolean;
+    { under the menu: no game time, no navigation (the mouse look's state
+      to restore) }
+    FPaused, FPausedMouseLook: Boolean;
     { target_endlevel's next map, loaded FPendingMapIn seconds later }
     FPendingMap: String;
     FPendingMapIn: Single;
@@ -164,6 +167,9 @@ type
     destructor Destroy; override;
     procedure Start; override;
     procedure Stop; override;
+    { the menu pushed over the game (Escape) pauses it }
+    procedure Pause; override;
+    procedure Resume; override;
     procedure Update(const SecondsPassed: Single; var HandleInput: Boolean); override;
     function Press(const Event: TInputPressRelease): Boolean; override;
     { the view's bob, only while rendering (walk navigation moves the
@@ -177,6 +183,10 @@ type
 
 var
   ViewPlay: TViewPlay;
+
+{ A key to a GUI: backspace 8, enter 13, escape 27, else the character
+  (only to a focused edit, escape always). }
+function GuiKey(const Gui: TD3Gui; const Event: TInputPressRelease): Boolean;
 
 implementation
 
@@ -398,8 +408,36 @@ begin
       TEnvironmentLightNode(Root.FdChildren[I]).Intensity := Value;
 end;
 
+procedure TViewPlay.Pause;
+begin
+  inherited Pause;
+  if FPaused or (FGame = nil) then
+    Exit;
+  FPaused := True;
+  FPausedMouseLook := WalkNavigation.MouseLook;
+  WalkNavigation.MouseLook := False;
+  WalkNavigation.Exists := False;
+  { the menu covers it all: don't draw the world under it }
+  MainViewport.Exists := False;
+  ReleaseDemoKeys;
+end;
+
+procedure TViewPlay.Resume;
+begin
+  inherited Resume;
+  if not FPaused then
+    Exit;
+  FPaused := False;
+  MainViewport.Exists := True;
+  WalkNavigation.Exists := True;
+  WalkNavigation.MouseLook := FPausedMouseLook;
+end;
+
 procedure TViewPlay.Stop;
 begin
+  FPaused := False;
+  MainViewport.Exists := True;
+  WalkNavigation.Exists := True;
   ReleaseDemoKeys;
   FreeEnvProbes;
   SetReverbEffect(nil, 'leaving the game');
@@ -1973,6 +2011,34 @@ begin
       SoundOcclusion := StrToIntDef(Args, 1) <> 0;
     Console.Print('s_occlusion ' + Iff(SoundOcclusion, '1', '0'));
   end else
+  if Cmd = 'menu' then
+  begin
+    { the in-game menu (Escape); "menu x y" clicks it at GUI coordinates,
+      "menu esc" sends it Escape }
+    Words := Args.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if Length(Words) = 0 then
+    begin
+      if not FPaused then
+      begin
+        ViewMenu.InGame := True;
+        Container.PushView(ViewMenu);
+      end;
+    end else
+    if SameText(Words[0], 'esc') then
+      ViewMenu.GuiEscape
+    else
+    if Length(Words) >= 2 then
+      ViewMenu.GuiClick(StrToFloatDef(Words[0], 0), StrToFloatDef(Words[1], 0));
+    Console.Print(Format('Menu: %s%s', [Iff(FPaused, 'open', 'closed'),
+      Iff(ViewMenu.GuiShown, ' (guis/mainmenu.gui)', '')]));
+  end else
+  if Cmd = 'g_menugui' then
+  begin
+    { Doom 3's main menu GUI instead of our map list }
+    if Args <> '' then
+      UseMenuGui := StrToIntDef(Args, 0) <> 0;
+    Console.Print('g_menuGui ' + Iff(UseMenuGui, '1', '0') + ' (guis/mainmenu.gui when the data has it, else our map list)');
+  end else
   if Cmd = 'g_hudgui' then
   begin
     { Doom 3's HUD GUI instead of our panels }
@@ -2534,6 +2600,13 @@ begin
   inherited Update(SecondsPassed, HandleInput);
   if FGame = nil then
     Exit;
+  if FPaused then
+  begin
+    { a demo script goes on under the menu (console "menu") }
+    if AutoTestPrefix <> '' then
+      RunDemoStep(SecondsPassed);
+    Exit;
+  end;
   if FPendingMap <> '' then
   begin
     FPendingMapIn := FPendingMapIn - SecondsPassed;
@@ -2682,7 +2755,11 @@ begin
     if FInCinematic then
       FGame.SkipCinematic
     else
-      Container.View := ViewMenu;
+    begin
+      { Doom 3's in-game menu: over the paused game, "close" comes back }
+      ViewMenu.InGame := True;
+      Container.PushView(ViewMenu);
+    end;
     Exit(True);
   end;
   if Event.IsKey(keyF) then
