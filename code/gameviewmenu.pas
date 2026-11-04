@@ -98,13 +98,22 @@ uses
   Doom3Files, Doom3Decls, Doom3Sampler, GameViewPlay;
 
 const
-  MenuGuiPath = 'guis/mainmenu.gui';
   { software rendered (about ten full screen layers): at most this many
     redraws a second, at this size (the 640 x 480 GUI fills the screen, so
     more than the in-world 512) }
   MenuRedrawRate = 20;
   MenuImageWidth = 800;
   MenuImageHeight = 600;
+
+{ idSessionLocal: the demo's menu is guis/demo_mainmenu.gui (the demo data
+  has no mainmenu.gui; the test PK4's would show instead) }
+function MenuGuiPath: String;
+begin
+  if D3Fs.FileExists('guis/demo_mainmenu.gui') then
+    Result := 'guis/demo_mainmenu.gui'
+  else
+    Result := 'guis/mainmenu.gui';
+end;
 
 function ListMaps: TStringList;
 var
