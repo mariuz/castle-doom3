@@ -616,7 +616,13 @@ begin
     Exit;
   Result := nil;
   if (Decls <> nil) and Decls.DeclBody(dtAF, Key, Body) then
-    Result := ParseArticulatedFigure(Key, Body);
+    Result := ParseArticulatedFigure(Key, Body)
+  else
+  { entity defs name some figures with the file's extension
+    ("char_npc_misc.af", the env_ragdoll_* defs) }
+  if (Decls <> nil) and (ExtractFileExt(Key) = '.af') and
+     Decls.DeclBody(dtAF, ChangeFileExt(Key, ''), Body) then
+    Result := ParseArticulatedFigure(ChangeFileExt(Key, ''), Body);
   { nil too: not looked up again }
   Cache.Add(Key, Result);
 end;

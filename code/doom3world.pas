@@ -233,7 +233,17 @@ type
     Source: TCastleSoundSource;
     Sound: TCastleSound;
     Looping: Boolean;
+    { fadeSound on the speaker: its volume factor, going from FadeFrom to
+      FadeTo over FadeTime seconds from FadeStart }
+    FadeFrom, FadeTo, FadeStart, FadeTime: Single;
+    Faded: Boolean;
+    function FadeFactor(const Time: Single): Single;
     destructor Destroy; override;
+  end;
+
+  TD3SoundFade = record
+    Key: String;
+    From, ToVolume, Start, Time: Single;
   end;
 
   TD3TriggerKind = (tkOnce, tkMultiple, tkHurt);
@@ -296,6 +306,14 @@ type
     Rotating, RotContinuous: Boolean;
     RotFrom, RotTo, RotSpeed: TVector3;
     RotStart, RotDuration: Single;
+    { sway (idMover::Event_Sway): the angles swing around SwayBase without
+      end, a sine of amplitude SwayAmplitude, SwayQuarter seconds from the
+      middle to an end (EXTRAPOLATION_DECELSINE | NOSTOP) }
+    Swaying: Boolean;
+    SwayBase, SwayAmplitude: TVector3;
+    SwayStart, SwayQuarter: Single;
+    { where it spawned, for restorePosition }
+    SpawnOrigin, SpawnAngles: TVector3;
     { startSpline: moving along a curve (control points, Doom 3
       coordinates) instead of a line, turning with its direction }
     Spline: array of TVector3;
@@ -692,6 +710,8 @@ type
     end;
     FMonsters: specialize TObjectList<TD3Monster>;
     FSpeakers: specialize TObjectList<TD3Speaker>;
+    { fadeSound fades of script sounds (FScriptSounds keys) }
+    FSoundFades: array of TD3SoundFade;
     FSounds: specialize TObjectDictionary<String, TCastleSound>;
     { the file of each sound shader played last (no repeats when it has
       several: idSoundShader's random choice) }
@@ -894,6 +914,17 @@ type
     procedure Message(const S: String);
     procedure SpawnEmitters;
     procedure SpawnParticleDeforms;
+    { func_portal (idFuncPortal): blocks the visibility portal in its
+      bounds while on ("start_on"), activation toggles it }
+    procedure FadeScriptSound(const E: TD3MapEntity; const Handle, Channel: Integer;
+      const Decibels, Seconds: Single);
+    procedure UpdateSoundFades;
+    procedure SpawnFuncPortals;
+    { env_ragdoll_* (idAFEntity_Generic / _WithAttachedHead, "sleep" 1):
+      the map's "body <name>" keys hold each figure body's place and angles;
+      the md5 pose from them (each body's joints moved with it) }
+    procedure PoseEnvRagdolls;
+    procedure SetFuncPortal(const E: TD3MapEntity; const Blocked: Boolean);
     function AddEmitter(const DeclName: String; const Origin: TVector3; const Axis: TD3Axis;
       const OneShot: Boolean; const Who: String): TD3ParticleEmitter;
     function EmitterEntityOf(const E: TD3MapEntity): TD3EmitterEntity;
@@ -906,7 +937,8 @@ type
     function EntityOriginNow(const E: TD3MapEntity): TVector3;
     procedure NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
     procedure UpdateShakes;
-    procedure OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single);
+    procedure OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single;
+      const Sound: TCastleSound = nil);
     procedure UpdateSoundOcclusion;
     procedure SpawnMover(const B: TD3BrushEntity);
     procedure SpawnElevator(const B: TD3BrushEntity);
@@ -2252,10 +2284,11 @@ begin
       end;
 end;
 
-procedure TD3Game.OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single);
+procedure TD3Game.OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single;
+  const Sound: TCastleSound);
 var
   Pos: TVector3;
-  Direct, Path: Single;
+  Direct, Path, Near: Single;
 begin
   if (Source = nil) or (Source.Parent = nil) or not Source.Spatial then
     Exit;
@@ -2270,6 +2303,18 @@ begin
   if (MaxDistance > 0) and (Path >= MaxDistance) then
     Source.Volume := 0
   else
+  if (Sound <> nil) and (Sound.Channels > 1) and (MaxDistance > 0) then
+  begin
+    { a stereo file: OpenAL plays it without position, so without its
+      distance falloff either (the ambience speakers' soundscapes were
+      heard all over the map); Doom 3 fades it from its min to its max
+      distance }
+    Near := Min(Sound.ReferenceDistance, MaxDistance * 0.99);
+    if Path <= Near then
+      Source.Volume := 1
+    else
+      Source.Volume := EnsureRange(1 - (Path - Near) / (MaxDistance - Near), 0, 1);
+  end else
     Source.Volume := EnsureRange(Direct / Max(Direct, Path), 0, 1);
 end;
 
@@ -2288,10 +2333,15 @@ begin
     Exit;
   FSoundOcclusionTime := FTime + 0.1;
   for S in FSpeakers do
+  begin
     if S.Sound <> nil then
-      OccludeSoundSource(S.Source, S.Sound.MaxDistance)
+      OccludeSoundSource(S.Source, S.Sound.MaxDistance, S.Sound)
     else
       OccludeSoundSource(S.Source, 0);
+    { fadeSound }
+    if (S.Source <> nil) and S.Faded then
+      S.Source.Volume := S.Source.Volume * S.FadeFactor(FTime);
+  end;
   for M in FMovers do
     OccludeSoundSource(M.Sounds, 0);
   for Src in FSoundSources.Values do
@@ -5649,6 +5699,8 @@ begin
     end;
   SpawnEmitters;
   SpawnParticleDeforms;
+  SpawnFuncPortals;
+  PoseEnvRagdolls;
   InitInventory;
   { Doom 3 gives the player the "personal" PDA }
   if PdaDecl('personal') <> nil then
@@ -6137,6 +6189,12 @@ begin
       ElevatorGotoFloor(ElevatorOf(E), E.IntValue('triggerFloor', 0));
     Handled := True;
   end;
+  { idFuncPortal::Event_Activate: the portal blocked or open }
+  if Cls = 'func_portal' then
+  begin
+    SetFuncPortal(E, E.Value('cd3_portal_blocked') <> '1');
+    Handled := True;
+  end;
   if not Handled then
     Unsupported('activating ' + Cls);
 end;
@@ -6394,6 +6452,7 @@ begin
   UpdateShakes;
   UpdateBurns;
   UpdateSoundOcclusion;
+  UpdateSoundFades;
   if not ScriptsPaused then
     UpdateScriptMovers;
   UpdateBindings;
@@ -8392,6 +8451,133 @@ begin
     Result := E.Origin;
 end;
 
+procedure TD3Game.SetFuncPortal(const E: TD3MapEntity; const Blocked: Boolean);
+var
+  P: Integer;
+  Portals: TD3IntArray;
+  B: TD3BrushEntity;
+  Box: TBox3D;
+begin
+  if FMap.Portals = nil then
+    Exit;
+  { idFuncPortal: the portal in its bounds grown by 32 }
+  B := FMap.FindBrush(E.Name);
+  if (B <> nil) and not B.Scene.BoundingBox.IsEmpty then
+    Box := B.Scene.WorldBoundingBox
+  else
+    Box := Box3DAroundPoint(D3ToCge(E.Origin), 64);
+  Portals := FMap.Portals.PortalsInBox(Box.Grow(32));
+  for P in Portals do
+    FMap.Portals.PortalClosed[P] := Blocked;
+  E.SetValue('cd3_portal_blocked', IntToStr(Ord(Blocked)));
+  WritelnLog('Doom3World', 'Portal %s %s (%d portals)', [E.Name, BoolToStr(Blocked, 'blocked', 'open'),
+    Length(Portals)]);
+end;
+
+{ A quaternion turning vectors like the Doom 3 matrix M (rows = the turned
+  axes, v * M), in Doom3Md5's QuatRotate convention: CGE's
+  QuatFromRotationMatrix of M or of its transpose, the one that turns the
+  x axis into M's first row. }
+function D3MatrixQuat(const M: TMatrix3): TQuaternion;
+var
+  T: TMatrix3;
+  I, J: Integer;
+begin
+  Result := QuatFromRotationMatrix(M);
+  if (QuatRotate(Result, Vector3(1, 0, 0)) - Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2])).Length < 1e-3 then
+    Exit;
+  for I := 0 to 2 do
+    for J := 0 to 2 do
+      T.Data[I, J] := M.Data[J, I];
+  Result := QuatFromRotationMatrix(T);
+end;
+
+procedure TD3Game.PoseEnvRagdolls;
+var
+  E: TD3MapEntity;
+  ME: TD3ModelEntity;
+  Def: TStringList;
+  AF: TD3ArticulatedFigure;
+  Body: TD3AFBody;
+  BindPose, Pose: TD3JointArray;
+  Parts: TStringArray;
+  EntRot, EntRotT, Rw, Rm: TMatrix3;
+  Ow, Om, Ob: TVector3;
+  Rq: TQuaternion;
+  J, I, K, Posed, Count: Integer;
+  Defined: Boolean;
+  AFName: String;
+begin
+  Count := 0;
+  for E in FMap.MapFile.Entities do
+  begin
+    if Copy(LowerCase(E.ClassName_), 1, 11) <> 'env_ragdoll' then
+      Continue;
+    ME := FMap.FindModelEntity(E.Name);
+    if (ME = nil) or (ME.Instance = nil) then
+      Continue;
+    AFName := E.Value('articulatedFigure');
+    if AFName = '' then
+    begin
+      Def := Decls.EntityDef(E.ClassName_);
+      if Def <> nil then
+        AFName := Def.Values['articulatedFigure'];
+    end;
+    AF := ArticulatedFigure(AFName);
+    if AF = nil then
+      Continue;
+    BindPose := ME.Instance.Model.Joints;
+    Pose := Copy(BindPose);
+    EntRot := E.Rotation;
+    for I := 0 to 2 do
+      for K := 0 to 2 do
+        EntRotT.Data[I, K] := EntRot.Data[K, I];
+    Posed := 0;
+    for Body in AF.Bodies do
+    begin
+      Parts := E.Value('body ' + Body.Name).Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+      if Length(Parts) < 6 then
+        Continue;
+      { the body's world place and angles (idAF::LoadState), into the
+        entity's model space }
+      Ow := Vector3(D3StrToFloat(Parts[0]), D3StrToFloat(Parts[1]), D3StrToFloat(Parts[2]));
+      Rw := AnglesMatrix(Vector3(D3StrToFloat(Parts[3]), D3StrToFloat(Parts[4]), D3StrToFloat(Parts[5])));
+      Om := D3VecMat(Ow - E.Origin, EntRotT);
+      for I := 0 to 2 do
+        for K := 0 to 2 do
+          Rm.Data[I, K] := D3VecMat(Vector3(Rw.Data[I, 0], Rw.Data[I, 1], Rw.Data[I, 2]), EntRotT).Data[K];
+      { the body in the bind pose: its origin, axes along the model's }
+      Ob := Body.Origin.Evaluate(BindPose, Defined);
+      if not Defined then
+        Continue;
+      Rq := D3MatrixQuat(Rm);
+      for J in Body.JointList(BindPose) do
+        if (J >= 0) and (J <= High(Pose)) then
+        begin
+          Pose[J].Position := Om + QuatRotate(Rq, BindPose[J].Position - Ob);
+          Pose[J].Orientation := QuatNormalize(QuatMultiply(Rq, BindPose[J].Orientation));
+        end;
+      Inc(Posed);
+    end;
+    if Posed = 0 then
+      Continue;
+    ME.Instance.SetPose(Pose);
+    ME.Instance.PoseLocked := True;
+    Inc(Count);
+  end;
+  if Count > 0 then
+    WritelnLog('Doom3World', 'Ragdoll entities posed from their bodies: %d', [Count]);
+end;
+
+procedure TD3Game.SpawnFuncPortals;
+var
+  E: TD3MapEntity;
+begin
+  for E in FMap.MapFile.Entities do
+    if SameText(E.ClassName_, 'func_portal') then
+      SetFuncPortal(E, E.BoolValue('start_on'));
+end;
+
 procedure TD3Game.SpawnParticleDeforms;
 var
   D: TD3ParticleDeform;
@@ -9554,6 +9740,74 @@ begin
     if SameText(FEntityFades[I].EntityName, AName) then
       FEntityFades.Delete(I);
   FEntityFades.Add(Fade);
+end;
+
+function TD3Speaker.FadeFactor(const Time: Single): Single;
+begin
+  if FadeTime <= 0 then
+    Result := FadeTo
+  else
+    Result := FadeFrom + (FadeTo - FadeFrom) * EnsureRange((Time - FadeStart) / FadeTime, 0, 1);
+end;
+
+procedure TD3Game.FadeScriptSound(const E: TD3MapEntity; const Handle, Channel: Integer;
+  const Decibels, Seconds: Single);
+var
+  S: TD3Speaker;
+  Target: Single;
+  Key: String;
+  F: TD3SoundFade;
+  Playing: TCastlePlayingSoundSource;
+begin
+  { fadeSound( channel, to (dB), over (s) ): idEntity::Event_FadeSound;
+    channel 0 (SND_CHANNEL_ANY) fades all the entity's sounds }
+  Target := Min(1, Power(10, Decibels / 20));
+  S := SpeakerOf(E.Name);
+  if S <> nil then
+  begin
+    if not S.Faded then
+      S.FadeTo := 1;
+    S.FadeFrom := S.FadeFactor(FTime);
+    S.Faded := True;
+    S.FadeTo := Target;
+    S.FadeStart := FTime;
+    S.FadeTime := Seconds;
+    if S.Source <> nil then
+      S.Source.Volume := S.Source.Volume * S.FadeFactor(FTime);
+  end;
+  for Key in FScriptSounds.Keys do
+    if (Copy(Key, 1, Length(IntToStr(Handle)) + 1) = IntToStr(Handle) + ':') and
+       ((Channel = 0) or (Key = IntToStr(Handle) + ':' + IntToStr(Channel))) and
+       FScriptSounds.TryGetValue(Key, Playing) then
+    begin
+      F.Key := Key;
+      F.From := Playing.Volume;
+      F.ToVolume := Target;
+      F.Start := FTime;
+      F.Time := Seconds;
+      FSoundFades := Concat(FSoundFades, [F]);
+    end;
+end;
+
+procedure TD3Game.UpdateSoundFades;
+var
+  I: Integer;
+  Playing: TCastlePlayingSoundSource;
+  T: Single;
+begin
+  for I := High(FSoundFades) downto 0 do
+  begin
+    if FSoundFades[I].Time <= 0 then
+      T := 1
+    else
+      T := EnsureRange((FTime - FSoundFades[I].Start) / FSoundFades[I].Time, 0, 1);
+    if FScriptSounds.TryGetValue(FSoundFades[I].Key, Playing) then
+      Playing.Volume := FSoundFades[I].From + (FSoundFades[I].ToVolume - FSoundFades[I].From) * T
+    else
+      T := 1;
+    if T >= 1 then
+      Delete(FSoundFades, I, 1);
+  end;
 end;
 
 function TD3Game.SpeakerOf(const AName: String): TD3Speaker;
@@ -11770,6 +12024,8 @@ begin
   else
     Local := T.Transform;
   D3PlacementFromMatrix(Local, Result.Origin, Result.Angles);
+  Result.SpawnOrigin := Result.Origin;
+  Result.SpawnAngles := Result.Angles;
   { idMover spawn args: "move_time" (default 1), "move_speed", "accel_time",
     "decel_time" }
   Result.MoveTime := E.FloatValue('move_time', 1);
@@ -11823,6 +12079,11 @@ begin
         M.Moving := False;
         M.Spline := nil;
       end;
+      Changed := True;
+    end;
+    if M.Swaying and (M.SwayQuarter > 0) then
+    begin
+      M.Angles := M.SwayBase + M.SwayAmplitude * Sin((FTime - M.SwayStart) / M.SwayQuarter * Pi / 2);
       Changed := True;
     end;
     if M.Rotating then
@@ -11956,6 +12217,7 @@ var
   Door: TD3Mover;
   Dist: Single;
   Def: TStringList;
+  Trig: TD3Trigger;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -12123,6 +12385,16 @@ begin
       EventResult := D3FloatValue(Ord(MoveableOf(E).AtRest));
       Exit(True);
     end;
+  end;
+  if (N = 'enable') or (N = 'disable') then
+  begin
+    { idTrigger::Event_Enable / Event_Disable }
+    for Trig in FTriggers do
+      if Trig.Entity = E then
+      begin
+        Trig.Disabled := N = 'disable';
+        Exit(True);
+      end;
   end;
   if (N = 'markUsed') and (CombatNodeOf(E) <> nil) then
   begin
@@ -12294,6 +12566,9 @@ begin
   if N = 'stopSound' then
     StopScriptSound(Target, Round(ArgF(0)))
   else
+  if N = 'fadeSound' then
+    FadeScriptSound(E, Target, Round(ArgF(0)), ArgF(1), ArgF(2))
+  else
   if (Light >= 0) and (N = 'setColor') then
   begin
     FMap.SetLightParm(Light, 0, ArgF(0));
@@ -12442,17 +12717,47 @@ begin
       'removeInitialSplineAngles':
         { the mover keeps its own angles plus the curve's turn }
         ;
-      'stopRotating': M.Rotating := False;
+      'stopRotating':
+        begin
+          M.Rotating := False;
+          M.Swaying := False;
+        end;
       'isMoving': EventResult := D3FloatValue(Ord(M.Moving));
       'isRotating': EventResult := D3FloatValue(Ord(M.Rotating));
       'getOrigin': EventResult := D3VectorValue(M.Origin);
       'getWorldOrigin': EventResult := D3VectorValue(CgeToD3(M.Transform.WorldTranslation));
       'getAngles': EventResult := D3VectorValue(M.Angles);
-      'setOrigin':
+      'setOrigin', 'setWorldOrigin':
         begin
+          { setWorldOrigin is the same for an unbound mover }
           M.Moving := False;
           M.Origin := Args[0].V;
           ApplyScriptMover(M);
+        end;
+      'restorePosition':
+        begin
+          { back where it spawned (idEntity::Event_RestorePosition) }
+          M.Moving := False;
+          M.Rotating := False;
+          M.Swaying := False;
+          M.Origin := M.SpawnOrigin;
+          M.Angles := M.SpawnAngles;
+          ApplyScriptMover(M);
+        end;
+      'sway':
+        begin
+          { sway( speed, phase, depth ): Doom 3's speed is degrees per
+            second at the middle; the phase isn't used there either }
+          if (ArgF(0) > 0) and not Args[2].V.IsZero then
+          begin
+            M.Rotating := False;
+            M.Swaying := True;
+            M.SwayBase := M.Angles;
+            M.SwayQuarter := Args[2].V.Length / ArgF(0);
+            { angSpeed = depth / (duration * sqrt(1/2)), times the duration }
+            M.SwayAmplitude := Args[2].V * Sqrt(2);
+            M.SwayStart := FTime;
+          end;
         end;
       'setAngles':
         begin

@@ -97,6 +97,24 @@ begin
   Result := Pos('(', S) = 0;
 end;
 
+var
+  { images reported missing (once each) }
+  MissingImages: TStringList;
+
+procedure ReportMissingImage(const AName, Why: String);
+begin
+  if MissingImages = nil then
+  begin
+    MissingImages := TStringList.Create;
+    MissingImages.Sorted := True;
+    MissingImages.Duplicates := dupIgnore;
+  end;
+  if MissingImages.IndexOf(AName) >= 0 then
+    Exit;
+  MissingImages.Add(AName);
+  WritelnLog('Doom3Images', 'Image %s: %s', [Why, AName]);
+end;
+
 function ImageProgramUrl(const AProgram: String; const Kind: TD3ImageKind): String;
 var
   F: String;
@@ -109,7 +127,13 @@ begin
     { normal maps always need processing (green flip at least); DDS normal
       maps are compressed (often RXGB), so only uncompressed ones are used }
     if IsPlainName(AProgram) and (FindImageFile(AProgram, False) = '') then
+    begin
+      if FindImageFile(AProgram) <> '' then
+        ReportMissingImage(AProgram, 'normal map only as DDS, not used')
+      else
+        ReportMissingImage(AProgram, 'not found');
       Exit;
+    end;
     Result := 'd3img:/normal/' + AProgram;
   end
   else
@@ -117,7 +141,9 @@ begin
   begin
     F := FindImageFile(AProgram);
     if F <> '' then
-      Result := D3FsUrl(F);
+      Result := D3FsUrl(F)
+    else
+      ReportMissingImage(AProgram, 'not found');
   end else
     Result := 'd3img:/color/' + AProgram;
 end;
@@ -516,6 +542,7 @@ begin
 end;
 
 finalization
+  FreeAndNil(MissingImages);
   if ProtocolRegistered then
     UnregisterUrlProtocol('d3img');
   FreeAndNil(Handler);
