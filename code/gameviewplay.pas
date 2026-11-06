@@ -557,7 +557,15 @@ begin
     portal visibility, instead of a stall when each first comes into view }
   if not FSkipPrepare and (GetEnvironmentVariable('CD3_PREPARE_RESOURCES') <> '0') then
   begin
+    { with every light on that starts on, not only the visible areas' ones:
+      the shapes' shaders are for the lights reaching them, so prepared
+      with the hidden areas' lights off they were compiled again on the
+      way (stalls of seconds in every map) }
+    if GetEnvironmentVariable('CD3_LIGHTS_IN_HIDDEN_AREAS') <> '' then
+      Map.LightsInHiddenAreas := GetEnvironmentVariable('CD3_LIGHTS_IN_HIDDEN_AREAS') <> '0';
+    Map.AllLightsOn;
     MainViewport.PrepareResources(Map, [prRenderSelf, prBoundingBox]);
+    Map.UpdateVisibility(MainViewport.Camera);
     LoadProfileStep('prepare');
   end;
   FProfileFrames := 1;
@@ -1573,6 +1581,47 @@ begin
     FGame.Fire(Camera.Translation, Camera.Direction);
 end;
 
+{ The texture URLs of a shape's appearance (the material's images), for
+  console "pick". }
+function ShapeTextureUrls(const Shape: TShape): String;
+
+  procedure AddTexture(const T: TX3DNode);
+  var
+    I: Integer;
+  begin
+    if T is TImageTextureNode then
+    begin
+      if TImageTextureNode(T).FdUrl.Count > 0 then
+        Result := Result + ' ' + TImageTextureNode(T).FdUrl.Items[0];
+    end else
+    if T is TMultiTextureNode then
+      for I := 0 to TMultiTextureNode(T).FdTexture.Count - 1 do
+        AddTexture(TMultiTextureNode(T).FdTexture[I])
+    else
+    if T <> nil then
+      Result := Result + ' (' + T.X3DType + ')';
+  end;
+
+var
+  App: TAppearanceNode;
+begin
+  Result := '';
+  if (Shape = nil) or (Shape.Node = nil) or (Shape.Node.Appearance = nil) then
+    Exit('(none)');
+  App := Shape.Node.Appearance;
+  AddTexture(App.Texture);
+  if App.Material is TMaterialNode then
+  begin
+    AddTexture(TMaterialNode(App.Material).DiffuseTexture);
+    AddTexture(TMaterialNode(App.Material).EmissiveTexture);
+    AddTexture(TMaterialNode(App.Material).NormalTexture);
+  end else
+  if App.Material is TUnlitMaterialNode then
+    AddTexture(TUnlitMaterialNode(App.Material).EmissiveTexture);
+  if Result = '' then
+    Result := '(none)';
+end;
+
 procedure TViewPlay.HandleConsoleCommand(const Cmd, Args: String);
 var
   Maps: TStringList;
@@ -1588,6 +1637,7 @@ var
   Hit: TRayCollision;
   HitDistance: Single;
   HitNormal: TVector3;
+  RayOrigin, RayDirection: TVector3;
 begin
   if Cmd = 'help' then
   begin
@@ -1822,6 +1872,50 @@ begin
     P := CgeToD3(Camera.Translation - Vector3(0, FGame.EyeHeight, 0));
     Console.Print(Format('origin %.0f %.0f %.0f  yaw %.0f  area %d',
       [P.X, P.Y, P.Z, CameraYaw, Map.AreaAt(Camera.Translation)]));
+  end else
+  if Cmd = 'tour' then
+  begin
+    { tour <i> <n>: the i-th of n spots spread over the map (the player
+      start, then the items, which lie on floors in playable places), the
+      eye there and the view along the entity's angle (tools/tour_maps.ps1) }
+    Words := Args.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    I := 0;
+    J := 1;
+    if Length(Words) > 0 then
+      I := StrToIntDef(Words[0], 0);
+    if Length(Words) > 1 then
+      J := Max(1, StrToIntDef(Words[1], 1));
+    Maps := TStringList.Create;
+    try
+      for E in Map.MapFile.Entities do
+        if SameText(E.ClassName_, 'info_player_start') then
+          Maps.AddObject(E.Name, E);
+      for E in Map.MapFile.Entities do
+      begin
+        S := LowerCase(E.ClassName_);
+        if (Copy(S, 1, 5) = 'item_') or (Copy(S, 1, 7) = 'weapon_') or (Copy(S, 1, 5) = 'ammo_') or
+           (Copy(S, 1, 14) = 'moveable_item_') then
+          Maps.AddObject(E.Name, E);
+      end;
+      if Maps.Count = 0 then
+        for E in Map.MapFile.Entities do
+          if SameText(E.ClassName_, 'light') then
+            Maps.AddObject(E.Name, E);
+      if Maps.Count > 0 then
+      begin
+        E := TD3MapEntity(Maps.Objects[Min(Maps.Count - 1, Round(EnsureRange(I, 0, J - 1) * (Maps.Count - 1) / Max(1, J - 1)))]);
+        { standing where the item lies (PlaceCamera adds the eye height) }
+        P := E.Origin + Vector3(0, 0, 1);
+        PlaceCamera(D3ToCge(P), E.Angle);
+        P := CgeToD3(Camera.Translation);
+        WritelnLog('GameViewPlay', 'Tour %d/%d: %s (%s) at %s, area %d', [I, J, E.Name, E.ClassName_,
+          P.ToString, Map.AreaAt(D3ToCge(P))]);
+        Console.Print(Format('Tour %d/%d: %s (%s)', [I, J, E.Name, E.ClassName_]));
+      end else
+        Console.Print('Tour: no spots in this map');
+    finally
+      Maps.Free;
+    end;
   end else
   if Cmd = 'setviewpos' then
   begin
@@ -2089,6 +2183,12 @@ begin
       Console.Print('RenderDoc: not loaded (start the game with renderdoccmd capture)');
     end;
   end else
+  if Cmd = 'r_lightsinhiddenareas' then
+  begin
+    if Args <> '' then
+      Map.LightsInHiddenAreas := StrToIntDef(Args, 1) <> 0;
+    Console.Print('r_lightsInHiddenAreas ' + Iff(Map.LightsInHiddenAreas, '1', '0'));
+  end else
   if Cmd = 'r_filterlights' then
   begin
     { only the lights that are on are given to CGE's renderer (it walks
@@ -2272,8 +2372,16 @@ begin
   if Cmd = 'pick' then
   begin
     { what the view's center ray hits first (pickable, existing scenes,
-      also ones hidden by portal visibility) }
-    Hit := Map.World.WorldRay(Camera.Translation, Camera.Direction);
+      also ones hidden by portal visibility); "pick x y": the ray through
+      that point of the view, as fractions from the top left }
+    Words := Args.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if Length(Words) >= 2 then
+    begin
+      MainViewport.PositionToRay(Vector2(StrToFloatDef(Words[0], 0.5) * MainViewport.EffectiveWidth,
+        (1 - StrToFloatDef(Words[1], 0.5)) * MainViewport.EffectiveHeight), True, RayOrigin, RayDirection);
+      Hit := Map.World.WorldRay(RayOrigin, RayDirection);
+    end else
+      Hit := Map.World.WorldRay(Camera.Translation, Camera.Direction);
     try
       if (Hit = nil) or (Hit.Count = 0) then
         S := 'nothing'
@@ -2282,8 +2390,11 @@ begin
         S := Format('%s (visible %s) at %s, distance %.1f', [Hit[0].Item.Name,
           BoolToStr(Hit[0].Item.Visible, '1', '0'), CgeToD3(Hit[0].Point).ToString, Hit.Distance]);
         if Hit[0].Triangle <> nil then
+        begin
           S := S + Format(', shape %s, geometry %s', [Hit[0].Triangle^.Shape.Node.X3DName,
             Hit[0].Triangle^.Shape.Geometry.X3DName]);
+          S := S + ', textures ' + ShapeTextureUrls(TShape(Hit[0].Triangle^.InternalShape));
+        end;
         for I := 1 to Hit.Count - 1 do
           S := S + ' < ' + Hit[I].Item.Name;
       end;

@@ -34,3 +34,5 @@ samples.txt
 /castle-doom3
 /tests/castle-doom3-tests
 __pycache__/
+tour_output*/
+tour_test/

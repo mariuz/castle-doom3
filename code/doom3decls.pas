@@ -20,7 +20,7 @@ type
   TD3DeclType = (dtMaterial, dtEntityDef, dtModel, dtSkin, dtSound, dtTable, dtAF, dtParticle, dtFx,
     dtPda, dtEmail, dtAudio, dtVideo, dtOther);
 
-  TD3BlendMode = (bmOpaque, bmBlend, bmAdd, bmFilter);
+  TD3BlendMode = (bmOpaque, bmBlend, bmAdd, bmFilter, bmInverseFilter);
 
   { A texture matrix keyword of a stage (idMaterial's MultiplyTextureMatrix). }
   TD3TexOpKind = (toScroll, toScale, toCenterScale, toShear, toRotate);
@@ -814,6 +814,8 @@ begin
   if (Src = 'gl_src_alpha') and (Dst = 'gl_one_minus_src_alpha') then Exit(bmBlend);
   if ((Src = 'gl_dst_color') and (Dst = 'gl_zero')) or
      ((Src = 'gl_zero') and (Dst = 'gl_src_color')) then Exit(bmFilter);
+  { blood decals: the image darkens what is behind it (dest * (1 - src)) }
+  if (Src = 'gl_zero') and (Dst = 'gl_one_minus_src_color') then Exit(bmInverseFilter);
   if Dst = 'gl_one' then Exit(bmAdd);
   Result := bmBlend;
 end;
@@ -906,7 +908,7 @@ var
   Lexer: TDoom3Lexer;
   Tok, L, Special, StageMap, Line: String;
   StageBlendMode: TD3BlendMode;
-  StageSpecial, HasBlend, HasStageColor, StageSkyTexGen, StageVC, StageInvVC: Boolean;
+  StageSpecial, HasBlend, HasStageColor, StageSkyTexGen, StageVC, StageInvVC, StageMaskColor: Boolean;
   StageCubeMap: String;
   StageCameraCubeMap, StageReflectTexGen: Boolean;
   StageMirrorW, StageMirrorH, StageRemoteW, StageRemoteH: Integer;
@@ -989,6 +991,7 @@ begin
         StageAlphaTest := -1;
         StageAlphaTestExpr := nil;
         StageVC := False;
+        StageMaskColor := False;
         StageInvVC := False;
         FreeAndNil(StageCond);
         for I := 0 to 3 do
@@ -1085,6 +1088,11 @@ begin
             StageBlendMode := ParseBlend(Lexer, Special);
             HasBlend := True;
           end else
+          if L = 'maskcolor' then
+            { writes no color (only alpha or depth: a mask for the next
+              stages' gl_dst_alpha blends, glass2's reflection) }
+            StageMaskColor := True
+          else
           if L = 'map' then
             StageMap := ReadImageProgram(Lexer)
           else
@@ -1182,6 +1190,10 @@ begin
             Regs[I] := nil;
           end;
         end;
+        { a stage that writes no color draws nothing here (drawn as the
+          material's image it made Mars City's windows white) }
+        if StageMaskColor then
+          StageMap := '';
         { a remote view: the first remoteRenderMap stage }
         if (StageRemoteW > 0) and (StageRemoteH > 0) and (Result.RemoteWidth = 0) then
         begin

@@ -140,6 +140,9 @@ type
     FAllGlobalLights: TLightInstancesList;
     { off from now on: every light stays in the light scene's list }
     FKeepAllGlobalLights: Boolean;
+    FLightsInHiddenAreas: Boolean;
+    { the last area the view was in (-1: none yet) }
+    FLastViewArea: Integer;
     { the world's polygons blocking monsters (solid, monsterclip), off for
       the player: monster moves swap it with FWorldCollision }
     FMonsterCollision: TCastleScene;
@@ -260,10 +263,18 @@ type
     { the light scene's global lights: only the ones that are on (from
       UpdateVisibility) }
     procedure FilterGlobalLights;
+    { every light that is on by its entity (start_off, scripts), whatever
+      portal visibility hides: to prepare the shapes' shaders for them
+      (UpdateVisibility switches the hidden ones off again) }
+    procedure AllLightsOn;
     { console r_filterLights 0: every light in the light scene's global
       lights, also the ones that are off (to compare; 1, the default, keeps
       only the ones that are on) }
     property KeepAllLights: Boolean read FKeepAllGlobalLights write FKeepAllGlobalLights;
+    { console r_lightsInHiddenAreas: lights stay on when portal visibility
+      hides their areas (they light what they reach in the visible ones,
+      like Doom 3), so the shapes' light sets, and shaders, don't change }
+    property LightsInHiddenAreas: Boolean read FLightsInHiddenAreas write FLightsInHiddenAreas;
     { Pick the light casting shadow volumes: the strongest light at a point
       (the player), with some hysteresis. Called by UpdateVisibility. }
     procedure UpdateShadowLight(const P: TVector3);
@@ -554,6 +565,7 @@ end;
 constructor TDoom3Map.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
+  FLastViewArea := -1;
   FSpawnModels := True;
   FUseCollisionModel := True;
   FPortalCulling := True;
@@ -1585,7 +1597,16 @@ begin
   begin
     for P := fpLeft to fpTop do
       Planes[Ord(P)] := Camera.Frustum.Planes[P];
-    FPortals.Compute(Camera.WorldTranslation, AreaAt(Camera.WorldTranslation), Planes);
+    { outside every area (in a wall, noclip): from the last area the view
+      was in. Doom 3 draws everything there, but with all areas the lights
+      of all areas reach every shape: new shaders for all, a frame of a
+      minute (alphalabs1) }
+    Area := AreaAt(Camera.WorldTranslation);
+    if Area >= 0 then
+      FLastViewArea := Area
+    else
+      Area := FLastViewArea;
+    FPortals.Compute(Camera.WorldTranslation, Area, Planes);
   end else
     FPortals.AllVisible;
 
@@ -1605,7 +1626,7 @@ begin
   end;
   for I := 0 to High(FLights) do
   begin
-    On := FLights[I].StartOn and AnyAreaVisible(FPortals, FLights[I].Areas);
+    On := FLights[I].StartOn and (FLightsInHiddenAreas or AnyAreaVisible(FPortals, FLights[I].Areas));
     if FLights[I].Node.IsOn <> On then
       FLights[I].Node.IsOn := On;
   end;
@@ -1631,6 +1652,52 @@ begin
     end;
 end;
 
+procedure TDoom3Map.AllLightsOn;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FLights) do
+    if FLights[I].Node.IsOn <> FLights[I].StartOn then
+      FLights[I].Node.IsOn := FLights[I].StartOn;
+  FilterGlobalLights;
+end;
+
+{ The lights in an order by their kind (node class and effects: what the
+  shaders depend on), stable: CGE builds a shape's shader from the sequence
+  of its lights' kinds, so with the kinds always in the same order shapes
+  share far more programs (fewer compiles, the driver's stalls of seconds
+  when a new place comes into view). }
+procedure SortLightsByKind(const Lights: TLightInstancesList);
+var
+  Keys: TStringList;
+  Sorted: TLightInstancesList;
+  I, J: Integer;
+  Key: String;
+  Node: TAbstractLightNode;
+begin
+  Keys := TStringList.Create;
+  Sorted := TLightInstancesList.Create;
+  try
+    for I := 0 to Lights.Count - 1 do
+    begin
+      Node := Lights.L[I].Node;
+      Key := Node.ClassName;
+      for J := 0 to Node.FdEffects.Count - 1 do
+        Key := Key + '/' + IntToHex(PtrUInt(Node.FdEffects[J]), 16);
+      { the index keeps the sort stable }
+      Keys.AddObject(Key + '#' + IntToHex(I, 8), TObject(PtrUInt(I)));
+    end;
+    Keys.Sort;
+    for I := 0 to Keys.Count - 1 do
+      Sorted.Add(Lights.L[PtrUInt(Keys.Objects[I])]);
+    Lights.Clear;
+    Lights.AddRange(Sorted);
+  finally
+    Sorted.Free;
+    Keys.Free;
+  end;
+end;
+
 procedure TDoom3Map.FilterGlobalLights;
 var
   Lights: TLightInstancesList;
@@ -1647,12 +1714,14 @@ begin
   begin
     FAllGlobalLights := TLightInstancesList.Create;
     FAllGlobalLights.AddRange(Lights);
+    SortLightsByKind(FAllGlobalLights);
   end else
   if Lights.Count > FAllGlobalLights.Count then
   begin
     { the scene collected its lights again (it changed): all of them }
     FAllGlobalLights.Clear;
     FAllGlobalLights.AddRange(Lights);
+    SortLightsByKind(FAllGlobalLights);
   end;
   Lights.Clear;
   for I := 0 to FAllGlobalLights.Count - 1 do
@@ -2582,6 +2651,7 @@ end;
 function TDoom3Map.LoadMap(const AMapName: String): Boolean;
 begin
   FMapName := AMapName;
+  FLastViewArea := -1;
   Rebuild;
   Result := FProc <> nil;
 end;

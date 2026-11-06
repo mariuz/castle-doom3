@@ -651,6 +651,14 @@ begin
         Blend.DestFactor := bdZero;
         App.BlendMode := Blend;
       end;
+    bmInverseFilter:
+      begin
+        App.AlphaMode := amBlend;
+        Blend := TBlendModeNode.Create;
+        Blend.SrcFactor := bsZero;
+        Blend.DestFactor := bdOneMinusSrcColor;
+        App.BlendMode := Blend;
+      end;
   end;
 end;
 
