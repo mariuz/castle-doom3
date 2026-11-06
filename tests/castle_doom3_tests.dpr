@@ -15,7 +15,7 @@ uses
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
   Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq, Doom3HudGui,
-  CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions;
+  CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions, CastleShapes;
 
 var
   Passed, Failed: Integer;
@@ -820,6 +820,13 @@ end;
 
 procedure TestMd5;
 var
+  Geometry: TIndexedTriangleSetNode;
+  Points, Normals: TVector3List;
+  Tangents: TVector4List;
+  CgeNormals: TVector3List;
+  Shape: TShape;
+  Across, Unit_: Boolean;
+  Facing: Integer;
   Model: TD3Md5Model;
   Anim: TD3Md5Anim;
   Pose: TD3JointArray;
@@ -933,6 +940,39 @@ begin
   Instance := TD3Md5Instance.Create(Model, nil);
   try
     CheckEquals(0, Instance.ShadowHullCount, 'small meshes cast themselves');
+    { the skinning's own normals and tangents (CGE would compute them again
+      for every pose, slower): one per vertex, unit, outward on the round
+      blob; tangents across the normals, CGE's w 1 }
+    Geometry := Instance.MeshShapes[0].Geometry as TIndexedTriangleSetNode;
+    Points := (Geometry.Coord as TCoordinateNode).FdPoint.Items;
+    Check(Geometry.Normal is TNormalNode, 'md5 meshes have their own normals');
+    Check(Geometry.Tangent <> nil, 'md5 meshes have their own tangents');
+    Normals := (Geometry.Normal as TNormalNode).FdVector.Items;
+    Tangents := Geometry.Tangent.FdVector.Items;
+    CheckEquals(Points.Count, Normals.Count, 'a normal per vertex');
+    CheckEquals(Points.Count, Tangents.Count, 'a tangent per vertex');
+    { CGE's own smooth normals of the same shape, for comparison }
+    CgeNormals := nil;
+    for Shape in Instance.Scene.Shapes.TraverseList(False) do
+      if Shape.Geometry = Geometry then
+        CgeNormals := Shape.NormalsSmooth(Geometry.Ccw);
+    Check(CgeNormals <> nil, 'CGE''s smooth normals of the mesh');
+    Across := True;
+    Unit_ := True;
+    Facing := 0;
+    for I := 0 to Points.Count - 1 do
+    begin
+      if Abs(Normals.L[I].Length - 1) > 1e-3 then
+        Unit_ := False;
+      if (CgeNormals <> nil) and (I < CgeNormals.Count) and
+         (TVector3.DotProduct(Normals.L[I], CgeNormals.L[I].Normalize) > 0.999) then
+        Inc(Facing);
+      if (Abs(TVector3.DotProduct(Tangents.L[I].XYZ, Normals.L[I])) > 1e-3) or (Tangents.L[I].W <> 1) then
+        Across := False;
+    end;
+    Check(Unit_, 'unit normals');
+    CheckEquals(Points.Count, Facing, 'the normals are CGE''s smooth normals');
+    Check(Across, 'tangents across the normals, w 1');
   finally
     Instance.Free;
   end;
