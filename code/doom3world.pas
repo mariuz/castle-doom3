@@ -1293,6 +1293,9 @@ type
     function CanStandUp(const Eye: TVector3): Boolean;
     { the player's feet (CGE): the eye minus EyeHeight }
     function PlayerFeet: TVector3;
+    { The player was put somewhere else (a teleport, the console): not a
+      move nor a fall. Eye: the new eye position (CGE world). }
+    procedure PlayerTeleported(const Eye: TVector3);
     { the player's box height: pm_normalheight 74, pm_crouchheight 38,
       pm_deadheight 20 }
     function PlayerBodyHeight: Single;
@@ -7078,6 +7081,14 @@ end;
 function TD3Game.ThirdPersonActive: Boolean;
 begin
   Result := ThirdPerson or (PlayerDead and ThirdPersonDeath);
+end;
+
+procedure TD3Game.PlayerTeleported(const Eye: TVector3);
+begin
+  { the eye the next update reads (FPlayerEye is the last update's) }
+  FPrevEye := Eye - Vector3(0, FEyeHeight, 0);
+  FHasPrevEye := True;
+  FFalling := False;
 end;
 
 function TD3Game.PlayerFeet: TVector3;
