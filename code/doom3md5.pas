@@ -140,6 +140,16 @@ type
     FModel: TD3Md5Model;
     FScene: TCastleScene;
     FCoords: array of TCoordinateNode;
+    { each mesh's normals and tangents, computed with the skinning (CGE
+      would smooth the normals and find the tangents of every changed mesh
+      again in its own, slower way), and its texture coordinates }
+    FNormals: array of TNormalNode;
+    FTangents: array of TTangentNode;
+    FTexCoords: array of TTextureCoordinateNode;
+    { the pose and skin scale the meshes were last skinned with: the same
+      again (a frozen game, a still prop) skips the skinning }
+    FSkinnedPose: TD3JointArray;
+    FSkinnedScale: Single;
     { decal overlays (idRenderModelOverlay): shapes sharing a mesh's
       coordinates, the oldest first }
     FOverlays: array of TShapeNode;
@@ -191,6 +201,8 @@ type
     FAppearanceMaterials: array of String;
     procedure SetShown(const Value: Boolean);
     procedure ApplyPose;
+    function PoseUnchanged: Boolean;
+    procedure UpdateNormalsAndTangents(const I: Integer);
     procedure FinishPose;
     procedure LockPoseOrigin;
     procedure FireFrameCommands(const FromTime, ToTime: Single);
@@ -1052,6 +1064,11 @@ begin
   FPose := Copy(FModel.Joints);
   Root := TX3DRootNode.Create;
   SetLength(FCoords, FModel.Meshes.Count);
+  SetLength(FNormals, FModel.Meshes.Count);
+  SetLength(FTangents, FModel.Meshes.Count);
+  SetLength(FTexCoords, FModel.Meshes.Count);
+  { a new mesh set: skin it whatever the pose }
+  FSkinnedPose := nil;
   for I := 0 to FModel.Meshes.Count - 1 do
   begin
     Mesh := FModel.Meshes[I];
@@ -1061,14 +1078,19 @@ begin
     if Decls.Material(MaterialName).IsInvisible or (Length(Mesh.Tris) = 0) then
       Continue;
     FCoords[I] := TCoordinateNode.Create;
+    FNormals[I] := TNormalNode.Create;
+    FTangents[I] := TTangentNode.Create;
     SetLength(UVs, Length(Mesh.Verts));
     for J := 0 to High(Mesh.Verts) do
       UVs[J] := Vector2(Mesh.Verts[J].ST.X, 1 - Mesh.Verts[J].ST.Y);
     TexCoord := TTextureCoordinateNode.Create;
     TexCoord.SetPoint(UVs);
+    FTexCoords[I] := TexCoord;
     Geometry := TIndexedTriangleSetNode.Create;
     Geometry.Coord := FCoords[I];
     Geometry.TexCoord := TexCoord;
+    Geometry.Normal := FNormals[I];
+    Geometry.Tangent := FTangents[I];
     Geometry.SetIndex(Mesh.Tris);
     { "deform eyeball": only the eye triangles are drawn, their texture
       coordinates projected from the origin through the focus triangle
@@ -1223,6 +1245,11 @@ begin
     Exit;
   end;
   FSkinPending := False;
+  { the same pose as last time: the meshes are right already }
+  if PoseUnchanged then
+    Exit;
+  FSkinnedPose := Copy(FFinalPose);
+  FSkinnedScale := SkinScale;
   TD3Md5Model.PoseMatrices(FFinalPose, FMatrices);
   for I := 0 to High(FCoords) do
     if FCoords[I] <> nil then
@@ -1247,8 +1274,111 @@ begin
         FEyeballs[I].TexCoord.FdPoint.Changed;
       end;
     end;
+  for I := 0 to High(FCoords) do
+    if FCoords[I] <> nil then
+      UpdateNormalsAndTangents(I);
   for I := 0 to High(FHullTransforms) do
     FHullTransforms[I].Matrix := JointMatrix(FFinalPose[FHullJoints[I]]);
+end;
+
+function TD3Md5Instance.PoseUnchanged: Boolean;
+var
+  I: Integer;
+begin
+  Result := (Length(FSkinnedPose) = Length(FFinalPose)) and (Length(FFinalPose) > 0) and
+    (FSkinnedScale = SkinScale);
+  if Result then
+    for I := 0 to High(FFinalPose) do
+      if not (TVector3.PerfectlyEquals(FSkinnedPose[I].Position, FFinalPose[I].Position) and
+        TVector4.PerfectlyEquals(FSkinnedPose[I].Orientation.Data.Vector4,
+          FFinalPose[I].Orientation.Data.Vector4)) then
+        Exit(False);
+end;
+
+procedure TD3Md5Instance.UpdateNormalsAndTangents(const I: Integer);
+var
+  Points: TVector3List;
+  UVs: TVector2List;
+  Normals: TVector3List;
+  Tangents: TVector4List;
+  Sums: array of TVector3;
+  Tris: array of Int32;
+  T, V, A, B, C: Integer;
+  E1, E2, N, Tan: TVector3;
+  DU1, DV1, DU2, DV2, Det: Single;
+begin
+  { like CGE's smooth normals: the sum of the unit face normals at each
+    vertex (Doom 3's triangles are clockwise from the front); tangents:
+    the direction of increasing s on each face, summed and made
+    orthogonal to the normal (CGE's convention, w 1) }
+  Points := FCoords[I].FdPoint.Items;
+  if (Points.Count = 0) or (FNormals[I] = nil) then
+    Exit;
+  UVs := FTexCoords[I].FdPoint.Items;
+  Tris := FModel.Meshes[I].Tris;
+  Normals := FNormals[I].FdVector.Items;
+  Tangents := FTangents[I].FdVector.Items;
+  Normals.Count := Points.Count;
+  Tangents.Count := Points.Count;
+  SetLength(Sums, Points.Count);
+  for V := 0 to Points.Count - 1 do
+  begin
+    Normals.L[V] := TVector3.Zero;
+    Sums[V] := TVector3.Zero;
+  end;
+  for T := 0 to Length(Tris) div 3 - 1 do
+  begin
+    A := Tris[T * 3];
+    B := Tris[T * 3 + 1];
+    C := Tris[T * 3 + 2];
+    if (A >= Points.Count) or (B >= Points.Count) or (C >= Points.Count) then
+      Continue;
+    E1 := Points.L[B] - Points.L[A];
+    E2 := Points.L[C] - Points.L[A];
+    N := TVector3.CrossProduct(E2, E1);
+    if not N.IsZero then
+    begin
+      N := N.Normalize;
+      Normals.L[A] := Normals.L[A] + N;
+      Normals.L[B] := Normals.L[B] + N;
+      Normals.L[C] := Normals.L[C] + N;
+    end;
+    if UVs.Count = Points.Count then
+    begin
+      DU1 := UVs.L[B].X - UVs.L[A].X;
+      DV1 := UVs.L[B].Y - UVs.L[A].Y;
+      DU2 := UVs.L[C].X - UVs.L[A].X;
+      DV2 := UVs.L[C].Y - UVs.L[A].Y;
+      Det := DU1 * DV2 - DU2 * DV1;
+      if Abs(Det) > 1e-12 then
+      begin
+        Tan := (E1 * DV2 - E2 * DV1) * (1 / Det);
+        if not Tan.IsZero then
+        begin
+          Tan := Tan.Normalize;
+          Sums[A] := Sums[A] + Tan;
+          Sums[B] := Sums[B] + Tan;
+          Sums[C] := Sums[C] + Tan;
+        end;
+      end;
+    end;
+  end;
+  for V := 0 to Points.Count - 1 do
+  begin
+    if not Normals.L[V].IsZero then
+      Normals.L[V] := Normals.L[V].Normalize
+    else
+      Normals.L[V] := Vector3(0, 1, 0);
+    Tan := Sums[V];
+    if Tan.IsZero then
+      Tan := Vector3(1, 0, 0);
+    Tan := Tan - Normals.L[V] * TVector3.DotProduct(Tan, Normals.L[V]);
+    if Tan.IsZero then
+      Tan := AnyOrthogonalVector(Normals.L[V]);
+    Tangents.L[V] := Vector4(Tan.Normalize, 1);
+  end;
+  FNormals[I].FdVector.Changed;
+  FTangents[I].FdVector.Changed;
 end;
 
 procedure TD3Md5Instance.FinishPose;
@@ -1731,6 +1861,7 @@ begin
       Inc(Result, Indexes.Count div 3);
       Geometry := TIndexedTriangleSetNode.Create;
       Geometry.Coord := FCoords[I];
+      Geometry.Normal := FNormals[I];
       TexCoord := TTextureCoordinateNode.Create;
       TexCoord.SetPoint(UVs);
       Geometry.TexCoord := TexCoord;

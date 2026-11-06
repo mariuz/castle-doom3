@@ -696,6 +696,14 @@ type
     { the file of each sound shader played last (no repeats when it has
       several: idSoundShader's random choice) }
     FSoundLastFile: specialize TDictionary<String, Integer>;
+    { sound occlusion: each portal's shortest way to the listener (crossing
+      it), for FSoundDistListener at game time FSoundDistTime; the portals
+      of each area }
+    FSoundPortalDist: array of Single;
+    FAreaPortals: array of array of Integer;
+    FSoundDistListener: TVector3;
+    FSoundDistTime: Single;
+    FSoundDistValid: Boolean;
     { sounds shaking the view ("shakes"): where, how much, how far, until }
     FShakes: array of record
       Position: TVector3;
@@ -927,6 +935,7 @@ type
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
     procedure UpdateWeapon(const SecondsPassed: Single);
     procedure UpdateGuiFocus;
+    function GuiWithinReach: Boolean;
     { idPlayer::UpdateFocus for characters: one ready to talk in front of
       the view (FTalkFocus); its Weapon_NPC: the attack button talks }
     procedure UpdateTalkFocus;
@@ -1099,6 +1108,7 @@ type
       to the listener through the portals (a closed one adds 150), the
       straight distance in one area, MaxSingle when it can't get there }
     function SoundPathDistance(const Source, Listener: TVector3): Single;
+    procedure UpdateSoundPortalDistances(const Listener: TVector3);
     { idAnimatedEntity::AddLocalDamageEffect: the wound's blood particles
       (smoke_wound_flesh) and a blood splat decal behind it (mtr_splat_flesh*);
       Direction points back along the shot }
@@ -1960,6 +1970,8 @@ end;
 
 procedure TD3Game.Clear;
 begin
+  FSoundDistValid := False;
+  FAreaPortals := nil;
   FreeAndNil(FAas);
   FLocations := nil;
   FCombatNodes.Clear;
@@ -2135,68 +2147,109 @@ end;
 
 { Sound occlusion through portals --------------------------------------------- }
 
-function TD3Game.SoundPathDistance(const Source, Listener: TVector3): Single;
+procedure TD3Game.UpdateSoundPortalDistances(const Listener: TVector3);
 const
-  MaxDepth = 10;
   { idSoundSystemLocal::s_doorDistanceAdd }
   DoorDistanceAdd = 150;
 var
   Portals: TD3PortalVisibility;
-  SrcArea, ListenerArea: Integer;
-  Best: Single;
-  OnPath: array of Boolean;
+  ListenerArea, P, Q, A, Side, Best: Integer;
+  Done: array of Boolean;
+  D: Single;
 
-  procedure Walk(const Area: Integer; const From: TVector3; const Dist: Single; const Depth: Integer);
-  var
-    P, Other: Integer;
-    Center: TVector3;
-    Add: Single;
+  function DoorAdd(const Portal: Integer): Single;
   begin
-    { idSoundWorldLocal::ResolveOrigin: through the portals to the
-      listener's area, a closed one (a door) adding distance }
-    if Dist >= Best then
-      Exit;
-    if Area = ListenerArea then
-    begin
-      Best := Min(Best, Dist + (Listener - From).Length);
-      Exit;
-    end;
-    if Depth >= MaxDepth then
-      Exit;
-    OnPath[Area] := True;
-    for P := 0 to Portals.PortalCount - 1 do
-    begin
-      if Portals.PortalArea(P, 0) = Area then
-        Other := Portals.PortalArea(P, 1)
-      else
-      if Portals.PortalArea(P, 1) = Area then
-        Other := Portals.PortalArea(P, 0)
-      else
-        Continue;
-      if (Other < 0) or (Other >= Length(OnPath)) or OnPath[Other] then
-        Continue;
-      Center := Portals.PortalCenter(P);
-      Add := 0;
-      if Portals.PortalClosed[P] then
-        Add := DoorDistanceAdd;
-      Walk(Other, Center, Dist + (Center - From).Length + Add, Depth + 1);
-    end;
-    OnPath[Area] := False;
+    if Portals.PortalClosed[Portal] then
+      Result := DoorDistanceAdd
+    else
+      Result := 0;
   end;
 
 begin
-  Result := (Source - Listener).Length;
+  { the shortest way from the listener to each portal, crossing it
+    (idSoundWorldLocal::ResolveOrigin's search through the portals, a
+    closed one adding distance), once per frame for all the sources:
+    Dijkstra over the portals, two of them joined when they share an area }
   Portals := FMap.Portals;
-  if Portals = nil then
+  FSoundDistListener := Listener;
+  FSoundDistTime := FTime;
+  FSoundDistValid := True;
+  SetLength(FSoundPortalDist, Portals.PortalCount);
+  for P := 0 to High(FSoundPortalDist) do
+    FSoundPortalDist[P] := MaxSingle;
+  if Length(FAreaPortals) <> Portals.AreaCount then
+  begin
+    SetLength(FAreaPortals, Portals.AreaCount);
+    for A := 0 to High(FAreaPortals) do
+      FAreaPortals[A] := nil;
+    for P := 0 to Portals.PortalCount - 1 do
+      for Side := 0 to 1 do
+      begin
+        A := Portals.PortalArea(P, Side);
+        if (A >= 0) and (A < Length(FAreaPortals)) then
+          FAreaPortals[A] := Concat(FAreaPortals[A], [P]);
+      end;
+  end;
+  ListenerArea := FMap.AreaAt(Listener);
+  if (ListenerArea < 0) or (ListenerArea >= Length(FAreaPortals)) then
+    Exit;
+  for P in FAreaPortals[ListenerArea] do
+    FSoundPortalDist[P] := (Portals.PortalCenter(P) - Listener).Length + DoorAdd(P);
+  SetLength(Done, Portals.PortalCount);
+  for P := 0 to High(Done) do
+    Done[P] := False;
+  repeat
+    Best := -1;
+    for P := 0 to High(FSoundPortalDist) do
+      if not Done[P] and (FSoundPortalDist[P] < MaxSingle) and
+         ((Best < 0) or (FSoundPortalDist[P] < FSoundPortalDist[Best])) then
+        Best := P;
+    if Best < 0 then
+      Break;
+    Done[Best] := True;
+    { on to the portals of both its areas }
+    for Side := 0 to 1 do
+    begin
+      A := Portals.PortalArea(Best, Side);
+      if (A < 0) or (A >= Length(FAreaPortals)) then
+        Continue;
+      for Q in FAreaPortals[A] do
+        if not Done[Q] then
+        begin
+          D := FSoundPortalDist[Best] + (Portals.PortalCenter(Q) - Portals.PortalCenter(Best)).Length + DoorAdd(Q);
+          if D < FSoundPortalDist[Q] then
+            FSoundPortalDist[Q] := D;
+        end;
+    end;
+  until False;
+end;
+
+function TD3Game.SoundPathDistance(const Source, Listener: TVector3): Single;
+var
+  SrcArea, ListenerArea, P: Integer;
+  D: Single;
+begin
+  Result := (Source - Listener).Length;
+  if FMap.Portals = nil then
     Exit;
   SrcArea := FMap.AreaAt(Source);
   ListenerArea := FMap.AreaAt(Listener);
   if (SrcArea < 0) or (ListenerArea < 0) or (SrcArea = ListenerArea) then
     Exit;
-  Best := MaxSingle;
-  SetLength(OnPath, Portals.AreaCount);
-  Walk(SrcArea, Source, 0, 0);
-  Result := Best;
+  { the portal distances: again when the listener moved or a frame went by
+    (doors) }
+  if not FSoundDistValid or (FSoundDistTime <> FTime) or
+     not TVector3.PerfectlyEquals(FSoundDistListener, Listener) then
+    UpdateSoundPortalDistances(Listener);
+  Result := MaxSingle;
+  if SrcArea < Length(FAreaPortals) then
+    for P in FAreaPortals[SrcArea] do
+      if FSoundPortalDist[P] < MaxSingle then
+      begin
+        D := (Source - FMap.Portals.PortalCenter(P)).Length + FSoundPortalDist[P];
+        if D < Result then
+          Result := D;
+      end;
 end;
 
 procedure TD3Game.OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single);
@@ -8581,6 +8634,7 @@ var
   T: TCastleTransform;
   AllDone, Ended: Boolean;
   Elapsed, Intensity: Single;
+  Area: Integer;
 begin
   ViewAxis := PlayerViewAxis;
   FDecals.Update(FTime);
@@ -8655,6 +8709,19 @@ begin
     Em := FEmitters[I];
     if not Em.Enabled then
       Continue;
+    { in an area portal visibility hides: not drawn nor rebuilt (Doom 3
+      updates particles only when drawn; ours come from the game time, so
+      nothing is lost) }
+    Area := FMap.AreaAt(D3ToCge(Em.Origin));
+    if (FMap.Portals <> nil) and (Area >= 0) and (Area <= High(FMap.Portals.AreaVisible)) and
+       not FMap.Portals.AreaVisible[Area] then
+    begin
+      if Em.Scene <> nil then
+        Em.Scene.Exists := False;
+      if Em.Finished(FTime) and not Em.Persistent then
+        FEmitters.Delete(I);
+      Continue;
+    end;
     Em.Update(FTime, ViewAxis);
     if Em.Finished(FTime) and not Em.Persistent then
       FEmitters.Delete(I);
@@ -8690,6 +8757,23 @@ begin
     AddDecal(P.DetonateDecal, CgeToD3(P.Position), CgeToD3(Normal), P.DecalSize);
 end;
 
+function TD3Game.GuiWithinReach: Boolean;
+var
+  S: TD3GuiSurface;
+  Eye: TVector3;
+begin
+  if FMap.GuiSurfaces = nil then
+    Exit(False);
+  { the focus needs an interactive GUI within GuiFocusDistance: without
+    one near, no world ray every frame (most of a big map) }
+  Eye := FPlayerEye;
+  for S in FMap.GuiSurfaces do
+    if (S.Scene <> nil) and S.Gui.Interactive and not S.Scene.WorldBoundingBox.IsEmpty and
+       (S.Scene.WorldBoundingBox.PointDistanceSqr(Eye) <= Sqr(GuiFocusDistance + 16)) then
+      Exit(True);
+  Result := False;
+end;
+
 procedure TD3Game.UpdateGuiFocus;
 var
   Hit: TRayCollision;
@@ -8706,7 +8790,7 @@ begin
     GUI surface; the cursor goes where it hits, through the surface's
     texture coordinates (GuiTrace) }
   S := nil;
-  if (FMap <> nil) and not PlayerDead and not PlayerViewDir.IsZero then
+  if (FMap <> nil) and not PlayerDead and not PlayerViewDir.IsZero and GuiWithinReach then
   begin
     Hit := FMap.World.WorldRay(FPlayerEye, PlayerViewDir);
     try

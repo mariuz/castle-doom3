@@ -2529,6 +2529,12 @@ end;
 
 type
   TGuiPainter = class
+  strict private
+    { scratch images for DrawTransformed, one per nesting level, reused
+      for every transformed window of a render (hud.gui has ~20) }
+    FScratches: array of TRGBAlphaImage;
+    FScratchDepth: Integer;
+  public
     Image: TRGBAlphaImage;
     { the window being drawn by DrawTransformed (not transformed again) }
     InTransform: TD3GuiWindow;
@@ -2560,6 +2566,8 @@ type
       onto Image around its center (idWindow::SetupTransforms) }
     function DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
     procedure DrawCursor;
+  public
+    destructor Destroy; override;
   end;
 
 procedure TGuiPainter.BlendBytes(const X, Y: Integer; const R, G, B, A: Integer);
@@ -3010,6 +3018,15 @@ begin
   end;
 end;
 
+destructor TGuiPainter.Destroy;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FScratches) do
+    FreeAndNil(FScratches[I]);
+  inherited;
+end;
+
 function TGuiPainter.DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
 var
   Angle, ShearX, ShearY, CosA, SinA, Det, CX, CY, DX, DY, SX, SY, Margin: Single;
@@ -3019,6 +3036,7 @@ var
   Parts: TStringArray;
   X, Y, PX, PY, K, BX0, BY0, BX1, BY1: Integer;
   SaveX0, SaveY0, SaveX1, SaveY1: Integer;
+  RX0, RY0, RX1, RY1, Row: Integer;
   P: PVector4Byte;
   OuterInTransform: TD3GuiWindow;
 begin
@@ -3039,17 +3057,52 @@ begin
   if (Abs(Angle) < 0.001) and (Abs(ShearX) < 0.0001) and (Abs(ShearY) < 0.0001) then
     Exit;
   Result := True;
+  V := Gui.PropVec4(W, 'rect');
+  { a transformed window's own text isn't clipped to it (dhewm3 draws
+    hud.gui's 50 wide "100" whole in its 39 wide window): a margin }
+  Margin := 24;
+  { where the untransformed window draws: its rect with the margin, in
+    the parent's clip; only that part of the scratch image is cleared,
+    drawn and read }
+  RX0 := Max(ClipX0, Floor((ParentX + V.X - Margin) * ScaleX));
+  RY0 := Max(ClipY0, Floor((ParentY + V.Y - Margin) * ScaleY));
+  RX1 := Min(ClipX1, Ceil((ParentX + V.X + V.Z + Margin) * ScaleX));
+  RY1 := Min(ClipY1, Ceil((ParentY + V.Y + V.W + Margin) * ScaleY));
+  if (RX1 <= RX0) or (RY1 <= RY0) then
+    Exit;
   { the window and its children, untransformed, on a clear scratch image }
   Main := Image;
-  Scratch := TRGBAlphaImage.Create(Main.Width, Main.Height);
+  if FScratchDepth >= Length(FScratches) then
+    SetLength(FScratches, FScratchDepth + 1);
+  Scratch := FScratches[FScratchDepth];
+  if (Scratch = nil) or (Scratch.Width <> Main.Width) or (Scratch.Height <> Main.Height) then
+  begin
+    FreeAndNil(FScratches[FScratchDepth]);
+    Scratch := TRGBAlphaImage.Create(Main.Width, Main.Height);
+    FScratches[FScratchDepth] := Scratch;
+  end;
+  Inc(FScratchDepth);
   try
-    Scratch.Clear(Vector4Byte(0, 0, 0, 0));
+    for Row := RY0 to RY1 - 1 do
+      FillChar(Scratch.PixelPtr(RX0, Scratch.Height - 1 - Row)^, (RX1 - RX0) * SizeOf(TVector4Byte), 0);
     Image := Scratch;
     OuterInTransform := InTransform;
     InTransform := W;
+    SaveX0 := ClipX0;
+    SaveY0 := ClipY0;
+    SaveX1 := ClipX1;
+    SaveY1 := ClipY1;
+    ClipX0 := RX0;
+    ClipY0 := RY0;
+    ClipX1 := RX1;
+    ClipY1 := RY1;
     try
       DrawWindow(W, ParentX, ParentY);
     finally
+      ClipX0 := SaveX0;
+      ClipY0 := SaveY0;
+      ClipX1 := SaveX1;
+      ClipY1 := SaveY1;
       InTransform := OuterInTransform;
       Image := Main;
     end;
@@ -3057,7 +3110,6 @@ begin
       (smat[0][1] = shear.x, smat[1][0] = shear.y), applied to row vectors
       (v * trans): on column vectors M = smat^T * rotation^T, so shear.x
       moves y along x and shear.y x along y (hud.gui's slanted text) }
-    V := Gui.PropVec4(W, 'rect');
     CX := (ParentX + V.X + V.Z / 2) * ScaleX;
     CY := (ParentY + V.Y + V.W / 2) * ScaleY;
     CosA := Cos(DegToRad(Angle));
@@ -3079,9 +3131,6 @@ begin
     BY0 := MaxInt;
     BX1 := -MaxInt;
     BY1 := -MaxInt;
-    { a transformed window's own text isn't clipped to it (dhewm3 draws
-      hud.gui's 50 wide "100" whole in its 39 wide window): a margin }
-    Margin := 24;
     for K := 0 to 3 do
     begin
       DX := (ParentX + V.X - Margin + (V.Z + 2 * Margin) * (K mod 2)) * ScaleX - CX;
@@ -3121,7 +3170,8 @@ begin
         SY := CY + (I10 * DX + I11 * DY) * ScaleY;
         PX := Floor(SX);
         PY := Floor(SY);
-        if (PX < 0) or (PY < 0) or (PX >= Integer(Scratch.Width)) or (PY >= Integer(Scratch.Height)) then
+        { only the part drawn and cleared this time }
+        if (PX < RX0) or (PY < RY0) or (PX >= RX1) or (PY >= RY1) then
           Continue;
         P := Scratch.PixelPtr(PX, Scratch.Height - 1 - PY);
         { blended onto a clear image its colors are times its alpha }
@@ -3134,7 +3184,7 @@ begin
     ClipX1 := SaveX1;
     ClipY1 := SaveY1;
   finally
-    Scratch.Free;
+    Dec(FScratchDepth);
   end;
 end;
 

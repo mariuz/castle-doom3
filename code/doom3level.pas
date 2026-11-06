@@ -135,6 +135,11 @@ type
     FProc: TD3ProcFile;
     FMapFile: TD3MapFile;
     FLightScene, FWorldCollision: TCastleScene;
+    { all the light scene's global lights; the scene's own list keeps only
+      the ones that are on (FilterGlobalLights) }
+    FAllGlobalLights: TLightInstancesList;
+    { off from now on: every light stays in the light scene's list }
+    FKeepAllGlobalLights: Boolean;
     { the world's polygons blocking monsters (solid, monsterclip), off for
       the player: monster moves swap it with FWorldCollision }
     FMonsterCollision: TCastleScene;
@@ -252,6 +257,13 @@ type
       through the portals (call every frame). Everything is shown when
       PortalCulling is off or the camera is outside the map. }
     procedure UpdateVisibility(const Camera: TCastleCamera);
+    { the light scene's global lights: only the ones that are on (from
+      UpdateVisibility) }
+    procedure FilterGlobalLights;
+    { console r_filterLights 0: every light in the light scene's global
+      lights, also the ones that are off (to compare; 1, the default, keeps
+      only the ones that are on) }
+    property KeepAllLights: Boolean read FKeepAllGlobalLights write FKeepAllGlobalLights;
     { Pick the light casting shadow volumes: the strongest light at a point
       (the player), with some hysteresis. Called by UpdateVisibility. }
     procedure UpdateShadowLight(const P: TVector3);
@@ -622,6 +634,7 @@ begin
   FPrelightState := nil;
   FCasterBrushCount := 0;
   FreeAndNil(FLightScene);
+  FreeAndNil(FAllGlobalLights);
   FreeAndNil(FPortals);
   FreeAndNil(FWorldCollision);
   FreeAndNil(FMonsterCollision);
@@ -1429,6 +1442,7 @@ begin
   FLightScene.Pickable := False;
   FLightScene.CastShadows := False;
   Add(FLightScene);
+  FreeAndNil(FAllGlobalLights);
 
   FPortals := TD3PortalVisibility.Create(FProc);
   for I := 0 to High(FLights) do
@@ -1595,6 +1609,7 @@ begin
     if FLights[I].Node.IsOn <> On then
       FLights[I].Node.IsOn := On;
   end;
+  FilterGlobalLights;
   if Camera <> nil then
   begin
     UpdateShadowLight(Camera.WorldTranslation);
@@ -1614,6 +1629,35 @@ begin
               On := True;
       FCasterScenes[I].Exists := On and FShadows;
     end;
+end;
+
+procedure TDoom3Map.FilterGlobalLights;
+var
+  Lights: TLightInstancesList;
+  I: Integer;
+begin
+  { CGE gives every shape every global light, each pass: it walks all of
+    them per shape (light radius, probes, shadow volume casting checks),
+    though most are off (hidden areas; Mars City 1 has 463). The light
+    scene's own list keeps only the lights that are on. }
+  if FLightScene = nil then
+    Exit;
+  Lights := FLightScene.InternalGlobalLights;
+  if FAllGlobalLights = nil then
+  begin
+    FAllGlobalLights := TLightInstancesList.Create;
+    FAllGlobalLights.AddRange(Lights);
+  end else
+  if Lights.Count > FAllGlobalLights.Count then
+  begin
+    { the scene collected its lights again (it changed): all of them }
+    FAllGlobalLights.Clear;
+    FAllGlobalLights.AddRange(Lights);
+  end;
+  Lights.Clear;
+  for I := 0 to FAllGlobalLights.Count - 1 do
+    if FKeepAllGlobalLights or FAllGlobalLights.L[I].Node.IsOn then
+      Lights.Add(FAllGlobalLights.L[I]);
 end;
 
 function TDoom3Map.LightStrengthAt(const I: Integer; const P: TVector3): Single;

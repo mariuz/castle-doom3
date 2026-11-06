@@ -10,7 +10,7 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields, CastleTimeUtils,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui, Doom3RenderDoc;
 
 type
   TViewPlay = class(TCastleView)
@@ -935,8 +935,11 @@ end;
 
 procedure TViewPlay.UpdateHudGui(const SecondsPassed: Single);
 const
-  { software rendered: at most this many redraws a second }
+  { software rendered: at most this many redraws a second when the state
+    or an event changed something, else (the flickers and scrolls of its
+    time expressions) IdleRate }
   RedrawRate = 20;
+  IdleRate = 10;
 var
   HudParent: TCastleUserInterface;
 begin
@@ -978,12 +981,13 @@ begin
   FHudGui.Update(FGame, Round(FHudTimeMs), D3LangString(FGame.LocationAt(Camera.Translation)));
   { dead or in a cinematic: no HUD (idPlayer::DrawHUD) }
   FHudImage.Exists := not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
-  FHudRedraw := FHudRedraw - SecondsPassed;
-  if FHudImage.Exists and ((FHudRedraw <= 0) or (FHudImage.Image = nil)) then
+  FHudRedraw := FHudRedraw + SecondsPassed;
+  if FHudImage.Exists and ((FHudImage.Image = nil) or (FHudRedraw >= 1 / IdleRate) or
+     (FHudGui.Gui.Dirty and (FHudRedraw >= 1 / RedrawRate))) then
   begin
     FHudImage.Image := FHudGui.Render;
     FHudImage.OwnsImage := True;
-    FHudRedraw := 1 / RedrawRate;
+    FHudRedraw := 0;
   end;
 end;
 
@@ -2070,6 +2074,29 @@ begin
     if Args <> '' then
       Map.ShadowMapSize := Max(16, StrToIntDef(Args, 512));
     Console.Print('r_shadowMapSize ' + IntToStr(Map.ShadowMapSize) + ' (used by the next map loaded)');
+  end else
+  if Cmd = 'renderdoc' then
+  begin
+    { a RenderDoc capture of the next frame (the game started by RenderDoc,
+      with --capabilities=force-modern) }
+    if RenderDocTriggerCapture then
+    begin
+      WritelnLog('GameViewPlay', 'RenderDoc: capturing the next frame (%d captures so far)', [RenderDocCaptureCount]);
+      Console.Print('RenderDoc: capturing the next frame');
+    end else
+    begin
+      WritelnLog('GameViewPlay', 'RenderDoc: not loaded (start the game with renderdoccmd capture)');
+      Console.Print('RenderDoc: not loaded (start the game with renderdoccmd capture)');
+    end;
+  end else
+  if Cmd = 'r_filterlights' then
+  begin
+    { only the lights that are on are given to CGE's renderer (it walks
+      every global light per shape and pass) }
+    if Args <> '' then
+      Map.KeepAllLights := StrToIntDef(Args, 1) = 0;
+    Console.Print('r_filterLights ' + Iff(Map.KeepAllLights, '0', '1') +
+      Format(' (%d global lights given to the renderer)', [Map.LightScene.InternalGlobalLights.Count]));
   end else
   if Cmd = 'r_shadowlights' then
   begin
