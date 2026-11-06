@@ -194,7 +194,7 @@ uses
   Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
-  Doom3Sampler,
+  Doom3Sampler, CastleInternalGLShadowVolumes, CastleGLShaders,
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
   Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq;
@@ -468,6 +468,10 @@ begin
     EyeHeight := FGame.EyeHeight;
   Camera.SetWorldView(FeetPos + Vector3(0, EyeHeight, 0), YawToCgeDir(YawDeg),
     Vector3(0, 1, 0));
+  { the move from the old place isn't a fall (at a few frames per second
+    the teleport and the start of a fall could be one frame's move) }
+  if FGame <> nil then
+    FGame.PlayerTeleported(Camera.WorldTranslation);
 end;
 
 procedure TViewPlay.UpdateCinematic;
@@ -563,6 +567,9 @@ begin
       way (stalls of seconds in every map) }
     if GetEnvironmentVariable('CD3_LIGHTS_IN_HIDDEN_AREAS') <> '' then
       Map.LightsInHiddenAreas := GetEnvironmentVariable('CD3_LIGHTS_IN_HIDDEN_AREAS') <> '0';
+    { env CD3_PREPARE_LIGHTS=0: prepare without the map's lights (CGE's
+      old way, to compare) }
+    InternalPrepareGlobalLights := GetEnvironmentVariable('CD3_PREPARE_LIGHTS') <> '0';
     Map.AllLightsOn;
     MainViewport.PrepareResources(Map, [prRenderSelf, prBoundingBox]);
     Map.UpdateVisibility(MainViewport.Camera);
@@ -2183,6 +2190,16 @@ begin
       Console.Print('RenderDoc: not loaded (start the game with renderdoccmd capture)');
     end;
   end else
+  if Cmd = 'r_lightareas' then
+  begin
+    { lights light only the scenes of the areas they touch (Doom 3's light
+      references; CGE's InternalGlobalLightsMask, doom3-port) }
+    if Args <> '' then
+      Map.MaskLights := StrToIntDef(Args, 1) <> 0
+    else
+      Map.MaskLights := not Map.MaskLights;
+    Console.Print('r_lightAreas ' + Iff(Map.MaskLights, '1', '0'));
+  end else
   if Cmd = 'r_lightsinhiddenareas' then
   begin
     if Args <> '' then
@@ -2220,6 +2237,17 @@ begin
     WritelnLog('GameViewPlay', 'Depth bounds per shadow light %s (GL_EXT_depth_bounds_test %s)',
       [Iff(InternalShadowVolumesLightDepthBounds, 'on', 'off'),
        Iff(GLFeatures.DepthBoundsTest, 'supported', 'not supported')]);
+  end else
+  if Cmd = 'r_shadowzerolights' then
+  begin
+    { the shadowed pass keeps the shadow lights in the shaders with zero
+      color (CGE change T, doom3-port): it shares the lit pass's shader
+      programs, and a new shadow light makes no new ones; 0 leaves them out }
+    if Args <> '' then
+      InternalShadowVolumesZeroLights := StrToIntDef(Args, 1) <> 0
+    else
+      InternalShadowVolumesZeroLights := not InternalShadowVolumesZeroLights;
+    Console.Print('r_shadowZeroLights ' + BoolToStr(InternalShadowVolumesZeroLights, '1', '0'));
   end else
   if Cmd = 'r_usescissor' then
   begin
@@ -2397,6 +2425,19 @@ begin
         end;
         for I := 1 to Hit.Count - 1 do
           S := S + ' < ' + Hit[I].Item.Name;
+        { the lights reaching the hit point; "(masked)": not in the hit
+          scene's InternalGlobalLightsMask (r_lightAreas) }
+        S := S + ', lights';
+        for I := 0 to Map.LightCount - 1 do
+          if Map.LightStrengthAt(I, Hit[0].Point) > 0 then
+          begin
+            S := S + ' ' + Map.Light(I).Entity.Name;
+            if (Hit[0].Item is TCastleScene) and
+               (Length(TCastleScene(Hit[0].Item).InternalGlobalLightsMask) <> 0) and
+               (Map.Light(I).Node.InternalGlobalLightsMaskIndex > 0) and
+               not TCastleScene(Hit[0].Item).InternalGlobalLightsMask[Map.Light(I).Node.InternalGlobalLightsMaskIndex - 1] then
+              S := S + '(masked)';
+          end;
       end;
     finally FreeAndNil(Hit) end;
     Console.Print(S);
@@ -2504,6 +2545,17 @@ begin
         S := Format('%s %s on=%s floor %.2f eye %.2f stq %s', [L.Entity.Name, L.Entity.Value('texture', '(default)'),
           BoolToStr(L.Node.IsOn, '1', '0'), Map.LightStrengthAt(I, P), Map.LightStrengthAt(I, Camera.Translation),
           LightTexCoord(L.Matrix, P).ToString]);
+        { its areas, and whether it lights the player's area scene
+          (r_lightAreas: InternalGlobalLightsMask) }
+        S := S + ' areas';
+        for J in L.Areas do
+          S := S + ' ' + IntToStr(J);
+        J := Map.AreaAt(Camera.Translation);
+        if (J >= 0) and (Map.AreaScene(J) <> nil) and
+           (Length(Map.AreaScene(J).InternalGlobalLightsMask) <> 0) and
+           (L.Node.InternalGlobalLightsMaskIndex > 0) and
+           not Map.AreaScene(J).InternalGlobalLightsMask[L.Node.InternalGlobalLightsMaskIndex - 1] then
+          S := S + Format(' (not in area %d''s lights)', [J]);
         Console.Print(S);
         WritelnLog('LightsAt', S);
       end;
@@ -2574,9 +2626,10 @@ begin
   end;
   if ShadowName = '' then
     ShadowName := 'none';
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, shadows %s%s)',
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, programs %d, shadows %s%s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
-     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, ShadowName,
+     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, InternalProgramsLinked,
+     ShadowName,
      Iff(FGame.CinematicName <> '', ', cinematic ' + FGame.CinematicName, '')]);
 end;
 

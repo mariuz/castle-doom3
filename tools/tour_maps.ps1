@@ -76,6 +76,11 @@ foreach ($Map in $Maps) {
     $Text += "FPS: min $($Sorted[0]), median $($Sorted[[int]($Sorted.Count / 2)]), max $($Sorted[-1]) over $($Fps.Count) shots: $($Fps -join ' ')"
   }
   $Text += "Long frames: $($Long.Count), $(($Long | Measure-Object -Sum).Sum) s in all, the longest $(($Long | Measure-Object -Maximum).Maximum) s"
+  # GLSL programs linked (screenshot lines): by the first screenshot and during the tour
+  $Programs = @($Lines | Select-String 'Screenshot .*programs (\d+)' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value })
+  if ($Programs.Count -gt 0) { $Text += "Shader programs: $($Programs[0]) at the first screenshot, $($Programs[-1] - $Programs[0]) more during the tour" }
+  $Stalls = @($Long | Where-Object { $_ -gt 0.3 })
+  $Text += "Stalls over 0.3 s: $($Stalls.Count), $([Math]::Round(($Stalls | Measure-Object -Sum).Sum, 1)) s"
   $Tours = $Lines | Select-String 'Tour \d+/' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
   $Text += $Tours
   foreach ($Kind in @(

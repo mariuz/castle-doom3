@@ -141,6 +141,8 @@ type
     { off from now on: every light stays in the light scene's list }
     FKeepAllGlobalLights: Boolean;
     FLightsInHiddenAreas: Boolean;
+    { r_lightAreas: lights light only the scenes of their areas }
+    FMaskLights: Boolean;
     { the last area the view was in (-1: none yet) }
     FLastViewArea: Integer;
     { the world's polygons blocking monsters (solid, monsterclip), off for
@@ -216,6 +218,11 @@ type
     procedure BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
     procedure BuildStaticModelEntities;
     procedure UpdateShadowMapCasting;
+    { Each light lights only the area scenes and brushes of the areas it
+      touches (like Doom 3's light references per area), through CGE's
+      InternalGlobalLightsMask (doom3-port). }
+    procedure ApplyLightMasks;
+    procedure SetMaskLights(const Value: Boolean);
   protected
     procedure Loaded; override;
   public
@@ -275,6 +282,8 @@ type
       hides their areas (they light what they reach in the visible ones,
       like Doom 3), so the shapes' light sets, and shaders, don't change }
     property LightsInHiddenAreas: Boolean read FLightsInHiddenAreas write FLightsInHiddenAreas;
+    { lights light only the area scenes and brushes of the areas they touch }
+    property MaskLights: Boolean read FMaskLights write SetMaskLights;
     { Pick the light casting shadow volumes: the strongest light at a point
       (the player), with some hysteresis. Called by UpdateVisibility. }
     procedure UpdateShadowLight(const P: TVector3);
@@ -566,6 +575,8 @@ constructor TDoom3Map.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FLastViewArea := -1;
+  { env CD3_LIGHT_AREAS=0: lights reach every scene (to compare) }
+  FMaskLights := GetEnvironmentVariable('CD3_LIGHT_AREAS') <> '0';
   FSpawnModels := True;
   FUseCollisionModel := True;
   FPortalCulling := True;
@@ -1811,6 +1822,86 @@ begin
   UpdateShadowMapCasting;
 end;
 
+procedure TDoom3Map.ApplyLightMasks;
+var
+  AreaLights: array of TD3IntArray;
+  I, A, L, Masked: Integer;
+  Mask: array of Boolean;
+  B: TD3BrushEntity;
+
+  { the mask of the lights touching any of Areas }
+  procedure MaskOfAreas(const Areas: TD3IntArray);
+  var
+    J, AA: Integer;
+  begin
+    Mask := nil;
+    SetLength(Mask, Length(FLights));
+    for AA in Areas do
+      if (AA >= 0) and (AA <= High(AreaLights)) then
+        for J in AreaLights[AA] do
+          Mask[J] := True;
+  end;
+
+begin
+  if not FMaskLights then
+  begin
+    { every light reaches every scene }
+    for L := 0 to High(FLights) do
+      FLights[L].Node.InternalGlobalLightsMaskIndex := 0;
+    for I := 0 to High(FAreaScenes) do
+    begin
+      if FAreaScenes[I] <> nil then
+        FAreaScenes[I].InternalGlobalLightsMask := nil;
+      if FAreaNonSolid[I] <> nil then
+        FAreaNonSolid[I].InternalGlobalLightsMask := nil;
+    end;
+    for B in FBrushes do
+      B.Scene.InternalGlobalLightsMask := nil;
+    Exit;
+  end;
+  { a light touching no area, or riding with a mover (its areas change),
+    lights everything }
+  SetLength(AreaLights, Length(FAreaScenes));
+  Masked := 0;
+  for L := 0 to High(FLights) do
+  begin
+    if (Length(FLights[L].Areas) = 0) or (FLights[L].Entity.Value('bind') <> '') then
+    begin
+      FLights[L].Node.InternalGlobalLightsMaskIndex := 0;
+      Continue;
+    end;
+    FLights[L].Node.InternalGlobalLightsMaskIndex := L + 1;
+    Inc(Masked);
+    for A in FLights[L].Areas do
+      if (A >= 0) and (A <= High(AreaLights)) then
+        AreaLights[A] := Concat(AreaLights[A], [L]);
+  end;
+  for I := 0 to High(FAreaScenes) do
+  begin
+    MaskOfAreas([I]);
+    if FAreaScenes[I] <> nil then
+      FAreaScenes[I].InternalGlobalLightsMask := Copy(Mask);
+    if FAreaNonSolid[I] <> nil then
+      FAreaNonSolid[I].InternalGlobalLightsMask := Copy(Mask);
+  end;
+  for B in FBrushes do
+    if Length(B.Areas) <> 0 then
+    begin
+      MaskOfAreas(B.Areas);
+      B.Scene.InternalGlobalLightsMask := Mask;
+    end;
+  WritelnLog('Doom3Level', 'Light masks: %d of %d lights light only their areas'' scenes', [Masked, Length(FLights)]);
+end;
+
+procedure TDoom3Map.SetMaskLights(const Value: Boolean);
+begin
+  if FMaskLights = Value then
+    Exit;
+  FMaskLights := Value;
+  if FProc <> nil then
+    ApplyLightMasks;
+end;
+
 procedure TDoom3Map.UpdateShadowMapCasting;
 
   { CGE's TCastleTransform.CastShadowsWhenHidden (in doom3-port):
@@ -2629,6 +2720,7 @@ begin
     [TubeSurfaceCount - Tubes, EyeballSurfaceCount - Eyeballs]);
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
+  ApplyLightMasks;
   { the GUIs on the surfaces become live (events, transitions, the cursor) }
   for GuiArea := 0 to High(FAreaScenes) do
   begin
