@@ -37,7 +37,7 @@ interface
 
 uses
   SysUtils, Classes, Generics.Collections,
-  CastleVectors, CastleImages, CastleRectangles, X3DNodes, CastleTransform;
+  CastleVectors, CastleImages, CastleRectangles, X3DNodes, CastleTransform, CastleBoxes;
 
 type
   TD3GuiWindow = class;
@@ -344,7 +344,21 @@ type
     EntityName: String;
     { the map time (s) of the last render }
     LastRender: Single;
+    { the seconds the last redraw took (UpdateGuis spaces costly GUIs) }
+    RenderSeconds: Single;
     Renders: Integer;
+    { the box of Scene's shapes showing it, in Scene's coordinates
+      (TDoom3Map.UpdateGuis: GUIs out of the view don't redraw) }
+    LocalBox: TBox3D;
+    HasLocalBox: Boolean;
+    { the texture size for the next redraw (0: GuiImageWidth x
+      GuiImageHeight); UpdateGuis makes it smaller for GUIs that are small on
+      screen. RenderedSize is the last texture's (0 before the first). }
+    RenderSize: Integer;
+    RenderedSize: Integer;
+    { its estimated size on screen (pixels across) and its box's radius,
+      for the console's "guis" }
+    ScreenPixels, BoxRadius: Single;
     constructor Create(const AGui: TD3Gui);
     destructor Destroy; override;
     { Redraw into a new texture version and point the nodes at it;
@@ -2358,7 +2372,9 @@ var
 
   function ReadInt: Integer;
   begin
-    Result := Data[P] or (Data[P + 1] shl 8) or (Data[P + 2] shl 16) or (Data[P + 3] shl 24);
+    { through LongWord: a negative value overflows Integer with range checks }
+    Result := Integer(LongWord(Data[P]) or (LongWord(Data[P + 1]) shl 8) or
+      (LongWord(Data[P + 2]) shl 16) or (LongWord(Data[P + 3]) shl 24));
     Inc(P, 4);
   end;
 
@@ -3737,15 +3753,22 @@ var
 begin
   if not (Force or Gui.Dirty) then
     Exit(False);
-  Img := RenderGui(Gui, nil);
-  if FVersion > 0 then
-    GuiImages.Remove(FKey + '_v' + IntToStr(FVersion));
+  if RenderSize > 0 then
+    Img := RenderGui(Gui, nil, RenderSize, RenderSize)
+  else
+    Img := RenderGui(Gui, nil);
+  RenderedSize := Img.Width;
   Inc(FVersion);
   GuiImages.Add(FKey + '_v' + IntToStr(FVersion), Img);
   FUrl := 'd3gui:/' + FKey + '_v' + IntToStr(FVersion) + '.tga';
+  { the image itself to the textures (a copy each): no TGA written and read
+    back through the d3gui: protocol, which still serves the URL (a reload
+    after the OpenGL context is lost) }
   for I := 0 to Nodes.Count - 1 do
     if Nodes[I] is TImageTextureNode then
-      TImageTextureNode(Nodes[I]).SetUrl([FUrl]);
+      TImageTextureNode(Nodes[I]).LoadFromImage(Img, False, FUrl);
+  if FVersion > 1 then
+    GuiImages.Remove(FKey + '_v' + IntToStr(FVersion - 1));
   Inc(Renders);
   Result := True;
 end;

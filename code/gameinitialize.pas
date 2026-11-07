@@ -12,7 +12,7 @@ implementation
 uses
   SysUtils, Classes,
   CastleWindow, CastleLog, CastleUIControls, CastleApplicationProperties, CastleParameters,
-  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils, CastleGLShaders,
+  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils, CastleGLShaders, CastleInternalRenderer,
   Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level, Doom3LightEffects
   {$region 'Castle Initialization Uses'}
   // The content here may be automatically updated by CGE editor.
@@ -175,6 +175,11 @@ initialization
     stay cached across map reloads, so compare in separate runs) }
   if GetEnvironmentVariable('CD3_SHARED_LIGHT_EFFECTS') = '0' then
     SharedLightEffects := False;
+  { keep the shader programs no shape uses now (a monster that moved away
+    from a light, the last projectile of a kind): the next one needs them
+    again, and linking them again stalls (CD3_KEEP_PROGRAMS=0 compares) }
+  if GetEnvironmentVariable('CD3_KEEP_PROGRAMS') <> '0' then
+    InternalKeepUnusedShaderPrograms := 8192;
   Application.OnInitialize := @ApplicationInitialize;
 
   Window := TCastleWindow.Create(Application);

@@ -289,3 +289,11 @@ Merged into `doom3-port` (2026-11-06):
 - `PrepareResources` adds the `CastGlobalLights` scenes' lights (`TCastleViewport.AddScenesGlobalLights`, shared with rendering) and prepares each scene with its world transformation (`InternalPrepareGlobalLights` compares, env `CD3_PREPARE_LIGHTS=0`);
 - `TAbstractLightNode.InternalGlobalLightsMaskIndex` with `TX3DEventsEngine.InternalGlobalLightsMask`: a global light lights only the scenes whose mask has it (an O(1) check per light and shape). Here each Doom 3 light lights only the area scenes and brushes of the areas it touches, like Doom 3's light references per area (`TDoom3Map.ApplyLightMasks`; console `r_lightAreas 0` compares; lights bound to movers and lights touching no area still reach everything);
 - `InternalProgramsLinked` counts linked programs (screenshot log lines: `programs N`).
+
+**U. Shader programs for moving shapes.** The full playthrough (`tools/tour_maps.ps1 -Route`) still linked thousands of programs per map while monsters walked among lights and projectiles came and went. Two causes in CGE:
+- a shape's program depends on which kind of light is at each light number, so a monster moving among lights got a new program for the same kinds in another order;
+- a program is freed as soon as no shape uses it, so the next projectile of a kind, or a monster coming back to a light, links it again.
+
+Local branch `light-order-programs` (2026-11-07, to merge into `doom3-port`):
+- `TLightsRenderer` enables a shape's lights sorted by what decides their shader code (effects, node class, attenuation, radius and ambient defines); lights add up, so the image is the same;
+- `InternalKeepUnusedShaderPrograms` (default 0: the old behavior) keeps that many unused programs for reuse, the oldest freed first. Programs bound to X3D node fields (`TX3DShaderProgram.BoundToNodes`: shader node uniforms, texture fields) are never kept, since their nodes may be freed and new nodes at the same addresses would match their hash. The kept ones are freed when the last OpenGL context closes (`TRendererCache.FreeUnusedPrograms`). Here: 8192 (`CD3_KEEP_PROGRAMS=0` turns it off).

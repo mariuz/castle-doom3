@@ -36,3 +36,6 @@ samples.txt
 __pycache__/
 tour_output*/
 tour_test/
+playthrough*/
+playthrough_run.txt
+dhewm3_ref/

@@ -103,6 +103,20 @@ def main(out):
     out.write('\nSlowest draws:\n')
     for d, eid, name, idx, key in sorted(top, reverse=True)[:25]:
         out.write('%8.3f ms  event %6d  %8d indices  %s  [%s]\n' % (d * 1000, eid, idx, name, key))
+    # RDC_DUMP_DIR: the fragment shader source of the 3 slowest draws
+    # (<dir>/event<id>.frag), to see what makes them slow (how many lights)
+    dump_dir = os.environ.get('RDC_DUMP_DIR', '')
+    if dump_dir:
+        os.makedirs(dump_dir, exist_ok=True)
+        for d, eid, name, idx, key in sorted(top, reverse=True)[:3]:
+            ctrl.SetFrameEvent(eid, False)
+            refl = ctrl.GetGLPipelineState().fragmentShader.reflection
+            if refl is None:
+                continue
+            path = os.path.join(dump_dir, 'event%d.frag' % eid)
+            with open(path, 'wb') as f:
+                f.write(bytes(refl.rawBytes))
+            out.write('Fragment shader of event %d: %s\n' % (eid, path))
     ctrl.Shutdown()
     cap.Shutdown()
 

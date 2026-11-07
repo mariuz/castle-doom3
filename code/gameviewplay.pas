@@ -69,6 +69,23 @@ type
     FDemoCrouch: Boolean;
     { GO:... crouch holds it while moving }
     FDemoGoCrouch: Boolean;
+    { the console "route" (Doom 3 feet points) and the demo's R: walk
+      along it: the segment, the distance along it, the distance since the
+      last screenshot, the map it was made for, the time in a cinematic }
+    FRoute: TD3PointArray;
+    FRouteSeg: Integer;
+    FRouteAlong, FRouteSinceShot, FRouteWalked, FRouteCinematic: Single;
+    FRouteMap: String;
+    { the point indexes where the route reaches a trigger or an item, and
+      their names (logged when the walk gets there) }
+    FRouteMarks: array of Integer;
+    FRouteMarkNames: TStringArray;
+    FRouteNextMark: Integer;
+    { where the walk put the eye last frame (a teleport moves it away), and
+      the seconds left to stand where a teleport put the player }
+    FRouteLastEye: TVector3;
+    FRouteHold: Single;
+    FRouteGaps: Single;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
@@ -122,6 +139,11 @@ type
     function ReverbStatus: String;
     procedure UpdateCinematic;
     procedure LoadLevel(const AMapName: String);
+    { route all: FRoute through every touch trigger and item, nearest
+      first, ending at Goal (Doom 3 feet); FRouteGaps sums the hops }
+    procedure BuildCoverageRoute(const Goal: TVector3; const GoalName: String);
+    { R: returns True when the walk is over }
+    function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
     procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
@@ -620,7 +642,9 @@ begin
   { idTarget_EndLevel: the next map loads ("map <nextMap>"), after the
     message has shown for a moment }
   Hud.ShowMessage('End of level: next map ' + Msg, 6);
-  if (Msg <> '') and D3Fs.FileExists(TDoom3Map.MapBasePath(Msg) + '.map') then
+  { fired again while pending (the player standing in a trigger_multiple,
+    delta2a's end): keep counting down, or the map never changes }
+  if (Msg <> '') and (FPendingMap = '') and D3Fs.FileExists(TDoom3Map.MapBasePath(Msg) + '.map') then
   begin
     FPendingMap := Msg;
     FPendingMapIn := 2;
@@ -1645,7 +1669,11 @@ var
   HitDistance: Single;
   HitNormal: TVector3;
   RayOrigin, RayDirection: TVector3;
+  Found: Boolean;
+  Total: Single;
+  Args2: String;
 begin
+  Args2 := '';
   if Cmd = 'help' then
   begin
     Console.Print('map <name>, maps, noclip, god, notarget, flashlight, kill, health <n>,');
@@ -1653,7 +1681,7 @@ begin
     Console.Print('r_useportals [0|1], r_lightvolumes [0|1], r_shadows [0|1], r_md5ShadowTris <n>, r_md5ShadowClosed [0|1], r_prelightShadows [0|1], r_shadowLights <n>, r_useScissor [0|1], r_useDepthBounds [0|1],');
     Console.Print('portals, lights, lightsat, ent <name>, pick, guidump <gui file>, guis, objectives, pda [name], scripts, g_stopTime [0|1],');
     Console.Print('stamina [n], pm_stamina <s>, pm_staminarate <r>, pm_staminathreshold <s>, pm_thirdPerson [0|1], pm_thirdPersonRange / Height / Angle <n>, pm_thirdPersonClip [0|1], pm_thirdPersonDeath [0|1], crouch [0|1], ragdoll [0|1], g_showBrass [0|1],');
-    Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], quit');
+    Console.Print('skipcinematic, actors, near <entity> [distance], activate <entity>, soundinfo, reverb, s_useEAXReverb [0|1], route [x y z], tour <i> <n>, quit');
   end else
   if (Cmd = 'map') or (Cmd = 'devmap') then
     LoadLevel(Args)
@@ -1880,6 +1908,65 @@ begin
     Console.Print(Format('origin %.0f %.0f %.0f  yaw %.0f  area %d',
       [P.X, P.Y, P.Z, CameraYaw, Map.AreaAt(Camera.Translation)]));
   end else
+  if Cmd = 'route' then
+  begin
+    { route [all | x y z]: the AAS route from the player's feet to the
+      level's end (target_endlevel's trigger) or to a point, for the demo's
+      R: walk; "all" goes through every touch trigger and item on the way
+      (the nearest next) }
+    FRouteMarks := nil;
+    FRouteMarkNames := nil;
+    FRouteNextMark := 0;
+    if SameText(Args, 'all') then
+    begin
+      Found := FGame.EndLevelGoal(P, S);
+      if not Found then
+      begin
+        { no end: finish where it started }
+        P := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+        S := 'the start';
+      end;
+      BuildCoverageRoute(P, S);
+      Found := True;
+      Args2 := 'all';
+    end else
+    if Args <> '' then
+    begin
+      P := ParseVector3(Args, TVector3.Zero);
+      S := 'point';
+      Found := True;
+    end else
+      Found := FGame.EndLevelGoal(P, S);
+    if not Found then
+    begin
+      FRoute := nil;
+      WritelnLog('GameViewPlay', 'Route: no target_endlevel in this map');
+      Console.Print('Route: no target_endlevel in this map');
+    end else
+    begin
+      if Args2 = 'all' then
+      begin
+        Dist := FRouteGaps;
+        I := Length(FRouteMarks);
+      end else
+        FGame.PlayerRoute(CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight), P,
+          FRoute, Dist, I);
+      FRouteSeg := 0;
+      FRouteAlong := 0;
+      FRouteSinceShot := 0;
+      FRouteWalked := 0;
+      FRouteCinematic := 0;
+      FRouteHold := 0;
+      FRouteLastEye := Camera.Translation;
+      FRouteMap := MapName;
+      Total := 0;
+      for J := 1 to High(FRoute) do
+        Total := Total + PointsDistance(FRoute[J - 1], FRoute[J]);
+      WritelnLog('GameViewPlay', 'Route to %s at %s: %d points over %d areas (spots), %.0f units, gaps %.0f',
+        [S, P.ToString, Length(FRoute), I, Total, Dist]);
+      Console.Print(Format('Route to %s: %.0f units, gap %.0f', [S, Total, Dist]));
+    end;
+  end else
   if Cmd = 'tour' then
   begin
     { tour <i> <n>: the i-th of n spots spread over the map (the player
@@ -2035,9 +2122,10 @@ begin
       the cursor and transitions }
     for I := 0 to Map.GuiSurfaces.Count - 1 do
     begin
-      S := Format('%s (%s): %d windows, %d redraws%s%s%s', [
+      S := Format('%s (%s): %d windows, %d redraws (the last %d px, %.1f ms; on screen ~%.0f px, radius %.0f)%s%s%s', [
         Map.GuiSurfaces[I].Gui.Name, Map.GuiSurfaces[I].EntityName, Map.GuiSurfaces[I].Gui.WindowCount,
-        Map.GuiSurfaces[I].Renders, BoolToStr(Map.GuiSurfaces[I].Gui.Interactive, ', interactive', ''),
+        Map.GuiSurfaces[I].Renders, Map.GuiSurfaces[I].RenderedSize, Map.GuiSurfaces[I].RenderSeconds * 1000,
+        Map.GuiSurfaces[I].ScreenPixels, Map.GuiSurfaces[I].BoxRadius, BoolToStr(Map.GuiSurfaces[I].Gui.Interactive, ', interactive', ''),
         BoolToStr(Map.GuiSurfaces[I].Gui.CursorShown, Format(', cursor %d %d', [Round(Map.GuiSurfaces[I].Gui.CursorX),
           Round(Map.GuiSurfaces[I].Gui.CursorY)]), ''),
         BoolToStr(Map.GuiSurfaces[I].Gui.TransitionCount > 0, Format(', %d transitions', [Map.GuiSurfaces[I].Gui.TransitionCount]), '')]);
@@ -2451,6 +2539,41 @@ begin
     else
       Console.Print('activate: no entity ' + Args);
   end else
+  if Cmd = 'moveables' then
+  begin
+    { the moveables still moving (idMoveable's physics not at rest) }
+    J := 0;
+    for I := 0 to FGame.Moveables.Count - 1 do
+      if not FGame.Moveables[I].AtRest and not FGame.Moveables[I].Brush.Hidden then
+      begin
+        Inc(J);
+        WritelnLog('GameViewPlay', 'Moveable %s at %s, velocity %s', [FGame.Moveables[I].Brush.Entity.Name,
+          FGame.Moveables[I].Origin.ToString, FGame.Moveables[I].Velocity.ToString]);
+      end;
+    WritelnLog('GameViewPlay', 'Moveables: %d of %d moving', [J, FGame.Moveables.Count]);
+    Console.Print(Format('Moveables: %d of %d moving', [J, FGame.Moveables.Count]));
+  end else
+  if Cmd = 'g_dormant' then
+  begin
+    { monsters out of the player's PVS stop thinking (idEntity::CheckDormant) }
+    if Args <> '' then
+      FGame.DormancyEnabled := StrToIntDef(Args, 1) <> 0
+    else
+      FGame.DormancyEnabled := not FGame.DormancyEnabled;
+    Console.Print(Format('g_dormant %s (%d dormant)', [BoolToStr(FGame.DormancyEnabled, '1', '0'), FGame.DormantCount]));
+  end else
+  if Cmd = 'endlevel' then
+  begin
+    { activate the map's target_endlevel (its exit GUI or script does in
+      the game): the next map loads }
+    for E in Map.MapFile.Entities do
+      if SameText(E.ClassName_, 'target_endlevel') then
+      begin
+        WritelnLog('GameViewPlay', 'End level: activating %s (next map "%s")', [E.Name, E.Value('nextMap')]);
+        FGame.Activate(E);
+        Break;
+      end;
+  end else
   if Cmd = 'near' then
   begin
     { stand in front of an entity, facing it: near <name> [distance] }
@@ -2626,11 +2749,209 @@ begin
   end;
   if ShadowName = '' then
     ShadowName := 'none';
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, programs %d, shadows %s%s)',
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, programs %d, dormant %d, shadows %s%s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
-     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, InternalProgramsLinked,
+     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, InternalProgramsLinked, FGame.DormantCount,
      ShadowName,
      Iff(FGame.CinematicName <> '', ', cinematic ' + FGame.CinematicName, '')]);
+end;
+
+procedure TViewPlay.BuildCoverageRoute(const Goal: TVector3; const GoalName: String);
+var
+  Spots: TD3PointArray;
+  Names: TStringList;
+  T: TD3Trigger;
+  E: TD3MapEntity;
+  S: String;
+  Cur, P: TVector3;
+  Hop: TD3PointArray;
+  Best, D, Gap: Single;
+  I, J, BestI, Areas: Integer;
+  Used: array of Boolean;
+begin
+  Spots := nil;
+  Names := TStringList.Create;
+  try
+    for T in FGame.Triggers do
+      if (T.Kind <> tkHurt) and not T.NoTouch and not SameText(T.Entity.Name, GoalName) then
+      begin
+        P := CgeToD3(T.Box.Center);
+        P.Z := CgeToD3(T.Box.Data[0]).Z;
+        if PointsDistance(P, Goal) < 64 then
+          Continue;
+        Spots := Concat(Spots, [P]);
+        Names.Add(T.Entity.Name);
+      end;
+    for E in Map.MapFile.Entities do
+    begin
+      S := LowerCase(E.ClassName_);
+      if (Copy(S, 1, 5) = 'item_') or (Copy(S, 1, 7) = 'weapon_') or (Copy(S, 1, 5) = 'ammo_') or
+         (Copy(S, 1, 14) = 'moveable_item_') then
+      begin
+        Spots := Concat(Spots, [E.Origin]);
+        Names.Add(E.Name);
+      end;
+    end;
+    Cur := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+    FRoute := [Cur];
+    FRouteGaps := 0;
+    SetLength(Used, Length(Spots));
+    for I := 0 to High(Spots) + 1 do
+    begin
+      if I <= High(Spots) then
+      begin
+        { the nearest spot left (heights count double: stay on a floor) }
+        Best := MaxSingle;
+        BestI := -1;
+        for J := 0 to High(Spots) do
+          if not Used[J] then
+          begin
+            D := Sqr(Spots[J].X - Cur.X) + Sqr(Spots[J].Y - Cur.Y) + 4 * Sqr(Spots[J].Z - Cur.Z);
+            if D < Best then
+            begin
+              Best := D;
+              BestI := J;
+            end;
+          end;
+        Used[BestI] := True;
+        P := Spots[BestI];
+        S := Names[BestI];
+      end else
+      begin
+        P := Goal;
+        S := GoalName;
+      end;
+      FGame.PlayerRoute(Cur, P, Hop, Gap, Areas);
+      FRoute := Concat(FRoute, Copy(Hop, 1, MaxInt));
+      FRouteGaps := FRouteGaps + Gap;
+      FRouteMarks := Concat(FRouteMarks, [High(FRoute)]);
+      FRouteMarkNames := Concat(FRouteMarkNames, [S]);
+      Cur := P;
+    end;
+  finally
+    Names.Free;
+  end;
+end;
+
+function TViewPlay.WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
+var
+  Step, SegLen, Ahead, Yaw: Single;
+  P, Q, Dir: TVector3;
+  Seg: Integer;
+  Along: Single;
+  Hop: TD3PointArray;
+begin
+  Result := True;
+  if (Length(FRoute) < 2) or (FRouteMap <> MapName) then
+  begin
+    if FRouteMap <> MapName then
+      WritelnLog('GameViewPlay', 'Route: the map changed to "%s" after %.0f units', [MapName, FRouteWalked]);
+    FRoute := nil;
+    Exit;
+  end;
+  { cinematics play for 2 s, then they are skipped }
+  if FGame.CinematicActive then
+  begin
+    FRouteCinematic := FRouteCinematic + SecondsPassed;
+    if FRouteCinematic > 2 then
+    begin
+      WritelnLog('GameViewPlay', 'Route: skipping cinematic %s', [FGame.CinematicName]);
+      FGame.SkipCinematic;
+      FRouteCinematic := 0;
+    end;
+    Exit(False);
+  end;
+  { the game teleported the player (info_player_teleport): stand there for
+    a while (its triggers fire, a fade in...), then walk back to the route }
+  if PointsDistance(Camera.Translation, FRouteLastEye) > 64 then
+  begin
+    WritelnLog('GameViewPlay', 'Route: teleported to %s, back to the route in 2 s',
+      [CgeToD3(Camera.Translation).ToString]);
+    FRouteHold := 2;
+    FRouteLastEye := Camera.Translation;
+  end;
+  if FRouteHold > 0 then
+  begin
+    FRouteHold := FRouteHold - SecondsPassed;
+    if FRouteHold <= 0 then
+    begin
+      P := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+      Q := FRoute[FRouteSeg] + (FRoute[FRouteSeg + 1] - FRoute[FRouteSeg]) *
+        (FRouteAlong / Max(0.001, PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1])));
+      FGame.PlayerRoute(P, Q, Hop, Along, Seg);
+      { the hop, then the rest of the route from where it was left }
+      FRoute := Concat(Hop, Copy(FRoute, FRouteSeg + 1, MaxInt));
+      for Seg := 0 to High(FRouteMarks) do
+        FRouteMarks[Seg] := FRouteMarks[Seg] - FRouteSeg - 1 + Length(Hop);
+      FRouteSeg := 0;
+      FRouteAlong := 0;
+    end;
+    FRouteLastEye := Camera.Translation;
+    Exit(False);
+  end;
+  { at most 1/10 s of walking per frame (slow frames, loads) }
+  Step := Speed * Min(SecondsPassed, 0.1);
+  while (Step > 0) and (FRouteSeg < High(FRoute)) do
+  begin
+    SegLen := PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]);
+    if FRouteAlong + Step < SegLen then
+    begin
+      FRouteAlong := FRouteAlong + Step;
+      FRouteWalked := FRouteWalked + Step;
+      FRouteSinceShot := FRouteSinceShot + Step;
+      Step := 0;
+    end else
+    begin
+      Step := Step - (SegLen - FRouteAlong);
+      FRouteWalked := FRouteWalked + SegLen - FRouteAlong;
+      FRouteSinceShot := FRouteSinceShot + SegLen - FRouteAlong;
+      FRouteAlong := 0;
+      Inc(FRouteSeg);
+      while (FRouteNextMark <= High(FRouteMarks)) and (FRouteMarks[FRouteNextMark] <= FRouteSeg) do
+      begin
+        WritelnLog('GameViewPlay', 'Route: at %s (%d of %d, %.0f units)',
+          [FRouteMarkNames[FRouteNextMark], FRouteNextMark + 1, Length(FRouteMarks), FRouteWalked]);
+        Inc(FRouteNextMark);
+      end;
+    end;
+  end;
+  if FRouteSeg >= High(FRoute) then
+  begin
+    P := FRoute[High(FRoute)];
+    PlaceCamera(D3ToCge(P), CameraYaw);
+    WritelnLog('GameViewPlay', 'Route: done, %.0f units', [FRouteWalked]);
+    CaptureScreenshot;
+    FRoute := nil;
+    Exit;
+  end;
+  SegLen := Max(0.001, PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]));
+  P := FRoute[FRouteSeg] + (FRoute[FRouteSeg + 1] - FRoute[FRouteSeg]) * (FRouteAlong / SegLen);
+  { look at the route 96 units ahead }
+  Seg := FRouteSeg;
+  Along := FRouteAlong + 96;
+  while (Seg < High(FRoute)) and (Along > PointsDistance(FRoute[Seg], FRoute[Seg + 1])) do
+  begin
+    Along := Along - PointsDistance(FRoute[Seg], FRoute[Seg + 1]);
+    Inc(Seg);
+  end;
+  if Seg < High(FRoute) then
+    Q := FRoute[Seg] + (FRoute[Seg + 1] - FRoute[Seg]) *
+      (Along / Max(0.001, PointsDistance(FRoute[Seg], FRoute[Seg + 1])))
+  else
+    Q := FRoute[High(FRoute)];
+  Dir := Q - P;
+  Yaw := CameraYaw;
+  if Sqr(Dir.X) + Sqr(Dir.Y) > 1 then
+    Yaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
+  PlaceCamera(D3ToCge(P), Yaw);
+  FRouteLastEye := Camera.Translation;
+  if FRouteSinceShot >= ShotEvery then
+  begin
+    FRouteSinceShot := 0;
+    WritelnLog('GameViewPlay', 'Route: %.0f units walked, segment %d of %d', [FRouteWalked, FRouteSeg + 1, High(FRoute)]);
+    CaptureScreenshot;
+  end;
+  Result := False;
 end;
 
 procedure TViewPlay.ReleaseDemoKeys;
@@ -2714,6 +3035,21 @@ begin
       Exit;
     ReleaseDemoKeys;
     FDemoTimer := 0;
+  end else
+  if Action = 'R' then
+  begin
+    { R:speed shotEvery [maxUnits]: walk the console's "route" (noclip), a
+      screenshot every shotEvery units, at most maxUnits }
+    Parts := Param.Split([' '], TStringSplitOptions.ExcludeEmpty);
+    if (Length(Parts) > 2) and (FRoute <> nil) and (FRouteWalked >= StrToFloatDef(Parts[2], MaxSingle)) then
+    begin
+      { a later R: with a bigger maxUnits goes on }
+      WritelnLog('GameViewPlay', 'Route: stopped after %.0f units', [FRouteWalked]);
+    end else
+    if not WalkRoute(SecondsPassed,
+      StrToFloatDef(Iff(Length(Parts) > 0, Parts[0], ''), 300),
+      StrToFloatDef(Iff(Length(Parts) > 1, Parts[1], ''), 500)) then
+      Exit;
   end else
   if Action = 'S' then
     CaptureScreenshot
