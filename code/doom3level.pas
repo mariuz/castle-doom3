@@ -24,7 +24,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
-  CastleCameras, Doom3Scene,
+  CastleCameras, CastleFrustum, Doom3Scene,
   Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions,
   Doom3Materials, Doom3Gui,
   Doom3LightEffects;
@@ -65,6 +65,13 @@ type
     HeadJoint: String;
     { The body's model decl offset (the scene's translation). }
     Offset: TVector3;
+    { out of the player's PVS for a while: its AI doesn't think and its
+      animation stands still (idEntity::CheckDormant; TD3Game sets it) }
+    Dormant: Boolean;
+    { the game time it was last in the player's PVS; never dormant
+      ("neverdormant", the script's setNeverDormant) }
+    LastInPvs: Single;
+    NeverDormant: Boolean;
     { Place the head at its joint. }
     procedure UpdateHead;
     destructor Destroy; override;
@@ -185,6 +192,11 @@ type
     FGuiSurfaces: specialize TObjectList<TD3GuiSurface>;
     { where UpdateGuis's redraw budget starts next frame }
     FGuiRenderStart: Integer;
+    { the view of the last UpdateVisibility (world coordinates), for
+      UpdateGuis }
+    FGuiViewKnown: Boolean;
+    FGuiViewPos: TVector3;
+    FGuiFrustum: TFrustum;
     FGuiRenders: Integer;
     FLights: array of TD3LightInfo;
     FSpawnOrigin: TVector3;
@@ -193,6 +205,7 @@ type
     procedure CollectGuiTexture(Node: TX3DNode);
     procedure CollectGuiSurfaces(const Scene: TCastleScene; const EntityName: String; const Keys: TStrings);
     procedure UpdateGuis;
+    procedure GuiSurfaceBox(const S: TD3GuiSurface);
     procedure SetShadowLight(const I: Integer);
     procedure SetShadowLights(const NewLights: TD3IntArray);
     { Make the light I cast shadows (shadow volumes or shadow maps) or not. }
@@ -454,7 +467,7 @@ implementation
 uses
   Math, TypInfo,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
-  CastleRenderOptions, CastleFrustum, CastleTriangles, CastleShapes, Doom3Roq,
+  CastleRenderOptions, CastleTimeUtils, CastleTriangles, CastleShapes, Doom3Roq,
   Doom3Files, Doom3Images, Doom3StaticModels;
 
 type
@@ -1602,6 +1615,12 @@ var
   Area, L: Integer;
   On: Boolean;
 begin
+  if Camera <> nil then
+  begin
+    FGuiViewKnown := True;
+    FGuiViewPos := Camera.WorldTranslation;
+    FGuiFrustum := Camera.Frustum;
+  end;
   if FPortals = nil then
     Exit;
   if FPortalCulling and (Camera <> nil) then
@@ -2949,19 +2968,59 @@ begin
     Result := nil;
 end;
 
+procedure TDoom3Map.GuiSurfaceBox(const S: TD3GuiSurface);
+var
+  Sh: TShape;
+  Tex: TAbstractTextureNode;
+begin
+  S.HasLocalBox := True;
+  S.LocalBox := TBox3D.Empty;
+  if not (S.Scene is TCastleScene) then
+    Exit;
+  for Sh in TCastleScene(S.Scene).Shapes.TraverseList(False) do
+  begin
+    if (Sh.Node = nil) or (Sh.Node.Appearance = nil) then
+      Continue;
+    Tex := Sh.Node.Appearance.Texture;
+    if (Tex = nil) and (Sh.Node.Appearance.Material is TUnlitMaterialNode) then
+      Tex := TUnlitMaterialNode(Sh.Node.Appearance.Material).EmissiveTexture;
+    if (Tex <> nil) and (S.Nodes.IndexOf(Tex) >= 0) then
+      S.LocalBox := S.LocalBox + Sh.BoundingBox;
+  end;
+end;
+
 procedure TDoom3Map.UpdateGuis;
 const
   { redraws per frame, and how often one GUI redraws while it keeps
-    changing (transitions, the cursor moving) }
+    changing (transitions, the cursor moving): near GUIs at 25 Hz, further
+    ones less often (MinInterval more every NearDistance units, up to
+    MaxInterval), within RenderBudget seconds a frame }
   MaxRenders = 4;
   MinInterval = 0.04;
+  MaxInterval = 0.5;
+  NearDistance = 192;
+  RenderBudget = 0.006;
+  { a GUI waits CostFactor times its last redraw's time before the next
+    (software rendering: a 60 window GUI with full screen layers takes
+    ~30 ms, which every frame halved the frame rate), unless the player
+    is using it }
+  CostFactor = 4;
+  { the GUI texture's size follows the GUI's size on screen: the pixels
+    across a screen of radius r at distance d are about
+    FocalPixels * 2 * r / d (a 900 pixels high view with a 90 degree fov) }
+  FocalPixels = 640;
 var
   S: TD3GuiSurface;
   Renders, N, K: Integer;
   TimeMs: Integer;
+  Box: TBox3D;
+  Interval, Dist, Pixels, Radius: Single;
+  Start, RenderStart: TTimerResult;
+  Size: Integer;
 begin
   TimeMs := Round(FTime * 1000);
   Renders := 0;
+  Start := Timer;
   { the redraw budget goes round: GUIs that change every frame (videos)
     don't starve the others }
   N := FGuiSurfaces.Count;
@@ -2979,10 +3038,52 @@ begin
     { a video on it changes every frame }
     if S.Gui.HasVideo then
       S.Gui.Dirty := True;
-    if S.Gui.Dirty and (Renders < MaxRenders) and
-       ((S.Renders = 0) or (FTime - S.LastRender >= MinInterval) or S.Gui.CursorShown) then
+    { unchanged: only one drawn small may need a sharper redraw }
+    if (not S.Gui.Dirty and ((S.RenderedSize = 0) or (S.RenderedSize >= GuiImageWidth))) or
+       (Renders >= MaxRenders) then
+      Continue;
+    if (Renders > 0) and (TimerSeconds(Timer, Start) > RenderBudget) then
+      Continue;
+    { out of the view: it redraws when seen (the time lines still run);
+      far away: less often }
+    Interval := MinInterval;
+    Size := GuiImageWidth;
+    if FGuiViewKnown and (S.Scene <> nil) and not S.Gui.CursorShown and (S.Renders > 0) then
     begin
+      if not S.HasLocalBox then
+        GuiSurfaceBox(S);
+      if not S.LocalBox.IsEmpty then
+      begin
+        Box := S.LocalBox.Transform(S.Scene.WorldTransform);
+        if not FGuiFrustum.Box3DCollisionPossibleSimple(Box) then
+          Continue;
+        { TBox3D.Radius is from (0, 0, 0): the box's own radius is half its
+          diagonal }
+        Radius := Box.Diagonal / 2;
+        Dist := Max(0, PointsDistance(Box.Center, FGuiViewPos) - Radius);
+        Interval := Min(MaxInterval, MinInterval * Max(1, Dist / NearDistance));
+        Pixels := FocalPixels * 2 * Radius / Max(1, PointsDistance(Box.Center, FGuiViewPos));
+        S.ScreenPixels := Pixels;
+        S.BoxRadius := Radius;
+        if Pixels < 160 then
+          Size := GuiImageWidth div 4
+        else
+        if Pixels < 320 then
+          Size := GuiImageWidth div 2;
+      end;
+    end;
+    { coming closer: redraw sharper now }
+    if Size > S.RenderedSize then
+      S.Gui.Dirty := True;
+    if not S.Gui.Dirty then
+      Continue;
+    S.RenderSize := Size;
+    Interval := Max(Interval, S.RenderSeconds * CostFactor);
+    if (S.Renders = 0) or (FTime - S.LastRender >= Interval) or S.Gui.CursorShown then
+    begin
+      RenderStart := Timer;
       S.Render(False);
+      S.RenderSeconds := TimerSeconds(Timer, RenderStart);
       S.LastRender := FTime;
       Inc(Renders);
       Inc(FGuiRenders);
@@ -3159,6 +3260,8 @@ begin
     { skinning is the slow part: only for models that can be seen (portal
       visibility hides the others) }
     ME.Instance.Shown := ME.Holder.Visible and ME.Holder.Exists;
+    if ME.Dormant then
+      Continue;
     ME.Instance.Update(SecondsPassed);
     if ME.HeadInstance <> nil then
     begin

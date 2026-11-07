@@ -12,6 +12,11 @@
 #   .\tools\tour_maps.ps1 -BasePath "F:\GogGalaxyGames\DOOM 3"
 #   .\tools\tour_maps.ps1 -BasePath "F:\GogGalaxyGames\DOOM 3" -Maps game/hell1 -Spots 20
 #   .\tools\tour_maps.ps1 -BasePath "F:\work\doom3-demo"
+#   .\tools\tour_maps.ps1 -BasePath "F:\GogGalaxyGames\DOOM 3" -Route -OutDir playthrough
+# -Route plays each map through instead (console "route all"): from the
+# start through every touch trigger and item, the nearest next, to the
+# trigger of its target_endlevel, in noclip and god mode (monsters see the
+# player), at -Speed units a second with a screenshot every -ShotEvery units.
 # Without -Maps: the demo's 3 maps when <BasePath>\demo\demo00.pk4 exists,
 # otherwise the full game's 27 single player maps (about 1 minute each).
 
@@ -22,7 +27,10 @@ param(
   [string] $OutDir = "tour_output",
   [int] $TimeoutSeconds = 400,
   # more demo script steps after the setup, e.g. "O:r_shadows 0"
-  [string[]] $Setup = @()
+  [string[]] $Setup = @(),
+  [switch] $Route,
+  [int] $Speed = 500,
+  [int] $ShotEvery = 1500
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +57,10 @@ for ($I = 0; $I -lt $Spots; $I++) {
   $Steps += "T:180"; $Steps += "W:0.7"; $Steps += "S"
 }
 $Steps += "Q"
+if ($Route) {
+  $Steps = @("W:3", "O:skipcinematic", "W:2", "O:god", "O:noclip") + $Setup + @("O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
+  if ($TimeoutSeconds -eq 400) { $TimeoutSeconds = 1200 }
+}
 $Demo = $Steps -join ","
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -81,7 +93,7 @@ foreach ($Map in $Maps) {
   if ($Programs.Count -gt 0) { $Text += "Shader programs: $($Programs[0]) at the first screenshot, $($Programs[-1] - $Programs[0]) more during the tour" }
   $Stalls = @($Long | Where-Object { $_ -gt 0.3 })
   $Text += "Stalls over 0.3 s: $($Stalls.Count), $([Math]::Round(($Stalls | Measure-Object -Sum).Sum, 1)) s"
-  $Tours = $Lines | Select-String 'Tour \d+/' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
+  $Tours = $Lines | Select-String 'Tour \d+/|Route to|Route: done|Route: the map|Route: skipping|Loading map' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
   $Text += $Tours
   foreach ($Kind in @(
       @('Exceptions', 'Exception'),

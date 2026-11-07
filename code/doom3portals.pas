@@ -24,6 +24,7 @@ uses
 type
   TD3PlaneArray = array of TVector4;
   TD3IntArray = array of Integer;
+  TD3BoolArray = array of Boolean;
   TD3PointArray = array of TVector3;
 
   TD3PortalVisibility = class
@@ -52,6 +53,11 @@ type
     procedure Compute(const Eye: TVector3; const StartArea: Integer;
       const Planes: array of TVector4);
     procedure AllVisible;
+    { The areas seen from Eye in every direction (like Compute without
+      planes), into Visible, keeping AreaVisible (the view's) as it was:
+      the player's PVS for the monsters' dormancy. }
+    procedure ComputeAround(const Eye: TVector3; const StartArea: Integer;
+      var Visible: TD3BoolArray);
     { Areas a light can reach: from StartArea through portals closer than
       Radius to Center. }
     function AreasWithinRadius(const Center: TVector3; const Radius: Single;
@@ -284,6 +290,31 @@ begin
       Start[High(Start)] := Planes[I];
     end;
   Flow(Eye, StartArea, Start, 0);
+end;
+
+procedure TD3PortalVisibility.ComputeAround(const Eye: TVector3; const StartArea: Integer;
+  var Visible: TD3BoolArray);
+var
+  Saved: array of Boolean;
+  SavedCount: Integer;
+  SavedClosed: array of Boolean;
+begin
+  Saved := Copy(AreaVisible);
+  SavedCount := VisibleCount;
+  { through closed doors too: Doom 3's PVS is the map's geometry
+    (idPVS::SetupCurrentPVS with PVS_NORMAL), a monster behind a closed
+    door stays awake }
+  SavedClosed := Copy(PortalClosed);
+  if Length(PortalClosed) > 0 then
+    FillChar(PortalClosed[0], Length(PortalClosed) * SizeOf(Boolean), 0);
+  try
+    Compute(Eye, StartArea, []);
+  finally
+    PortalClosed := SavedClosed;
+  end;
+  Visible := Copy(AreaVisible);
+  AreaVisible := Saved;
+  VisibleCount := SavedCount;
 end;
 
 function TD3PortalVisibility.AreasWithinRadius(const Center: TVector3; const Radius: Single;

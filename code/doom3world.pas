@@ -55,7 +55,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
-  Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda;
+  Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals;
 
 type
   { A monster's route through the AAS (the path between the areas it was
@@ -67,6 +67,8 @@ type
     Fly: Boolean;
     Path: TD3AasPath;
   end;
+
+  TD3PointArray = array of TVector3;
 
   TD3MessageEvent = procedure (const Msg: String) of object;
   TD3BoolEvent = procedure (const Value: Boolean) of object;
@@ -766,6 +768,22 @@ type
     { the map's AAS for monsters of the player's size (maps/<map>.aas48),
       nil when the map has none: then monsters walk straight }
     FAas: TD3AasFile;
+    { the areas seen from the player's eye in every direction (closed doors
+      block), every PvsInterval s, and when it was computed }
+    FPvs: Doom3Portals.TD3BoolArray;
+    { the map's box (CGE coordinates, empty until a moveable needs it):
+      moveables leaving it stop (idPhysics_RigidBody's world bounds) }
+    FWorldBox: TBox3D;
+    FPvsTime: Single;
+    FPvsValid: Boolean;
+    FDormantCount: Integer;
+    procedure UpdatePvs(const Eye: TVector3);
+    { idEntity::CheckDormant for a monster or a scripted AI: True (and
+      ME.Dormant) when it was out of the player's PVS for DormantDelay s }
+    function CheckDormant(const ME: TD3ModelEntity): Boolean;
+  private
+    { FAas's reachabilities into each area (PlayerRoute) }
+    FAasIncoming: array of array of Integer;
     { per portal area: the "location" of the info_location spread there
       ('' = none), see SpreadLocations }
     FLocations: array of String;
@@ -1163,6 +1181,11 @@ type
     { Player state }
     Health, Armor: Integer;
     God, NoTarget: Boolean;
+    { monsters out of the player's PVS stop thinking (console g_dormant) }
+    DormancyEnabled: Boolean;
+    { monsters and scripted AI dormant now }
+    property DormantCount: Integer read FDormantCount;
+  public
     Kills: Integer;
     { Seconds since the last pistol shot (for the muzzle flash) }
     SinceFire: Single;
@@ -1569,6 +1592,17 @@ type
     function FlyPathClear(const From, Dest: TVector3; const Radius, Height: Single): Boolean;
     { The AAS route from an entity to the player, for the console "aas". }
     function RouteStatus(const EntityName: String): String;
+    { Where the level ends (Doom 3 coordinates): the trigger that fires
+      the target_endlevel (through relays), else the target_endlevel. }
+    function EndLevelGoal(out Goal: TVector3; out GoalName: String): Boolean;
+    { A route for a noclip playthrough (console "route"), in Doom 3
+      coordinates (feet): the AAS path over every travel type from From to
+      Goal. When the AAS has no path between them (elevators, teleporters
+      and scripted moves aren't always reachabilities), the closest pair of
+      points of the part reachable from From and the part that reaches Goal
+      is joined by a straight hop, its length is Gap. }
+    function PlayerRoute(const From, Goal: TVector3; out Points: TD3PointArray;
+      out Gap: Single; out AreaCount: Integer): Boolean;
     { A projectile of an entityDef (idProjectile: def_damage,
       def_splash_damage, fuse...) flying from From (CGE coordinates) with
       Velocity; nil if there's no such def. }
@@ -1646,7 +1680,7 @@ uses
   CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
   CastleShapes,
-  Doom3Files, Doom3Collision, Doom3Portals, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
+  Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
   Doom3AF, Doom3Images;
 
 const
@@ -1891,6 +1925,7 @@ constructor TD3Game.Create(const AMap: TDoom3Map);
 begin
   inherited Create;
   FMap := AMap;
+  DormancyEnabled := True;
   FMovers := specialize TObjectList<TD3Mover>.Create(True);
   FElevators := specialize TObjectList<TD3Elevator>.Create(True);
   FBrass := specialize TObjectList<TD3Brass>.Create(True);
@@ -3293,7 +3328,16 @@ begin
       K := LowerCase(E.Pairs.Names[I]);
       if (Copy(K, 1, 4) = 'inv_') and (K <> 'inv_carry') then
         if Give(Copy(K, 5, MaxInt), E.Pairs.ValueFromIndex[I]) then
+        begin
           Result := True;
+          { idInventory::Give with ui_autoSwitch (on by default): a new
+            weapon is raised }
+          if (K = 'inv_weapon') and not FWeaponsDisabled then
+          begin
+            FSelectWeaponName := Trim(E.Pairs.ValueFromIndex[I].Split([','])[0]);
+            FSelectWeaponAt := FTime;
+          end;
+        end;
     end;
   if not Result then
     Exit;
@@ -5147,6 +5191,17 @@ begin
       M.Brush.Scene.Pickable := WasPickable;
     end;
     M.Brush.Scene.Translation := D3ToCge(Center - M.CenterOffset);
+    { out of the world (it fell through a floor): it stops, like Doom 3's
+      rigid bodies (it fell forever, casting rays every step) }
+    if FWorldBox.IsEmpty then
+      FWorldBox := FMap.BoundingBox;
+    if not FWorldBox.IsEmpty and not FWorldBox.Contains(D3ToCge(Center)) then
+    begin
+      WritelnWarning('Doom3World', '%s moved outside the world bounds at %s', [M.Brush.Entity.Name, Center.ToString]);
+      M.Velocity := TVector3.Zero;
+      M.AtRest := True;
+      Continue;
+    end;
     if OnFloor then
     begin
       { a bounce that is only this frame's gravity is lying on the floor }
@@ -5658,6 +5713,10 @@ begin
       end;
   if FMap.MapName <> '' then
   begin
+    FAasIncoming := nil;
+    FPvsValid := False;
+    FWorldBox := TBox3D.Empty;
+    FDormantCount := 0;
     FAas := TD3AasFile.Create;
     if not FAas.LoadFromVfs(TDoom3Map.MapBasePath(FMap.MapName) + '.aas48') then
       FreeAndNil(FAas);
@@ -5916,6 +5975,9 @@ var
   GS: TD3GuiSurface;
 begin
   Inc(ActivationCount);
+  { not spawned at this skill (the map's hard-only monsters): nothing to do }
+  if TDoom3Map.EntityInhibited(E) then
+    Exit;
   Cls := LowerCase(E.ClassName_);
   Handled := False;
   { idEntity::ActivateTargets: an activated entity's GUIs get onTrigger }
@@ -6470,8 +6532,10 @@ begin
   UpdateProjectiles(SecondsPassed);
   UpdateBrass(SecondsPassed);
   UpdateParticles;
+  UpdatePvs(PlayerEye);
   for Mon in FMonsters do
-    UpdateMonster(Mon, SecondsPassed, Feet);
+    if not CheckDormant(Mon.Model) then
+      UpdateMonster(Mon, SecondsPassed, Feet);
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
     UpdateActors(SecondsPassed);
@@ -7838,7 +7902,9 @@ begin
         end;
       end;
     { what the game doesn't do (yet): nothing happens }
-    'setBoneMod', 'setNeverDormant', 'allowMovement',
+    'setNeverDormant':
+      A.Model.NeverDormant := D3ValueToFloat(Args[0]) <> 0;
+    'setBoneMod', 'allowMovement',
     'allowDamage', 'ignoreDamage', 'disablePain', 'enablePain',
     'animTurn', 'becomeSolid', 'becomeNonSolid',
     'kickObstacles', 'preventPain', 'overrideAnim',
@@ -8219,6 +8285,9 @@ var
 begin
   for A in FActors do
   begin
+    { out of the player's PVS: its scripts wait (idAI::Think) }
+    if CheckDormant(A.Model) then
+      Continue;
     { state switches asked last frame }
     if A.HasIdeal then
     begin
@@ -9237,6 +9306,290 @@ begin
     Exit;
   WritelnLog('Doom3World', 'PDA audio log %s (%s)', [Audio.Name, Audio.Audio]);
   PlayPdaSound(Audio.Audio);
+end;
+
+procedure TD3Game.UpdatePvs(const Eye: TVector3);
+const
+  PvsInterval = 0.25;
+var
+  Area: Integer;
+begin
+  if (FMap.Portals = nil) or (FPvsValid and (FTime - FPvsTime < PvsInterval) and (FTime >= FPvsTime)) then
+    Exit;
+  FPvsTime := FTime;
+  Area := FMap.AreaAt(Eye);
+  { outside every area (noclip in a wall): keep the last one }
+  if Area < 0 then
+    Exit;
+  FMap.Portals.ComputeAround(CgeToD3(Eye), Area, FPvs);
+  FPvsValid := True;
+end;
+
+function TD3Game.CheckDormant(const ME: TD3ModelEntity): Boolean;
+const
+  { idEntity's DELAY_DORMANT_TIME }
+  DormantDelay = 3;
+var
+  Area: Integer;
+begin
+  Result := False;
+  if (ME <> nil) and FPvsValid and DormancyEnabled and not ME.NeverDormant and
+     ME.Holder.Exists and not ME.Entity.BoolValue('neverdormant') and
+     not ME.Entity.BoolValue('cinematic') then
+  begin
+    Area := FMap.AreaAt(ME.Holder.WorldTranslation + Vector3(0, 16, 0));
+    if (Area < 0) or (Area > High(FPvs)) or FPvs[Area] then
+      ME.LastInPvs := FTime
+    else
+      Result := FTime - ME.LastInPvs > DormantDelay;
+  end;
+  if ME <> nil then
+  begin
+    if Result and not ME.Dormant then
+      Inc(FDormantCount)
+    else
+    if ME.Dormant and not Result then
+      Dec(FDormantCount);
+    ME.Dormant := Result;
+  end;
+end;
+
+function TD3Game.EndLevelGoal(out Goal: TVector3; out GoalName: String): Boolean;
+var
+  E, EndLevel: TD3MapEntity;
+  T: TD3Trigger;
+  Wanted: TStringList;
+  Depth: Integer;
+  Added: Boolean;
+  Target: TD3MapEntity;
+begin
+  Result := False;
+  EndLevel := nil;
+  if FMap.MapFile = nil then
+    Exit;
+  for E in FMap.MapFile.Entities do
+    if SameText(E.ClassName_, 'target_endlevel') then
+    begin
+      EndLevel := E;
+      Break;
+    end;
+  if EndLevel = nil then
+    Exit;
+  Goal := EndLevel.Origin;
+  GoalName := EndLevel.Name;
+  Result := True;
+  { the entities that fire it, up to 4 relays back }
+  Wanted := TStringList.Create;
+  try
+    Wanted.CaseSensitive := False;
+    Wanted.Add(EndLevel.Name);
+    for Depth := 1 to 4 do
+    begin
+      Added := False;
+      for E in FMap.MapFile.Entities do
+        if Wanted.IndexOf(E.Name) < 0 then
+          for Target in TargetsOf(E) do
+            if Wanted.IndexOf(Target.Name) >= 0 then
+            begin
+              Wanted.Add(E.Name);
+              Added := True;
+              Break;
+            end;
+      { the first touch trigger among them }
+      for T in FTriggers do
+        if (Wanted.IndexOf(T.Entity.Name) >= 0) and not T.NoTouch then
+        begin
+          Goal := CgeToD3(T.Box.Center);
+          Goal.Z := CgeToD3(T.Box.Data[0]).Z;
+          GoalName := T.Entity.Name;
+          Exit;
+        end;
+      if not Added then
+        Break;
+    end;
+  finally
+    Wanted.Free;
+  end;
+end;
+
+function TD3Game.PlayerRoute(const From, Goal: TVector3; out Points: TD3PointArray;
+  out Gap: Single; out AreaCount: Integer): Boolean;
+const
+  AllFlags = $7FFFFFFF;
+var
+  N, A, R, B, I, J, FromArea, ToArea, BestA, BestB: Integer;
+  Fwd, Back: array of Boolean;
+  Queue: array of Integer;
+  Head: Integer;
+  FwdPts, BackPts: TD3PointArray;
+  FwdArea, BackArea: array of Integer;
+  D, Best: Single;
+  Path: TD3AasPath;
+
+  procedure AddPath(const P: TD3AasPath);
+  var
+    K: Integer;
+  begin
+    for K := 0 to High(P) do
+    begin
+      Points := Concat(Points, [FAas.Areas[P[K].Area].Reach[P[K].Reach].Start,
+        FAas.Areas[P[K].Area].Reach[P[K].Reach].Stop]);
+      Inc(AreaCount);
+    end;
+  end;
+
+begin
+  Points := [From];
+  Gap := 0;
+  AreaCount := 0;
+  Result := FAas <> nil;
+  if not Result then
+  begin
+    Points := Concat(Points, [Goal]);
+    Gap := PointsDistance(From, Goal);
+    Exit;
+  end;
+  FromArea := FAas.OriginAreaNum(From);
+  ToArea := FAas.OriginAreaNum(Goal);
+  if (FromArea <> 0) and (ToArea <> 0) and FAas.FindPath(FromArea, ToArea, AllFlags, Path) then
+  begin
+    AddPath(Path);
+    Points := Concat(Points, [Goal]);
+    Exit;
+  end;
+  { the areas reachable from FromArea, and those that reach ToArea }
+  N := Length(FAas.Areas);
+  SetLength(Fwd, N);
+  SetLength(Back, N);
+  if Length(FAasIncoming) <> N then
+  begin
+    SetLength(FAasIncoming, N);
+    for A := 1 to N - 1 do
+      for R := 0 to High(FAas.Areas[A].Reach) do
+      begin
+        B := FAas.Areas[A].Reach[R].ToArea;
+        if (B > 0) and (B < N) then
+          FAasIncoming[B] := Concat(FAasIncoming[B], [A]);
+      end;
+  end;
+  SetLength(Queue, N);
+  if FromArea > 0 then
+  begin
+    Fwd[FromArea] := True;
+    Queue[0] := FromArea;
+    Head := 0;
+    J := 1;
+    while Head < J do
+    begin
+      A := Queue[Head];
+      Inc(Head);
+      for R := 0 to High(FAas.Areas[A].Reach) do
+      begin
+        B := FAas.Areas[A].Reach[R].ToArea;
+        if (B > 0) and (B < N) and not Fwd[B] then
+        begin
+          Fwd[B] := True;
+          Queue[J] := B;
+          Inc(J);
+        end;
+      end;
+    end;
+  end;
+  if ToArea > 0 then
+  begin
+    Back[ToArea] := True;
+    Queue[0] := ToArea;
+    Head := 0;
+    J := 1;
+    while Head < J do
+    begin
+      A := Queue[Head];
+      Inc(Head);
+      for B in FAasIncoming[A] do
+        if not Back[B] then
+        begin
+          Back[B] := True;
+          Queue[J] := B;
+          Inc(J);
+        end;
+    end;
+  end;
+  { points of each part: where reachabilities enter its areas }
+  { (sized for every reachability first: growing them one by one was
+    quadratic) }
+  I := 1;
+  for A := 1 to N - 1 do
+    Inc(I, Length(FAas.Areas[A].Reach));
+  SetLength(FwdPts, I);
+  SetLength(FwdArea, I);
+  SetLength(BackPts, I);
+  SetLength(BackArea, I);
+  FwdPts[0] := From;
+  FwdArea[0] := FromArea;
+  BackPts[0] := Goal;
+  BackArea[0] := ToArea;
+  I := 1;
+  J := 1;
+  for A := 1 to N - 1 do
+    for R := 0 to High(FAas.Areas[A].Reach) do
+    begin
+      B := FAas.Areas[A].Reach[R].ToArea;
+      if (B <= 0) or (B >= N) then
+        Continue;
+      if Fwd[B] and Fwd[A] then
+      begin
+        FwdPts[I] := FAas.Areas[A].Reach[R].Stop;
+        FwdArea[I] := B;
+        Inc(I);
+      end;
+      if Back[B] and Back[A] then
+      begin
+        BackPts[J] := FAas.Areas[A].Reach[R].Stop;
+        BackArea[J] := B;
+        Inc(J);
+      end;
+    end;
+  SetLength(FwdPts, I);
+  SetLength(FwdArea, I);
+  SetLength(BackPts, J);
+  SetLength(BackArea, J);
+  { the reachable point nearest the goal, then the point that reaches the
+    goal nearest to it (two passes: a search over all pairs took a minute
+    on big maps) }
+  Best := MaxSingle;
+  BestA := 0;
+  for I := 0 to High(FwdPts) do
+  begin
+    D := PointsDistanceSqr(FwdPts[I], Goal);
+    if D < Best then
+    begin
+      Best := D;
+      BestA := I;
+    end;
+  end;
+  Best := MaxSingle;
+  BestB := 0;
+  for J := 0 to High(BackPts) do
+  begin
+    D := PointsDistanceSqr(FwdPts[BestA], BackPts[J]);
+    if D < Best then
+    begin
+      Best := D;
+      BestB := J;
+    end;
+  end;
+  Gap := Sqrt(Best);
+  if (FromArea > 0) and (BestA > 0) and FAas.FindPath(FromArea, FwdArea[BestA], AllFlags, Path) then
+    AddPath(Path);
+  if BestA > 0 then
+    Points := Concat(Points, [FwdPts[BestA]]);
+  if BestB > 0 then
+  begin
+    Points := Concat(Points, [BackPts[BestB]]);
+    if (ToArea > 0) and FAas.FindPath(BackArea[BestB], ToArea, AllFlags, Path) then
+      AddPath(Path);
+  end;
+  Points := Concat(Points, [Goal]);
 end;
 
 function TD3Game.TargetsOf(const E: TD3MapEntity): TD3MapEntityArray;
