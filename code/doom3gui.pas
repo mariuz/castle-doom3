@@ -381,6 +381,9 @@ function GuiCacheCount: Integer;
 type
   TD3FontGlyph = record
     Height, Top, Bottom, Pitch, XSkip, ImageWidth, ImageHeight: Integer;
+    { the glyph's image starts this far right of the pen (Doom 3 BFG's
+      fonts; 0 in Doom 3's) }
+    Left: Integer;
     S, T, S2, T2: Single;
     Page: TRGBAlphaImage; { nil: not drawn }
   end;
@@ -2482,6 +2485,147 @@ begin
   end;
 end;
 
+{ Doom 3 BFG's fonts (idFont::LoadFont): one size, newfonts/<name>/48.dat
+  with one page 48.tga. The file: a magic, the point size, ascender,
+  descender and number of glyphs (big endian shorts), then per glyph its
+  width, height, top, left, xSkip (bytes) and its place in the page
+  (little endian shorts, 10 bytes in all), then the glyphs' character codes
+  (sorted, little endian). The GUI's font name is mapped by the language
+  file ("#font_an" is "Arial_Narrow"). }
+function LoadBfgFontSize(const GuiName: String): TD3FontSize;
+const
+  FontMagic = $6964662A;
+var
+  Base, Mapped, Dir, ImageFile: String;
+  S: TStream;
+  Data: array of Byte;
+  NumGlyphs, I, P, C, PageW, PageH, G: Integer;
+  Page: TRGBAlphaImage;
+  Loaded: TCastleImage;
+  Codes: array of Cardinal;
+begin
+  Result := nil;
+  Base := NormalizeD3Path(GuiName);
+  if Base = 'fonts' then
+    Base := ''
+  else
+  if Copy(Base, 1, 6) = 'fonts/' then
+    Delete(Base, 1, 6);
+  Mapped := D3LangString('#font_' + Base);
+  if Copy(Mapped, 1, 1) = '#' then
+    Mapped := D3LangString('#font_*');
+  if Copy(Mapped, 1, 1) = '#' then
+    Mapped := Base;
+  Mapped := StringReplace(StringReplace(Mapped, ' ', '_', [rfReplaceAll]), '-', '_', [rfReplaceAll]);
+  Dir := 'newfonts/' + LowerCase(Mapped);
+  if not D3Fs.FileExists(Dir + '/48.dat') then
+    Dir := 'newfonts/arial_narrow';
+  S := D3Fs.OpenFile(Dir + '/48.dat');
+  if S = nil then
+    Exit;
+  try
+    SetLength(Data, S.Size);
+    if Length(Data) > 0 then
+      S.ReadBuffer(Data[0], Length(Data));
+  finally
+    S.Free;
+  end;
+  if (Length(Data) < 12) or
+     (((Cardinal(Data[0]) shl 24) or (Cardinal(Data[1]) shl 16) or (Cardinal(Data[2]) shl 8) or Data[3]) <> FontMagic) then
+  begin
+    WritelnWarning('Doom3Gui', 'Not a Doom 3 BFG font: "%s/48.dat"', [Dir]);
+    Exit;
+  end;
+  NumGlyphs := (Data[10] shl 8) or Data[11];
+  if Length(Data) < 12 + NumGlyphs * 14 then
+    Exit;
+  ImageFile := FindImageFile(Dir + '/48', False);
+  if ImageFile = '' then
+  begin
+    WritelnWarning('Doom3Gui', 'Font page "%s/48" not found', [Dir]);
+    Exit;
+  end;
+  Page := nil;
+  try
+    Loaded := LoadImage(D3FsUrl(ImageFile));
+    try
+      if Loaded is TRGBAlphaImage then
+      begin
+        Page := TRGBAlphaImage(Loaded);
+        Loaded := nil;
+      end else
+      begin
+        Page := TRGBAlphaImage.Create;
+        Page.Assign(Loaded);
+      end;
+    finally
+      Loaded.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      WritelnWarning('Doom3Gui', 'Cannot load font page "%s": %s', [ImageFile, E.Message]);
+      Exit;
+    end;
+  end;
+  FontPages.Add(Page);
+  PageW := Page.Width;
+  PageH := Page.Height;
+  SetLength(Codes, NumGlyphs);
+  P := 12 + NumGlyphs * 10;
+  for I := 0 to NumGlyphs - 1 do
+    Codes[I] := Data[P + I * 4] or (Cardinal(Data[P + I * 4 + 1]) shl 8) or
+      (Cardinal(Data[P + I * 4 + 2]) shl 16) or (Cardinal(Data[P + I * 4 + 3]) shl 24);
+  Result := TD3FontSize.Create;
+  Result.PointSize := 48;
+  Result.GlyphScale := 1;
+  for C := 0 to 255 do
+  begin
+    G := -1;
+    for I := 0 to NumGlyphs - 1 do
+      if Codes[I] = Cardinal(C) then
+      begin
+        G := I;
+        Break;
+      end;
+    if G < 0 then
+      Continue;
+    P := 12 + G * 10;
+    Result.Glyphs[C].ImageWidth := Data[P];
+    Result.Glyphs[C].ImageHeight := Data[P + 1];
+    Result.Glyphs[C].Height := Data[P + 1];
+    Result.Glyphs[C].Top := ShortInt(Data[P + 2]);
+    Result.Glyphs[C].Left := ShortInt(Data[P + 3]);
+    Result.Glyphs[C].XSkip := Data[P + 4];
+    I := Data[P + 6] or (Data[P + 7] shl 8);
+    Result.Glyphs[C].S := I / PageW;
+    Result.Glyphs[C].S2 := (I + Data[P]) / PageW;
+    I := Data[P + 8] or (Data[P + 9] shl 8);
+    Result.Glyphs[C].T := I / PageH;
+    Result.Glyphs[C].T2 := (I + Data[P + 1]) / PageH;
+    Result.Glyphs[C].Page := Page;
+    Result.MaxHeight := Max(Result.MaxHeight, Result.Glyphs[C].Height);
+    Result.MaxWidth := Max(Result.MaxWidth, Result.Glyphs[C].XSkip);
+  end;
+  { the lines keep Doom 3's height: the old 48 point glyph table is there
+    for that }
+  S := D3Fs.OpenFile(Dir + '/old_48.dat');
+  if S <> nil then
+  try
+    SetLength(Data, S.Size);
+    if Length(Data) >= 256 * 80 then
+    begin
+      S.ReadBuffer(Data[0], Length(Data));
+      Result.MaxHeight := 0;
+      for C := 0 to 255 do
+        Result.MaxHeight := Max(Result.MaxHeight, Integer(Data[C * 80] or (Cardinal(Data[C * 80 + 1]) shl 8)));
+    end;
+  finally
+    S.Free;
+  end;
+  WritelnLog('Doom3Gui', 'Font "%s": Doom 3 BFG font %s (%d glyphs)', [GuiName, Dir, NumGlyphs]);
+end;
+
 function D3Font(const AName: String): TD3Font;
 var
   Key, Dir: String;
@@ -2503,6 +2647,15 @@ begin
     Result.Sizes[I] := LoadFontSize(Dir, 12 shl I);
     if Result.Sizes[I] <> nil then
       Inc(Loaded);
+  end;
+  if (Loaded = 0) and D3Fs.IsBfg then
+  begin
+    Result.Sizes[2] := LoadBfgFontSize(Key);
+    if Result.Sizes[2] <> nil then
+    begin
+      Fonts.Add(Key, Result);
+      Exit;
+    end;
   end;
   if Loaded = 0 then
   begin
@@ -2992,7 +3145,7 @@ begin
           begin
             { PaintChar at (x, baseline - top * useScale), imageWidth x
               imageHeight scaled }
-            DstX0 := Round(PenX * ScaleX);
+            DstX0 := Round((PenX + Glyph.Left * UseScale) * ScaleX);
             DstY0 := Round((Baseline - Glyph.Top * UseScale) * ScaleY);
             DstW := Max(1, Round(Glyph.ImageWidth * UseScale * ScaleX));
             DstH := Max(1, Round(Glyph.ImageHeight * UseScale * ScaleY));

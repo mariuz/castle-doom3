@@ -576,6 +576,9 @@ type
     Entity: TD3MapEntity;
     { its brush entity or static model, nil without one }
     Brush: TD3BrushEntity;
+    { shaking: what turns (the brush entity's scene, or an md5 model's
+      holder) }
+    Shaken: TCastleTransform;
     Kind: TD3MiscKind;
     Health, Count: Integer;
     { Dead: exploded / shattered / used up. On: the force field, the
@@ -910,6 +913,9 @@ type
     FTraceFraction: Single;
     FTraceEnd, FTraceNormal: TVector3;
     FSpawnArgs: TStringList;
+    { func_fx entities a script spawned with "start": they play at the
+      next update, where the script has put them by then }
+    FSpawnedFx: array of TD3MapEntity;
     { the grabber (idGrabber): on, what it holds, since when, the last throw }
     FGrabEnabled: Boolean;
     FGrabbed: TD3Moveable;
@@ -2153,6 +2159,7 @@ begin
   FGrabFired := 0;
   FPreviousWeaponName := '';
   FSpawnArgs.Clear;
+  SetLength(FSpawnedFx, 0);
   FBrass.Clear;
   FBrassDue := -1;
   FreeAndNil(FRagdoll);

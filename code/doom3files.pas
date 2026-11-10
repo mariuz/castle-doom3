@@ -33,6 +33,9 @@ type
   public
     Name: String;
     IsDirectory: Boolean;
+    { A Doom 3 BFG ".resources" container: Stream is the open file, the
+      entries' HeaderOffset is where their (uncompressed) data starts. }
+    IsResources: Boolean;
     { PK4: the open archive file. }
     Stream: TStream;
     { PK4: the whole archive in memory (a memory mapped file, or the memory
@@ -53,6 +56,13 @@ type
     { Normalized path -> index in FEntries }
     FIndex: specialize TDictionary<String, Integer>;
     FProtocolRegistered: Boolean;
+    FBfg: Boolean;
+    { BFG: image name (no extension) -> the codes (usage and cube kind,
+      like "0100") of its generated/images/<name>#__<code>.bimage files,
+      space separated }
+    FBfgImages: specialize TDictionary<String, String>;
+    function AddResources(const FileName: String): Boolean;
+    function ReadResourceEntry(const Entry: TDoom3FileEntry): TMemoryStream;
     procedure AddEntry(const Entry: TDoom3FileEntry);
     function FindEntry(const APath: String; out Entry: TDoom3FileEntry): Boolean;
     function ReadZipEntry(const Entry: TDoom3FileEntry): TMemoryStream;
@@ -71,7 +81,24 @@ type
     function AddGameDirectory(const Dir: String): Boolean;
 
     function HasSource(const Name: String): Boolean;
+    { A file, or (Doom 3 BFG data) one that the generated binary of BfgGenerated
+      stands for. }
     function FileExists(const APath: String): Boolean;
+    { Doom 3 BFG data (".resources" containers) is mounted: source files
+      (.proc, .cm, .md5mesh, .md5anim, .lwo, .ase, .tga, .wav) exist only
+      as "generated/" binaries. }
+    property IsBfg: Boolean read FBfg;
+    { The generated binary that stands for a source file (.bproc, .bcm,
+      .bmd5mesh, .bmd5anim, .blwo, .base, .bimage, .idwav), '' if none. }
+    function BfgGenerated(const APath: String): String;
+    { That binary's contents (caller frees), nil if none. }
+    function OpenGenerated(const APath: String): TStream;
+    { The .bimage for an image name without extension: a 2D image
+      (CoveragePath: its alpha test version, whose alpha it lost, or ''),
+      or one side of a cube map (Face, CameraCube) for a name ending with
+      _px ... _nz or _forward ... _down. }
+    function BfgImage(const AName: String; out GenPath, CoveragePath: String;
+      out Face: Integer; out CameraCube: Boolean): Boolean;
     { Contents as a new stream (caller frees), nil when missing. }
     function OpenFile(const APath: String): TStream;
     { Contents as a string, '' when missing. }
@@ -99,6 +126,9 @@ procedure LoadProfileLog(const Title: String);
 
 var
   D3Fs: TDoom3FileSystem;
+  { Doom 3 BFG data: makes the source file (a .tga or .wav in memory) from
+    its generated binary; nil when it can't. Set by Doom3Images. }
+  BfgConvertHook: function (const APath: String): TStream;
   LoadProfile: String;
   { time spent (and calls) reading files, evaluating image programs (with
     their reads); LoadProfileLog writes and resets them }
@@ -321,6 +351,7 @@ begin
   FSources := specialize TObjectList<TDoom3Source>.Create(True);
   FEntries := specialize TList<TDoom3FileEntry>.Create;
   FIndex := specialize TDictionary<String, Integer>.Create;
+  FBfgImages := specialize TDictionary<String, String>.Create;
 end;
 
 destructor TDoom3FileSystem.Destroy;
@@ -328,6 +359,7 @@ begin
   if FProtocolRegistered then
     UnregisterUrlProtocol('d3fs');
   FIndex.Free;
+  FBfgImages.Free;
   FEntries.Free;
   FSources.Free;
   inherited Destroy;
@@ -343,6 +375,255 @@ begin
     FEntries[Existing] := Entry
   else
     FIndex.Add(Key, FEntries.Add(Entry));
+end;
+
+{ Doom 3 BFG ----------------------------------------------------------------- }
+
+const
+  BfgImagePrefix = 'generated/images/';
+
+{ A ".resources" container: magic, the table's offset and size (big endian),
+  then at the table the number of files and for each its name (little
+  endian length), offset and size (big endian). Files aren't compressed. }
+function TDoom3FileSystem.AddResources(const FileName: String): Boolean;
+const
+  ResourceMagic = $D000000D;
+var
+  Source: TDoom3Source;
+  Entry: TDoom3FileEntry;
+  Header: array [0..11] of Byte;
+  Table: array of Byte;
+  TableOffset, TableSize, Count, NameLen: UInt32;
+  P, I, SourceIndex, Hash: Integer;
+  Key, Name, Code, Codes: String;
+
+  function Big(const Offset: Integer): UInt32;
+  begin
+    Result := (UInt32(Table[Offset]) shl 24) or (UInt32(Table[Offset + 1]) shl 16) or
+      (UInt32(Table[Offset + 2]) shl 8) or Table[Offset + 3];
+  end;
+
+begin
+  Result := False;
+  Source := TDoom3Source.Create;
+  try
+    Source.Name := FileName;
+    Source.IsResources := True;
+    Source.Stream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
+    if Source.Stream.Read(Header, 12) <> 12 then
+      Exit;
+    if ((UInt32(Header[0]) shl 24) or (UInt32(Header[1]) shl 16) or (UInt32(Header[2]) shl 8) or Header[3]) <> ResourceMagic then
+      Exit;
+    TableOffset := (UInt32(Header[4]) shl 24) or (UInt32(Header[5]) shl 16) or (UInt32(Header[6]) shl 8) or Header[7];
+    TableSize := (UInt32(Header[8]) shl 24) or (UInt32(Header[9]) shl 16) or (UInt32(Header[10]) shl 8) or Header[11];
+    if (TableSize < 4) or (Int64(TableOffset) + TableSize > Source.Stream.Size) then
+      Exit;
+    SetLength(Table, TableSize);
+    Source.Stream.Position := TableOffset;
+    Source.Stream.ReadBuffer(Table[0], TableSize);
+    SourceIndex := FSources.Add(Source);
+    Source := nil;
+    Count := Big(0);
+    P := 4;
+    for I := 0 to Integer(Count) - 1 do
+    begin
+      if P + 4 > Integer(TableSize) then
+        Break;
+      NameLen := Table[P] or (UInt32(Table[P + 1]) shl 8) or (UInt32(Table[P + 2]) shl 16) or (UInt32(Table[P + 3]) shl 24);
+      Inc(P, 4);
+      if P + Integer(NameLen) + 8 > Integer(TableSize) then
+        Break;
+      SetLength(Name, NameLen);
+      if NameLen > 0 then
+        Move(Table[P], Name[1], NameLen);
+      Inc(P, NameLen);
+      Entry := Default(TDoom3FileEntry);
+      Entry.Path := Name;
+      Entry.SourceIndex := SourceIndex;
+      Entry.HeaderOffset := Big(P);
+      Entry.Size := Big(P + 4);
+      Entry.CompressedSize := Entry.Size;
+      Inc(P, 8);
+      AddEntry(Entry);
+      { index the images by name: "<name>#__<code>.bimage" }
+      Key := NormalizeD3Path(Name);
+      if (Copy(Key, 1, Length(BfgImagePrefix)) = BfgImagePrefix) and (ExtractFileExt(Key) = '.bimage') then
+      begin
+        Hash := Pos('#__', Key);
+        if Hash > 0 then
+        begin
+          Code := Copy(Key, Hash + 3, Length(Key) - Hash - 2 - Length('.bimage'));
+          Key := Copy(Key, Length(BfgImagePrefix) + 1, Hash - Length(BfgImagePrefix) - 1);
+          if FBfgImages.TryGetValue(Key, Codes) then
+          begin
+            if Pos(Code, Codes) = 0 then
+              FBfgImages[Key] := Codes + ' ' + Code;
+          end else
+            FBfgImages.Add(Key, Code);
+        end;
+      end;
+    end;
+    FBfg := True;
+    Result := True;
+  finally
+    Source.Free;
+  end;
+end;
+
+function TDoom3FileSystem.ReadResourceEntry(const Entry: TDoom3FileEntry): TMemoryStream;
+var
+  Source: TDoom3Source;
+begin
+  Source := FSources[Entry.SourceIndex];
+  Result := TMemoryStream.Create;
+  try
+    Result.Size := Entry.Size;
+    Source.Stream.Position := Entry.HeaderOffset;
+    if Entry.Size > 0 then
+      Source.Stream.ReadBuffer(Result.Memory^, Entry.Size);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+function TDoom3FileSystem.BfgImage(const AName: String; out GenPath, CoveragePath: String;
+  out Face: Integer; out CameraCube: Boolean): Boolean;
+const
+  { the codes are the image's usage (textureUsage_t) and cube kind: a 2D
+    image is drawn from its diffuse, plain, specular, bump or light version }
+  Preferred: array [0..4] of String = ('0100', '0200', '0000', '0300', '0500');
+  CubeSides: array [0..5] of String = ('_px', '_nx', '_py', '_ny', '_pz', '_nz');
+  CameraSides: array [0..5] of String = ('_forward', '_back', '_left', '_right', '_up', '_down');
+var
+  Key, Codes, Code, Base: String;
+  Parts: TStringArray;
+  I: Integer;
+begin
+  Result := False;
+  GenPath := '';
+  CoveragePath := '';
+  Face := 0;
+  CameraCube := False;
+  if not FBfg then
+    Exit;
+  Key := NormalizeD3Path(AName);
+  if FBfgImages.TryGetValue(Key, Codes) then
+  begin
+    Code := '';
+    for I := 0 to High(Preferred) do
+      if Pos(Preferred[I], Codes) > 0 then
+      begin
+        Code := Preferred[I];
+        Break;
+      end;
+    if Code = '' then
+    begin
+      { any other 2D version }
+      Parts := Codes.Split([' ']);
+      for I := 0 to High(Parts) do
+        if Copy(Parts[I], 3, 2) = '00' then
+          Code := Parts[I];
+    end;
+    if Code <> '' then
+    begin
+      GenPath := BfgImagePrefix + Key + '#__' + Code + '.bimage';
+      if (Code = '0100') and (Pos('1000', Codes) > 0) then
+        CoveragePath := BfgImagePrefix + Key + '#__1000.bimage';
+      Exit(True);
+    end;
+  end;
+  for I := 0 to 5 do
+  begin
+    if Copy(Key, Length(Key) - Length(CubeSides[I]) + 1, MaxInt) = CubeSides[I] then
+    begin
+      Base := Copy(Key, 1, Length(Key) - Length(CubeSides[I]));
+      if FBfgImages.TryGetValue(Base, Codes) and (Pos('01 ', Codes + ' ') > 0) then
+      begin
+        Parts := Codes.Split([' ']);
+        for Code in Parts do
+          if Copy(Code, 3, 2) = '01' then
+            GenPath := BfgImagePrefix + Base + '#__' + Code + '.bimage';
+        Face := I;
+        Exit(GenPath <> '');
+      end;
+    end;
+    if Copy(Key, Length(Key) - Length(CameraSides[I]) + 1, MaxInt) = CameraSides[I] then
+    begin
+      Base := Copy(Key, 1, Length(Key) - Length(CameraSides[I]));
+      if FBfgImages.TryGetValue(Base, Codes) and (Pos('02 ', Codes + ' ') > 0) then
+      begin
+        Parts := Codes.Split([' ']);
+        for Code in Parts do
+          if Copy(Code, 3, 2) = '02' then
+            GenPath := BfgImagePrefix + Base + '#__' + Code + '.bimage';
+        Face := I;
+        CameraCube := True;
+        Exit(GenPath <> '');
+      end;
+    end;
+  end;
+end;
+
+function TDoom3FileSystem.BfgGenerated(const APath: String): String;
+var
+  Key, Ext, Coverage: String;
+  Face: Integer;
+  Camera: Boolean;
+begin
+  Result := '';
+  if not FBfg then
+    Exit;
+  Key := NormalizeD3Path(APath);
+  Ext := ExtractFileExt(Key);
+  if Ext = '.proc' then
+    Result := 'generated/' + ChangeFileExt(Key, '.bproc')
+  else
+  if Ext = '.cm' then
+    Result := 'generated/' + ChangeFileExt(Key, '.bcm')
+  else
+  if Ext = '.md5mesh' then
+    Result := 'generated/rendermodels/' + ChangeFileExt(Key, '.bmd5mesh')
+  else
+  if Ext = '.md5anim' then
+    Result := 'generated/anim/' + ChangeFileExt(Key, '.bmd5anim')
+  else
+  if Ext = '.lwo' then
+    Result := 'generated/rendermodels/' + ChangeFileExt(Key, '.blwo')
+  else
+  if Ext = '.ase' then
+    Result := 'generated/rendermodels/' + ChangeFileExt(Key, '.base')
+  else
+  if Ext = '.wav' then
+  begin
+    { speech is per language (idSoundSample::LoadResource) }
+    if Pos('/vo/', Key) > 0 then
+    begin
+      Result := 'generated/' + ChangeFileExt(StringReplace(Key, '/vo/', '/vo/english/', []), '.idwav');
+      if FIndex.ContainsKey(Result) then
+        Exit;
+    end;
+    Result := 'generated/' + ChangeFileExt(Key, '.idwav');
+  end else
+  if Ext = '.tga' then
+  begin
+    if not BfgImage(ChangeFileExt(Key, ''), Result, Coverage, Face, Camera) then
+      Result := '';
+    Exit;
+  end else
+    Exit;
+  if not FIndex.ContainsKey(Result) then
+    Result := '';
+end;
+
+function TDoom3FileSystem.OpenGenerated(const APath: String): TStream;
+var
+  G: String;
+begin
+  G := BfgGenerated(APath);
+  if G = '' then
+    Exit(nil);
+  Result := OpenFile(G);
 end;
 
 function TDoom3FileSystem.FindEntry(const APath: String; out Entry: TDoom3FileEntry): Boolean;
@@ -538,6 +819,40 @@ begin
     for Name in Names do
       if AddPk4(IncludeTrailingPathDelimiter(Dir) + Name) then
         Result := True;
+    { Doom 3 BFG: _common, _ordered, the sounds (English speech), then
+      every map's container }
+    Names.Clear;
+    if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.resources', faAnyFile, Info) = 0 then
+    try
+      repeat
+        Name := LowerCase(Info.Name);
+        if (Copy(Name, 1, 10) <> '_sound_pc_') or (Name = '_sound_pc_en.resources') then
+          Names.Add(Info.Name);
+      until FindNext(Info) <> 0;
+    finally
+      SysUtils.FindClose(Info);
+    end;
+    Names.Sort;
+    for Name in Names do
+      if AddResources(IncludeTrailingPathDelimiter(Dir) + Name) then
+        Result := True;
+    if Names.Count > 0 then
+    begin
+      Names.Clear;
+      if FindFirst(IncludeTrailingPathDelimiter(Dir) + 'maps' + PathDelim + '*.resources', faAnyFile, Info) = 0 then
+      try
+        repeat
+          Names.Add(Info.Name);
+        until FindNext(Info) <> 0;
+      finally
+        SysUtils.FindClose(Info);
+      end;
+      Names.Sort;
+      for Name in Names do
+        AddResources(IncludeTrailingPathDelimiter(Dir) + 'maps' + PathDelim + Name);
+      WritelnLog('Doom3Files', 'Doom 3 BFG data: %d files in the .resources containers of "%s" (%d images)',
+        [FEntries.Count, Dir, FBfgImages.Count]);
+    end;
   finally
     Names.Free;
   end;
@@ -557,7 +872,7 @@ end;
 
 function TDoom3FileSystem.FileExists(const APath: String): Boolean;
 begin
-  Result := FIndex.ContainsKey(NormalizeD3Path(APath));
+  Result := FIndex.ContainsKey(NormalizeD3Path(APath)) or (FBfg and (BfgGenerated(APath) <> ''));
 end;
 
 function TDoom3FileSystem.ReadZipEntry(const Entry: TDoom3FileEntry): TMemoryStream;
@@ -641,7 +956,12 @@ var
 begin
   Result := nil;
   if not FindEntry(APath, Entry) then
+  begin
+    { Doom 3 BFG: an image or a sound from its generated binary }
+    if FBfg and Assigned(BfgConvertHook) and (BfgGenerated(APath) <> '') then
+      Result := BfgConvertHook(NormalizeD3Path(APath));
     Exit;
+  end;
   Start := Timer;
   Inc(ProfileReadCount);
   Source := FSources[Entry.SourceIndex];
@@ -657,6 +977,9 @@ begin
       end;
       Result := Mem;
     end else
+    if Source.IsResources then
+      Result := ReadResourceEntry(Entry)
+    else
       Result := ReadZipEntry(Entry);
   except
     on E: Exception do
@@ -696,6 +1019,11 @@ begin
     if ((Prefix = '') or (Copy(Key, 1, Length(Prefix)) = Prefix)) and
        ((Ext = '') or (ExtractFileExt(Key) = Ext)) then
       Result.Add(Key);
+  { Doom 3 BFG: the maps are binary .bproc files }
+  if FBfg and (Ext = '.proc') then
+    for Key in FIndex.Keys do
+      if (ExtractFileExt(Key) = '.bproc') and (Copy(Key, 1, 10 + Length(Prefix)) = 'generated/' + Prefix) then
+        Result.Add(ChangeFileExt(Copy(Key, 11, MaxInt), '.proc'));
   Result.Sort;
 end;
 

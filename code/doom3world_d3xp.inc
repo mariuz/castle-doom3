@@ -474,7 +474,16 @@ begin
           FEntities.AddOrSetValue(LowerCase(Other.Name), Other);
           FHandles.AddOrSetValue(LowerCase(Other.Name), FMap.MapFile.Entities.Count);
           EventResult := D3EntityValue(FMap.MapFile.Entities.Count);
-          Unsupported('sys.spawn of ' + ArgStr(0) + ' (the entity exists for scripts; no model, light or AI is made)');
+          if SameText(ArgStr(0), 'func_fx') then
+          begin
+            { idEntityFx with "start": it plays where the script puts it }
+            if Other.BoolValue('start') and (Other.Value('fx') <> '') then
+            begin
+              SetLength(FSpawnedFx, Length(FSpawnedFx) + 1);
+              FSpawnedFx[High(FSpawnedFx)] := Other;
+            end;
+          end else
+            Unsupported('sys.spawn of ' + ArgStr(0) + ' (the entity exists for scripts; no model, light or AI is made)');
         end;
       'onSignal', 'clearSignalThread', 'clearSignal':
         { signals (a blocked mover...) aren't raised here: the threads
@@ -644,8 +653,31 @@ begin
             FTriggers[I].Disabled := N = 'Off';
             Result := True;
           end;
+        if not Result then
+          Unsupported(Format('event "%s" on %s (%s)', [N, E.Name, E.ClassName_]));
+      end;
+    { entities that are only a place (targets, relays, spawned ones): the
+      map entity keeps what the script sets }
+    'setOrigin', 'setWorldOrigin':
+      E.SetValue('origin', Format('%g %g %g', [Args[0].V.X, Args[0].V.Y, Args[0].V.Z], DefaultFormatSettings));
+    'setAngles':
+      E.SetValue('angle', Format('%g', [Args[0].V.Y], DefaultFormatSettings));
+    'setShaderParm':
+      E.SetValue('shaderParm' + IntToStr(Round(ArgF(0))), Format('%g', [ArgF(1)], DefaultFormatSettings));
+    'setShaderParms', 'setColor':
+      ;
+    'startSoundShader', 'startSound':
+      begin
+        S := ArgStr(0);
+        if E.Value(S) <> '' then
+          S := E.Value(S);
+        PlaySoundAt(S, D3ToCge(E.Origin));
+        EventResult := D3FloatValue(0);
       end;
     else
-      Result := False;
+      begin
+        Unsupported(Format('event "%s" on %s (%s)', [N, E.Name, E.ClassName_]));
+        Result := False;
+      end;
   end;
 end;

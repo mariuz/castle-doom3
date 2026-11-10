@@ -56,6 +56,9 @@ type
     destructor Destroy; override;
     function LoadLwo(const Stream: TStream): Boolean;
     function LoadAse(const Text: String): Boolean;
+    { Doom 3 BFG's binary version of either (generated/rendermodels/*.blwo,
+      *.base): a render model. }
+    function LoadBinary(const Stream: TStream): Boolean;
     procedure UpdateBounds;
     function TriangleCount: Integer;
     { X3D shapes for the model (fresh nodes on every call). A skin remaps
@@ -91,7 +94,7 @@ implementation
 uses
   Math,
   CastleLog, CastleUtils,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3LightEffects, Doom3Gui,
+  Doom3Files, Doom3Bfg, Doom3Lexer, Doom3Decls, Doom3MapFile, Doom3LightEffects, Doom3Gui,
   Doom3Collision;
 
 function IsStaticModelPath(const Path: String): Boolean;
@@ -1039,22 +1042,86 @@ begin
   FModels.Clear;
 end;
 
+{ The render model's surfaces are as Doom 3 draws them: clockwise from the
+  front, t down. The vertex colors count when they differ (models without
+  any have one value everywhere). }
+function TD3StaticModel.LoadBinary(const Stream: TStream): Boolean;
+var
+  R: TBfgReader;
+  Brm: TBfgModel;
+  Surf: TD3StaticSurface;
+  I, J, N: Integer;
+  Colored: Boolean;
+begin
+  Result := False;
+  R := TBfgReader.Create(Stream, False);
+  try
+    if not BfgReadModel(R, Brm) then
+      Exit;
+  finally
+    R.Free;
+  end;
+  for I := 0 to High(Brm.Surfaces) do
+  begin
+    N := Length(Brm.Surfaces[I].Verts);
+    if (N = 0) or (Length(Brm.Surfaces[I].Indexes) < 3) then
+      Continue;
+    Surf := TD3StaticSurface.Create;
+    Surfaces.Add(Surf);
+    Surf.Material := Brm.Surfaces[I].Material;
+    SetLength(Surf.Positions, N);
+    SetLength(Surf.TexCoords, N);
+    Colored := False;
+    for J := 0 to N - 1 do
+    begin
+      Surf.Positions[J] := Brm.Surfaces[I].Verts[J].Position;
+      Surf.TexCoords[J] := Vector2(Brm.Surfaces[I].Verts[J].ST.X, 1 - Brm.Surfaces[I].Verts[J].ST.Y);
+      if (J > 0) and (PCardinal(@Brm.Surfaces[I].Verts[J].Color[0])^ <> PCardinal(@Brm.Surfaces[I].Verts[0].Color[0])^) then
+        Colored := True;
+    end;
+    if Colored then
+    begin
+      SetLength(Surf.Colors, N);
+      for J := 0 to N - 1 do
+        Surf.Colors[J] := Vector4(Brm.Surfaces[I].Verts[J].Color[0] / 255, Brm.Surfaces[I].Verts[J].Color[1] / 255,
+          Brm.Surfaces[I].Verts[J].Color[2] / 255, Brm.Surfaces[I].Verts[J].Color[3] / 255);
+    end;
+    N := Length(Brm.Surfaces[I].Indexes) div 3;
+    SetLength(Surf.Indexes, N * 3);
+    for J := 0 to N - 1 do
+    begin
+      Surf.Indexes[J * 3] := Brm.Surfaces[I].Indexes[J * 3];
+      Surf.Indexes[J * 3 + 1] := Brm.Surfaces[I].Indexes[J * 3 + 2];
+      Surf.Indexes[J * 3 + 2] := Brm.Surfaces[I].Indexes[J * 3 + 1];
+    end;
+  end;
+  UpdateBounds;
+  Result := Surfaces.Count > 0;
+end;
+
 function TD3StaticModelCache.Model(const Path: String): TD3StaticModel;
 var
   Key: String;
   Stream: TStream;
-  Ok: Boolean;
+  Ok, Binary: Boolean;
 begin
   Key := NormalizeD3Path(Path);
   if FModels.TryGetValue(Key, Result) then
     Exit;
   Result := nil;
   Stream := D3Fs.OpenFile(Key);
+  { Doom 3 BFG: only the binary version }
+  Binary := Stream = nil;
+  if Binary then
+    Stream := D3Fs.OpenGenerated(Key);
   if Stream <> nil then
   try
     Result := TD3StaticModel.Create;
     Result.Name := Key;
     try
+      if Binary then
+        Ok := Result.LoadBinary(Stream)
+      else
       if LowerCase(ExtractFileExt(Key)) = '.lwo' then
         Ok := Result.LoadLwo(Stream)
       else

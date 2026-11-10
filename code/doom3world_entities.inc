@@ -136,10 +136,12 @@ begin
   end else
   if SC = 'idShaking' then
   begin
-    if B = nil then
+    { (a brush, a static model or an md5 model) }
+    if TransformOf(E.Name) = nil then
       Exit;
     M := NewMisc(ekShaking);
-    M.BaseRotation := B.Scene.Rotation;
+    M.Shaken := TransformOf(E.Name);
+    M.BaseRotation := M.Shaken.Rotation;
     if M.BaseRotation.XYZ.IsZero then
       M.BaseRotation := Vector4(0, 1, 0, 0);
     M.Force := E.VectorValue('shake', Vector3(0.5, 0.5, 0.5));
@@ -513,6 +515,9 @@ var
   I: Integer;
 begin
   Feet := PlayerFeet;
+  for I := 0 to High(FSpawnedFx) do
+    StartFx(FSpawnedFx[I].Value('fx'), FSpawnedFx[I].Origin, FSpawnedFx[I].Rotation, FSpawnedFx[I]);
+  SetLength(FSpawnedFx, 0);
   for I := 0 to FMisc.Count - 1 do
   begin
     M := FMisc[I];
@@ -582,7 +587,7 @@ begin
           end;
         end;
       ekShaking:
-        if M.On and (M.Brush <> nil) and not M.Brush.Hidden then
+        if M.On and (M.Shaken <> nil) and ((M.Brush = nil) or not M.Brush.Hidden) then
         begin
           { idShaking::BeginShaking: idExtrapolate DECELSINE | NOSTOP of
             period / 4 around the spawn angles, "shake" degrees a second }
@@ -596,7 +601,7 @@ begin
             QuatFromAxisAngle(D3ToCge(Vector3(0, 1, 0)), DegToRad(M.Force.X * Amp)) *
             QuatFromAxisAngle(D3ToCge(Vector3(1, 0, 0)), DegToRad(M.Force.Z * Amp));
           R := Q.ToAxisAngle;
-          M.Brush.Scene.Rotation := R;
+          M.Shaken.Rotation := R;
         end;
       ekEarthQuake:
         begin
@@ -720,8 +725,8 @@ begin
       ekShaking:
         begin
           M.On := not M.On;
-          if not M.On and (M.Brush <> nil) then
-            M.Brush.Scene.Rotation := M.BaseRotation;
+          if not M.On and (M.Shaken <> nil) then
+            M.Shaken.Rotation := M.BaseRotation;
         end;
       ekEarthQuake:
         QuakeMisc(M, False);

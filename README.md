@@ -121,7 +121,7 @@ The Doom 3 demo (2004) has three maps of the full game, shortened: `game/demo_ma
 
 Like the full game, the demo data is id Software's: never commit it.
 
-Doom 3 BFG Edition's binary formats (`.bimage`, `.bproc`, `.bcm`) are not supported; use the original 2004 game data.
+Doom 3 BFG Edition's data works too: `-basepath "<DOOM 3 BFG folder>"` (the folder with `base\_common.resources`). Its maps, models, images, sounds and fonts are read from the `.resources` containers' binary files; its Flash menus, HUD and PDA and its Bink videos are not (the port's own HUD and menu show). Resurrection of Evil's and the Lost Mission's maps are in the same `base` (`game/erebus1`, `game/le_enpro1`...).
 
 ### Command line
 

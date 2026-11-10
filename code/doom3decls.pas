@@ -618,7 +618,8 @@ var
   F, Key, Value: String;
   L: TDoom3Lexer;
 begin
-  if (Length(S) < 5) or not SameText(Copy(S, 1, 5), '#str_') then
+  { (Doom 3 BFG also names its fonts there: "#font_an") }
+  if (Length(S) < 5) or not (SameText(Copy(S, 1, 5), '#str_') or SameText(Copy(S, 1, 6), '#font_')) then
     Exit(S);
   if LangStrings = nil then
   begin
@@ -628,7 +629,11 @@ begin
       for F in Files do
         if Pos('english', LowerCase(ExtractFileName(F))) > 0 then
         begin
-          L := TDoom3Lexer.Create(D3Fs.ReadText(F));
+          Value := D3Fs.ReadText(F);
+          { Doom 3 BFG's files start with a UTF-8 byte order mark }
+          if Copy(Value, 1, 3) = #$EF#$BB#$BF then
+            Delete(Value, 1, 3);
+          L := TDoom3Lexer.Create(Value);
           try
             if L.Peek = '{' then
               L.Next(Key);
@@ -657,7 +662,11 @@ begin
   if D3Fs.FileExists(Result) then
     Exit;
   Result := Path;
-  if not D3Fs.FileExists(Result) then
+  if D3Fs.FileExists(Result) then
+    Exit;
+  { Doom 3 BFG has every sound as a generated .idwav, read as a .wav }
+  Result := ChangeFileExt(Path, '.wav');
+  if not (D3Fs.IsBfg and D3Fs.FileExists(Result)) then
     Result := '';
 end;
 

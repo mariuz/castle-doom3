@@ -48,7 +48,7 @@ implementation
 uses
   Math,
   CastleDownload, CastleLog, CastleUriUtils, CastleTimeUtils,
-  Doom3Files, Doom3Lexer, Doom3Decls;
+  Doom3Files, Doom3Bfg, Doom3Lexer, Doom3Decls;
 
 var
   ProtocolRegistered: Boolean;
@@ -413,10 +413,104 @@ begin
   end;
 end;
 
+{ Doom 3 BFG: the image for a name without extension from its .bimage. }
+function LoadBfgImage(const AName: String): TCastleImage;
+var
+  GenPath, CoveragePath: String;
+  Face: Integer;
+  Camera: Boolean;
+  Data, Coverage: TStream;
+begin
+  Result := nil;
+  if not D3Fs.BfgImage(AName, GenPath, CoveragePath, Face, Camera) then
+    Exit;
+  Data := D3Fs.OpenFile(GenPath);
+  if Data = nil then
+    Exit;
+  Coverage := nil;
+  try
+    if CoveragePath <> '' then
+      Coverage := D3Fs.OpenFile(CoveragePath);
+    Result := BfgDecodeImage(Data, Face, Camera, Coverage);
+    if Result = nil then
+      WritelnWarning('Doom3Images', 'Cannot decode "%s"', [GenPath]);
+  finally
+    Data.Free;
+    Coverage.Free;
+  end;
+end;
+
+{ Doom 3 BFG has the results of image programs, named after them:
+  "addnormals(a, heightmap(b, 4))" is generated/images/addnormals/a/
+  heightmap/b/4 (idBinaryImage::GetGeneratedFileName). }
+function BfgProgramName(const AProgram: String): String;
+begin
+  Result := LowerCase(AProgram);
+  Result := StringReplace(Result, ' ', '', [rfReplaceAll]);
+  Result := StringReplace(Result, '.tga', '', [rfReplaceAll]);
+  Result := StringReplace(Result, '(', '/', [rfReplaceAll]);
+  Result := StringReplace(Result, ',', '/', [rfReplaceAll]);
+  Result := StringReplace(Result, ')', '', [rfReplaceAll]);
+end;
+
+{ BfgConvertHook: the .tga an image name stands for, or the .wav of a
+  sound, made from the generated binary. }
+function BfgConvert(const APath: String): TStream;
+var
+  Ext: String;
+  Img: TCastleImage;
+  Gen: TStream;
+begin
+  Result := nil;
+  Ext := ExtractFileExt(APath);
+  if Ext = '.tga' then
+  begin
+    Img := LoadBfgImage(ChangeFileExt(APath, ''));
+    if Img = nil then
+      Exit;
+    try
+      Result := TMemoryStream.Create;
+      SaveTga(Img, Result);
+      Result.Position := 0;
+    finally
+      Img.Free;
+    end;
+  end else
+  if Ext = '.wav' then
+  begin
+    Gen := D3Fs.OpenGenerated(APath);
+    if Gen = nil then
+      Exit;
+    try
+      Result := BfgDecodeSound(Gen);
+      if Result = nil then
+        WritelnWarning('Doom3Images', 'Cannot decode the sound "%s"', [APath]);
+    finally
+      Gen.Free;
+    end;
+  end;
+end;
+
 function EvaluateImageProgram(const AProgram: String; const Kind: TD3ImageKind): TCastleImage;
 var
   Lexer: TDoom3Lexer;
+  A: TCastleImage;
 begin
+  if D3Fs.IsBfg and not IsPlainName(AProgram) then
+  begin
+    A := LoadBfgImage(BfgProgramName(AProgram));
+    if A <> nil then
+    begin
+      if Kind = ikNormal then
+      begin
+        Result := ToRGB(A);
+        A.Free;
+        FlipGreen(TRGBImage(Result));
+      end else
+        Result := A;
+      Exit;
+    end;
+  end;
   Lexer := TDoom3Lexer.Create(AProgram);
   try
     Result := Evaluate(Lexer, Kind);
@@ -541,6 +635,8 @@ begin
   ProtocolRegistered := True;
 end;
 
+initialization
+  BfgConvertHook := @BfgConvert;
 finalization
   FreeAndNil(MissingImages);
   if ProtocolRegistered then

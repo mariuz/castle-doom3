@@ -80,6 +80,8 @@ type
     constructor Create;
     destructor Destroy; override;
     function LoadFromText(const Text: String): Boolean;
+    { Doom 3 BFG's binary version (generated/maps/<name>.bproc). }
+    function LoadFromBinary(const Stream: TStream): Boolean;
     { Load maps/<name>.proc from the virtual file system. }
     function LoadFromVfs(const Path: String): Boolean;
     function ModelCount: Integer;
@@ -101,7 +103,7 @@ implementation
 
 uses
   CastleLog,
-  Doom3Files;
+  Doom3Files, Doom3Bfg;
 
 { TD3ProcModel }
 
@@ -307,13 +309,168 @@ begin
   end;
 end;
 
+{ A .bproc: the magic, the number of entries, the map's name and time,
+  then entries of a type name and their data: render models ("model" and
+  "shadowModel" alike; the shadow volumes are the ones with shadow
+  vertexes), "interAreaPortals", "nodes". }
+function TD3ProcFile.LoadFromBinary(const Stream: TStream): Boolean;
+var
+  R: TBfgReader;
+  Brm: TBfgModel;
+  M: TD3ProcModel;
+  S: TD3ProcSurface;
+  SM: TD3ShadowModel;
+  Kind, ModelName, Key: String;
+  NumEntries, E, I, J, K, N: Integer;
+begin
+  Result := False;
+  R := TBfgReader.Create(Stream, False);
+  try
+    try
+      if R.BigUInt <> BfgProcMagic then
+      begin
+        WritelnWarning('Doom3Proc', 'Not a Doom 3 BFG .bproc file');
+        Exit;
+      end;
+      NumEntries := R.BigInt;
+      R.Str; { the map's name }
+      R.BigInt64; { its time }
+      for E := 0 to NumEntries - 1 do
+      begin
+        Kind := LowerCase(R.Str);
+        if (Kind = 'model') or (Kind = 'shadowmodel') then
+        begin
+          ModelName := R.Str;
+          if not BfgReadModel(R, Brm) then
+          begin
+            WritelnWarning('Doom3Proc', 'Bad model "%s" in a .bproc file', [ModelName]);
+            Exit;
+          end;
+          if (Length(Brm.Surfaces) > 0) and (Length(Brm.Surfaces[0].ShadowVerts) > 0) then
+          begin
+            SM := TD3ShadowModel.Create;
+            SM.Name := ModelName;
+            FShadowModels.Add(SM);
+            FShadowModelIndex.AddOrSetValue(LowerCase(SM.Name), SM);
+            SM.NoCaps := Brm.Surfaces[0].NoCaps;
+            SM.NoFrontCaps := Brm.Surfaces[0].NoFrontCaps;
+            N := Length(Brm.Surfaces[0].ShadowVerts);
+            SetLength(SM.Positions, N);
+            for J := 0 to N - 1 do
+              SM.Positions[J] := Brm.Surfaces[0].ShadowVerts[J];
+            N := Length(Brm.Surfaces[0].Indexes);
+            SetLength(SM.Indexes, N);
+            for J := 0 to N - 1 do
+              SM.Indexes[J] := Brm.Surfaces[0].Indexes[J];
+            Continue;
+          end;
+          M := nil;
+          for I := 0 to High(Brm.Surfaces) do
+          begin
+            N := Length(Brm.Surfaces[I].Verts);
+            if (N = 0) or (Length(Brm.Surfaces[I].Indexes) = 0) then
+              Continue;
+            if M = nil then
+            begin
+              M := TD3ProcModel.Create;
+              M.Name := ModelName;
+              FModels.Add(M);
+              FModelIndex.AddOrSetValue(LowerCase(M.Name), M);
+            end;
+            S := TD3ProcSurface.Create;
+            M.Surfaces.Add(S);
+            S.Material := Brm.Surfaces[I].Material;
+            SetLength(S.Vertexes, N);
+            for J := 0 to N - 1 do
+            begin
+              S.Vertexes[J].Position := Brm.Surfaces[I].Verts[J].Position;
+              S.Vertexes[J].ST := Brm.Surfaces[I].Verts[J].ST;
+              S.Vertexes[J].Normal := Brm.Surfaces[I].Verts[J].Normal;
+            end;
+            N := Length(Brm.Surfaces[I].Indexes);
+            SetLength(S.Indexes, N);
+            for J := 0 to N - 1 do
+              S.Indexes[J] := Brm.Surfaces[I].Indexes[J];
+          end;
+          { an area without surfaces is still an area }
+          if (M = nil) and (LowerCase(Copy(ModelName, 1, 5)) = '_area') then
+          begin
+            M := TD3ProcModel.Create;
+            M.Name := ModelName;
+            FModels.Add(M);
+            FModelIndex.AddOrSetValue(LowerCase(M.Name), M);
+          end;
+        end else
+        if Kind = 'interareaportals' then
+        begin
+          NumAreas := R.BigInt;
+          N := R.BigInt;
+          SetLength(Portals, N);
+          for I := 0 to N - 1 do
+          begin
+            K := R.BigInt;
+            Portals[I].PositiveArea := R.BigInt;
+            Portals[I].NegativeArea := R.BigInt;
+            SetLength(Portals[I].Points, K);
+            for J := 0 to K - 1 do
+              Portals[I].Points[J] := R.BigVec3;
+          end;
+        end else
+        if Kind = 'nodes' then
+        begin
+          N := R.BigInt;
+          SetLength(Nodes, N);
+          for I := 0 to N - 1 do
+          begin
+            Nodes[I].Plane.X := R.BigFloat;
+            Nodes[I].Plane.Y := R.BigFloat;
+            Nodes[I].Plane.Z := R.BigFloat;
+            Nodes[I].Plane.W := R.BigFloat;
+            Nodes[I].Children[0] := R.BigInt;
+            Nodes[I].Children[1] := R.BigInt;
+          end;
+        end else
+        begin
+          WritelnWarning('Doom3Proc', 'Unknown entry "%s" in a .bproc file', [Kind]);
+          Exit;
+        end;
+      end;
+      if NumAreas = 0 then
+        for Key in FModelIndex.Keys do
+          if Copy(Key, 1, 5) = '_area' then
+            Inc(NumAreas);
+      Result := True;
+    except
+      on Err: Exception do
+        WritelnWarning('Doom3Proc', 'Cannot read the .bproc file: %s', [Err.Message]);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
 function TD3ProcFile.LoadFromVfs(const Path: String): Boolean;
 var
   Text: String;
+  Stream: TStream;
 begin
   Text := D3Fs.ReadText(Path);
   if Text = '' then
-    Exit(False);
+  begin
+    { Doom 3 BFG: only the binary version }
+    Stream := D3Fs.OpenGenerated(Path);
+    if Stream = nil then
+      Exit(False);
+    try
+      Result := LoadFromBinary(Stream);
+    finally
+      Stream.Free;
+    end;
+    if Result then
+      WritelnLog('Doom3Proc', '"%s" (binary): %d models, %d shadow models, %d areas, %d portals, %d nodes',
+        [Path, FModels.Count, FShadowModels.Count, NumAreas, Length(Portals), Length(Nodes)]);
+    Exit;
+  end;
   Result := LoadFromText(Text);
   if Result then
     WritelnLog('Doom3Proc', '"%s": %d models, %d areas, %d portals, %d nodes',
