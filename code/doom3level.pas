@@ -397,6 +397,9 @@ type
     property TimePaused: Boolean read FTimePaused write FTimePaused;
     { Doom 3's skill level (g_skill): 0 easy, 1 medium, 2 hard, 3 nightmare. }
     class var Skill: Integer;
+    { the speed of the md5 models' animations (TD3Game: 0.25 during
+      d3xp's hell time) }
+    AnimTimeScale: Single;
     { Not spawned at the current skill (idGameLocal::InhibitEntitySpawn:
       "not_easy", "not_medium", "not_hard"; nightmare counts as hard). }
     class function EntityInhibited(const E: TD3MapEntity): Boolean;
@@ -588,6 +591,7 @@ constructor TDoom3Map.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FLastViewArea := -1;
+  AnimTimeScale := 1;
   { env CD3_LIGHT_AREAS=0: lights reach every scene (to compare) }
   FMaskLights := GetEnvironmentVariable('CD3_LIGHT_AREAS') <> '0';
   FSpawnModels := True;
@@ -2485,7 +2489,11 @@ begin
       edges takes long }
     B.Scene.CastShadows := Model.HasClosedSurface;
     B.Scene.Collides := B.Scene.PreciseCollisions;
-    B.Scene.Pickable := B.Scene.PreciseCollisions;
+    { moveables (barrels, crates, items lying around) are hit by shots:
+      by their box }
+    B.Scene.Pickable := B.Scene.PreciseCollisions or
+      (E.Value('spawnclass') = 'idMoveable') or (E.Value('spawnclass') = 'idBarrel') or
+      (E.Value('spawnclass') = 'idExplodingBarrel') or (E.Value('spawnclass') = 'idMoveableItem');
     B.Scene.Translation := D3ToCge(E.Origin);
     Rot := E.Rotation;
     SetD3Rotation(B.Scene, Rot);
@@ -3262,7 +3270,7 @@ begin
     ME.Instance.Shown := ME.Holder.Visible and ME.Holder.Exists;
     if ME.Dormant then
       Continue;
-    ME.Instance.Update(SecondsPassed);
+    ME.Instance.Update(SecondsPassed * AnimTimeScale);
     if ME.HeadInstance <> nil then
     begin
       ME.HeadInstance.Shown := ME.Instance.Shown;

@@ -1406,6 +1406,8 @@ def cm_text():
     out.append(cm_model('trigger_once_cin', box_quads((-24, -24, -56), (24, 24, 56), TRIGONCE), []))
     # the volume of trigger_hurt_1
     out.append(cm_model('trigger_hurt_1', box_quads((-24, -24, -56), (24, 24, 56), TRIGONCE), []))
+    # the volume of forcefield_1
+    out.append(cm_model('forcefield_1', box_quads((-24, -24, -40), (24, 24, 40), TRIGONCE), []))
     return '\n'.join(out) + '\n'
 
 
@@ -1676,6 +1678,32 @@ def map_text():
         # a moveable barrel, and a monster that throws it at the player once
         # activated (the vagary's chooseObjectToThrow / throwObjectAtEnemy)
         {'classname': 'moveable_test_barrel', 'name': 'moveable_barrel_1', 'origin': '470 40 0'},
+        # the smaller entity classes (code/doom3world_entities.inc), on the
+        # balcony: two exploding barrels (one sets the other off), a pane
+        # that shatters, a damagable that fires its target twice
+        {'classname': 'moveable_test_explodingbarrel', 'name': 'barrel_exp_1', 'origin': '880 -60 96'},
+        {'classname': 'moveable_test_explodingbarrel', 'name': 'barrel_exp_2', 'origin': '880 -20 96'},
+        {'classname': 'func_fracture', 'name': 'glass_1',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '880 110 96'},
+        {'classname': 'func_damagable', 'name': 'damagable_1',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '880 170 96',
+         'health': '10', 'count': '2', 'target': 'null_damagable'},
+        {'classname': 'target_null', 'name': 'null_damagable', 'origin': '880 170 150'},
+        # a lift that rests 48 below and comes up when stood on (func_plat),
+        # a force field that throws up what is in it once activated, an
+        # earthquake, an explosion, a security clearance, stamina off
+        {'classname': 'func_plat', 'name': 'plat_1',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '300 -180 48', 'height': '48'},
+        {'classname': 'func_forcefield', 'name': 'forcefield_1', 'model': 'forcefield_1',
+         'origin': '600 340 40', 'uniform': '0 0 400'},
+        {'classname': 'func_earthquake', 'name': 'quake_1', 'origin': '600 340 100',
+         'snd_quake': 'test_pain', 'wait': '2', 'random': '0'},
+        {'classname': 'func_explosion', 'name': 'explosion_1', 'origin': '680 340 30',
+         'def_damage': 'damage_test_barrelsplash', 'model': 'test_explosion.prt'},
+        {'classname': 'target_givesecurity', 'name': 'security_1', 'origin': '680 340 60',
+         'text_security': 'Test Access'},
+        {'classname': 'target_enablestamina', 'name': 'stamina_off_1', 'origin': '680 340 90',
+         'enable': '0'},
         {'classname': 'monster_test_thrower', 'name': 'blob_thrower_1', 'origin': '420 80 0',
          'angle': '-90'},
         # a character that sidesteps with its evade_left anim when activated
@@ -2710,6 +2738,63 @@ entityDef moveable_test_barrel {
 
 entityDef damage_test_moveable {
 	"damage"				"12"
+}
+
+// the smaller entity classes (code/doom3world_entities.inc)
+entityDef moveable_test_explodingbarrel {
+	"editor_usage"			"A barrel that explodes when shot (idExplodingBarrel)."
+	"spawnclass"			"idExplodingBarrel"
+	"model"					"models/mapobjects/test/barrel.lwo"
+	"bouncyness"			"0.4"
+	"health"				"20"
+	"def_splash_damage"		"damage_test_barrelsplash"
+	"model_detonate"		"test_explosion.prt"
+	"snd_explode"			"test_pain"
+}
+
+entityDef damage_test_barrelsplash {
+	"damage"				"40"
+	"radius"				"100"
+	"push"					"3000"
+}
+
+entityDef func_fracture {
+	"spawnclass"			"idBrittleFracture"
+	"snd_shatter"			"test_pain"
+}
+
+entityDef func_damagable {
+	"spawnclass"			"idDamagable"
+	"health"				"5"
+	"count"					"1"
+	"wait"					"0.1"
+}
+
+entityDef func_plat {
+	"spawnclass"			"idPlat"
+	"lip"					"8"
+}
+
+entityDef func_forcefield {
+	"spawnclass"			"idForceField"
+	"start_on"				"0"
+}
+
+entityDef func_earthquake {
+	"spawnclass"			"idEarthQuake"
+}
+
+entityDef func_explosion {
+	"spawnclass"			"idExplodable"
+	"def_damage"			"damage_test_barrelsplash"
+}
+
+entityDef target_givesecurity {
+	"spawnclass"			"idTarget_GiveSecurity"
+}
+
+entityDef target_enablestamina {
+	"spawnclass"			"idTarget_EnableStamina"
 }
 
 // the player's inventory (like player_doommarine: the full game's is used
