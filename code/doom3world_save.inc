@@ -10,13 +10,39 @@
   hidden, monsters' health / death / place, items picked up, triggers
   disabled, doors locked, the smaller entities' state, trigger counts.
 
-  Not saved yet: the script threads (a restarted map script runs its
-  beginning again), where movers are, projectiles, monsters' awareness,
-  moveables' places. }
+  The script goes on where it was: the game's clock is the saved one, the
+  threads (stacks, frames, waits) and the actors' script objects are put
+  back when the program is the same (the same number of functions and
+  global variables), with the actors' states, the doors' and script
+  movers' moves, every brush and model entity's place and the delayed
+  activations.
+
+  Not saved yet: projectiles, the weapon's script state (it is raised
+  again), elevators, particles and FX in flight, the bodies of the dead
+  (they are gone), sounds that were playing. }
 
 const
   SaveMagic = 'castle-doom3-save';
-  SaveVersion = 1;
+  SaveVersion = 2;
+
+function SaveRot(const V: TVector4): String;
+begin
+  Result := FloatToStrF(V.X, ffGeneral, 9, 0, DefaultFormatSettings) + ' ' +
+    FloatToStrF(V.Y, ffGeneral, 9, 0, DefaultFormatSettings) + ' ' +
+    FloatToStrF(V.Z, ffGeneral, 9, 0, DefaultFormatSettings) + ' ' +
+    FloatToStrF(V.W, ffGeneral, 9, 0, DefaultFormatSettings);
+end;
+
+function LoadRot(const S: String): TVector4;
+var
+  Parts: TStringArray;
+begin
+  Result := Vector4(0, 1, 0, 0);
+  Parts := Trim(S).Split([' '], TStringSplitOptions.ExcludeEmpty);
+  if Length(Parts) >= 4 then
+    Result := Vector4(StrToFloatDef(Parts[0], 0, DefaultFormatSettings), StrToFloatDef(Parts[1], 1, DefaultFormatSettings),
+      StrToFloatDef(Parts[2], 0, DefaultFormatSettings), StrToFloatDef(Parts[3], 0, DefaultFormatSettings));
+end;
 
 function SaveFloat(const F: Single): String;
 begin
@@ -113,6 +139,11 @@ var
   Mov: TD3Mover;
   M: TD3MiscEntity;
   S: String;
+  A: TD3Actor;
+  C: Integer;
+  SM: TD3ScriptMover;
+  HandlePair: specialize TPair<Integer, TD3ScriptMover>;
+  E: TD3MapEntity;
 
   procedure Add(const Fields: array of String);
   var
@@ -187,6 +218,59 @@ begin
     for Pair in FCounts do
       Add(['count', SaveText(Pair.Key), IntToStr(Pair.Value)]);
 
+    { the script's threads (the weapon's is made again when it is raised)
+      and the actors' objects and states }
+    if FScript <> nil then
+    begin
+      Add(['program', IntToStr(FScript.FunctionCount), IntToStr(FScript.GlobalCount)]);
+      FScript.SaveThreads(L, 'weapon ');
+      for A in FActors do
+      begin
+        Add(['actor', A.Model.Entity.Name, SaveText(A.StateName), SaveText(A.IdealName), IntToStr(Ord(A.HasIdeal)),
+          SaveText(A.WaitAction), IntToStr(Ord(A.Thinking)), IntToStr(Ord(A.HasEnemy)), IntToStr(Ord(A.ChaseEnemy)),
+          IntToStr(A.TalkState), IntToStr(A.TalkTarget), IntToStr(A.FocusTarget), IntToStr(Ord(A.Moving)),
+          SaveVec(A.Goal), SaveFloat(A.Yaw), SaveFloat(A.IdealYaw), IntToStr(A.MoveType), SaveVec(A.Velocity),
+          IntToStr(Ord(A.MoveDirect)), IntToStr(Ord(A.WaitMove)), SaveText(A.Attack)]);
+        for C := Low(A.Channels) to High(A.Channels) do
+          Add(['achan', A.Model.Entity.Name, IntToStr(C), SaveText(A.Channels[C].StateName),
+            SaveText(A.Channels[C].PendingName), IntToStr(Ord(A.Channels[C].HasPending)),
+            SaveText(A.Channels[C].AnimName), SaveFloat(A.Channels[C].AnimStart),
+            SaveFloat(A.Channels[C].AnimLength), IntToStr(Ord(A.Channels[C].AnimLoop))]);
+        if A.Obj <> nil then
+        begin
+          Add(['obj', A.Model.Entity.Name, IntToStr(Length(A.Obj.Fields))]);
+          for I := 0 to High(A.Obj.Fields) do
+            Add(['ov', TD3ScriptVM.ValueKind(A.Obj.Fields[I]), TD3ScriptVM.ValueText(A.Obj.Fields[I])]);
+        end;
+      end;
+    end;
+    for I := 0 to FPending.Count - 1 do
+      if FPending[I].Entity <> nil then
+        Add(['pending', FPending[I].Entity.Name, SaveFloat(FPending[I].Time)]);
+
+    { where things are }
+    for B in FMap.Brushes do
+      Add(['xb', B.Entity.Name, SaveVec(B.Scene.Translation), SaveRot(B.Scene.Rotation)]);
+    for ME in FMap.Models do
+      Add(['xm', ME.Entity.Name, SaveVec(ME.Holder.Translation), SaveRot(ME.Holder.Rotation)]);
+    for Mov in FMovers do
+      Add(['door', Mov.Brush.Entity.Name, IntToStr(Ord(Mov.State)), SaveFloat(Mov.Progress), SaveFloat(Mov.Timer),
+        IntToStr(Ord(Mov.Running)), SaveFloat(Mov.Angle), SaveFloat(Mov.Time)]);
+    for HandlePair in FScriptMovers do
+    begin
+      SM := HandlePair.Value;
+      E := HandleEntity(HandlePair.Key);
+      if E = nil then
+        Continue;
+      Add(['smover', E.Name, SaveVec(SM.Origin), SaveVec(SM.Angles),
+        SaveFloat(SM.MoveTime), SaveFloat(SM.MoveSpeed), SaveFloat(SM.AccelTime), SaveFloat(SM.DecelTime),
+        IntToStr(Ord(SM.Moving)), SaveVec(SM.MoveFrom), SaveVec(SM.MoveTo), SaveFloat(SM.MoveStart),
+        SaveFloat(SM.MoveDuration), IntToStr(Ord(SM.Rotating)), IntToStr(Ord(SM.RotContinuous)),
+        SaveVec(SM.RotFrom), SaveVec(SM.RotTo), SaveVec(SM.RotSpeed), SaveFloat(SM.RotStart),
+        SaveFloat(SM.RotDuration), IntToStr(Ord(SM.Swaying)), SaveVec(SM.SwayBase), SaveVec(SM.SwayAmplitude),
+        SaveFloat(SM.SwayStart), SaveFloat(SM.SwayQuarter)]);
+    end;
+
     { entities }
     for I := 0 to FMap.LightCount - 1 do
       if FMap.Light(I).Entity <> nil then
@@ -200,7 +284,8 @@ begin
     for Mon in FMonsters do
       if Mon.Model <> nil then
         Add(['monster', Mon.Model.Entity.Name, IntToStr(Mon.Health), IntToStr(Ord(Mon.State = msDead)),
-          SaveVec(CgeToD3(Mon.Model.Holder.Translation)), SaveFloat(Mon.Yaw)]);
+          SaveVec(CgeToD3(Mon.Model.Holder.Translation)), SaveFloat(Mon.Yaw), IntToStr(Ord(Mon.Dormant)),
+          IntToStr(Ord(Mon.State))]);
     for Item in FItems do
       if Item.PickedUp then
         Add(['picked', Item.Entity.Name]);
@@ -234,7 +319,11 @@ var
   Mov: TD3Mover;
   M: TD3MiscEntity;
   Name, Kind: String;
-  GlobalsMatch, ObjectivesCleared: Boolean;
+  GlobalsMatch, ObjectivesCleared, ProgramMatch, ThreadsBegun: Boolean;
+  A, ObjActor: TD3Actor;
+  C, ObjIndex: Integer;
+  SM: TD3ScriptMover;
+  Pending: TD3PendingTargets;
 
   function Field(const Index: Integer): String;
   begin
@@ -269,6 +358,10 @@ begin
     FEmails.Clear;
     FVideos.Clear;
     ObjectivesCleared := False;
+    ProgramMatch := False;
+    ThreadsBegun := False;
+    ObjActor := nil;
+    ObjIndex := 0;
     GlobalsMatch := False;
     GlobalCount := 0;
     Slot := -1;
@@ -278,6 +371,170 @@ begin
       Kind := Field(0);
       Name := Field(1);
       case Kind of
+        'time':
+          begin
+            { the saved clock: the threads' and movers' times are on it }
+            FTime := LoadFloat(Field(1));
+            if FScript <> nil then
+              FScript.SetTime(FTime);
+          end;
+        'program':
+          begin
+            ProgramMatch := (FScript <> nil) and (FScript.FunctionCount = FieldInt(1)) and
+              (FScript.GlobalCount = FieldInt(2));
+            if not ProgramMatch then
+              WritelnWarning('Doom3World', 'The saved game''s script program isn''t this one: its threads aren''t restored');
+          end;
+        'threadnext', 'thread', 'tf', 'tv':
+          if ProgramMatch then
+          begin
+            if not ThreadsBegun then
+            begin
+              FScript.BeginRestoreThreads;
+              FPending.Clear;
+              ThreadsBegun := True;
+            end;
+            FScript.RestoreThreadLine(P);
+          end;
+        'actor':
+          if ProgramMatch then
+            for A in FActors do
+              if A.Model.Entity.Name = Name then
+              begin
+                A.StateName := LoadText(Field(2));
+                A.IdealName := LoadText(Field(3));
+                A.HasIdeal := FieldInt(4) <> 0;
+                A.IdealFunction := nil;
+                if A.HasIdeal and (A.Obj <> nil) then
+                  A.IdealFunction := A.Obj.Typ.FindMethodToRun(A.IdealName);
+                if A.IdealFunction = nil then
+                  A.HasIdeal := False;
+                A.WaitAction := LoadText(Field(5));
+                A.Thinking := FieldInt(6) <> 0;
+                A.HasEnemy := FieldInt(7) <> 0;
+                A.ChaseEnemy := FieldInt(8) <> 0;
+                A.TalkState := FieldInt(9);
+                A.TalkTarget := FieldInt(10);
+                A.FocusTarget := FieldInt(11);
+                A.Moving := FieldInt(12) <> 0;
+                A.Goal := LoadVec(Field(13));
+                A.Yaw := LoadFloat(Field(14));
+                A.IdealYaw := LoadFloat(Field(15));
+                A.MoveType := FieldInt(16);
+                A.Velocity := LoadVec(Field(17));
+                A.MoveDirect := FieldInt(18) <> 0;
+                A.WaitMove := FieldInt(19) <> 0;
+                A.Attack := LoadText(Field(20));
+                Break;
+              end;
+        'achan':
+          if ProgramMatch then
+            for A in FActors do
+              if A.Model.Entity.Name = Name then
+              begin
+                C := FieldInt(2);
+                if (C >= Low(A.Channels)) and (C <= High(A.Channels)) then
+                begin
+                  A.Channels[C].StateName := LoadText(Field(3));
+                  A.Channels[C].PendingName := LoadText(Field(4));
+                  A.Channels[C].HasPending := FieldInt(5) <> 0;
+                  A.Channels[C].PendingFunction := nil;
+                  if A.Channels[C].HasPending and (A.Obj <> nil) then
+                    A.Channels[C].PendingFunction := A.Obj.Typ.FindMethodToRun(A.Channels[C].PendingName);
+                  if A.Channels[C].PendingFunction = nil then
+                    A.Channels[C].HasPending := False;
+                  A.Channels[C].AnimName := LoadText(Field(6));
+                  A.Channels[C].AnimStart := LoadFloat(Field(7));
+                  A.Channels[C].AnimLength := LoadFloat(Field(8));
+                  A.Channels[C].AnimLoop := FieldInt(9) <> 0;
+                  { the model shows the animation again (from its start) }
+                  if A.Channels[C].AnimName <> '' then
+                    A.Model.Instance.PlayAnim(A.Channels[C].AnimName, A.Channels[C].AnimLoop);
+                end;
+                Break;
+              end;
+        'obj':
+          begin
+            ObjActor := nil;
+            ObjIndex := 0;
+            if ProgramMatch then
+              for A in FActors do
+                if (A.Model.Entity.Name = Name) and (A.Obj <> nil) and (Length(A.Obj.Fields) = FieldInt(2)) then
+                  ObjActor := A;
+          end;
+        'ov':
+          begin
+            if (ObjActor <> nil) and (ObjIndex <= High(ObjActor.Obj.Fields)) then
+              ObjActor.Obj.Fields[ObjIndex] := TD3ScriptVM.ValueFrom(Field(1), Field(2));
+            Inc(ObjIndex);
+          end;
+        'pending':
+          if ProgramMatch then
+          begin
+            Pending.Entity := FindEntity(Name);
+            Pending.Time := LoadFloat(Field(2));
+            if Pending.Entity <> nil then
+              FPending.Add(Pending);
+          end;
+        'xb':
+          begin
+            B := FMap.FindBrush(Name);
+            if B <> nil then
+            begin
+              B.Scene.Translation := LoadVec(Field(2));
+              B.Scene.Rotation := LoadRot(Field(3));
+            end;
+          end;
+        'xm':
+          begin
+            ME := FMap.FindModelEntity(Name);
+            if ME <> nil then
+            begin
+              ME.Holder.Translation := LoadVec(Field(2));
+              ME.Holder.Rotation := LoadRot(Field(3));
+            end;
+          end;
+        'door':
+          for Mov in FMovers do
+            if Mov.Brush.Entity.Name = Name then
+            begin
+              Mov.State := TD3DoorState(FieldInt(2));
+              Mov.Progress := LoadFloat(Field(3));
+              Mov.Timer := LoadFloat(Field(4));
+              Mov.Running := FieldInt(5) <> 0;
+              Mov.Angle := LoadFloat(Field(6));
+              Mov.Time := LoadFloat(Field(7));
+            end;
+        'smover':
+          begin
+            SM := ScriptMover(EntityHandle(FindEntity(Name)));
+            if SM <> nil then
+            begin
+              SM.Origin := LoadVec(Field(2));
+              SM.Angles := LoadVec(Field(3));
+              SM.MoveTime := LoadFloat(Field(4));
+              SM.MoveSpeed := LoadFloat(Field(5));
+              SM.AccelTime := LoadFloat(Field(6));
+              SM.DecelTime := LoadFloat(Field(7));
+              SM.Moving := FieldInt(8) <> 0;
+              SM.MoveFrom := LoadVec(Field(9));
+              SM.MoveTo := LoadVec(Field(10));
+              SM.MoveStart := LoadFloat(Field(11));
+              SM.MoveDuration := LoadFloat(Field(12));
+              SM.Rotating := FieldInt(13) <> 0;
+              SM.RotContinuous := FieldInt(14) <> 0;
+              SM.RotFrom := LoadVec(Field(15));
+              SM.RotTo := LoadVec(Field(16));
+              SM.RotSpeed := LoadVec(Field(17));
+              SM.RotStart := LoadFloat(Field(18));
+              SM.RotDuration := LoadFloat(Field(19));
+              SM.Swaying := FieldInt(20) <> 0;
+              SM.SwayBase := LoadVec(Field(21));
+              SM.SwayAmplitude := LoadVec(Field(22));
+              SM.SwayStart := LoadFloat(Field(23));
+              SM.SwayQuarter := LoadFloat(Field(24));
+            end;
+          end;
         'player':
           begin
             FTeleportPending := True;
@@ -379,6 +636,11 @@ begin
                 Mon.Health := FieldInt(2);
                 Mon.Model.Holder.Translation := D3ToCge(LoadVec(Field(4)));
                 Mon.Yaw := LoadFloat(Field(5));
+                if Length(P) > 7 then
+                begin
+                  Mon.Dormant := FieldInt(6) <> 0;
+                  Mon.State := TD3MonsterState(FieldInt(7));
+                end;
               end;
               Break;
             end;
@@ -430,6 +692,37 @@ begin
         if (MiscOf(E) = nil) and (ItemOf(E) = nil) then
           B.SetHidden(False);
       end;
+    { models hidden at spawn that the save had shown (monsters woken by a
+      trigger): shown, with their monster }
+    for ME in FMap.Models do
+      if ME.Hidden and (L.IndexOf('hidden'#9 + ME.Entity.Name) < 0) then
+      begin
+        N := 0;
+        for Mon in FMonsters do
+          if Mon.Model = ME then
+          begin
+            Inc(N);
+            if Mon.State = msDead then
+              Inc(N);
+          end;
+        { (dead ones stay gone) }
+        if N >= 2 then
+          Continue;
+        ME.Hidden := False;
+        ME.Holder.Exists := True;
+        if (N = 0) and (Copy(LowerCase(ME.Entity.ClassName_), 1, 8) = 'monster_') then
+          SpawnMonster(ME);
+      end;
+    { the fresh map script's first moments (a camera, a fade) are undone:
+      the saved threads go on instead }
+    if ThreadsBegun then
+    begin
+      FCameraEntity := nil;
+      FCameraAnim := nil;
+      FFadeTime := 0;
+      FFadeTo := TVector4.Zero;
+      FFadeFrom := TVector4.Zero;
+    end;
     if (Slot >= 0) and HasWeapon(Slot) then
       SelectWeapon(Slot);
     WritelnLog('Doom3World', 'Saved game restored: %d lines, health %d, %d script variables',

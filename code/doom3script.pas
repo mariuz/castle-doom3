@@ -192,6 +192,8 @@ type
     FCompiled: Boolean;
     FFileCount: Integer;
     FCurrent: TD3ScriptThread;
+    { the thread RestoreThreadLine fills }
+    FRestoring: TD3ScriptThread;
     { #defines, kept for the files compiled later (a TMacroTable) }
     FMacros: TObject;
     procedure Emit(const Op: TD3Op; const A: Integer = 0; const B: Integer = 0);
@@ -237,6 +239,28 @@ type
     function GlobalCount: Integer;
     function GlobalAt(const Index: Integer): TD3Value;
     procedure SetGlobalAt(const Index: Integer; const Value: TD3Value);
+    { Saved games. A value as two fields (its kind, f v s or e, and its
+      text) and back. }
+    class function ValueKind(const V: TD3Value): String; static;
+    class function ValueText(const V: TD3Value): String; static;
+    class function ValueFrom(const Kind, Text: String): TD3Value; static;
+    { The threads as lines of tab separated fields: "thread" (number,
+      name, persistent, state, pc, the waits, tag, channel), then its
+      frames "tf" (function index, return pc, base, self) and stack values
+      "tv" (kind, text). Threads whose name starts with SkipPrefix aren't
+      written. }
+    procedure SaveThreads(const Lines: TStrings; const SkipPrefix: String);
+    { Before the saved threads are read: the threads that aren't
+      persistent end (the fresh map script's). }
+    procedure BeginRestoreThreads;
+    { One saved line (its fields); False when it isn't a thread's line. A
+      persistent thread is found by its name, others are made. }
+    function RestoreThreadLine(const Fields: array of String): Boolean;
+    property NextThreadNumber: Integer read FNextThread write FNextThread;
+    function FunctionIndex(const F: TD3ScriptFunction): Integer;
+    function FunctionAt(const Index: Integer): TD3ScriptFunction;
+    { the clock the threads wait by }
+    procedure SetTime(const ATime: Single);
     function FunctionCount: Integer;
     function ThreadCount: Integer;
     function ThreadByNumber(const N: Integer): TD3ScriptThread;
@@ -2618,6 +2642,210 @@ procedure TD3ScriptVM.SetGlobalAt(const Index: Integer; const Value: TD3Value);
 begin
   if (Index >= 0) and (Index < Length(FGlobals)) then
     FGlobals[Index] := Value;
+end;
+
+function SaveNumber(const F: Single): String;
+begin
+  Result := FloatToStrF(F, ffGeneral, 9, 0, DefaultFormatSettings);
+end;
+
+function SaveString(const S: String): String;
+begin
+  Result := StringReplace(S, '\', '\\', [rfReplaceAll]);
+  Result := StringReplace(Result, #9, '\t', [rfReplaceAll]);
+  Result := StringReplace(Result, #13, '', [rfReplaceAll]);
+  Result := StringReplace(Result, #10, '\n', [rfReplaceAll]);
+end;
+
+function LoadString(const S: String): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  I := 1;
+  while I <= Length(S) do
+  begin
+    if (S[I] = '\') and (I < Length(S)) then
+    begin
+      Inc(I);
+      case S[I] of
+        't': Result := Result + #9;
+        'n': Result := Result + #10;
+        else Result := Result + S[I];
+      end;
+    end else
+      Result := Result + S[I];
+    Inc(I);
+  end;
+end;
+
+class function TD3ScriptVM.ValueKind(const V: TD3Value): String;
+begin
+  case V.Kind of
+    sbVector: Result := 'v';
+    sbString: Result := 's';
+    sbEntity: Result := 'e';
+    else Result := 'f';
+  end;
+end;
+
+class function TD3ScriptVM.ValueText(const V: TD3Value): String;
+begin
+  case V.Kind of
+    sbVector: Result := SaveNumber(V.V.X) + ' ' + SaveNumber(V.V.Y) + ' ' + SaveNumber(V.V.Z);
+    sbString: Result := SaveString(V.S);
+    sbEntity: Result := IntToStr(V.E);
+    else Result := SaveNumber(V.F);
+  end;
+end;
+
+class function TD3ScriptVM.ValueFrom(const Kind, Text: String): TD3Value;
+var
+  Parts: TStringArray;
+begin
+  case Kind of
+    'v':
+      begin
+        Result := D3VectorValue(TVector3.Zero);
+        Parts := Trim(Text).Split([' '], TStringSplitOptions.ExcludeEmpty);
+        if Length(Parts) >= 3 then
+          Result := D3VectorValue(Vector3(StrToFloatDef(Parts[0], 0, DefaultFormatSettings),
+            StrToFloatDef(Parts[1], 0, DefaultFormatSettings), StrToFloatDef(Parts[2], 0, DefaultFormatSettings)));
+      end;
+    's': Result := D3StringValue(LoadString(Text));
+    'e': Result := D3EntityValue(StrToIntDef(Text, 0));
+    else Result := D3FloatValue(StrToFloatDef(Trim(Text), 0, DefaultFormatSettings));
+  end;
+end;
+
+function TD3ScriptVM.FunctionIndex(const F: TD3ScriptFunction): Integer;
+begin
+  if F = nil then
+    Result := -1
+  else
+    Result := FFunctions.IndexOf(F);
+end;
+
+function TD3ScriptVM.FunctionAt(const Index: Integer): TD3ScriptFunction;
+begin
+  if (Index >= 0) and (Index < FFunctions.Count) then
+    Result := FFunctions[Index]
+  else
+    Result := nil;
+end;
+
+procedure TD3ScriptVM.SetTime(const ATime: Single);
+begin
+  FTime := ATime;
+end;
+
+procedure TD3ScriptVM.SaveThreads(const Lines: TStrings; const SkipPrefix: String);
+var
+  T: TD3ScriptThread;
+  I: Integer;
+begin
+  Lines.Add('threadnext'#9 + IntToStr(FNextThread));
+  for T in FThreads do
+  begin
+    if (SkipPrefix <> '') and (Copy(T.Name, 1, Length(SkipPrefix)) = SkipPrefix) then
+      Continue;
+    Lines.Add('thread'#9 + IntToStr(T.Number) + #9 + SaveString(T.Name) + #9 + IntToStr(Ord(T.Persistent)) + #9 +
+      IntToStr(Ord(T.State)) + #9 + IntToStr(T.PC) + #9 + SaveNumber(T.WaitUntil) + #9 +
+      IntToStr(T.WaitEntity) + #9 + IntToStr(T.WaitThread) + #9 + IntToStr(T.Tag) + #9 + IntToStr(T.Channel));
+    if T.State = tsDone then
+      Continue;
+    for I := 0 to T.FrameCount - 1 do
+      Lines.Add('tf'#9 + IntToStr(FunctionIndex(T.Frames[I].Func)) + #9 + IntToStr(T.Frames[I].ReturnPC) + #9 +
+        IntToStr(T.Frames[I].Base) + #9 + IntToStr(T.Frames[I].Self));
+    for I := 0 to T.Top - 1 do
+      Lines.Add('tv'#9 + ValueKind(T.Stack[I]) + #9 + ValueText(T.Stack[I]));
+  end;
+end;
+
+procedure TD3ScriptVM.BeginRestoreThreads;
+var
+  I: Integer;
+begin
+  FRestoring := nil;
+  FCurrent := nil;
+  for I := FThreads.Count - 1 downto 0 do
+    if not FThreads[I].Persistent then
+      FThreads.Delete(I);
+end;
+
+function TD3ScriptVM.RestoreThreadLine(const Fields: array of String): Boolean;
+var
+  T: TD3ScriptThread;
+  Name: String;
+
+  function Field(const Index: Integer): String;
+  begin
+    if Index <= High(Fields) then
+      Result := Fields[Index]
+    else
+      Result := '';
+  end;
+
+begin
+  Result := True;
+  case Field(0) of
+    'threadnext': FNextThread := StrToIntDef(Field(1), FNextThread);
+    'thread':
+      begin
+        Name := LoadString(Field(2));
+        FRestoring := nil;
+        if Field(3) = '1' then
+        begin
+          { an actor's or a weapon's own thread, made at its spawn }
+          for T in FThreads do
+            if T.Persistent and (T.Name = Name) then
+              FRestoring := T;
+          if FRestoring = nil then
+            Exit;
+        end else
+        begin
+          FRestoring := TD3ScriptThread.Create;
+          FRestoring.Name := Name;
+          SetLength(FRestoring.Stack, 64);
+          SetLength(FRestoring.Frames, 8);
+          FThreads.Add(FRestoring);
+        end;
+        FRestoring.Number := StrToIntDef(Field(1), FRestoring.Number);
+        FRestoring.State := TD3ScriptThreadState(StrToIntDef(Field(4), Ord(tsDone)));
+        FRestoring.PC := StrToIntDef(Field(5), 0);
+        FRestoring.WaitUntil := StrToFloatDef(Field(6), 0, DefaultFormatSettings);
+        FRestoring.WaitEntity := StrToIntDef(Field(7), 0);
+        FRestoring.WaitThread := StrToIntDef(Field(8), 0);
+        FRestoring.Tag := StrToIntDef(Field(9), 0);
+        FRestoring.Channel := StrToIntDef(Field(10), 0);
+        FRestoring.Top := 0;
+        FRestoring.FrameCount := 0;
+      end;
+    'tf':
+      if FRestoring <> nil then
+      begin
+        if FRestoring.FrameCount >= Length(FRestoring.Frames) then
+          SetLength(FRestoring.Frames, FRestoring.FrameCount * 2 + 8);
+        FRestoring.Frames[FRestoring.FrameCount].Func := FunctionAt(StrToIntDef(Field(1), -1));
+        FRestoring.Frames[FRestoring.FrameCount].ReturnPC := StrToIntDef(Field(2), -1);
+        FRestoring.Frames[FRestoring.FrameCount].Base := StrToIntDef(Field(3), 0);
+        FRestoring.Frames[FRestoring.FrameCount].Self := StrToIntDef(Field(4), 0);
+        { a frame without its function can't run }
+        if FRestoring.Frames[FRestoring.FrameCount].Func = nil then
+          FRestoring.State := tsDone;
+        Inc(FRestoring.FrameCount);
+      end;
+    'tv':
+      if FRestoring <> nil then
+      begin
+        if FRestoring.Top >= Length(FRestoring.Stack) then
+          SetLength(FRestoring.Stack, FRestoring.Top * 2 + 64);
+        FRestoring.Stack[FRestoring.Top] := ValueFrom(Field(1), Field(2));
+        Inc(FRestoring.Top);
+      end;
+    else
+      Result := False;
+  end;
 end;
 
 function TD3ScriptVM.FunctionCount: Integer;
