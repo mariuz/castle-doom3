@@ -7774,10 +7774,13 @@ var
   Game: TD3Game;
   Far: TVector3;
   Saved: String;
-  I: Integer;
+  I, J, Threads: Integer;
+  SavedTime: Single;
   T: TD3MiscEntity;
 begin
   Saved := '';
+  Threads := 0;
+  SavedTime := 0;
   for I := 0 to 1 do
   begin
     World := TCastleRootTransform.Create(nil);
@@ -7802,11 +7805,17 @@ begin
         Game.Update(0.05, D3ToCge(Vector3(0, -210, 0)) + Vector3(0, PlayerEyeHeight, 0));
         Game.Update(0.05, D3ToCge(Vector3(0, -210, 0)) + Vector3(0, PlayerEyeHeight, 0));
         Check(Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'the armor was picked up before saving');
-        Map.SetLightOn(Map.FindLight('light_trig'), True);
+        { (the trigger walked into below switches light_trig on) }
         Game.Activate(Game.FindEntity('security_1'));
         T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
         Game.DamageMiscAt(T.Brush.Scene.BoundingBox.Center, 50, 'damage_test_hurt');
         Game.Update(0.05, Far);
+        { the trigger's script function ran, the map's script waits }
+        for J := 1 to 30 do
+          Game.Update(0.05, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+        CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the trigger''s script function ran before saving');
+        Threads := Game.Script.ThreadCount;
+        SavedTime := Game.Time;
         Saved := Game.SaveState('testmap');
         CheckEquals('testmap', TD3Game.SavedMapName(Saved), 'the saved game names its map');
         CheckEquals('', TD3Game.SavedMapName('something else'), 'other text is not a saved game');
@@ -7818,11 +7827,19 @@ begin
         CheckEquals(61, Game.Health, 'restored health');
         Check(Game.Armor > 35, 'restored armor (the pickup''s and the given)');
         Check(Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'the armor stays picked up');
-        Check(Map.Light(Map.FindLight('light_trig')).StartOn, 'the light stays on');
+        Check(Map.Light(Map.FindLight('light_trig')).StartOn, 'the light the trigger switched on stays on');
         CheckEquals('Test Access', Game.Security, 'the clearance');
         T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
         Check(T.Dead and T.Brush.Hidden, 'the barrel stays exploded');
         Check(not Game.MiscOf(Game.FindEntity('glass_1')).Dead, 'the pane is whole');
+        { the script goes on: its variables, threads and clock }
+        CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the script''s variable');
+        CheckEquals(Threads, Game.Script.ThreadCount, 'the script''s threads');
+        CheckNear(SavedTime, Game.Time, 'the game''s clock', 0.001);
+        for J := 1 to 20 do
+          Game.Update(0.05, Far);
+        CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the restored threads run on without starting over');
+        Check(Game.Script.ThreadCount > 0, 'threads still run');
       end;
     finally
       FreeAndNil(Game);
