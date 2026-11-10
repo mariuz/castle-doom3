@@ -17,13 +17,17 @@
   movers' moves, every brush and model entity's place and the delayed
   activations.
 
-  Not saved yet: projectiles, the weapon's script state (it is raised
-  again), elevators, particles and FX in flight, the bodies of the dead
-  (they are gone), sounds that were playing. }
+  Also: projectiles in flight (made again from their defs), the weapon in
+  the hand with its script thread and object, elevators, the lights'
+  shader parameters (colors) and fades, which speakers play, god and
+  notarget (the view adds noclip). The dead lie where they died: a body
+  that was there falls again as a ragdoll at its place.
+
+  Not saved: particles and FX in flight, one-shot sounds, decals. }
 
 const
   SaveMagic = 'castle-doom3-save';
-  SaveVersion = 2;
+  SaveVersion = 3;
 
 function SaveRot(const V: TVector4): String;
 begin
@@ -144,6 +148,10 @@ var
   SM: TD3ScriptMover;
   HandlePair: specialize TPair<Integer, TD3ScriptMover>;
   E: TD3MapEntity;
+  Proj: TD3Projectile;
+  El: TD3Elevator;
+  Sp: TD3Speaker;
+  Info: TD3LightInfo;
 
   procedure Add(const Fields: array of String);
   var
@@ -223,7 +231,19 @@ begin
     if FScript <> nil then
     begin
       Add(['program', IntToStr(FScript.FunctionCount), IntToStr(FScript.GlobalCount)]);
-      FScript.SaveThreads(L, 'weapon ');
+      FScript.SaveThreads(L, '');
+      { the weapon in the hand: its script object and state }
+      if (FWeapon <> nil) and (FWeapon.Slot = Slot) then
+      begin
+        Add(['wstate', FWeapon.DefName, SaveText(FWeapon.StateName), SaveText(FWeapon.IdealName),
+          IntToStr(Ord(FWeapon.HasIdeal)), IntToStr(Ord(FWeapon.Status)), SaveFloat(FWeapon.AnimDoneTime)]);
+        if FWeapon.Obj <> nil then
+        begin
+          Add(['wobj', FWeapon.DefName, IntToStr(Length(FWeapon.Obj.Fields))]);
+          for I := 0 to High(FWeapon.Obj.Fields) do
+            Add(['wv', TD3ScriptVM.ValueKind(FWeapon.Obj.Fields[I]), TD3ScriptVM.ValueText(FWeapon.Obj.Fields[I])]);
+        end;
+      end;
       for A in FActors do
       begin
         Add(['actor', A.Model.Entity.Name, SaveText(A.StateName), SaveText(A.IdealName), IntToStr(Ord(A.HasIdeal)),
@@ -271,10 +291,30 @@ begin
         SaveFloat(SM.SwayStart), SaveFloat(SM.SwayQuarter)]);
     end;
 
+    Add(['cheats', IntToStr(Ord(God)), IntToStr(Ord(NoTarget))]);
+    for Proj in FProjectiles do
+      if (Proj.HeldBy = nil) and (Proj.HeldByWeapon = nil) and (Proj.DefName <> '') then
+        Add(['projectile', Proj.DefName, SaveText(Proj.Owner), SaveVec(Proj.Position), SaveVec(Proj.Velocity),
+          SaveFloat(Proj.Fuse), IntToStr(Ord(Proj.Resting)), SaveFloat(Proj.Pitch), SaveFloat(Proj.Yaw)]);
+    for El in FElevators do
+      Add(['elevator', El.Entity.Name, IntToStr(Ord(El.State)), IntToStr(El.CurrentFloor), IntToStr(El.PendingFloor),
+        IntToStr(El.LastFloor), IntToStr(Ord(El.ControlsDisabled)), SaveFloat(El.RetryAt), SaveFloat(El.ArriveAt),
+        SaveFloat(El.ReturnAt), SaveFloat(El.LastTouch), IntToStr(El.RetryFloor)]);
+    for Sp in FSpeakers do
+      if Sp.Looping then
+        Add(['speaker', Sp.Entity.Name, IntToStr(Ord(Sp.Source.Sound <> nil))]);
+
     { entities }
     for I := 0 to FMap.LightCount - 1 do
       if FMap.Light(I).Entity <> nil then
-        Add(['light', FMap.Light(I).Entity.Name, IntToStr(Ord(FMap.Light(I).StartOn))]);
+      begin
+        Info := FMap.Light(I);
+        Add(['light', Info.Entity.Name, IntToStr(Ord(Info.StartOn))]);
+        S := '';
+        for C := 0 to High(Info.Parms.Parms) do
+          S := S + SaveFloat(Info.Parms.Parms[C]) + ' ';
+        Add(['lightparms', Info.Entity.Name, Trim(S), SaveFloat(Info.Fade)]);
+      end;
     for B in FMap.Brushes do
       if B.Hidden then
         Add(['hidden', B.Entity.Name]);
@@ -324,6 +364,12 @@ var
   C, ObjIndex: Integer;
   SM: TD3ScriptMover;
   Pending: TD3PendingTargets;
+  Proj: TD3Projectile;
+  El: TD3Elevator;
+  Sp: TD3Speaker;
+  Info: TD3LightInfo;
+  Parts: TStringArray;
+  WeaponObj: Boolean;
 
   function Field(const Index: Integer): String;
   begin
@@ -362,6 +408,7 @@ begin
     ThreadsBegun := False;
     ObjActor := nil;
     ObjIndex := 0;
+    WeaponObj := False;
     GlobalsMatch := False;
     GlobalCount := 0;
     Slot := -1;
@@ -547,6 +594,103 @@ begin
           begin
             WeaponBits := Cardinal(StrToInt64Def(Field(1), 0));
             Slot := FieldInt(2);
+            { the saved weapon is in the hand at once: its thread and object
+              follow }
+            if (Slot >= 0) and HasWeapon(Slot) and ((FWeapon = nil) or (FWeapon.Slot <> Slot)) then
+            begin
+              if FWeapon <> nil then
+              begin
+                DropHeldProjectile(FWeapon);
+                if (FScript <> nil) and (FWeapon.Thread <> nil) then
+                  FScript.FreeThread(FWeapon.Thread);
+                FreeAndNil(FWeapon);
+              end;
+              FIdealSlot := Slot;
+              FWeapon := SpawnWeapon(Slot);
+            end;
+          end;
+        'wstate':
+          if ProgramMatch and (FWeapon <> nil) and (FWeapon.DefName = Name) then
+          begin
+            FWeapon.StateName := LoadText(Field(2));
+            FWeapon.IdealName := LoadText(Field(3));
+            FWeapon.HasIdeal := FieldInt(4) <> 0;
+            FWeapon.IdealFunction := nil;
+            if FWeapon.HasIdeal and (FWeapon.Obj <> nil) then
+              FWeapon.IdealFunction := FWeapon.Obj.Typ.FindMethodToRun(FWeapon.IdealName);
+            if FWeapon.IdealFunction = nil then
+              FWeapon.HasIdeal := False;
+            FWeapon.Status := TD3WeaponStatus(FieldInt(5));
+            FWeapon.AnimDoneTime := LoadFloat(Field(6));
+          end;
+        'wobj':
+          begin
+            WeaponObj := ProgramMatch and (FWeapon <> nil) and (FWeapon.DefName = Name) and
+              (FWeapon.Obj <> nil) and (Length(FWeapon.Obj.Fields) = FieldInt(2));
+            ObjIndex := 0;
+          end;
+        'wv':
+          begin
+            if WeaponObj and (ObjIndex <= High(FWeapon.Obj.Fields)) then
+              FWeapon.Obj.Fields[ObjIndex] := TD3ScriptVM.ValueFrom(Field(1), Field(2));
+            Inc(ObjIndex);
+          end;
+        'cheats':
+          begin
+            God := FieldInt(1) <> 0;
+            NoTarget := FieldInt(2) <> 0;
+          end;
+        'projectile':
+          begin
+            Proj := SpawnProjectile(Name, LoadText(Field(2)), LoadVec(Field(3)), LoadVec(Field(4)));
+            if Proj <> nil then
+            begin
+              Proj.Position := LoadVec(Field(3));
+              Proj.Velocity := LoadVec(Field(4));
+              Proj.Fuse := LoadFloat(Field(5));
+              Proj.Resting := FieldInt(6) <> 0;
+              Proj.Pitch := LoadFloat(Field(7));
+              Proj.Yaw := LoadFloat(Field(8));
+            end;
+          end;
+        'elevator':
+          for El in FElevators do
+            if El.Entity.Name = Name then
+            begin
+              El.State := TD3ElevatorState(FieldInt(2));
+              El.CurrentFloor := FieldInt(3);
+              El.PendingFloor := FieldInt(4);
+              El.LastFloor := FieldInt(5);
+              El.ControlsDisabled := FieldInt(6) <> 0;
+              El.RetryAt := LoadFloat(Field(7));
+              El.ArriveAt := LoadFloat(Field(8));
+              El.ReturnAt := LoadFloat(Field(9));
+              El.LastTouch := LoadFloat(Field(10));
+              El.RetryFloor := FieldInt(11);
+            end;
+        'speaker':
+          for Sp in FSpeakers do
+            if (Sp.Entity.Name = Name) and Sp.Looping then
+            begin
+              if (FieldInt(2) <> 0) and (Sp.Source.Sound = nil) then
+                Sp.Source.Sound := Sp.Sound
+              else
+              if (FieldInt(2) = 0) and (Sp.Source.Sound <> nil) then
+                Sp.Source.Sound := nil;
+            end;
+        'lightparms':
+          begin
+            I := FMap.FindLight(Name);
+            if I >= 0 then
+            begin
+              Info := FMap.Light(I);
+              Parts := Trim(Field(2)).Split([' '], TStringSplitOptions.ExcludeEmpty);
+              for C := 0 to Min(High(Parts), High(Info.Parms.Parms)) do
+                if Abs(Info.Parms.Parms[C] - LoadFloat(Parts[C])) > 0.0001 then
+                  FMap.SetLightParm(I, C, LoadFloat(Parts[C]));
+              if Abs(Info.Fade - LoadFloat(Field(3))) > 0.0001 then
+                FMap.SetLightFade(I, LoadFloat(Field(3)));
+            end;
           end;
         'clip':
           for I := 0 to High(WeaponDefs) do
@@ -627,10 +771,21 @@ begin
             begin
               if FieldInt(3) <> 0 then
               begin
-                { dead: gone (the body isn't kept) }
-                if Mon.State <> msDead then
-                  RemoveEntity(Mon.Model.Entity);
+                { dead: its body (unless it was gone: hidden above) lies
+                  where it died, falling there again as a ragdoll }
+                Mon.Model.Holder.Translation := D3ToCge(LoadVec(Field(4)));
+                Mon.Yaw := LoadFloat(Field(5));
                 Mon.Health := Min(0, FieldInt(2));
+                Mon.State := msDead;
+                Mon.StateTime := 1000;
+                Mon.Dormant := False;
+                if not Mon.Model.Hidden and Mon.Model.Holder.Exists then
+                begin
+                  if RagdollEnabled then
+                    MonsterRagdoll(Mon, TVector3.Zero)
+                  else
+                    RemoveEntity(Mon.Model.Entity);
+                end;
               end else
               begin
                 Mon.Health := FieldInt(2);

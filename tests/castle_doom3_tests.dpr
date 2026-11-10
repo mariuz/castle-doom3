@@ -7814,6 +7814,13 @@ begin
         for J := 1 to 30 do
           Game.Update(0.05, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
         CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the trigger''s script function ran before saving');
+        { a light's color, a projectile in flight, a monster's body, god }
+        Map.SetLightParm(Map.FindLight('light_1'), 0, 0.25);
+        Game.SpawnProjectile('projectile_test', 'blob_1', D3ToCge(Vector3(-100, -100, 60)), D3ToCge(Vector3(0, 1, 0)));
+        Game.DamageMonster(Game.Monsters[0], 1000, '', Vector3(1, 0, 0));
+        Game.God := True;
+        Game.Update(0.05, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
+        Check(Game.Projectiles.Count > 0, 'a projectile flies before saving');
         Threads := Game.Script.ThreadCount;
         SavedTime := Game.Time;
         Saved := Game.SaveState('testmap');
@@ -7832,6 +7839,11 @@ begin
         T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
         Check(T.Dead and T.Brush.Hidden, 'the barrel stays exploded');
         Check(not Game.MiscOf(Game.FindEntity('glass_1')).Dead, 'the pane is whole');
+        CheckNear(0.25, Map.Light(Map.FindLight('light_1')).Parms.Parms[0], 'the light''s color', 0.001);
+        Check(Game.Projectiles.Count > 0, 'the projectile flies again');
+        Check(Game.God, 'god mode');
+        Check(Game.Monsters[0].State = msDead, 'the monster stays dead');
+        Check(Game.Monsters[0].Model.Holder.Exists and (Game.Monsters[0].Ragdoll <> nil), 'its body lies there as a ragdoll');
         { the script goes on: its variables, threads and clock }
         CheckNear(1, Game.Script.GlobalValue('trigger_calls').F, 'the script''s variable');
         CheckEquals(Threads, Game.Script.ThreadCount, 'the script''s threads');
