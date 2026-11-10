@@ -4350,6 +4350,11 @@ scriptEvent void    waitFor( entity mover );
 scriptEvent void    waitFrame();
 scriptEvent void    print( string text );
 scriptEvent void    trigger( entity ent );
+scriptEvent void    setSpawnArg( string key, string value );
+scriptEvent entity  spawn( string classname );
+scriptEvent void    setOrigin( vector origin );
+scriptEvent void    projectileCreateProjectile( entity owner, vector start, vector dir );
+scriptEvent void    projectileLaunchProjectile( vector start, vector dir, vector pushVelocity );
 scriptEvent float   getTime();
 
 // entity events
@@ -4654,6 +4659,20 @@ void lift_loop() {
 // the test panel GUI's button (runScript "test_gui_clicked")
 void test_gui_clicked() {
 	sys.print( "GUI clicked\\n" );
+}
+
+// sys.spawn: a monster with its AI, placed by the script, and a projectile
+// (console "call test_spawn")
+void test_spawn() {
+    entity ent;
+    sys.setSpawnArg( "name", "blob_spawned_1" );
+    ent = sys.spawn( "monster_test_scripted" );
+    ent.setOrigin( '420 -100 0' );
+    sys.setSpawnArg( "name", "ball_spawned_1" );
+    ent = sys.spawn( "projectile_test" );
+    ent.projectileCreateProjectile( $blob_spawned_1, '420 -100 40', '0 -1 0' );
+    ent.projectileLaunchProjectile( '420 -100 40', '0 -1 0', '0 0 0' );
+    sys.print( "spawned\\n" );
 }
 
 void test_trigger_called() {

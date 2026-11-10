@@ -396,6 +396,8 @@ var
   E, Other: TD3MapEntity;
   B: TD3BrushEntity;
   GS: TD3GuiSurface;
+  ME: TD3ModelEntity;
+  Proj: TD3Projectile;
   Light, I: Integer;
   V, Dir, Normal: TVector3;
   Dist, Len: Single;
@@ -483,7 +485,22 @@ begin
               FSpawnedFx[High(FSpawnedFx)] := Other;
             end;
           end else
-            Unsupported('sys.spawn of ' + ArgStr(0) + ' (the entity exists for scripts; no model, light or AI is made)');
+          begin
+            { its entityDef's keys and md5 model; a monster gets its AI
+              (idAI's spawn), the script places it afterwards }
+            ME := FMap.SpawnModelEntity(Other);
+            if (ME <> nil) and (Other.Value('spawnclass') = 'idAI') then
+            begin
+              if Copy(LowerCase(Other.ClassName_), 1, 8) = 'monster_' then
+                SpawnMonster(ME);
+              if SpawnActor(ME) <> nil then
+                WritelnLog('Doom3World', 'Script spawned %s (%s) with its AI', [Other.Name, Other.ClassName_])
+              else
+                WritelnLog('Doom3World', 'Script spawned %s (%s)', [Other.Name, Other.ClassName_]);
+            end else
+            if Other.Value('spawnclass') <> 'idProjectile' then
+              Unsupported('sys.spawn of ' + ArgStr(0) + ' (the entity exists for scripts; no light or behavior is made)');
+          end;
         end;
       'onSignal', 'clearSignalThread', 'clearSignal':
         { signals (a blocked mover...) aren't raised here: the threads
@@ -655,6 +672,26 @@ begin
           end;
         if not Result then
           Unsupported(Format('event "%s" on %s (%s)', [N, E.Name, E.ClassName_]));
+      end;
+    { a projectile a script spawned (idProjectile's Create and Launch
+      events): it flies from the start along the direction at its def's
+      speed, plus the push velocity }
+    'projectileCreateProjectile':
+      ;
+    'projectileLaunchProjectile':
+      begin
+        Def := Decls.EntityDef(E.ClassName_);
+        Dir := Args[1].V;
+        if Dir.Length > 0.0001 then
+          Dir := Dir.Normalize;
+        V := TVector3.Zero;
+        if Def <> nil then
+          V := ParseVector3(Def.Values['velocity'], TVector3.Zero);
+        Proj := SpawnProjectile(E.ClassName_, E.Name, D3ToCge(Args[0].V), D3ToCge(Dir * V.X + Args[2].V));
+        if Proj <> nil then
+          WritelnLog('Doom3World', 'Script launched the projectile %s (%s)', [E.Name, E.ClassName_])
+        else
+          Result := False;
       end;
     { entities that are only a place (targets, relays, spawned ones): the
       map entity keeps what the script sets }

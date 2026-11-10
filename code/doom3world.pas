@@ -1144,6 +1144,7 @@ type
     procedure UpdateScriptMovers;
     function HandleEntity(const Handle: Integer): TD3MapEntity;
     procedure SpawnActors;
+    function SpawnActor(const ME: TD3ModelEntity): TD3Actor;
     function FindActor(const Handle: Integer): TD3Actor;
     function ActorChannel(const A: TD3Actor; const Channel: Single): TD3ActorChannel;
     procedure ActorAnim(const A: TD3Actor; const Channel: Single; const AnimName: String; const Loop: Boolean);
@@ -1593,6 +1594,8 @@ type
     property Carried: TStringList read FCarried;
     { inventory as text, for the console }
     function InventoryStatus: String;
+    { Run a script function in a new thread (console "call"). }
+    procedure RunScriptFunction(const AName: String);
     { Saved games (doom3world_save.inc): the state as text, and back onto
       the freshly spawned map it was saved in. }
     function SaveState(const AMapName: String): String;
@@ -5946,6 +5949,11 @@ begin
     [FMovers.Count, FMonsters.Count, Dormant, Hidden, FSpeakers.Count, FTriggers.Count, FBindings.Count]);
 end;
 
+procedure TD3Game.RunScriptFunction(const AName: String);
+begin
+  CallScript(AName, 'the console');
+end;
+
 function TD3Game.SpawnMonster(const ME: TD3ModelEntity): TD3Monster;
 begin
   Result := TD3Monster.Create;
@@ -7550,9 +7558,8 @@ begin
   Result := nil;
 end;
 
-procedure TD3Game.SpawnActors;
+function TD3Game.SpawnActor(const ME: TD3ModelEntity): TD3Actor;
 var
-  ME: TD3ModelEntity;
   E: TD3MapEntity;
   T, Character: TD3ScriptType;
   A: TD3Actor;
@@ -7562,99 +7569,115 @@ var
   SName: String;
   Mon, M: TD3Monster;
 begin
+  Result := nil;
   if FScript = nil then
     Exit;
   Character := FScript.FindType('character');
   MonsterCount := 0;
+  E := ME.Entity;
+  { characters, and monsters whose script object is supported; cinematic
+    characters just play their anim (Activate) }
+  if (E.Value('spawnclass') <> 'idAI') or E.BoolValue('cinematic') then
+    Exit;
+  T := FScript.FindType(E.Value('scriptobject'));
+  if T = nil then
+    Exit;
+  IsMonster := Copy(LowerCase(E.ClassName_), 1, 8) = 'monster_';
+  if IsMonster then
+  begin
+    Supported := False;
+    for SName in ScriptedMonsterObjects do
+      if (FScript.FindType(SName) <> nil) and T.IsA(FScript.FindType(SName)) then
+        Supported := True;
+    if not Supported then
+      Exit;
+  end else
+  if (Character = nil) or not T.IsA(Character) then
+    Exit;
+  A := TD3Actor.Create;
+  A.Model := ME;
+  A.Handle := EntityHandle(E);
+  A.Obj := TD3ScriptObject.Create(T);
+  A.Thinking := True;
+  A.MeleeRange := E.FloatValue('melee_range', 64);
+  { idAI::Spawn's flying settings (it reads fly_bob_vert into the
+    horizontal bob and fly_bob_horz into the vertical one) }
+  A.MoveType := MoveTypeAnim;
+  A.FlySpeed := E.FloatValue('fly_speed', 100);
+  A.FlyOffset := E.FloatValue('fly_offset', 0);
+  A.FlyBobStrength := E.FloatValue('fly_bob_strength', 50);
+  A.FlyBobHorz := E.FloatValue('fly_bob_vert', 2);
+  A.FlyBobVert := E.FloatValue('fly_bob_horz', 2.7);
+  A.FlySeekScale := E.FloatValue('fly_seek_scale', 4);
+  A.FlyRollScale := E.FloatValue('fly_roll_scale', 90);
+  A.FlyRollMax := E.FloatValue('fly_roll_max', 60);
+  A.FlyPitchScale := E.FloatValue('fly_pitch_scale', 45);
+  A.FlyPitchMax := E.FloatValue('fly_pitch_max', 30);
+  { look_joint <joint> = pitch yaw roll shares of the look angles }
+  for I := 0 to E.Pairs.Count - 1 do
+    if SameText(Copy(E.Pairs.Names[I], 1, 11), 'look_joint ') then
+    begin
+      J := ME.Instance.Model.JointIndex(Trim(Copy(E.Pairs.Names[I], 12, MaxInt)));
+      if J < 0 then
+        Continue;
+      LookScale := ParseVector3(E.Pairs.ValueFromIndex[I], TVector3.Zero);
+      SetLength(A.LookJoints, Length(A.LookJoints) + 1);
+      A.LookJoints[High(A.LookJoints)].Joint := J;
+      A.LookJoints[High(A.LookJoints)].Scale := Vector2(LookScale.X, LookScale.Y);
+    end;
+  LookScale := ParseVector3(E.Value('look_min'), Vector3(-80, -180, 0));
+  A.LookMin := Vector2(LookScale.X, LookScale.Y);
+  LookScale := ParseVector3(E.Value('look_max'), Vector3(80, 180, 0));
+  A.LookMax := Vector2(LookScale.X, LookScale.Y);
+  A.HeadFocusRate := E.FloatValue('head_focus_rate', 0.1);
+  ME.Instance.OnFrameCommand := @ActorFrameCommand;
+  if ME.HeadInstance <> nil then
+    ME.HeadInstance.OnFrameCommand := @ActorFrameCommand;
+  if IsMonster then
+  begin
+    { health and shots: the game's monster, its simple AI off }
+    Mon := nil;
+    for M in FMonsters do
+      if M.Model = ME then
+        Mon := M;
+    if Mon = nil then
+      Mon := SpawnMonster(ME);
+    Mon.Actor := A;
+    Mon.Dormant := False;
+    A.Monster := Mon;
+    Inc(MonsterCount);
+  end;
+  A.Yaw := E.Angle;
+  A.IdealYaw := A.Yaw;
+  A.TurnRate := E.FloatValue('turn_rate', 360);
+  A.Main := FScript.NewPersistentThread(E.Name + ' state');
+  A.Main.Tag := A.Handle;
+  for C := Low(A.Channels) to High(A.Channels) do
+  begin
+    A.Channels[C].Thread := FScript.NewPersistentThread(E.Name + ' anim ' + IntToStr(C));
+    A.Channels[C].Thread.Tag := A.Handle;
+    A.Channels[C].Thread.Channel := C;
+  end;
+  { idActor::ConstructScriptObject: the object's init in the main thread }
+  FScript.RestartThread(A.Main, T.FindMethodToRun('init'), A.Handle);
+  FActors.Add(A);
+  Result := A;
+end;
+
+procedure TD3Game.SpawnActors;
+var
+  ME: TD3ModelEntity;
+  A: TD3Actor;
+  MonsterCount: Integer;
+begin
+  if FScript = nil then
+    Exit;
+  MonsterCount := 0;
   for ME in FMap.Models do
   begin
-    E := ME.Entity;
-    { characters, and monsters whose script object is supported; cinematic
-      characters just play their anim (Activate) }
-    if (E.Value('spawnclass') <> 'idAI') or E.BoolValue('cinematic') then
-      Continue;
-    T := FScript.FindType(E.Value('scriptobject'));
-    if T = nil then
-      Continue;
-    IsMonster := Copy(LowerCase(E.ClassName_), 1, 8) = 'monster_';
-    if IsMonster then
-    begin
-      Supported := False;
-      for SName in ScriptedMonsterObjects do
-        if (FScript.FindType(SName) <> nil) and T.IsA(FScript.FindType(SName)) then
-          Supported := True;
-      if not Supported then
-        Continue;
-    end else
-    if (Character = nil) or not T.IsA(Character) then
-      Continue;
-    A := TD3Actor.Create;
-    A.Model := ME;
-    A.Handle := EntityHandle(E);
-    A.Obj := TD3ScriptObject.Create(T);
-    A.Thinking := True;
-    A.MeleeRange := E.FloatValue('melee_range', 64);
-    { idAI::Spawn's flying settings (it reads fly_bob_vert into the
-      horizontal bob and fly_bob_horz into the vertical one) }
-    A.MoveType := MoveTypeAnim;
-    A.FlySpeed := E.FloatValue('fly_speed', 100);
-    A.FlyOffset := E.FloatValue('fly_offset', 0);
-    A.FlyBobStrength := E.FloatValue('fly_bob_strength', 50);
-    A.FlyBobHorz := E.FloatValue('fly_bob_vert', 2);
-    A.FlyBobVert := E.FloatValue('fly_bob_horz', 2.7);
-    A.FlySeekScale := E.FloatValue('fly_seek_scale', 4);
-    A.FlyRollScale := E.FloatValue('fly_roll_scale', 90);
-    A.FlyRollMax := E.FloatValue('fly_roll_max', 60);
-    A.FlyPitchScale := E.FloatValue('fly_pitch_scale', 45);
-    A.FlyPitchMax := E.FloatValue('fly_pitch_max', 30);
-    { look_joint <joint> = pitch yaw roll shares of the look angles }
-    for I := 0 to E.Pairs.Count - 1 do
-      if SameText(Copy(E.Pairs.Names[I], 1, 11), 'look_joint ') then
-      begin
-        J := ME.Instance.Model.JointIndex(Trim(Copy(E.Pairs.Names[I], 12, MaxInt)));
-        if J < 0 then
-          Continue;
-        LookScale := ParseVector3(E.Pairs.ValueFromIndex[I], TVector3.Zero);
-        SetLength(A.LookJoints, Length(A.LookJoints) + 1);
-        A.LookJoints[High(A.LookJoints)].Joint := J;
-        A.LookJoints[High(A.LookJoints)].Scale := Vector2(LookScale.X, LookScale.Y);
-      end;
-    LookScale := ParseVector3(E.Value('look_min'), Vector3(-80, -180, 0));
-    A.LookMin := Vector2(LookScale.X, LookScale.Y);
-    LookScale := ParseVector3(E.Value('look_max'), Vector3(80, 180, 0));
-    A.LookMax := Vector2(LookScale.X, LookScale.Y);
-    A.HeadFocusRate := E.FloatValue('head_focus_rate', 0.1);
-    ME.Instance.OnFrameCommand := @ActorFrameCommand;
-    if ME.HeadInstance <> nil then
-      ME.HeadInstance.OnFrameCommand := @ActorFrameCommand;
-    if IsMonster then
-    begin
-      { health and shots: the game's monster, its simple AI off }
-      Mon := nil;
-      for M in FMonsters do
-        if M.Model = ME then
-          Mon := M;
-      if Mon = nil then
-        Mon := SpawnMonster(ME);
-      Mon.Actor := A;
-      Mon.Dormant := False;
-      A.Monster := Mon;
+    A := SpawnActor(ME);
+    if (A <> nil) and (A.Monster <> nil) then
       Inc(MonsterCount);
-    end;
-    A.Yaw := E.Angle;
-    A.IdealYaw := A.Yaw;
-    A.TurnRate := E.FloatValue('turn_rate', 360);
-    A.Main := FScript.NewPersistentThread(E.Name + ' state');
-    A.Main.Tag := A.Handle;
-    for C := Low(A.Channels) to High(A.Channels) do
-    begin
-      A.Channels[C].Thread := FScript.NewPersistentThread(E.Name + ' anim ' + IntToStr(C));
-      A.Channels[C].Thread.Tag := A.Handle;
-      A.Channels[C].Thread.Channel := C;
-    end;
-    { idActor::ConstructScriptObject: the object's init in the main thread }
-    FScript.RestartThread(A.Main, T.FindMethodToRun('init'), A.Handle);
-    FActors.Add(A);
   end;
   if FActors.Count > 0 then
     WritelnLog('Doom3World', 'Actors: %d run their AI scripts (%d monsters)', [FActors.Count, MonsterCount]);

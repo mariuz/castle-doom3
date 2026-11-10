@@ -1992,6 +1992,9 @@ begin
     Console.Print(S);
     WritelnLog('Inventory', LineEnding + S);
   end else
+  if Cmd = 'call' then
+    FGame.RunScriptFunction(Trim(Args))
+  else
   if Cmd = 'savegame' then
     SaveGame(Trim(Args))
   else

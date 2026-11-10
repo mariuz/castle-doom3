@@ -2366,7 +2366,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(45, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(46, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -7715,6 +7715,57 @@ begin
   end;
 end;
 
+{ sys.spawn: a monster made by a script has its model and AI, a projectile
+  flies. }
+procedure TestScriptSpawn;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  I, Monsters, Models: Integer;
+  ME: TD3ModelEntity;
+  RemoveMe: TRemoveType;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for sys.spawn');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-200, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Eye);
+    Monsters := Game.Monsters.Count;
+    Models := Map.Models.Count;
+    Check(Game.FindEntity('blob_spawned_1') = nil, 'nothing spawned yet');
+    Game.RunScriptFunction('test_spawn');
+    for I := 1 to 4 do
+    begin
+      Game.Update(0.05, Eye);
+      Map.Update(0.05, RemoveMe);
+    end;
+    Check(Game.FindEntity('blob_spawned_1') <> nil, 'the script''s monster is an entity');
+    CheckEquals(Models + 1, Map.Models.Count, 'it has an md5 model');
+    CheckEquals(Monsters + 1, Game.Monsters.Count, 'it is a monster');
+    ME := Map.FindModelEntity('blob_spawned_1');
+    Check(ME <> nil, 'find the spawned model');
+    if ME <> nil then
+    begin
+      CheckVectorNear(D3ToCge(Vector3(420, -100, 0)), ME.Holder.Translation, 'the script placed it', 1);
+      Check(Game.Monsters[Game.Monsters.Count - 1].Actor <> nil, 'it runs its AI script');
+      CheckEquals('monster_test', ME.Entity.Value('scriptobject'), 'it has its entityDef''s keys');
+    end;
+    Check(Game.FindEntity('ball_spawned_1') <> nil, 'the script''s projectile is an entity');
+    Check(Game.Projectiles.Count > 0, 'the projectile flies');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { Saved games: the state of one game put onto a freshly spawned one. }
 procedure TestSaveLoad;
 var
@@ -7860,6 +7911,7 @@ begin
   TestWeaponPresentation;
   TestPlayerMotion;
   TestDamageFeedback;
+  TestScriptSpawn;
   TestSaveLoad;
   TestBfg;
   TestPowerups;
