@@ -104,6 +104,72 @@ begin
   end;
 end;
 
+{ The fighting playthrough ---------------------------------------------------- }
+
+function TD3Game.FightTarget(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
+  out Target: TVector3; out TargetName: String): Boolean;
+var
+  Mon: TD3Monster;
+  Best, Dist: Single;
+  Awake: Boolean;
+begin
+  Result := False;
+  Best := MaxDist;
+  Target := TVector3.Zero;
+  TargetName := '';
+  for Mon in FMonsters do
+  begin
+    if (Mon.State = msDead) or (Mon.Health <= 0) or (Mon.Model = nil) or Mon.Model.Hidden or
+       not Mon.Model.Holder.Exists or Mon.Dormant or Mon.Model.Dormant then
+      Continue;
+    if Mon.Actor <> nil then
+      Awake := Mon.Actor.HasEnemy
+    else
+      Awake := Mon.State in [msChase, msAttack];
+    if not Awake then
+      Continue;
+    if Pos(',' + Mon.Model.Entity.Name + ',', ',' + Ignore + ',') > 0 then
+      Continue;
+    Dist := PointsDistance(Eye, Mon.Center);
+    if (Dist < Best) and CanSee(Eye, Mon.Center) then
+    begin
+      Best := Dist;
+      Target := Mon.Center;
+      TargetName := Mon.Model.Entity.Name;
+      Result := True;
+    end;
+  end;
+end;
+
+function TD3Game.BestFightSlot: Integer;
+const
+  { the strongest first; the rocket launcher, grenades and the BFG hurt
+    the player up close, the chainsaw and the fists need to be there }
+  Order: array [0..5] of String = ('chaingun', 'plasmagun', 'machinegun', 'shotgun', 'pistol', 'fists');
+var
+  I, Slot: Integer;
+  Def: TStringList;
+  AmmoType: String;
+begin
+  Result := -1;
+  for I := 0 to High(Order) do
+    for Slot := 0 to High(WeaponDefs) do
+      if HasWeapon(Slot) and (Pos(Order[I], LowerCase(WeaponDefs[Slot])) > 0) then
+      begin
+        Def := Decls.EntityDef(WeaponDefs[Slot]);
+        AmmoType := '';
+        if Def <> nil then
+          AmmoType := Def.Values['ammoType'];
+        if (Clip[Slot] > 0) or (AmmoType = '') or
+           (HasAmmo(AmmoType, StrToIntDef(Def.Values['ammoRequired'], 1)) <> 0) then
+          Exit(Slot);
+      end;
+  { anything it has }
+  for Slot := 0 to High(WeaponDefs) do
+    if HasWeapon(Slot) then
+      Exit(Slot);
+end;
+
 class function TD3Game.SavedMapName(const Text: String): String;
 var
   Lines: TStringList;

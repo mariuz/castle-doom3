@@ -31,6 +31,10 @@ param(
   # more demo script steps after the setup, e.g. "O:r_shadows 0"
   [string[]] $Setup = @(),
   [switch] $Route,
+  # with -Route: fight instead of walking in god mode (console "fight 1":
+  # the walk stops to shoot what comes for the player, saves every 20 s of
+  # quiet and loads the save when the player dies)
+  [switch] $Fight,
   [int] $Speed = 500,
   [int] $ShotEvery = 1500
 )
@@ -65,6 +69,10 @@ for ($I = 0; $I -lt $Spots; $I++) {
 $Steps += "Q"
 if ($Route) {
   $Steps = @("W:3", "O:skipcinematic", "W:2", "O:god", "O:noclip") + $Setup + @("O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
+  if ($Fight) {
+    $Steps = @("W:3", "O:skipcinematic", "W:2", "O:noclip") + $Setup + @("O:fight 1", "O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
+    if ($TimeoutSeconds -eq 400) { $TimeoutSeconds = 2400 }
+  }
   if ($TimeoutSeconds -eq 400) { $TimeoutSeconds = 1200 }
 }
 $Demo = $Steps -join ","
@@ -100,7 +108,7 @@ foreach ($Map in $Maps) {
   if ($Programs.Count -gt 0) { $Text += "Shader programs: $($Programs[0]) at the first screenshot, $($Programs[-1] - $Programs[0]) more during the tour" }
   $Stalls = @($Long | Where-Object { $_ -gt 0.3 })
   $Text += "Stalls over 0.3 s: $($Stalls.Count), $([Math]::Round(($Stalls | Measure-Object -Sum).Sum, 1)) s"
-  $Tours = $Lines | Select-String 'Tour \d+/|Route to|Route: done|Route: the map|Route: skipping|Loading map' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
+  $Tours = $Lines | Select-String 'Tour \d+/|Route to|Route: done|Route: the map|Route: skipping|Loading map|Fight: (summary|died|gave up|no save)|doesn''t die' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
   $Text += $Tours
   foreach ($Kind in @(
       @('Exceptions', 'Exception'),
