@@ -7715,6 +7715,71 @@ begin
   end;
 end;
 
+{ Saved games: the state of one game put onto a freshly spawned one. }
+procedure TestSaveLoad;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Far: TVector3;
+  Saved: String;
+  I: Integer;
+  T: TD3MiscEntity;
+begin
+  Saved := '';
+  for I := 0 to 1 do
+  begin
+    World := TCastleRootTransform.Create(nil);
+    Map := TDoom3Map.Create(World);
+    World.Add(Map);
+    Game := nil;
+    try
+      Check(Map.LoadMap('testmap'), 'load testmap for a saved game');
+      Game := TD3Game.Create(Map);
+      Game.Health := 100;
+      Game.Armor := 0;
+      Game.Spawn;
+      Game.NoTarget := True;
+      Far := D3ToCge(Vector3(-200, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+      Game.Update(0.05, Far);
+      if I = 0 then
+      begin
+        { the first game: hurt, armored, an item taken, a light switched,
+          a barrel exploded, a clearance }
+        Game.Health := 61;
+        Game.Give('armor', '35');
+        Game.Update(0.05, D3ToCge(Vector3(0, -210, 0)) + Vector3(0, PlayerEyeHeight, 0));
+        Game.Update(0.05, D3ToCge(Vector3(0, -210, 0)) + Vector3(0, PlayerEyeHeight, 0));
+        Check(Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'the armor was picked up before saving');
+        Map.SetLightOn(Map.FindLight('light_trig'), True);
+        Game.Activate(Game.FindEntity('security_1'));
+        T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
+        Game.DamageMiscAt(T.Brush.Scene.BoundingBox.Center, 50, 'damage_test_hurt');
+        Game.Update(0.05, Far);
+        Saved := Game.SaveState('testmap');
+        CheckEquals('testmap', TD3Game.SavedMapName(Saved), 'the saved game names its map');
+        CheckEquals('', TD3Game.SavedMapName('something else'), 'other text is not a saved game');
+        Check(not Game.RestoreState('something else'), 'other text is not restored');
+      end else
+      begin
+        Check(not Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'a fresh game has the armor');
+        Check(Game.RestoreState(Saved), 'restore the saved game');
+        CheckEquals(61, Game.Health, 'restored health');
+        Check(Game.Armor > 35, 'restored armor (the pickup''s and the given)');
+        Check(Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'the armor stays picked up');
+        Check(Map.Light(Map.FindLight('light_trig')).StartOn, 'the light stays on');
+        CheckEquals('Test Access', Game.Security, 'the clearance');
+        T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
+        Check(T.Dead and T.Brush.Hidden, 'the barrel stays exploded');
+        Check(not Game.MiscOf(Game.FindEntity('glass_1')).Dead, 'the pane is whole');
+      end;
+    finally
+      FreeAndNil(Game);
+      FreeAndNil(World);
+    end;
+  end;
+end;
+
 {$I test_bfg.inc}
 
 begin
@@ -7795,6 +7860,7 @@ begin
   TestWeaponPresentation;
   TestPlayerMotion;
   TestDamageFeedback;
+  TestSaveLoad;
   TestBfg;
   TestPowerups;
   TestStaminaSkinsKnockback;

@@ -1593,6 +1593,12 @@ type
     property Carried: TStringList read FCarried;
     { inventory as text, for the console }
     function InventoryStatus: String;
+    { Saved games (doom3world_save.inc): the state as text, and back onto
+      the freshly spawned map it was saved in. }
+    function SaveState(const AMapName: String): String;
+    function RestoreState(const Text: String): Boolean;
+    { The map of a saved game, '' if it isn't one. }
+    class function SavedMapName(const Text: String): String;
     { "give all": full health and armor, every weapon, full ammo }
     procedure GiveAll;
     { Attack once (a demo script's fire): holds WEAPON_ATTACK until the
@@ -13904,6 +13910,7 @@ end;
 
 {$I doom3world_entities.inc}
 {$I doom3world_d3xp.inc}
+{$I doom3world_save.inc}
 
 initialization
   ScriptedMonsterObjects := ['monster_zombie', 'monster_zombie_bernie', 'monster_zombie_security_pistol',
