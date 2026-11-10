@@ -566,6 +566,36 @@ type
     destructor Destroy; override;
   end;
 
+  TD3MiscKind = (ekBarrel, ekFracture, ekDamagable, ekForceField, ekShaking,
+    ekEarthQuake, ekActivator, ekShockwave, ekHarvest);
+
+  { One of the smaller entity classes (doom3world_entities.inc):
+    idExplodingBarrel, idBrittleFracture, idDamagable, idForceField,
+    idShaking, idEarthQuake, idActivator, idShockwave. }
+  TD3MiscEntity = class
+    Entity: TD3MapEntity;
+    { its brush entity or static model, nil without one }
+    Brush: TD3BrushEntity;
+    Kind: TD3MiscKind;
+    Health, Count: Integer;
+    { Dead: exploded / shattered / used up. On: the force field, the
+      shaking, the activator, the shockwave or the random earthquake runs;
+      a fracture can break. }
+    Dead, On, Burning, Disabled: Boolean;
+    { force fields: the volume (CGE), 0 uniform / 1 explosion / 2
+      implosion, the velocity (Doom 3; X the strength for modes 1 and 2);
+      shaking: the angles' speeds }
+    Box: TBox3D;
+    Mode: Integer;
+    Force: TVector3;
+    BaseRotation: TVector4;
+    { game times: a barrel's explosion, a force field's end, the next
+      random quake, when it can be triggered / damaged again, a hidden
+      damagable's return / a quake's shaking end, a shockwave's start }
+    ExplodeTime, OffTime, NextTime, NextTriggerTime, ShowTime, StartTime: Single;
+    Phase, LastRadius: Single;
+  end;
+
   TD3Moveable = class
     Brush: TD3BrushEntity;
     Velocity: TVector3;
@@ -580,6 +610,8 @@ type
     HalfSize, CenterOffset: TVector3;
     { "mass" (idMoveable: 100): a push of P changes its speed by P / Mass }
     Mass: Single;
+    { thrown by the player (the grabber): it hurts monsters until then }
+    ThrownUntil: Single;
     function Origin: TVector3;
   end;
 
@@ -789,6 +821,9 @@ type
     FLocations: array of String;
     FCombatNodes: specialize TObjectList<TD3CombatNode>;
     FMoveables: specialize TObjectList<TD3Moveable>;
+    FMisc: specialize TObjectList<TD3MiscEntity>;
+    { the last clearance of a target_givesecurity }
+    FSecurity: String;
     FItems: specialize TObjectList<TD3Item>;
     { the player's inventory (idInventory): weapons by slot (def_weaponN of
       the player def), ammo by ammo class, each weapon's clip (-1: full
@@ -863,7 +898,23 @@ type
     { the shot whose world model flash was logged }
     FWorldFlashLogged: Single;
     { powerups' end times (game time; 0: off) }
-    FPowerupEnd: array [0..3] of Single;
+    FPowerupEnd: array [0..7] of Single;
+    { doom3world_d3xp.inc: the air supply (idPlayer::UpdateAir), the
+      areas of the info_vacuum entities and the portals that block air }
+    FAirTics, FLastAirDamage, FAirCheckTime: Single;
+    FAirless, FAirCheckResult: Boolean;
+    FAirEvent: String;
+    FVacuumAreas: array of Integer;
+    FVacuumBlocked: array of Boolean;
+    { sys.trace's last result; sys.setSpawnArg's arguments }
+    FTraceFraction: Single;
+    FTraceEnd, FTraceNormal: TVector3;
+    FSpawnArgs: TStringList;
+    { the grabber (idGrabber): on, what it holds, since when, the last throw }
+    FGrabEnabled: Boolean;
+    FGrabbed: TD3Moveable;
+    FGrabStart, FGrabFired, FGrabDistance: Single;
+    FPreviousWeaponName: String;
     FBlobs: array of TD3ScreenBlob;
     FFalling: Boolean;
     FFallStartZ: Single;
@@ -1374,6 +1425,19 @@ type
       const Direction: TVector3);
 
     function PlayerDead: Boolean;
+    { the air left in percent (the HUD's player_air), and in a vacuum now }
+    function AirPercent: Integer;
+    property Airless: Boolean read FAirless;
+    { the clearance the last target_givesecurity gave }
+    property Security: String read FSecurity;
+    { "noAir" / "Air" once when the player enters / leaves a vacuum (the
+      HUD's named events), else '' }
+    function TakeAirEvent: String;
+    { 0.25 during d3xp's hell time: monsters, projectiles, movers and
+      animations run slower, the player doesn't }
+    function WorldTimeScale: Single;
+    function MiscScriptEvent(const Thread: TD3ScriptThread; const Target: Integer; const N: String;
+      const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
     { Fire the targets of E after Delay seconds (idEntity::ActivateTargets). }
     procedure ActivateTargets(const E: TD3MapEntity; const Delay: Single = 0);
     { Activate one entity (its Event_Activate), as if a trigger targeted it. }
@@ -1557,6 +1621,28 @@ type
     function BobbedViewAxis: TMatrix3;
     property BobFracSin: Single read FBobFracSin;
     function MoveableOf(const E: TD3MapEntity): TD3Moveable;
+    { doom3world_entities.inc }
+    function CmBox(const E: TD3MapEntity; out Box: TBox3D): Boolean;
+    function MiscOf(const E: TD3MapEntity): TD3MiscEntity;
+    procedure SpawnMisc(const E: TD3MapEntity);
+    procedure SpawnPlat(const B: TD3BrushEntity);
+    procedure SplashAt(const Position: TVector3; const DefName, Who: String; const Skip: TD3MiscEntity);
+    function DamageMiscAt(const Point: TVector3; const Damage: Integer; const DefName: String): Boolean;
+    procedure DamageMiscInRadius(const Position: TVector3; const Radius: Single; const Damage: Integer;
+      const DefName: String; const Skip: TD3MiscEntity);
+    procedure DamageMisc(const M: TD3MiscEntity; const Damage: Integer; const DefName: String);
+    procedure KillMisc(const M: TD3MiscEntity);
+    procedure QuakeMisc(const M: TD3MiscEntity; const BySelf: Boolean);
+    procedure UpdateMisc(const SecondsPassed: Single);
+    function ActivateMisc(const E: TD3MapEntity; const Cls, SC: String): Boolean;
+    { doom3world_d3xp.inc }
+    procedure SpawnVacuum;
+    procedure ToggleVacuumSeparator(const E: TD3MapEntity);
+    function AreaInVacuum(const Area: Integer): Boolean;
+    procedure UpdateAir(const SecondsPassed: Single);
+    function UpdateGrabber: Integer;
+    procedure UpdateThrownMoveables;
+    procedure UpdateHarvest(const M: TD3MiscEntity);
     { idMoveable::ApplyImpulse on the moveable at Point (CGE world): its
       speed changes by Impulse / mass. False when none is there. }
     function PushMoveableAt(const Point, Impulse: TVector3): Boolean;
@@ -1651,6 +1737,13 @@ const
   PowerupInvisibility = 1;
   PowerupMegaHealth = 2;
   PowerupAdrenaline = 3;
+  { Resurrection of Evil's (d3xp) }
+  PowerupInvulnerability = 4;
+  PowerupHelltime = 5;
+  PowerupEnvirosuit = 6;
+  PowerupEnvirotime = 7;
+  { pm_airTics: the air supply in 1 / 60 s (30 seconds) }
+  AirTicsMax = 1800;
   { idAI's moveType_t }
   MoveTypeDead = 0;
   MoveTypeAnim = 1;
@@ -1918,7 +2011,8 @@ end;
 function TD3GameScriptHost.CallEvent(const Thread: TD3ScriptThread; const Target: Integer;
   const Event: TD3ScriptEvent; const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
 begin
-  Result := Game.ScriptEvent(Thread, Target, Event, Args, EventResult);
+  Result := Game.ScriptEvent(Thread, Target, Event, Args, EventResult) or
+    Game.MiscScriptEvent(Thread, Target, Event.Name, Args, EventResult);
 end;
 
 constructor TD3Game.Create(const AMap: TDoom3Map);
@@ -1950,6 +2044,10 @@ begin
   FProjectiles := specialize TObjectList<TD3Projectile>.Create(True);
   FCombatNodes := specialize TObjectList<TD3CombatNode>.Create(True);
   FMoveables := specialize TObjectList<TD3Moveable>.Create(True);
+  FMisc := specialize TObjectList<TD3MiscEntity>.Create(True);
+  FSpawnArgs := TStringList.Create;
+  FAirTics := AirTicsMax;
+  FGrabDistance := 192;
   FItems := specialize TObjectList<TD3Item>.Create(True);
   FAmmo := specialize TDictionary<String, Integer>.Create;
   FCarried := TStringList.Create;
@@ -2022,6 +2120,8 @@ begin
   FProjectiles.Free;
   FCombatNodes.Free;
   FMoveables.Free;
+  FMisc.Free;
+  FSpawnArgs.Free;
   FItems.Free;
   FAmmo.Free;
   FCarried.Free;
@@ -2046,6 +2146,13 @@ begin
   FLocations := nil;
   FCombatNodes.Clear;
   FMoveables.Clear;
+  FMisc.Clear;
+  FSecurity := '';
+  FGrabbed := nil;
+  FGrabEnabled := False;
+  FGrabFired := 0;
+  FPreviousWeaponName := '';
+  FSpawnArgs.Clear;
   FBrass.Clear;
   FBrassDue := -1;
   FreeAndNil(FRagdoll);
@@ -2782,6 +2889,9 @@ begin
   if Cls = 'func_elevator' then
     SpawnElevator(B)
   else
+  if (Cls = 'func_plat') or (E.Value('spawnclass') = 'idPlat') then
+    SpawnPlat(B)
+  else
   if Cls = 'func_bobbing' then
   begin
     { idBobber::Spawn: "speed" seconds (a half cycle), "height", "phase",
@@ -3284,8 +3394,27 @@ begin
   if S = 'adrenaline' then
     Result := GivePowerUp(PowerupAdrenaline, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
   else
-  if (S = 'air') or (S = 'heartrate') then
-    { no air, heart rate yet: taken, nothing happens }
+  if S = 'helltime' then
+    Result := GivePowerUp(PowerupHelltime, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if S = 'invulnerability' then
+    Result := GivePowerUp(PowerupInvulnerability, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if S = 'envirosuit' then
+    Result := GivePowerUp(PowerupEnvirosuit, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if S = 'envirotime' then
+    Result := GivePowerUp(PowerupEnvirotime, StrToFloatDef(Trim(Value), 0, DefaultFormatSettings))
+  else
+  if S = 'air' then
+  begin
+    { idPlayer::Give: percent of the full supply (air canisters) }
+    Result := FAirTics < AirTicsMax;
+    if Result then
+      FAirTics := Min(AirTicsMax, FAirTics + StrToFloatDef(Trim(Value), 0, DefaultFormatSettings) / 100 * AirTicsMax);
+  end else
+  if S = 'heartrate' then
+    { no heart rate yet: taken, nothing happens }
     Result := True
   else
   begin
@@ -3673,6 +3802,9 @@ begin
     begin
       if FWeapon <> nil then
       begin
+        FPreviousWeaponName := FWeapon.DefName;
+        FGrabbed := nil;
+        FGrabEnabled := False;
         DropHeldProjectile(FWeapon);
         if (FScript <> nil) and (FWeapon.Thread <> nil) then
           FScript.FreeThread(FWeapon.Thread);
@@ -4151,7 +4283,11 @@ begin
     if Shader = '' then
       Shader := Arg;
     StartScriptSound(WeaponHandle, Shader, 0);
-  end;
+  end else
+  if (Cmd = 'object_call') and (FScript <> nil) and (FWeapon.Obj <> nil) and
+     (FWeapon.Obj.Typ.FindMethodToRun(Arg) <> nil) then
+    { a method of the weapon's script object (the artifact's Launch) }
+    FScript.StartThread(FWeapon.Obj.Typ.FindMethodToRun(Arg), WeaponHandle);
 end;
 
 function TD3Game.WeaponEvent(const W: TD3Weapon; const Thread: TD3ScriptThread; const N: String;
@@ -4254,6 +4390,10 @@ begin
     'getBlendFrames': EventResult := D3FloatValue(W.BlendFrames);
     'launchProjectiles':
       LaunchPlayerProjectiles(W, Round(ArgF(0)), ArgF(1), ArgF(2), ArgF(3), ArgF(4));
+    'launchProjectilesEllipse':
+      { d3xp's double barrel: ( count, spread a, spread b, fuse, power ),
+        an ellipse of pellets: its mean spread here }
+      LaunchPlayerProjectiles(W, Round(ArgF(0)), (ArgF(1) + ArgF(2)) / 2, ArgF(3), ArgF(4), 1);
     'melee': EventResult := D3FloatValue(Ord(WeaponMelee(W)));
     'getOwner': EventResult := D3EntityValue(PlayerHandle);
     'nextWeapon': NextWeapon(1);
@@ -5007,6 +5147,7 @@ begin
     { a moveable: pushed (idWeapon::Event_Melee's ApplyImpulse of "push") }
     if StrToFloatDef(Def.Values['push'], 0, DefaultFormatSettings) > 0 then
       PushMoveableAt(FPlayerEye + Dir * WallDist, Dir * StrToFloatDef(Def.Values['push'], 0, DefaultFormatSettings));
+    DamageMiscAt(FPlayerEye + Dir * WallDist, StrToIntDef(Def.Values['damage'], 10), W.MeleeDef);
   end
   else
     PlaySoundAt(Def.Values['snd_miss'], FPlayerEye);
@@ -5126,7 +5267,9 @@ begin
     { the player, anywhere along the step (idMoveable::Collide: damage
       scaled by the speed) }
     ToPlayer := Vector3(Feet.X - Center.X, Feet.Y - Center.Y, 0);
-    if not PlayerDead and (TVector3.DotProduct(M.Velocity, ToPlayer) > 0) and
+    { (not what the player holds or just threw with the grabber) }
+    if not PlayerDead and (M <> FGrabbed) and (M.ThrownUntil <= FTime) and
+       (TVector3.DotProduct(M.Velocity, ToPlayer) > 0) and
        (SegmentToPlayerDistance(D3ToCge(Center), D3ToCge(Center + Step), PlayerFeet,
           FPlayerEye) <= Radius + PlayerRadius) then
     begin
@@ -5757,11 +5900,14 @@ begin
       if (E.Value('spawnclass') = 'idItem') or (E.Value('spawnclass') = 'idMoveableItem') or
          (E.Value('spawnclass') = 'idItemPowerup') or (E.Value('spawnclass') = 'idPDAItem') or
          (E.Value('spawnclass') = 'idMoveablePDAItem') or (E.Value('spawnclass') = 'idVideoCDItem') then
-        SpawnItem(E);
+        SpawnItem(E)
+      else
+        SpawnMisc(E);
     end;
   SpawnEmitters;
   SpawnParticleDeforms;
   SpawnFuncPortals;
+  SpawnVacuum;
   PoseEnvRagdolls;
   InitInventory;
   { Doom 3 gives the player the "personal" PDA }
@@ -6130,6 +6276,9 @@ begin
     Exit;
 
   { tips, objectives, radio chatter, target_* effects (roadmap 5f) }
+  { barrels, glass, force fields, explosions... (doom3world_entities.inc) }
+  if ActivateMisc(E, Cls, E.Value('spawnclass')) then
+    Exit;
   if ActivatePlayerInfo(E, Cls) then
     Exit;
 
@@ -6507,7 +6656,7 @@ begin
           OpenTeam(Mover);
           Break;
         end;
-    Mover.Update(SecondsPassed);
+    Mover.Update(SecondsPassed * WorldTimeScale);
     { a shut door closes its area portal (like idDoor) }
     if FMap.Portals <> nil then
       for P in Mover.Portals do
@@ -6522,23 +6671,27 @@ begin
     UpdateScriptMovers;
   UpdateBindings;
   UpdateLightBindings;
-  UpdateMoveables(SecondsPassed);
+  UpdateMoveables(SecondsPassed * WorldTimeScale);
+  UpdateMisc(SecondsPassed * WorldTimeScale);
+  UpdateThrownMoveables;
+  UpdateAir(SecondsPassed);
+  FMap.AnimTimeScale := WorldTimeScale;
   UpdateItems;
   UpdatePowerUps;
   UpdateStamina(SecondsPassed);
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
-  UpdateProjectiles(SecondsPassed);
+  UpdateProjectiles(SecondsPassed * WorldTimeScale);
   UpdateBrass(SecondsPassed);
   UpdateParticles;
   UpdatePvs(PlayerEye);
   for Mon in FMonsters do
     if not CheckDormant(Mon.Model) then
-      UpdateMonster(Mon, SecondsPassed, Feet);
+      UpdateMonster(Mon, SecondsPassed * WorldTimeScale, Feet);
   UpdateTriggers(Feet);
   if (FScript <> nil) and not ScriptsPaused then
-    UpdateActors(SecondsPassed);
+    UpdateActors(SecondsPassed * WorldTimeScale);
   UpdateGuiFocus;
   UpdateTalkFocus;
   UpdateGuiCommands;
@@ -8591,7 +8744,9 @@ begin
   Count := 0;
   for E in FMap.MapFile.Entities do
   begin
-    if Copy(LowerCase(E.ClassName_), 1, 11) <> 'env_ragdoll' then
+    { (d3xp's env_harvest_* bodies lie the same way) }
+    if (Copy(LowerCase(E.ClassName_), 1, 11) <> 'env_ragdoll') and
+       (Copy(LowerCase(E.ClassName_), 1, 11) <> 'env_harvest') then
       Continue;
     ME := FMap.FindModelEntity(E.Name);
     if (ME = nil) or (ME.Instance = nil) then
@@ -8743,6 +8898,9 @@ begin
     if (ModelName = '') and (Def <> nil) then
       ModelName := Def.Values['model'];
     if not SameText(ExtractFileExt(ModelName), '.prt') then
+      Continue;
+    { an explosion shows its particles when it goes off }
+    if E.Value('spawnclass') = 'idExplodable' then
       Continue;
     Em := TD3EmitterEntity.Create;
     Em.Entity := E;
@@ -10999,6 +11157,7 @@ begin
     MonsterSplash(P.Position, P.SplashDamage, P.SplashRadius, P.SplashDefName);
   if (P.SplashPush > 0) and (P.SplashRadius > 0) then
     PushMoveablesInRadius(P.Position, P.SplashRadius, P.SplashPush);
+  DamageMiscInRadius(P.Position, P.SplashRadius, P.SplashDamage, P.SplashDefName, nil);
 end;
 
 procedure TD3Game.PushMoveablesInRadius(const Position: TVector3; const Radius, Push: Single);
@@ -11251,6 +11410,9 @@ begin
         ApplyImpulse of the damage def's "push") }
       if P.Push > 0 then
         PushMoveableAt(NewPos, P.Velocity.Normalize * P.Push);
+      { glass, barrels, damagables }
+      if P.FromPlayer then
+        DamageMiscAt(NewPos, P.Damage, P.DamageDefName);
       if P.DetonateOnWorld then
       begin
         Detonate := True;
@@ -13293,6 +13455,9 @@ begin
   Info := DamageInfo(DamageDefName, Amount);
   if (God and not Info.NoGod) or PlayerDead then
     Exit;
+  { d3xp's invulnerability (the artifact's third power) }
+  if PowerUpActive(PowerupInvulnerability) and not Info.NoGod then
+    Exit;
   Def := nil;
   if DamageDefName <> '' then
     Def := Decls.EntityDef(DamageDefName);
@@ -13513,8 +13678,9 @@ end;
 
 function TD3Game.GivePowerUp(const Powerup: Integer; const Seconds: Single): Boolean;
 const
-  DefNames: array [PowerupBerserk..PowerupAdrenaline] of String =
-    ('powerup_berserk', 'powerup_invisibility', 'powerup_megahealth', 'powerup_adrenaline');
+  DefNames: array [PowerupBerserk..PowerupEnvirotime] of String =
+    ('powerup_berserk', 'powerup_invisibility', 'powerup_megahealth', 'powerup_adrenaline',
+     'powerup_invulnerability', 'powerup_helltime', 'powerup_envirosuit', 'powerup_envirotime');
 var
   Duration: Single;
   Def: TStringList;
@@ -13539,9 +13705,14 @@ begin
     PowerupBerserk:
       begin
         PlayerSound('snd_berserk_third');
-        { the fists }
-        SelectWeapon(0);
+        { the fists (d3xp: the artifact's berserk keeps the weapon) }
+        if not PowerUpActive(PowerupHelltime) then
+          SelectWeapon(0);
       end;
+    PowerupHelltime:
+      PlayerSound('snd_helltime_start');
+    PowerupInvulnerability:
+      PlayerSound('snd_invulnerable');
     PowerupInvisibility:
       PlayerSound('snd_invisibility');
     PowerupAdrenaline:
@@ -13723,6 +13894,9 @@ function TD3Game.PlayerDead: Boolean;
 begin
   Result := Health <= 0;
 end;
+
+{$I doom3world_entities.inc}
+{$I doom3world_d3xp.inc}
 
 initialization
   ScriptedMonsterObjects := ['monster_zombie', 'monster_zombie_bernie', 'monster_zombie_security_pistol',

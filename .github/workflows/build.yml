@@ -127,7 +127,7 @@ jobs:
           grep -q 'Menu GUI "guis/mainmenu.gui" (6 windows, in game)' test_output/ingamemenu.log || { echo "::error::console menu should open the menu over the game"; exit 1; }
           grep -q 'Menu GUI: "close"' test_output/ingamemenu.log || { echo "::error::escape in the menu should close it"; exit 1; }
           run_test static testmap "W:1,G:740 -200 96,A:-45,W:0.5,S,G:-60 100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
-          grep -q "16 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
+          grep -q "21 static models" test_output/static.log || { echo "::error::static models (LWO / ASE) not loaded"; exit 1; }
           run_test clip testmap "W:1,G:-200 -100 0,A:90,W:0.3,GO:1 0 1.5,S,Q"
           grep -Eq "testmap.cm.: [0-9]+ models" test_output/clip.log || { echo "::error::collision model not loaded"; exit 1; }
           run_test portals testmap "W:1,S,G:200 0 0,A:0,W:2.2,S,A:180,W:0.2,S,Q"
@@ -204,7 +204,7 @@ jobs:
           grep -q "test_walker_1: state_Done" test_output/triggers.log || { echo "::error::the trigger should make test_walker_1 walk to its path_corner (AI script)"; exit 1; }
           grep -q "Script: testmap main" test_output/triggers.log || { echo "::error::the map script's main should run"; exit 1; }
           grep -q "test_trigger_called by trigger_once_1" test_output/triggers.log || { echo "::error::trigger_once_1's call key should run its script function"; exit 1; }
-          grep -q "Spawned 3 movers.*1 bound entities" test_output/triggers.log || { echo "::error::door_1, door_2 and spinner_1 should be movers, door_light_1 bound"; exit 1; }
+          grep -q "Spawned 4 movers.*1 bound entities" test_output/triggers.log || { echo "::error::door_1, door_2, spinner_1 and plat_1 should be movers, door_light_1 bound"; exit 1; }
           run_test cinematic testmap "W:1,O:notarget,G:340 -340 0,A:90,W:1,S,W:3.5,S,Q"
           grep "Screenshot" test_output/cinematic.log | sed -n 1p | grep -q "cinematic test_cam_1" || { echo "::error::trigger_once_cin should start the camera test_cam_1"; exit 1; }
           grep -q 'Animated animated_blob_1 plays "walk"' test_output/cinematic.log || { echo "::error::the cinematic should start the idAnimated blob"; exit 1; }

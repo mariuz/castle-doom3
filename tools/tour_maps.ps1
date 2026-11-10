@@ -1,4 +1,4 @@
-# Tour Doom 3 maps: load each one, skip its intro, and visit spots spread
+﻿# Tour Doom 3 maps: load each one, skip its intro, and visit spots spread
 # over the level (console "tour i n": the player start, then the items),
 # with two screenshots at each (along the spot's angle, then turned around).
 # The player is in god mode, noclip and notarget. Then each map's log is
@@ -23,6 +23,8 @@
 param(
   [Parameter(Mandatory = $true)] [string] $BasePath,
   [string[]] $Maps = @(),
+  # a mod directory over base, e.g. d3xp (Resurrection of Evil: its 12 maps)
+  [string] $Game = "",
   [int] $Spots = 10,
   [string] $OutDir = "tour_output",
   [int] $TimeoutSeconds = 400,
@@ -39,7 +41,11 @@ if (-not (Test-Path $Exe)) { throw "Run from the repository root after compiling
 $Log = Join-Path $env:LOCALAPPDATA "castle-doom3\castle-doom3.log"
 
 if ($Maps.Count -eq 0) {
-  if (Test-Path (Join-Path $BasePath "demo\demo00.pk4")) {
+  if ($Game -eq "d3xp") {
+    $Maps = "game/erebus1", "game/erebus2", "game/erebus3", "game/erebus4", "game/erebus5",
+      "game/erebus6", "game/phobos1", "game/phobos2", "game/phobos3", "game/phobos4",
+      "game/deltax", "game/hell"
+  } elseif (Test-Path (Join-Path $BasePath "demo\demo00.pk4")) {
     $Maps = "game/demo_mars_city1", "game/demo_mc_underground", "game/demo_mars_city2"
   } else {
     $Maps = "game/mars_city1", "game/mc_underground", "game/mars_city2", "game/admin",
@@ -68,6 +74,7 @@ $Summary = @()
 foreach ($Map in $Maps) {
   $Name = $Map -replace '[/\\]', '_'
   $Arguments = "--autotest $Map `"$OutDir\$Name`" --demo `"$Demo`" -basepath `"$BasePath`""
+  if ($Game -ne "") { $Arguments += " -game $Game" }
   $Process = Start-Process $Exe -ArgumentList $Arguments -PassThru
   if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
     Stop-Process $Process -Force

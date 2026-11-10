@@ -121,7 +121,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(53, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(66, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(76, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(4, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
@@ -789,7 +789,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(91, MapFile.Entities.Count, 'entity count');
+    CheckEquals(102, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1073,7 +1073,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(16, Cm.ModelCount, 'cm models (world + 12 brush entities + 3 triggers)');
+    CheckEquals(17, Cm.ModelCount, 'cm models (world + 12 brush entities + 3 triggers + a force field)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -3295,7 +3295,7 @@ begin
 
     { a moveable lies still until something moves it, then falls, bounces
       and rests on the floor }
-    CheckEquals(1, Game.Moveables.Count, 'one moveable (moveable_test_barrel, spawnclass idMoveable)');
+    CheckEquals(3, Game.Moveables.Count, 'three moveables (moveable_test_barrel, spawnclass idMoveable, and the two exploding barrels)');
     if Game.Moveables.Count <> 1 then
       Exit;
     Mov := Game.Moveables[0];
@@ -5271,6 +5271,129 @@ begin
     Check(not Game.MonsterSegmentCollision(D3ToCge(Vector3(-200, -20, 30)), D3ToCge(Vector3(-200, 20, 30))),
       'player clip lets monsters through');
     Check(Map.WorldCollision.Collides and not Map.MonsterCollision.Collides, 'the player''s collision restored');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+{ The smaller entity classes (doom3world_entities.inc): exploding barrels,
+  a pane that shatters, a damagable, a lift, a force field, an explosion }
+procedure TestMiscEntities;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  B1, B2, Glass, Dmg: TD3MiscEntity;
+  Plat, Mover: TD3Mover;
+  Far, Eye: TVector3;
+  I, Before, HealthBefore: Integer;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the smaller entity classes');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Far);
+
+    { idExplodingBarrel: 20 health; its splash sets the next one off }
+    B1 := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
+    B2 := Game.MiscOf(Game.FindEntity('barrel_exp_2'));
+    Check((B1 <> nil) and (B2 <> nil), 'the exploding barrels spawned');
+    if (B1 = nil) or (B2 = nil) then
+      Exit;
+    Check(B1.Kind = ekBarrel, 'an exploding barrel');
+    CheckEquals(20, B1.Health, 'barrel health');
+    Check(Game.MoveableOf(B1.Entity) <> nil, 'an exploding barrel is a moveable');
+    Check(not Game.DamageMiscAt(D3ToCge(Vector3(-200, -200, 50)), 10, 'damage_test_hurt'), 'nothing to damage there');
+    Check(Game.DamageMiscAt(B1.Brush.Scene.BoundingBox.Center, 10, 'damage_test_hurt'), 'a shot hits the barrel');
+    CheckEquals(10, B1.Health, 'barrel health after a shot');
+    Check(not B1.Dead, 'the barrel is whole');
+    Game.DamageMiscAt(B1.Brush.Scene.BoundingBox.Center, 10, 'damage_test_hurt');
+    Check(B1.Dead and B1.Brush.Hidden, 'the barrel exploded');
+    Check(not B2.Dead, 'the next barrel explodes a moment later');
+    for I := 1 to 12 do
+      Game.Update(0.05, Far);
+    Check(B2.Dead and B2.Brush.Hidden, 'the chain reaction');
+
+    { idBrittleFracture: breaks at the first damage }
+    Glass := Game.MiscOf(Game.FindEntity('glass_1'));
+    Check(Glass <> nil, 'the pane spawned');
+    if Glass <> nil then
+    begin
+      Check(not Glass.Dead, 'the pane is out of the barrels'' splash (radius 100)');
+      Game.DamageMiscAt(Glass.Brush.Scene.BoundingBox.Center, 5, 'damage_test_hurt');
+      Check(Glass.Dead and Glass.Brush.Hidden, 'the pane shattered');
+    end;
+
+    { idDamagable: its target each time its health is gone, "count" times }
+    Dmg := Game.MiscOf(Game.FindEntity('damagable_1'));
+    Check(Dmg <> nil, 'the damagable spawned');
+    if Dmg <> nil then
+    begin
+      for I := 1 to 4 do
+        Game.Update(0.05, Far);
+      Dmg.Health := 10;
+      Before := Game.ActivationCount;
+      Game.DamageMiscAt(Dmg.Brush.Scene.BoundingBox.Center, 10, 'damage_test_hurt');
+      Game.Update(0.05, Far);
+      Check(Game.ActivationCount > Before, 'the damagable fired its target');
+      Check(not Dmg.Dead, 'the damagable breaks twice');
+      CheckEquals(10, Dmg.Health, 'its health is back');
+      for I := 1 to 4 do
+        Game.Update(0.05, Far);
+      Game.DamageMiscAt(Dmg.Brush.Scene.BoundingBox.Center, 10, 'damage_test_hurt');
+      Check(Dmg.Dead, 'the damagable is used up');
+    end;
+
+    { idPlat: rests 48 below, up in a second when stood on, back after a
+      second }
+    Plat := nil;
+    for Mover in Game.Movers do
+      if Mover.Brush.Entity.Name = 'plat_1' then
+        Plat := Mover;
+    Check(Plat <> nil, 'the plat spawned');
+    if Plat <> nil then
+    begin
+      CheckNear(0, Plat.Brush.Scene.Translation.Y, 'the plat rests at the bottom', 0.01);
+      Eye := Plat.TriggerBox.Center;
+      for I := 1 to 24 do
+        Game.Update(0.05, Eye);
+      CheckNear(48, Plat.Brush.Scene.Translation.Y, 'the plat went up', 0.01);
+      for I := 1 to 60 do
+        Game.Update(0.05, Far);
+      CheckNear(0, Plat.Brush.Scene.Translation.Y, 'the plat came back', 0.01);
+    end;
+
+    { idForceField: off until activated, then what is in it goes up at 400 }
+    Eye := D3ToCge(Vector3(600, 340, 10)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Eye);
+    CheckNear(0, Game.KnockbackVelocity.Z, 'the force field is off', 0.01);
+    Game.Activate(Game.FindEntity('forcefield_1'));
+    Game.Update(0.05, Eye);
+    CheckNear(400, Game.KnockbackVelocity.Z, 'the force field throws the player up', 0.01);
+    Game.Activate(Game.FindEntity('forcefield_1'));
+
+    { idExplodable: radius damage when activated }
+    Eye := D3ToCge(Vector3(680, 300, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Eye);
+    HealthBefore := Game.Health;
+    Game.Activate(Game.FindEntity('explosion_1'));
+    Check(Game.Health < HealthBefore, Format('the explosion hurt the player (%d -> %d)', [HealthBefore, Game.Health]));
+
+    { idTarget_GiveSecurity, idTarget_EnableStamina, idEarthQuake }
+    Game.Activate(Game.FindEntity('security_1'));
+    CheckEquals('Test Access', Game.Security, 'security clearance');
+    Game.Activate(Game.FindEntity('stamina_off_1'));
+    Check(Game.StaminaDisabled, 'stamina off');
+    Before := Game.ActivationCount;
+    Game.Activate(Game.FindEntity('quake_1'));
+    Check(Game.ActivationCount > Before, 'the earthquake was activated');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
@@ -7646,6 +7769,7 @@ begin
   TestElevator;
   TestBindToJoint;
   TestMoveablePush;
+  TestMiscEntities;
   TestHitLocations;
   TestSoundShakesAndPaths;
   TestBurnAway;

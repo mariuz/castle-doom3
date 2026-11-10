@@ -123,7 +123,10 @@ begin
   FGui.SetState('player_armor', IntToStr(Armor));
   FGui.SetState('player_stamina', IntToStr(Max(0, Stamina)));
   FGui.SetState('player_nostamina', IntToStr(Ord(Stamina < 0)));
-  FGui.SetState('player_air', '100');
+  FGui.SetState('player_air', IntToStr(Game.AirPercent));
+  AmmoKey := Game.TakeAirEvent;
+  if AmmoKey <> '' then
+    Event(AmmoKey);
   FGui.SetState('player_hr', '70');
   FGui.SetState('location', Location);
   if First or (Health <> FHealth) or (Armor <> FArmor) or (Stamina <> FStamina) then
