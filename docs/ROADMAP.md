@@ -101,6 +101,42 @@ Status of version 0.12.0 plus the unreleased changes in `docs/CHANGELOG.md`. "Do
 12. **Features from dhewm3** (see below): the parts of the maintained Doom 3 source port that players expect and this port doesn't have yet.
 13. **Modern rendering and features from RBDOOM-3-BFG** (see below): PBR materials, baked indirect lighting, HDR with tone mapping, soft shadow maps, post-processing and modding formats, as optional modes next to the classic look.
 
+14. **After the playthroughs** (see below): what a real playthrough still needs, performance, playthrough testing and comparisons with other ports, in the order to do them.
+
+## After the playthroughs
+
+Proposed 2026-11-10 after the full playthroughs (Doom 3, Resurrection of Evil) and the BFG data support; nothing here is started. In the order to do them:
+
+**Gameplay**
+
+1. **Save and load**: the game's state (entities, movers, scripts' threads, inventory, objectives) written and read back; a real playthrough needs it.
+2. **Monsters and projectiles spawned by scripts** (`sys.spawn`): today the entity exists only for scripts. Resurrection of Evil's bosses depend on it (`monster_flying_forgotten`, `projectile_helltime_killer`, `wraith_spawneffect`).
+3. Item 8's leftovers: the grabber catching projectiles and small monsters, the envirosuit's HUD, `trigger_flashlight`, `info_portalsky`.
+4. Item 5's leftovers: `func_beam`, `func_securitycamera`, glass shards, torso aiming, `parm4` stage colors on md5 models.
+5. Doom 3 BFG: the armor mounted flashlight and its other script and def differences, the Lost Mission played through, the Flash (`.bswf`) HUD, menus and PDA (or the port's own stay, documented), Bink videos.
+6. The sky's top side in `game/commoutside` shows a seam (with the 2004 and the BFG data alike).
+
+**Testing the playthrough**
+
+7. **A playthrough that fights**: the route walker teleports with god mode. A mode without it that uses weapons and pickups and reports deaths, stuck spots and goals it can't reach.
+8. **Checks per map** beyond "reached the next map": the scripted events that must fire (the bio scanner, elevators, boss deaths), counted from the log.
+9. The playthrough on all three data sets (the 2004 game, Resurrection of Evil, BFG with the Lost Mission), their summaries kept in `docs/` as the baseline; a per-map performance budget in the summary (median FPS, stalls), so a regression shows as a difference between runs.
+10. Every bug a playthrough finds gets a small reproduction in the test map (CI can't run retail data).
+
+**Comparing with other ports**
+
+11. **dhewm3 on every map**: `tools/dhewm3_refs.ps1` shoots the same spots for one map; extend it to the 27 maps with a per-spot image difference and mean luma, as a table.
+12. **Behavior, not only pixels**: monster and item counts and trigger firings at the same point of a map, from dhewm3's console and this port's log.
+13. **RBDOOM-3-BFG** as the reference for the BFG data and the modern modes (shadow maps, probes, TAA); it has to be downloaded and built first.
+14. Other idTech 4 data (The Dark Mod, Quake 4, Prey) to check the readers against: low priority.
+
+**Performance** (the CPU is the limit at most views; the Resurrection of Evil maps ran at a median of 11 to 28 FPS)
+
+15. **Compressed textures straight to the GPU**: BFG's images are DXT already, and are decoded to RGBA and written as TGA in memory today (`game/delta1` used 3.1 GB). The 2004 game's `dds/` files the same way.
+16. **A disk cache for the prepare step** (shader programs, decoded images, by map): prepare is 15 of Mars City 1's 22 s.
+17. **Skinning on the GPU**: BFG's meshes have four joints and weights per vertex, the layout a vertex shader needs; the text md5 meshes can be converted to it.
+18. **Shader stalls**: `game/erebus5` still had 157 s of stalls over 0.3 s in its playthrough; continue CGE changes T and U until a playthrough has none.
+
 ## Classic Doom 3
 
 [Classic Doom 3](https://dhewm3.org/mods.html#classic-doom-3) (Flaming Sheep Software, 2007, version 1.3.1) remakes episode 1 of the original Doom (Knee-Deep in the Dead) in Doom 3. It needs the full Doom 3 data. Its data is a zip from [ModDB](https://www.moddb.com/downloads/classic-doom-3-131), extracted into the Doom 3 directory (a `cdoom/` mod directory); dhewm3 starts it with `+set fs_game cdoom`. Its game code was released under the GPL and lives in the [`cdoom` branch of dhewm3-sdk](https://github.com/dhewm/dhewm3-sdk/tree/cdoom) (commit "Import Classic Doom 3"), which tells what this port must do beyond the base game:
