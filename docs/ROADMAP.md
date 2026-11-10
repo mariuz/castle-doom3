@@ -118,7 +118,7 @@ Proposed 2026-11-10 after the full playthroughs (Doom 3, Resurrection of Evil) a
 
 **Testing the playthrough**
 
-7. **A playthrough that fights**: the route walker teleports with god mode. A mode without it that uses weapons and pickups and reports deaths, stuck spots and goals it can't reach.
+7. **A playthrough that fights**: started (unreleased): console `fight 1` and `tools/tour_maps.ps1 -Route -Fight` (targets, weapon choice, saves, loads on death, a summary; see the changelog). Mars City Underground: 16 kills, no deaths. Next: all maps of the three data sets played this way and their summaries kept; memory when a save is loaded many times in one run (a stuck run reached 6.4 GB after 8 loads: not measured since); walking without noclip (doors, lifts and keys used), so stuck spots and goals it can't reach show.
 8. **Checks per map** beyond "reached the next map": the scripted events that must fire (the bio scanner, elevators, boss deaths), counted from the log.
 9. The playthrough on all three data sets (the 2004 game, Resurrection of Evil, BFG with the Lost Mission), their summaries kept in `docs/` as the baseline; a per-map performance budget in the summary (median FPS, stalls), so a regression shows as a difference between runs.
 10. Every bug a playthrough finds gets a small reproduction in the test map (CI can't run retail data).

@@ -7766,6 +7766,53 @@ begin
   end;
 end;
 
+{ The fighting playthrough's choices: its target and its weapon. }
+procedure TestFight;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye, Target: TVector3;
+  TargetName, First: String;
+  I: Integer;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the fight');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.God := True;
+    Eye := D3ToCge(Vector3(420, -250, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.NoTarget := True;
+    Game.Update(0.05, Eye);
+    Check(not Game.FightTarget(Eye, 1200, '', Target, TargetName), 'nothing is after the player yet');
+    CheckEquals(1, Game.BestFightSlot, 'the pistol is the best weapon at the start');
+    Game.Give('weapon', 'weapon_test_shotgun');
+    Game.Clip[2] := 0;
+    CheckEquals(1, Game.BestFightSlot, 'a shotgun without shells isn''t chosen');
+    Game.Clip[2] := 4;
+    CheckEquals(2, Game.BestFightSlot, 'a loaded shotgun is');
+    { blob_ranged_1 attacks once activated }
+    Game.NoTarget := False;
+    Game.Activate(Game.FindEntity('blob_ranged_1'));
+    for I := 1 to 40 do
+      Game.Update(0.05, Eye);
+    Check(Game.FightTarget(Eye, 1200, '', Target, TargetName), 'a monster is after the player');
+    Check(TargetName <> '', 'the target has a name');
+    Check(PointsDistance(Target, Eye) < 1200, 'the target is in range');
+    Check(not Game.FightTarget(Eye, 10, '', Target, TargetName), 'no target out of range');
+    First := TargetName;
+    Check(not Game.FightTarget(Eye, 1200, 'x,' + First, Target, TargetName) or (TargetName <> First),
+      'an ignored monster is left out');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { Saved games: the state of one game put onto a freshly spawned one. }
 procedure TestSaveLoad;
 var
@@ -7941,6 +7988,7 @@ begin
   TestPlayerMotion;
   TestDamageFeedback;
   TestScriptSpawn;
+  TestFight;
   TestSaveLoad;
   TestBfg;
   TestPowerups;

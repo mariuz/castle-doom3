@@ -85,6 +85,19 @@ type
       the seconds left to stand where a teleport put the player }
     FRouteLastEye: TVector3;
     FRouteHold: Single;
+    { The fighting playthrough (console "fight 1", then a route): the walk
+      stops to shoot the monsters that come for the player, without god
+      mode; the game is saved every FightSaveEvery seconds of quiet, and
+      loaded when the player dies (three deaths after one save: god mode
+      until the next save). }
+    FFight: Boolean;
+    FFightKills, FFightDeaths, FFightSaves, FFightDeathsHere, FFightLastKills, FFightGaveUp: Integer;
+    FFightSinceSave, FFightOnTarget, FFightSkipUntil, FFightTime: Single;
+    FFightTarget, FFightIgnore: String;
+    FFightHasSave, FFightGod: Boolean;
+    FFightRoute: TD3PointArray;
+    FFightSeg: Integer;
+    FFightAlong, FFightWalked: Single;
     FRouteGaps: Single;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
@@ -146,6 +159,8 @@ type
     procedure BuildCoverageRoute(const Goal: TVector3; const GoalName: String);
     { R: returns True when the walk is over }
     function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
+    function FightStep(const SecondsPassed: Single): Boolean;
+    procedure FightSummary;
     procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
@@ -1997,6 +2012,25 @@ begin
     Console.Print(S);
     WritelnLog('Inventory', LineEnding + S);
   end else
+  if Cmd = 'fight' then
+  begin
+    FFight := StrToIntDef(Trim(Args), Ord(not FFight)) <> 0;
+    FFightKills := 0;
+    FFightDeaths := 0;
+    FFightSaves := 0;
+    FFightGaveUp := 0;
+    FFightDeathsHere := 0;
+    FFightLastKills := FGame.Kills;
+    FFightHasSave := False;
+    FFightGod := False;
+    FFightIgnore := '';
+    FFightTarget := '';
+    FFightTime := 0;
+    { the first save at once }
+    FFightSinceSave := 1000;
+    Console.Print('fight ' + BoolToStr(FFight, 'ON', 'OFF'));
+    WritelnLog('GameViewPlay', 'Fight: %s', [BoolToStr(FFight, 'on', 'off')]);
+  end else
   if Cmd = 'call' then
     FGame.RunScriptFunction(Trim(Args))
   else
@@ -2937,6 +2971,130 @@ begin
   end;
 end;
 
+procedure TViewPlay.FightSummary;
+begin
+  WritelnLog('GameViewPlay', 'Fight: summary: %d kills, %d deaths, %d saves, %d places given up (god mode), health %d, armor %d, %.0f s',
+    [FFightKills, FFightDeaths, FFightSaves, FFightGaveUp, FGame.Health, FGame.Armor, FFightTime]);
+end;
+
+{ One step of the fighting playthrough; True while the walk waits (a
+  fight, a death). }
+function TViewPlay.FightStep(const SecondsPassed: Single): Boolean;
+const
+  FightSaveEvery = 20;
+var
+  Target, Dir: TVector3;
+  TargetName: String;
+  Slot: Integer;
+begin
+  Result := False;
+  FFightTime := FFightTime + SecondsPassed;
+  if FGame.Kills > FFightLastKills then
+  begin
+    FFightKills := FFightKills + FGame.Kills - FFightLastKills;
+    { something died: the fight makes progress }
+    FFightOnTarget := 0;
+  end;
+  FFightLastKills := FGame.Kills;
+
+  if FGame.PlayerDead then
+  begin
+    Inc(FFightDeaths);
+    Inc(FFightDeathsHere);
+    WritelnLog('GameViewPlay', 'Fight: died at %s (death %d, %d since the save)',
+      [CgeToD3(Camera.Translation).ToString, FFightDeaths, FFightDeathsHere]);
+    if not FFightHasSave then
+    begin
+      WritelnLog('GameViewPlay', 'Fight: no save to load: the fight ends');
+      FightSummary;
+      FFight := False;
+      FRoute := nil;
+      Exit(True);
+    end;
+    LoadGame('fight');
+    FRoute := Copy(FFightRoute);
+    FRouteSeg := FFightSeg;
+    FRouteAlong := FFightAlong;
+    FRouteWalked := FFightWalked;
+    FRouteLastEye := Camera.Translation;
+    FRouteHold := 0;
+    FFightLastKills := FGame.Kills;
+    FFightTarget := '';
+    FFightIgnore := '';
+    if FFightDeathsHere >= 3 then
+    begin
+      { it can't get past here alive: on in god mode, until the next save }
+      Inc(FFightGaveUp);
+      FFightGod := True;
+      WritelnLog('GameViewPlay', 'Fight: gave up at %s after %d deaths: god mode until the next save',
+        [CgeToD3(Camera.Translation).ToString, FFightDeathsHere]);
+    end;
+    FGame.God := FFightGod;
+    Exit(True);
+  end;
+
+  if FGame.FightTarget(Camera.Translation, 1200, FFightIgnore, Target, TargetName) and
+     (FFightTime >= FFightSkipUntil) then
+  begin
+    if TargetName <> FFightTarget then
+    begin
+      FFightTarget := TargetName;
+      WritelnLog('GameViewPlay', 'Fight: target %s at %s (health %d)',
+        [TargetName, CgeToD3(Target).ToString, FGame.Health]);
+    end;
+    { the map enables the weapons at a point the walk may not have reached
+      (it cuts through doors) }
+    if FGame.WeaponsDisabled then
+    begin
+      WritelnLog('GameViewPlay', 'Fight: the map had the weapons disabled here: enabled');
+      FGame.WeaponsDisabled := False;
+    end;
+    { time since something died (the target may change back and forth) }
+    FFightOnTarget := FFightOnTarget + SecondsPassed;
+    if FFightOnTarget > 25 then
+    begin
+      { it doesn't die: leave it }
+      WritelnLog('GameViewPlay', 'Fight: %s doesn''t die, walking on', [TargetName]);
+      FFightIgnore := FFightIgnore + ',' + TargetName;
+      FFightTarget := '';
+      FFightOnTarget := 0;
+      Exit(False);
+    end;
+    Slot := FGame.BestFightSlot;
+    if (Slot >= 0) and (Slot <> FGame.IdealSlot) then
+      FGame.SelectWeapon(Slot);
+    Dir := Target - Camera.Translation;
+    if Dir.Length > 0.01 then
+      Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
+    FGame.AttackOnce;
+    FRouteLastEye := Camera.Translation;
+    { with only the fists it can't wait for the monster: it walks on }
+    Exit((Slot < 0) or (Pos('fists', LowerCase(FGame.WeaponDefs[Slot])) = 0));
+  end;
+  FFightTarget := '';
+  FFightOnTarget := 0;
+
+  { quiet: save now and then }
+  FFightSinceSave := FFightSinceSave + SecondsPassed;
+  if (FFightSinceSave >= FightSaveEvery) and not FGame.CinematicActive and (FGame.Health > 0) then
+  begin
+    FFightSinceSave := 0;
+    SaveGame('fight');
+    FFightHasSave := True;
+    Inc(FFightSaves);
+    FFightDeathsHere := 0;
+    FFightRoute := Copy(FRoute);
+    FFightSeg := FRouteSeg;
+    FFightAlong := FRouteAlong;
+    FFightWalked := FRouteWalked;
+    if FFightGod then
+    begin
+      FFightGod := False;
+      FGame.God := False;
+    end;
+  end;
+end;
+
 function TViewPlay.WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
 var
   Step, SegLen, Ahead, Yaw: Single;
@@ -2974,6 +3132,8 @@ begin
     FRouteHold := 2;
     FRouteLastEye := Camera.Translation;
   end;
+  if FFight and FightStep(SecondsPassed) then
+    Exit(False);
   if FRouteHold > 0 then
   begin
     FRouteHold := FRouteHold - SecondsPassed;
@@ -3024,6 +3184,8 @@ begin
     P := FRoute[High(FRoute)];
     PlaceCamera(D3ToCge(P), CameraYaw);
     WritelnLog('GameViewPlay', 'Route: done, %.0f units', [FRouteWalked]);
+    if FFight then
+      FightSummary;
     CaptureScreenshot;
     FRoute := nil;
     Exit;

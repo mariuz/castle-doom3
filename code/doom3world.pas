@@ -1596,6 +1596,15 @@ type
     property Carried: TStringList read FCarried;
     { inventory as text, for the console }
     function InventoryStatus: String;
+    { The fighting playthrough (console "fight"): the nearest monster that
+      is alive, shown, after the player and in sight of Eye (CGE), within
+      MaxDist; its center and name. Names in Ignore (comma separated) are
+      left out. }
+    function FightTarget(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
+      out Target: TVector3; out TargetName: String): Boolean;
+    { The slot of the strongest weapon the player has ammo for (the fists
+      when there is none), -1 without weapons. }
+    function BestFightSlot: Integer;
     { Run a script function in a new thread (console "call"). }
     procedure RunScriptFunction(const AName: String);
     { Saved games (doom3world_save.inc): the state as text, and back onto
@@ -3538,6 +3547,15 @@ var
   Keys: TStringList;
 begin
   Result := Format('health %d/%d, armor %d/%d', [Health, MaxHealth, Armor, MaxArmor]);
+  { why the weapon may not fire }
+  if FWeaponsDisabled then
+    Result := Result + ', weapons disabled';
+  if FInfluenceLevel <> 0 then
+    Result := Result + ', influence ' + IntToStr(FInfluenceLevel);
+  if FGuiFocus <> nil then
+    Result := Result + ', GUI focus';
+  if FTalkFocus <> nil then
+    Result := Result + ', talk focus';
   if FPlayerDef = nil then
     Result := Result + ', no player def';
   Result := Result + LineEnding + 'weapons:';
