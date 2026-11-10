@@ -10,8 +10,8 @@ program castle_doom3_tests;
 uses
   {$ifdef UNIX} CThreads, {$endif}
   SysUtils, Classes, Math,
-  CastleVectors, CastleLog, CastleImages,
-  Doom3Files, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
+  CastleVectors, CastleLog, CastleImages, CastleQuaternions,
+  Doom3Files, Doom3Bfg, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
   Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq, Doom3HudGui,
@@ -7715,6 +7715,8 @@ begin
   end;
 end;
 
+{$I test_bfg.inc}
+
 begin
   if GetEnvironmentVariable('CD3_ROQ_DUMP') <> '' then
   begin
@@ -7793,6 +7795,7 @@ begin
   TestWeaponPresentation;
   TestPlayerMotion;
   TestDamageFeedback;
+  TestBfg;
   TestPowerups;
   TestStaminaSkinsKnockback;
   TestCrouchAndDeath;

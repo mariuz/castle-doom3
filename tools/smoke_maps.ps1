@@ -10,7 +10,8 @@
 # Without -Maps, the demo's 3 maps are loaded when <BasePath>\demo\demo00.pk4
 # exists, otherwise the full game's single player maps (a map missing from
 # the data shows as "(not loaded)"); with -Game d3xp (<BasePath>\d3xp over
-# base), Resurrection of Evil's maps.
+# base), Resurrection of Evil's maps; with Doom 3 BFG data
+# (<BasePath>\base\_common.resources), the 47 maps of its three campaigns.
 
 param(
   [Parameter(Mandatory = $true)] [string] $BasePath,
@@ -36,7 +37,11 @@ if ($Maps.Count -eq 0) {
   $D3xp = "game/erebus1", "game/erebus2", "game/erebus3", "game/erebus4", "game/erebus5",
     "game/erebus6", "game/phobos1", "game/phobos2", "game/phobos3", "game/phobos4",
     "game/deltax", "game/hell"
+  # Doom 3 BFG: one base with Doom 3's, Resurrection of Evil's and the Lost Mission's maps
+  $Lost = "game/le_enpro1", "game/le_enpro2", "game/le_underground", "game/le_underground2",
+    "game/le_exis1", "game/le_exis2", "game/le_hell", "game/le_hell_post"
   if ($Game -eq "d3xp") { $Maps = $D3xp }
+  elseif (Test-Path (Join-Path $BasePath "base\_common.resources")) { $Maps = $Full + $D3xp + $Lost }
   elseif (Test-Path (Join-Path $BasePath "demo\demo00.pk4")) { $Maps = $Demo } else { $Maps = $Full }
 }
 

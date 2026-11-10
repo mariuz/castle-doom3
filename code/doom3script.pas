@@ -2897,8 +2897,10 @@ begin
   if N = 'CrossProduct' then
     R := D3VectorValue(TVector3.CrossProduct(Args[0].V, Args[1].V))
   else
-  if N = 'VecToAngles' then
+  if (N = 'VecToAngles') or (N = 'VecToOrthoBasisAngles') then
   begin
+    { (VecToOrthoBasisAngles: the angles of a basis whose forward is the
+      vector) }
     { pitch yaw roll in degrees, like idVec3::ToAngles }
     Fwd := Args[0].V;
     A := Sqrt(Sqr(Fwd.X) + Sqr(Fwd.Y));

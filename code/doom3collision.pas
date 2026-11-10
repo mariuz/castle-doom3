@@ -80,6 +80,8 @@ type
     constructor Create;
     destructor Destroy; override;
     function LoadFromText(const Text: String): Boolean;
+    { Doom 3 BFG's binary version (generated/maps/<name>.bcm). }
+    function LoadFromBinary(const Stream: TStream): Boolean;
     function LoadFromVfs(const Path: String): Boolean;
     function ModelCount: Integer;
     function Model(const I: Integer): TD3CollisionModel;
@@ -93,7 +95,7 @@ implementation
 uses
   Math, CastleRenderOptions,
   CastleLog,
-  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Portals;
+  Doom3Files, Doom3Decls, Doom3MapFile, Doom3Portals, Doom3Bfg;
 
 function BrushPolyhedron(const Brush: TD3CmBrush; const Inset: Single): TD3Polyhedron;
 var
@@ -522,13 +524,190 @@ begin
   end;
 end;
 
+{ The contents bits of a binary collision model as the text version's
+  names. }
+function ContentsNames(const Bits: Integer): String;
+const
+  Names: array [0..15] of String = ('solid', 'opaque', 'water', 'playerclip', 'monsterclip',
+    'moveableclip', 'ikclip', 'blood', 'body', 'projectile', 'corpse', 'rendermodel',
+    'trigger', 'aas_solid', 'aas_obstacle', 'flashlight_trigger');
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(Names) do
+    if (Bits and (1 shl I)) <> 0 then
+    begin
+      if Result <> '' then
+        Result := Result + ',';
+      Result := Result + Names[I];
+    end;
+  if Result = '' then
+    Result := 'none';
+end;
+
+{ A .bcm: the number of models, the map's name, its CRC, "CM", the
+  version, then the models (idCollisionModelManagerLocal::
+  LoadBinaryModelFromFile): counts, vertices, edges, materials, polygons
+  (edge numbers; negative: backwards), brushes (planes as a b c d with
+  d = -dist), the node tree. }
+function TD3CollisionFile.LoadFromBinary(const Stream: TStream): Boolean;
+var
+  R: TBfgReader;
+
+  procedure ReadNode(const M: TD3CollisionModel; const Depth: Integer);
+  var
+    PlaneType: Integer;
+  begin
+    Inc(M.NodeCount);
+    PlaneType := R.BigInt;
+    R.BigFloat;
+    while R.BigInt >= 0 do ;
+    while R.BigInt >= 0 do ;
+    if (PlaneType <> -1) and (Depth < 4000) then
+    begin
+      ReadNode(M, Depth + 1);
+      ReadNode(M, Depth + 1);
+    end;
+  end;
+
+var
+  M: TD3CollisionModel;
+  Materials: array of String;
+  NumModels, I, J, K, N, E, NumVertices, NumEdges, NumPolygons, NumBrushes: Integer;
+  D: Single;
+begin
+  Result := False;
+  FModels.Clear;
+  R := TBfgReader.Create(Stream, False);
+  try
+    try
+      NumModels := R.BigInt;
+      R.Str; { the map's name }
+      Crc := R.BigUInt;
+      if not SameText(R.Str, 'CM') then
+      begin
+        WritelnWarning('Doom3Collision', 'Not a Doom 3 BFG .bcm file');
+        Exit;
+      end;
+      R.Str; { version }
+      for I := 0 to NumModels - 1 do
+      begin
+        if R.BigUInt <> BfgCmMagic then
+        begin
+          WritelnWarning('Doom3Collision', 'Bad model %d in a .bcm file', [I]);
+          Exit;
+        end;
+        R.BigInt64; { time }
+        M := TD3CollisionModel.Create;
+        FModels.Add(M);
+        M.Name := R.Str;
+        R.Skip(24); { bounds }
+        R.BigInt; { contents }
+        R.Bool; { isConvex }
+        NumVertices := R.BigInt;
+        NumEdges := R.BigInt;
+        NumPolygons := R.BigInt;
+        NumBrushes := R.BigInt;
+        R.Skip(7 * 4); { nodes, brush and polygon refs, internal and sharp edges, removed and merged polygons }
+        SetLength(M.Vertices, NumVertices);
+        for J := 0 to NumVertices - 1 do
+        begin
+          M.Vertices[J] := R.BigVec3;
+          R.Skip(12); { checkcount, side, sideSet }
+        end;
+        SetLength(M.Edges, NumEdges);
+        for J := 0 to NumEdges - 1 do
+        begin
+          R.Skip(16); { checkcount, internal, numUsers, side, sideSet }
+          M.Edges[J][0] := R.BigInt;
+          M.Edges[J][1] := R.BigInt;
+          R.Skip(12); { normal }
+        end;
+        R.BigInt; { polygon memory }
+        R.BigInt; { brush memory }
+        N := R.BigInt;
+        SetLength(Materials, N);
+        for J := 0 to N - 1 do
+          Materials[J] := R.Str;
+        SetLength(M.Polygons, NumPolygons);
+        for J := 0 to NumPolygons - 1 do
+        begin
+          K := R.BigInt;
+          if (K >= 0) and (K < Length(Materials)) then
+            M.Polygons[J].Material := Materials[K];
+          N := R.BigInt;
+          R.Skip(24); { bounds }
+          R.BigInt; { checkcount }
+          R.BigInt; { contents }
+          M.Polygons[J].Normal := R.BigVec3;
+          D := R.BigFloat;
+          M.Polygons[J].Dist := -D;
+          SetLength(M.Polygons[J].Verts, N);
+          for K := 0 to N - 1 do
+          begin
+            E := R.BigInt;
+            if Abs(E) < NumEdges then
+            begin
+              if E < 0 then
+                M.Polygons[J].Verts[K] := M.Edges[-E][1]
+              else
+                M.Polygons[J].Verts[K] := M.Edges[E][0];
+            end;
+          end;
+        end;
+        SetLength(M.Brushes, NumBrushes);
+        for J := 0 to NumBrushes - 1 do
+        begin
+          R.BigInt; { material }
+          N := R.BigInt;
+          R.BigInt; { checkcount }
+          M.Brushes[J].Mins := R.BigVec3;
+          M.Brushes[J].Maxs := R.BigVec3;
+          M.Brushes[J].Contents := ContentsNames(R.BigInt);
+          R.BigInt; { primitiveNum }
+          SetLength(M.Brushes[J].Planes, N);
+          for K := 0 to N - 1 do
+          begin
+            M.Brushes[J].Planes[K].X := R.BigFloat;
+            M.Brushes[J].Planes[K].Y := R.BigFloat;
+            M.Brushes[J].Planes[K].Z := R.BigFloat;
+            D := R.BigFloat;
+            M.Brushes[J].Planes[K].W := -D;
+          end;
+        end;
+        ReadNode(M, 0);
+      end;
+      Result := FModels.Count > 0;
+    except
+      on Err: Exception do
+        WritelnWarning('Doom3Collision', 'Cannot read the .bcm file: %s', [Err.Message]);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
 function TD3CollisionFile.LoadFromVfs(const Path: String): Boolean;
 var
   Text: String;
   W: TD3CollisionModel;
+  Stream: TStream;
 begin
   Text := D3Fs.ReadText(Path);
-  Result := (Text <> '') and LoadFromText(Text);
+  if Text = '' then
+  begin
+    { Doom 3 BFG: only the binary version }
+    Stream := D3Fs.OpenGenerated(Path);
+    if Stream = nil then
+      Exit(False);
+    try
+      Result := LoadFromBinary(Stream);
+    finally
+      Stream.Free;
+    end;
+  end else
+    Result := LoadFromText(Text);
   if Result then
   begin
     W := World;

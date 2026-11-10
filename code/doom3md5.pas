@@ -60,6 +60,8 @@ type
     constructor Create;
     destructor Destroy; override;
     function LoadFromText(const Text: String): Boolean;
+    { Doom 3 BFG's binary version (generated/rendermodels/*.bmd5mesh). }
+    function LoadFromBinary(const Stream: TStream): Boolean;
     function JointIndex(const AName: String): Integer;
     { Skin a mesh with absolute joints into Doom 3 coordinates. }
     { The joints of a pose as matrices (for SkinMeshTo). }
@@ -92,6 +94,8 @@ type
     Frames: array of array of Single;
     constructor Create;
     function LoadFromText(const Text: String): Boolean;
+    { Doom 3 BFG's binary version (generated/anim/*.bmd5anim). }
+    function LoadFromBinary(const Stream: TStream): Boolean;
     function Duration: Single;
     { Absolute (model space) joints of a frame. }
     procedure FramePose(const Frame: Integer; var Pose: TD3JointArray);
@@ -363,7 +367,7 @@ implementation
 uses
   Math,
   CastleLog, CastleUtils,
-  Doom3Files, Doom3Decls, Doom3MapFile, Doom3LightEffects,
+  Doom3Files, Doom3Bfg, Doom3Decls, Doom3MapFile, Doom3LightEffects,
   Doom3Collision;
 
 { Doom 3 stores unit quaternions as x y z, w = -sqrt(1 - x2 - y2 - z2). }
@@ -931,15 +935,217 @@ begin
   FAnims.Clear;
 end;
 
+{ A .bmd5mesh: a render model (the bind pose's surfaces; not used), then
+  the joints (name, parent), their bind pose relative to the parent
+  (quaternion x y z w in Doom 3's convention, the opposite rotation sense
+  of ours, and position), the inverse bind matrices and the meshes: the
+  vertexes in the bind pose with up to four joints (color) and weights
+  (color2), which become md5 weights: positions relative to their joint. }
+function TD3Md5Model.LoadFromBinary(const Stream: TStream): Boolean;
+var
+  R: TBfgReader;
+  Brm: TBfgModel;
+  Mesh: TD3Md5Mesh;
+  V: TBfgVertex;
+  Local: TQuaternion;
+  T: TVector3;
+  N, I, J, K, NumOutputVerts, NumIndexes, NumMirrored, NumDup, NumSil, Sum, Joint, NumWeights: Integer;
+begin
+  Result := False;
+  R := TBfgReader.Create(Stream, False);
+  try
+    try
+      if not BfgReadModel(R, Brm) then
+        Exit;
+      if R.BigUInt <> BfgMd5MeshMagic then
+        Exit;
+      N := R.BigInt;
+      SetLength(Joints, N);
+      for I := 0 to N - 1 do
+      begin
+        Joints[I].Name := R.Str;
+        Joints[I].Parent := R.BigInt;
+      end;
+      N := R.BigInt;
+      for I := 0 to N - 1 do
+      begin
+        Local.Data.Vector.X := R.BigFloat;
+        Local.Data.Vector.Y := R.BigFloat;
+        Local.Data.Vector.Z := R.BigFloat;
+        Local.Data.Real := -R.BigFloat;
+        T := R.LittleVec3;
+        if I > High(Joints) then
+          Continue;
+        if (Joints[I].Parent >= 0) and (Joints[I].Parent < I) then
+        begin
+          Joints[I].Position := Joints[Joints[I].Parent].Position +
+            QuatRotate(Joints[Joints[I].Parent].Orientation, T);
+          Joints[I].Orientation := QuatNormalize(QuatMultiply(Joints[Joints[I].Parent].Orientation, Local));
+        end else
+        begin
+          Joints[I].Position := T;
+          Joints[I].Orientation := QuatNormalize(Local);
+        end;
+      end;
+      N := R.BigInt;
+      R.Skip(48 * PtrInt(N)); { the inverse bind matrices }
+      N := R.BigInt;
+      for I := 0 to N - 1 do
+      begin
+        Mesh := TD3Md5Mesh.Create;
+        Meshes.Add(Mesh);
+        Mesh.Shader := R.Str;
+        R.BigInt; { numVerts }
+        R.BigInt; { numTris }
+        R.Skip(R.BigInt); { the joints the mesh uses }
+        R.BigFloat; { maxJointVertDist }
+        R.BigInt; { numSourceVerts }
+        NumOutputVerts := R.BigInt;
+        NumIndexes := R.BigInt;
+        NumMirrored := R.BigInt;
+        NumDup := R.BigInt;
+        NumSil := R.BigInt;
+        SetLength(Mesh.Verts, NumOutputVerts);
+        SetLength(Mesh.Weights, NumOutputVerts * 4);
+        NumWeights := 0;
+        for J := 0 to NumOutputVerts - 1 do
+        begin
+          BfgReadDrawVertBig(R, V);
+          Mesh.Verts[J].ST := V.ST;
+          Mesh.Verts[J].StartWeight := NumWeights;
+          Sum := 0;
+          for K := 0 to 3 do
+            Inc(Sum, V.Color2[K]);
+          if Sum = 0 then
+          begin
+            V.Color2[0] := 255;
+            Sum := 255;
+          end;
+          for K := 0 to 3 do
+            if V.Color2[K] > 0 then
+            begin
+              Joint := V.Color[K];
+              if Joint > High(Joints) then
+                Joint := 0;
+              Mesh.Weights[NumWeights].Joint := Joint;
+              Mesh.Weights[NumWeights].Bias := V.Color2[K] / Sum;
+              Mesh.Weights[NumWeights].Position :=
+                QuatRotate(QuatConjugate(Joints[Joint].Orientation), V.Position - Joints[Joint].Position);
+              Inc(NumWeights);
+            end;
+          Mesh.Verts[J].WeightCount := NumWeights - Mesh.Verts[J].StartWeight;
+        end;
+        SetLength(Mesh.Weights, NumWeights);
+        SetLength(Mesh.Tris, NumIndexes);
+        for J := 0 to NumIndexes - 1 do
+          Mesh.Tris[J] := R.BigWord;
+        if NumIndexes > 0 then
+          R.Skip(2 * PtrInt(NumIndexes)); { silIndexes }
+        R.Skip(4 * PtrInt(NumMirrored) + 8 * PtrInt(NumDup) + 8 * PtrInt(NumSil));
+        R.BigInt; { surfaceNum }
+      end;
+      Result := (Length(Joints) > 0) and (Meshes.Count > 0);
+    except
+      on E: Exception do
+        WritelnWarning('Doom3Md5', 'Cannot read the .bmd5mesh of "%s": %s', [Name, E.Message]);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+{ A .bmd5anim: like the text file's sections, the frames' components in
+  one array. }
+function TD3Md5Anim.LoadFromBinary(const Stream: TStream): Boolean;
+var
+  R: TBfgReader;
+  N, I, J, NumJoints: Integer;
+  W: Single;
+begin
+  Result := False;
+  R := TBfgReader.Create(Stream, False);
+  try
+    try
+      if R.BigUInt <> BfgMd5AnimMagic then
+        Exit;
+      R.BigInt64; { time }
+      NumFrames := R.BigInt;
+      FrameRate := R.BigInt;
+      R.BigInt; { animLength }
+      NumJoints := R.BigInt;
+      NumAnimatedComponents := R.BigInt;
+      N := R.BigInt;
+      R.Skip(24 * PtrInt(N)); { bounds }
+      N := R.BigInt;
+      SetLength(Hierarchy, N);
+      for I := 0 to N - 1 do
+      begin
+        Hierarchy[I].Name := R.Str;
+        Hierarchy[I].Parent := R.BigInt;
+        Hierarchy[I].Flags := R.BigInt;
+        Hierarchy[I].StartIndex := R.BigInt;
+      end;
+      N := R.BigInt;
+      SetLength(BaseFrame, N);
+      for I := 0 to N - 1 do
+      begin
+        BaseFrame[I].Orientation.X := R.BigFloat;
+        BaseFrame[I].Orientation.Y := R.BigFloat;
+        BaseFrame[I].Orientation.Z := R.BigFloat;
+        W := R.BigFloat;
+        { stored with w >= 0 like the text file's implied w }
+        if W < 0 then
+          BaseFrame[I].Orientation := -BaseFrame[I].Orientation;
+        BaseFrame[I].Position := R.LittleVec3;
+      end;
+      N := R.BigInt;
+      SetLength(Frames, NumFrames);
+      for I := 0 to NumFrames - 1 do
+      begin
+        SetLength(Frames[I], NumAnimatedComponents);
+        for J := 0 to NumAnimatedComponents - 1 do
+          if I * NumAnimatedComponents + J < N then
+            Frames[I][J] := R.LittleFloat;
+      end;
+      Result := (NumFrames > 0) and (NumJoints > 0) and (Length(Hierarchy) = NumJoints) and
+        (Length(BaseFrame) = NumJoints);
+    except
+      on E: Exception do
+        WritelnWarning('Doom3Md5', 'Cannot read the .bmd5anim of "%s": %s', [Name, E.Message]);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
 function TD3Md5Cache.Model(const Path: String): TD3Md5Model;
 var
   Key, Text: String;
+  Stream: TStream;
 begin
   Key := NormalizeD3Path(Path);
   if FModels.TryGetValue(Key, Result) then
     Exit;
   Result := nil;
   Text := D3Fs.ReadText(Key);
+  Stream := nil;
+  if Text = '' then
+    Stream := D3Fs.OpenGenerated(Key);
+  if Stream <> nil then
+  begin
+    { Doom 3 BFG: only the binary version }
+    try
+      Result := TD3Md5Model.Create;
+      Result.Name := Key;
+      if not Result.LoadFromBinary(Stream) then
+      begin
+        WritelnWarning('Doom3Md5', 'Invalid binary md5mesh "%s"', [Key]);
+        FreeAndNil(Result);
+      end;
+    finally
+      Stream.Free;
+    end;
+  end else
   if Text <> '' then
   begin
     Result := TD3Md5Model.Create;
@@ -957,12 +1163,31 @@ end;
 function TD3Md5Cache.Anim(const Path: String): TD3Md5Anim;
 var
   Key, Text: String;
+  Stream: TStream;
 begin
   Key := NormalizeD3Path(Path);
   if FAnims.TryGetValue(Key, Result) then
     Exit;
   Result := nil;
   Text := D3Fs.ReadText(Key);
+  Stream := nil;
+  if Text = '' then
+    Stream := D3Fs.OpenGenerated(Key);
+  if Stream <> nil then
+  begin
+    { Doom 3 BFG: only the binary version }
+    try
+      Result := TD3Md5Anim.Create;
+      Result.Name := Key;
+      if not Result.LoadFromBinary(Stream) then
+      begin
+        WritelnWarning('Doom3Md5', 'Invalid binary md5anim "%s"', [Key]);
+        FreeAndNil(Result);
+      end;
+    finally
+      Stream.Free;
+    end;
+  end else
   if Text <> '' then
   begin
     Result := TD3Md5Anim.Create;
