@@ -434,6 +434,8 @@ type
     player it reaches and detonates on the world, or bounces. CGE
     coordinates. }
   TD3Projectile = class
+    { its entityDef (saved games make it again) }
+    DefName: String;
     Position, Velocity: TVector3;
     { created (create_missile, createMissile) and not launched yet: it
       stays at HeldJoint of HeldBy, harmless }
@@ -11125,6 +11127,7 @@ begin
   Result.Yaw := D3DirYaw(D);
   Result.Gravity := DefFloat('gravity', 0);
   Result.Fuse := DefFloat('fuse', 4);
+  Result.DefName := DefName;
   Result.DetonateOnFuse := DefBool('detonate_on_fuse');
   Result.DetonateOnWorld := DefBool('detonate_on_world');
   Result.DetonateOnActor := DefBool('detonate_on_actor');

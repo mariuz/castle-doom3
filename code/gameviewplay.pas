@@ -679,6 +679,7 @@ begin
   Lines := TStringList.Create;
   try
     Lines.Text := FGame.SaveState(MapName);
+    Lines.Add('noclip'#9 + IntToStr(Ord(FNoclip)));
     try
       ForceDirectories(ExtractFileDir(FileName));
       Lines.SaveToFile(FileName);
@@ -701,7 +702,9 @@ procedure TViewPlay.LoadGame(const AName: String);
 var
   FileName, AMap: String;
   Lines: TStringList;
+  HadNoclip: Boolean;
 begin
+  HadNoclip := False;
   FileName := SaveFileName(AName);
   if not SysUtils.FileExists(FileName) then
   begin
@@ -720,11 +723,13 @@ begin
     end;
     WritelnLog('GameViewPlay', 'Loading the saved game "%s" (map "%s")', [FileName, AMap]);
     FPendingRestore := Lines.Text;
+    HadNoclip := Lines.IndexOf('noclip'#9'1') >= 0;
   finally
     Lines.Free;
   end;
   LoadLevel(AMap);
   FPendingRestore := '';
+  SetNoclip(HadNoclip);
 end;
 
 procedure TViewPlay.HandleEndLevel(const Msg: String);
