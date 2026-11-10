@@ -121,6 +121,8 @@ type
     { target_endlevel's next map, loaded FPendingMapIn seconds later }
     FPendingMap: String;
     FPendingMapIn: Single;
+    { a saved game to restore once its map has spawned }
+    FPendingRestore: String;
     FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
@@ -149,6 +151,9 @@ type
     procedure HandleMessage(const Msg: String);
     procedure HandleFlashlight(const Value: Boolean);
     procedure HandleEndLevel(const Msg: String);
+    function SaveFileName(const AName: String): String;
+    procedure SaveGame(const AName: String);
+    procedure LoadGame(const AName: String);
     procedure SetPdaOpen(const Value: Boolean);
     procedure UpdatePdaText;
     { idPlayer::UpdatePDAInfo (and TogglePDA's inventory, weapons and
@@ -573,6 +578,12 @@ begin
   FGame.Armor := 0;
   FGame.Spawn;
   PlaceCamera(Map.SpawnOrigin, Map.SpawnAngle);
+  if FPendingRestore <> '' then
+  begin
+    if not FGame.RestoreState(FPendingRestore) then
+      Hud.ShowMessage('Cannot restore the saved game', 6);
+    FPendingRestore := '';
+  end;
   LoadReverb;
   SetupSky;
   if FEnvProbesOn then
@@ -635,6 +646,85 @@ end;
 procedure TViewPlay.HandleFlashlight(const Value: Boolean);
 begin
   SetFlashlight(Value);
+end;
+
+{ Saved games: <user config>/saves/<name>.sav ("quick" without a name). }
+function TViewPlay.SaveFileName(const AName: String): String;
+var
+  N: String;
+  I: Integer;
+begin
+  N := LowerCase(Trim(AName));
+  if N = '' then
+    N := 'quick';
+  for I := 1 to Length(N) do
+    if not (N[I] in ['a'..'z', '0'..'9', '_', '-']) then
+      N[I] := '_';
+  Result := InclPathDelim(GetAppConfigDir(False)) + 'saves' + PathDelim + N + '.sav';
+end;
+
+procedure TViewPlay.SaveGame(const AName: String);
+var
+  FileName: String;
+  Lines: TStringList;
+begin
+  if (FGame = nil) or (MapName = '') then
+    Exit;
+  if FGame.PlayerDead then
+  begin
+    Console.Print('Cannot save: the player is dead');
+    Exit;
+  end;
+  FileName := SaveFileName(AName);
+  Lines := TStringList.Create;
+  try
+    Lines.Text := FGame.SaveState(MapName);
+    try
+      ForceDirectories(ExtractFileDir(FileName));
+      Lines.SaveToFile(FileName);
+      WritelnLog('GameViewPlay', 'Game saved: "%s" (%d lines)', [FileName, Lines.Count]);
+      Hud.ShowMessage('Game saved', 3);
+      Console.Print('Game saved: ' + FileName);
+    except
+      on E: Exception do
+      begin
+        WritelnWarning('GameViewPlay', 'Cannot save "%s": %s', [FileName, E.Message]);
+        Console.Print('Cannot save: ' + E.Message);
+      end;
+    end;
+  finally
+    Lines.Free;
+  end;
+end;
+
+procedure TViewPlay.LoadGame(const AName: String);
+var
+  FileName, AMap: String;
+  Lines: TStringList;
+begin
+  FileName := SaveFileName(AName);
+  if not SysUtils.FileExists(FileName) then
+  begin
+    Console.Print('No saved game ' + FileName);
+    WritelnLog('GameViewPlay', 'No saved game "%s"', [FileName]);
+    Exit;
+  end;
+  Lines := TStringList.Create;
+  try
+    Lines.LoadFromFile(FileName);
+    AMap := TD3Game.SavedMapName(Lines.Text);
+    if (AMap = '') or not TDoom3Map.MapExists(AMap) then
+    begin
+      Console.Print('Not a saved game of this data: ' + FileName);
+      Exit;
+    end;
+    WritelnLog('GameViewPlay', 'Loading the saved game "%s" (map "%s")', [FileName, AMap]);
+    FPendingRestore := Lines.Text;
+  finally
+    Lines.Free;
+  end;
+  LoadLevel(AMap);
+  FPendingRestore := '';
 end;
 
 procedure TViewPlay.HandleEndLevel(const Msg: String);
@@ -1902,6 +1992,15 @@ begin
     Console.Print(S);
     WritelnLog('Inventory', LineEnding + S);
   end else
+  if Cmd = 'call' then
+    FGame.RunScriptFunction(Trim(Args))
+  else
+  if Cmd = 'savegame' then
+    SaveGame(Trim(Args))
+  else
+  if Cmd = 'loadgame' then
+    LoadGame(Trim(Args))
+  else
   if Cmd = 'pos' then
   begin
     P := CgeToD3(Camera.Translation - Vector3(0, FGame.EyeHeight, 0));
@@ -3339,6 +3438,17 @@ begin
   if Event.IsKey(keyF5) then
   begin
     LabelFps.Exists := not LabelFps.Exists;
+    Exit(True);
+  end;
+  { quick save and quick load }
+  if Event.IsKey(keyF6) then
+  begin
+    SaveGame('');
+    Exit(True);
+  end;
+  if Event.IsKey(keyF9) then
+  begin
+    LoadGame('');
     Exit(True);
   end;
   if Event.IsKey(keyF12) then

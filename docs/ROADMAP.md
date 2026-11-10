@@ -109,8 +109,8 @@ Proposed 2026-11-10 after the full playthroughs (Doom 3, Resurrection of Evil) a
 
 **Gameplay**
 
-1. **Save and load**: the game's state (entities, movers, scripts' threads, inventory, objectives) written and read back; a real playthrough needs it.
-2. **Monsters and projectiles spawned by scripts** (`sys.spawn`): today the entity exists only for scripts. Resurrection of Evil's bosses depend on it (`monster_flying_forgotten`, `projectile_helltime_killer`, `wraith_spawneffect`).
+1. **Save and load**: the game's state (entities, movers, scripts' threads, inventory, objectives) written and read back; a real playthrough needs it. Started (unreleased): `savegame` / `loadgame` restore the player, the inventory, the script's global variables and per entity state onto the map loaded again (see the changelog for what is and isn't saved). Next: the script threads and objects (the VM's state is plain data: globals, threads' stacks and frames, objects' fields), movers' places and states, actors' states, moveables, projectiles, the bodies.
+2. **Monsters and projectiles spawned by scripts** (`sys.spawn`): done in the test map (unreleased: the model, the AI script, `projectileLaunchProjectile`), to check in Resurrection of Evil's boss maps; lights and other classes a script spawns still exist only for scripts. Before: the entity existed only for scripts. Resurrection of Evil's bosses depend on it (`monster_flying_forgotten`, `projectile_helltime_killer`, `wraith_spawneffect`).
 3. Item 8's leftovers: the grabber catching projectiles and small monsters, the envirosuit's HUD, `trigger_flashlight`, `info_portalsky`.
 4. Item 5's leftovers: `func_beam`, `func_securitycamera`, glass shards, torso aiming, `parm4` stage colors on md5 models.
 5. Doom 3 BFG: the armor mounted flashlight and its other script and def differences, the Lost Mission played through, the Flash (`.bswf`) HUD, menus and PDA (or the port's own stay, documented), Bink videos.

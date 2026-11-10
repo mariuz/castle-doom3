@@ -2366,7 +2366,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(45, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(46, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -7715,6 +7715,122 @@ begin
   end;
 end;
 
+{ sys.spawn: a monster made by a script has its model and AI, a projectile
+  flies. }
+procedure TestScriptSpawn;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  I, Monsters, Models: Integer;
+  ME: TD3ModelEntity;
+  RemoveMe: TRemoveType;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for sys.spawn');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-200, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Eye);
+    Monsters := Game.Monsters.Count;
+    Models := Map.Models.Count;
+    Check(Game.FindEntity('blob_spawned_1') = nil, 'nothing spawned yet');
+    Game.RunScriptFunction('test_spawn');
+    for I := 1 to 4 do
+    begin
+      Game.Update(0.05, Eye);
+      Map.Update(0.05, RemoveMe);
+    end;
+    Check(Game.FindEntity('blob_spawned_1') <> nil, 'the script''s monster is an entity');
+    CheckEquals(Models + 1, Map.Models.Count, 'it has an md5 model');
+    CheckEquals(Monsters + 1, Game.Monsters.Count, 'it is a monster');
+    ME := Map.FindModelEntity('blob_spawned_1');
+    Check(ME <> nil, 'find the spawned model');
+    if ME <> nil then
+    begin
+      CheckVectorNear(D3ToCge(Vector3(420, -100, 0)), ME.Holder.Translation, 'the script placed it', 1);
+      Check(Game.Monsters[Game.Monsters.Count - 1].Actor <> nil, 'it runs its AI script');
+      CheckEquals('monster_test', ME.Entity.Value('scriptobject'), 'it has its entityDef''s keys');
+    end;
+    Check(Game.FindEntity('ball_spawned_1') <> nil, 'the script''s projectile is an entity');
+    Check(Game.Projectiles.Count > 0, 'the projectile flies');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
+{ Saved games: the state of one game put onto a freshly spawned one. }
+procedure TestSaveLoad;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Far: TVector3;
+  Saved: String;
+  I: Integer;
+  T: TD3MiscEntity;
+begin
+  Saved := '';
+  for I := 0 to 1 do
+  begin
+    World := TCastleRootTransform.Create(nil);
+    Map := TDoom3Map.Create(World);
+    World.Add(Map);
+    Game := nil;
+    try
+      Check(Map.LoadMap('testmap'), 'load testmap for a saved game');
+      Game := TD3Game.Create(Map);
+      Game.Health := 100;
+      Game.Armor := 0;
+      Game.Spawn;
+      Game.NoTarget := True;
+      Far := D3ToCge(Vector3(-200, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+      Game.Update(0.05, Far);
+      if I = 0 then
+      begin
+        { the first game: hurt, armored, an item taken, a light switched,
+          a barrel exploded, a clearance }
+        Game.Health := 61;
+        Game.Give('armor', '35');
+        Game.Update(0.05, D3ToCge(Vector3(0, -210, 0)) + Vector3(0, PlayerEyeHeight, 0));
+        Game.Update(0.05, D3ToCge(Vector3(0, -210, 0)) + Vector3(0, PlayerEyeHeight, 0));
+        Check(Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'the armor was picked up before saving');
+        Map.SetLightOn(Map.FindLight('light_trig'), True);
+        Game.Activate(Game.FindEntity('security_1'));
+        T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
+        Game.DamageMiscAt(T.Brush.Scene.BoundingBox.Center, 50, 'damage_test_hurt');
+        Game.Update(0.05, Far);
+        Saved := Game.SaveState('testmap');
+        CheckEquals('testmap', TD3Game.SavedMapName(Saved), 'the saved game names its map');
+        CheckEquals('', TD3Game.SavedMapName('something else'), 'other text is not a saved game');
+        Check(not Game.RestoreState('something else'), 'other text is not restored');
+      end else
+      begin
+        Check(not Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'a fresh game has the armor');
+        Check(Game.RestoreState(Saved), 'restore the saved game');
+        CheckEquals(61, Game.Health, 'restored health');
+        Check(Game.Armor > 35, 'restored armor (the pickup''s and the given)');
+        Check(Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'the armor stays picked up');
+        Check(Map.Light(Map.FindLight('light_trig')).StartOn, 'the light stays on');
+        CheckEquals('Test Access', Game.Security, 'the clearance');
+        T := Game.MiscOf(Game.FindEntity('barrel_exp_1'));
+        Check(T.Dead and T.Brush.Hidden, 'the barrel stays exploded');
+        Check(not Game.MiscOf(Game.FindEntity('glass_1')).Dead, 'the pane is whole');
+      end;
+    finally
+      FreeAndNil(Game);
+      FreeAndNil(World);
+    end;
+  end;
+end;
+
 {$I test_bfg.inc}
 
 begin
@@ -7795,6 +7911,8 @@ begin
   TestWeaponPresentation;
   TestPlayerMotion;
   TestDamageFeedback;
+  TestScriptSpawn;
+  TestSaveLoad;
   TestBfg;
   TestPowerups;
   TestStaminaSkinsKnockback;

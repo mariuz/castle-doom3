@@ -228,6 +228,7 @@ type
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
     procedure BuildModelEntities;
+    function BuildModelEntity(const E: TD3MapEntity): TD3ModelEntity;
     procedure BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
     procedure BuildStaticModelEntities;
     procedure UpdateShadowMapCasting;
@@ -353,6 +354,9 @@ type
     function GuiTrace(const Origin, Dir: TVector3; const MaxDistance: Single;
       out Surface: TD3GuiSurface; out TexCoord: TVector2; out Distance: Single): Boolean;
     property Models: specialize TObjectList<TD3ModelEntity> read FModels;
+    { An entity made while the game runs (a script's sys.spawn): its
+      entityDef's keys, and its md5 model if it has one (nil otherwise). }
+    function SpawnModelEntity(const E: TD3MapEntity): TD3ModelEntity;
     { Player start in CGE coordinates (feet) and Doom 3 yaw. }
     property SpawnOrigin: TVector3 read FSpawnOrigin;
     property SpawnAngle: Single read FSpawnAngle;
@@ -2504,9 +2508,10 @@ begin
   end;
 end;
 
-procedure TDoom3Map.BuildModelEntities;
+procedure MergeEntityDef(const E: TD3MapEntity); forward;
+
+function TDoom3Map.BuildModelEntity(const E: TD3MapEntity): TD3ModelEntity;
 var
-  E: TD3MapEntity;
   Def: TStringList;
   ModelName, MeshPath, SkinName: String;
   Decl: TD3ModelDecl;
@@ -2516,68 +2521,81 @@ var
   Rot: TMatrix3;
   Offset: TVector3;
 begin
-  for E in FMapFile.Entities do
+  Result := nil;
+  if EntityInhibited(E) then
+    Exit;
+  Def := Decls.EntityDef(E.ClassName_);
+  ModelName := E.Value('model');
+  if (ModelName = '') and (Def <> nil) then
+    ModelName := Def.Values['model'];
+  if ModelName = '' then
+    Exit;
+  MeshPath := '';
+  Decl := nil;
+  if SameText(ExtractFileExt(ModelName), '.md5mesh') then
+    MeshPath := ModelName
+  else
   begin
-    if EntityInhibited(E) then
-      Continue;
-    Def := Decls.EntityDef(E.ClassName_);
-    ModelName := E.Value('model');
-    if (ModelName = '') and (Def <> nil) then
-      ModelName := Def.Values['model'];
-    if ModelName = '' then
-      Continue;
-    MeshPath := '';
-    Decl := nil;
-    if SameText(ExtractFileExt(ModelName), '.md5mesh') then
-      MeshPath := ModelName
-    else
-    begin
-      Decl := Decls.ModelDecl(ModelName);
-      if Decl <> nil then
-        MeshPath := Decl.Mesh;
-    end;
-    if not SameText(ExtractFileExt(MeshPath), '.md5mesh') then
-      Continue; { .lwo / .ase: BuildStaticModelEntities }
-    Md5 := Md5Cache.Model(MeshPath);
-    if Md5 = nil then
-      Continue;
-    SkinName := E.Value('skin');
-    if (SkinName = '') and (Def <> nil) then
-      SkinName := Def.Values['skin'];
-    if (SkinName = '') and (Decl <> nil) then
-      SkinName := Decl.Skin;
-    Anims := nil;
+    Decl := Decls.ModelDecl(ModelName);
     if Decl <> nil then
-      Anims := Decl.Anims;
-    Offset := TVector3.Zero;
-    if Decl <> nil then
-      Offset := Decl.Offset;
-
-    ME := TD3ModelEntity.Create;
-    ME.Entity := E;
-    ME.EntityDef := Def;
-    ME.Instance := TD3Md5Instance.Create(Md5, Anims, SkinName);
-    if Decl <> nil then
-      ME.Instance.FrameCommands := Decl.FrameCommands;
-    ME.Instance.Scene.Collides := False;
-    ME.Instance.Scene.Pickable := False;
-    ME.Instance.Scene.Translation := D3ToCge(Offset);
-    ME.Holder := TCastleTransform.Create(nil);
-    ME.Holder.SetTransient;
-    ME.Holder.Name := 'Model_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
-    ME.Holder.Translation := D3ToCge(E.Origin);
-    Rot := E.Rotation;
-    SetD3Rotation(ME.Holder, Rot);
-    ME.Holder.Add(ME.Instance.Scene);
-    ME.Offset := Offset;
-    if Def <> nil then
-      BuildHead(ME, Def.Values['def_head'], Def.Values['head_joint']);
-    { "hide" "1" (or "2"): hidden until a trigger shows it (TD3Game.Activate) }
-    ME.Hidden := E.IntValue('hide', 0) <> 0;
-    ME.Holder.Exists := not ME.Hidden;
-    Add(ME.Holder);
-    FModels.Add(ME);
+      MeshPath := Decl.Mesh;
   end;
+  if not SameText(ExtractFileExt(MeshPath), '.md5mesh') then
+    Exit; { .lwo / .ase: BuildStaticModelEntities }
+  Md5 := Md5Cache.Model(MeshPath);
+  if Md5 = nil then
+    Exit;
+  SkinName := E.Value('skin');
+  if (SkinName = '') and (Def <> nil) then
+    SkinName := Def.Values['skin'];
+  if (SkinName = '') and (Decl <> nil) then
+    SkinName := Decl.Skin;
+  Anims := nil;
+  if Decl <> nil then
+    Anims := Decl.Anims;
+  Offset := TVector3.Zero;
+  if Decl <> nil then
+    Offset := Decl.Offset;
+
+  ME := TD3ModelEntity.Create;
+  ME.Entity := E;
+  ME.EntityDef := Def;
+  ME.Instance := TD3Md5Instance.Create(Md5, Anims, SkinName);
+  if Decl <> nil then
+    ME.Instance.FrameCommands := Decl.FrameCommands;
+  ME.Instance.Scene.Collides := False;
+  ME.Instance.Scene.Pickable := False;
+  ME.Instance.Scene.Translation := D3ToCge(Offset);
+  ME.Holder := TCastleTransform.Create(nil);
+  ME.Holder.SetTransient;
+  ME.Holder.Name := 'Model_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
+  ME.Holder.Translation := D3ToCge(E.Origin);
+  Rot := E.Rotation;
+  SetD3Rotation(ME.Holder, Rot);
+  ME.Holder.Add(ME.Instance.Scene);
+  ME.Offset := Offset;
+  if Def <> nil then
+    BuildHead(ME, Def.Values['def_head'], Def.Values['head_joint']);
+  { "hide" "1" (or "2"): hidden until a trigger shows it (TD3Game.Activate) }
+  ME.Hidden := E.IntValue('hide', 0) <> 0;
+  ME.Holder.Exists := not ME.Hidden;
+  Add(ME.Holder);
+  FModels.Add(ME);
+  Result := ME;
+end;
+
+procedure TDoom3Map.BuildModelEntities;
+var
+  E: TD3MapEntity;
+begin
+  for E in FMapFile.Entities do
+    BuildModelEntity(E);
+end;
+
+function TDoom3Map.SpawnModelEntity(const E: TD3MapEntity): TD3ModelEntity;
+begin
+  MergeEntityDef(E);
+  Result := BuildModelEntity(E);
 end;
 
 procedure TDoom3Map.BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
