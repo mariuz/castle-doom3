@@ -7907,6 +7907,49 @@ begin
   end;
 end;
 
+{ Loading a map again and again (a saved game's load does it) must not
+  grow the heap: what a load makes, the next one frees. }
+procedure TestReloadMemory;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Far: TVector3;
+  I, J: Integer;
+  RemoveMe: TRemoveType;
+  Used: array [0..5] of PtrUInt;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := TD3Game.Create(Map);
+  try
+    Far := D3ToCge(Vector3(-200, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    for I := 0 to High(Used) do
+    begin
+      Game.Clear;
+      Check(Map.LoadMap('testmap'), 'load testmap again');
+      Game.Health := 100;
+      Game.Armor := 0;
+      Game.Spawn;
+      for J := 1 to 40 do
+      begin
+        RemoveMe := rtNone;
+        Game.Update(0.05, Far);
+        Map.Update(0.05, RemoveMe);
+      end;
+      Used[I] := GetFPCHeapStatus.CurrHeapUsed;
+      Writeln(Format('  reload %d: heap %.2f MB', [I, Used[I] / (1024 * 1024)]));
+    end;
+    { the first loads fill caches (decls, images, models) }
+    Check(Used[5] < Used[2] + 512 * 1024,
+      Format('3 more loads grew the heap by %.2f MB', [(Used[5] - Used[2]) / (1024 * 1024)]));
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 {$I test_bfg.inc}
 
 begin
@@ -7990,6 +8033,7 @@ begin
   TestScriptSpawn;
   TestFight;
   TestSaveLoad;
+  TestReloadMemory;
   TestBfg;
   TestPowerups;
   TestStaminaSkinsKnockback;

@@ -98,6 +98,10 @@ type
     FFightRoute: TD3PointArray;
     FFightSeg: Integer;
     FFightAlong, FFightWalked: Single;
+    { it sidesteps while it shoots: at most FightStrafeReach from where
+      the fight began, turning back at walls }
+    FFightAnchor: TVector3;
+    FFightSide: Single;
     FRouteGaps: Single;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
@@ -2982,8 +2986,14 @@ end;
 function TViewPlay.FightStep(const SecondsPassed: Single): Boolean;
 const
   FightSaveEvery = 20;
+  { no save while badly hurt (a load would start every fight like that),
+    unless the last one is this old }
+  FightSaveHealth = 50;
+  FightSaveAnyway = 90;
+  FightStrafeSpeed = 140;
+  FightStrafeReach = 44;
 var
-  Target, Dir: TVector3;
+  Target, Dir, Side, NewEye: TVector3;
   TargetName: String;
   Slot: Integer;
 begin
@@ -3036,6 +3046,12 @@ begin
   if FGame.FightTarget(Camera.Translation, 1200, FFightIgnore, Target, TargetName) and
      (FFightTime >= FFightSkipUntil) then
   begin
+    if FFightTarget = '' then
+    begin
+      FFightAnchor := Camera.Translation;
+      if FFightSide = 0 then
+        FFightSide := 1;
+    end;
     if TargetName <> FFightTarget then
     begin
       FFightTarget := TargetName;
@@ -3067,6 +3083,18 @@ begin
     if Dir.Length > 0.01 then
       Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
     FGame.AttackOnce;
+    { sidestep: fireballs and bursts aimed at where it stood miss }
+    Side := TVector3.CrossProduct(Dir, Vector3(0, 1, 0));
+    if Side.Length > 0.01 then
+    begin
+      Side := Side.Normalize * FFightSide;
+      NewEye := Camera.Translation + Side * (FightStrafeSpeed * Min(SecondsPassed, 0.1));
+      if (PointsDistance(NewEye, FFightAnchor) > FightStrafeReach) or
+         MainViewport.Items.WorldSegmentCollision(Camera.Translation, NewEye + Side * (PlayerRadius + 8)) then
+        FFightSide := -FFightSide
+      else
+        Camera.Translation := NewEye;
+    end;
     FRouteLastEye := Camera.Translation;
     { with only the fists it can't wait for the monster: it walks on }
     Exit((Slot < 0) or (Pos('fists', LowerCase(FGame.WeaponDefs[Slot])) = 0));
@@ -3076,7 +3104,8 @@ begin
 
   { quiet: save now and then }
   FFightSinceSave := FFightSinceSave + SecondsPassed;
-  if (FFightSinceSave >= FightSaveEvery) and not FGame.CinematicActive and (FGame.Health > 0) then
+  if (FFightSinceSave >= FightSaveEvery) and not FGame.CinematicActive and (FGame.Health > 0) and
+     ((FGame.Health >= FightSaveHealth) or (FFightSinceSave >= FightSaveAnyway) or not FFightHasSave) then
   begin
     FFightSinceSave := 0;
     SaveGame('fight');
