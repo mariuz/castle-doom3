@@ -1162,7 +1162,7 @@ type
     function ActorTestMelee(const A: TD3Actor): Boolean;
     { idAI::DirectDamage: hurt the player by the damage def; ends a
       multiframe attack }
-    procedure ActorDirectDamage(const A: TD3Actor; const DamageDefName: String);
+    procedure ActorDirectDamage(const A: TD3Actor; const ADamageDefName: String);
     { idAI::AttackMelee: hit the player in reach, True when hit }
     function ActorAttackMelee(const A: TD3Actor; const DamageDefName: String): Boolean;
     procedure UpdateProjectiles(const SecondsPassed: Single);
@@ -11083,11 +11083,16 @@ begin
   Result := ActorCanSeePlayer(A, False);
 end;
 
-procedure TD3Game.ActorDirectDamage(const A: TD3Actor; const DamageDefName: String);
+procedure TD3Game.ActorDirectDamage(const A: TD3Actor; const ADamageDefName: String);
 var
   Def: TStringList;
   Damage: Integer;
+  DamageDefName: String;
 begin
+  { a copy: the caller may pass A.Attack itself, a const parameter doesn't
+    hold the string, and clearing A.Attack below would free it under us
+    (freed memory used: heap corruption, crashes much later) }
+  DamageDefName := ADamageDefName;
   { idAI::DirectDamage ends a multiframe attack }
   A.Attack := '';
   Def := Decls.EntityDef(DamageDefName);
