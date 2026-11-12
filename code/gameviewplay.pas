@@ -143,6 +143,10 @@ type
     FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
+    { map loads in this run, and the shader programs linked before the
+      last one (the memory log line) }
+    FMapLoads: Integer;
+    FProgramsAtLoad: Cardinal;
     { after those, frames longer than LongFrameSeconds are logged (stalls
       when new areas come into view: textures, shaders) }
     FLastUpdate: TTimerResult;
@@ -164,6 +168,7 @@ type
     { R: returns True when the walk is over }
     function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
     function FightStep(const SecondsPassed: Single): Boolean;
+    procedure LogMemory(const Title: String);
     procedure FightSummary;
     procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
@@ -239,7 +244,8 @@ implementation
 uses
   Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
-  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
+  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils, CastleGLImages,
+  CastleRenderContext,
   Doom3Sampler, CastleInternalGLShadowVolumes, CastleGLShaders,
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
@@ -278,6 +284,11 @@ end;
 procedure TViewPlay.Start;
 begin
   inherited Start;
+  { env CD3_GLOBAL_AMBIENT=0: black where no light reaches, like Doom 3
+    (console r_globalAmbient; CGE's default is 0.2) }
+  if GetEnvironmentVariable('CD3_GLOBAL_AMBIENT') <> '' then
+    RenderContext.GlobalAmbient := Vector3(1, 1, 1) *
+      SysUtils.StrToFloatDef(GetEnvironmentVariable('CD3_GLOBAL_AMBIENT'), 0, DefaultFormatSettings);
   FGame := TD3Game.Create(Map);
   FGame.OnMessage := @HandleMessage;
   FGame.OnFlashlight := @HandleFlashlight;
@@ -564,9 +575,25 @@ begin
   FadeRect.Color := C;
 end;
 
+{ One log line: the process's memory, the Pascal heap, the shader programs
+  linked (in all and since the map's load began), the textures on the GPU
+  (env CD3_TEXMEM=1 turns CGE's texture memory profiler on). }
+procedure TViewPlay.LogMemory(const Title: String);
+var
+  S: String;
+begin
+  S := Format('%s: %s, %d shader programs linked (%d by this load)',
+    [Title, ProcessMemoryText, InternalProgramsLinked, InternalProgramsLinked - FProgramsAtLoad]);
+  if TextureMemoryProfiler.Enabled then
+    S := S + ', ' + Copy(TextureMemoryProfiler.Summary, 1, Pos(#10, TextureMemoryProfiler.Summary + #10) - 1);
+  WritelnLog('Memory', S);
+end;
+
 procedure TViewPlay.LoadLevel(const AMapName: String);
 begin
   WritelnLog('GameViewPlay', 'Loading map "%s"', [AMapName]);
+  Inc(FMapLoads);
+  FProgramsAtLoad := InternalProgramsLinked;
   LoadProfileStart;
   if SamplerWanted then
     SamplerStart;
@@ -2535,6 +2562,15 @@ begin
       BoolToStr(SharedLightEffectsAvailable, '', ' (not supported by this CGE)') + ', reloading the map');
     LoadLevel(MapName);
   end else
+  if Cmd = 'r_globalambient' then
+  begin
+    { CGE's global ambient light (its default 0.2 times the materials' 0.2
+      ambient make every surface at least 10 of 255 bright; Doom 3 is
+      black where no light reaches: r_globalAmbient 0) }
+    if Args <> '' then
+      RenderContext.GlobalAmbient := Vector3(1, 1, 1) * SysUtils.StrToFloatDef(Trim(Args), 0, DefaultFormatSettings);
+    Console.Print(Format('r_globalAmbient %.2f', [RenderContext.GlobalAmbient.X]));
+  end else
   if Cmd = 'r_lightvolumes' then
   begin
     if Args <> '' then
@@ -2779,6 +2815,22 @@ begin
       SamplerStopAndReport('Sample of ' + MapName);
       Console.Print('Samples written (samples.txt)');
     end;
+  end else
+  if Cmd = 'colbench' then
+  begin
+    { the cost of a short segment collision at the eye: against the whole
+      world, then without the collision model's scenes (what the other
+      colliding scenes cost) }
+    S := FGame.CollisionBenchmark(Camera.Translation);
+    Console.Print(S);
+    WritelnLog('Benchmark', S);
+  end else
+  if Cmd = 'meminfo' then
+  begin
+    LogMemory('Now');
+    Console.Print(ProcessMemoryText);
+    if TextureMemoryProfiler.Enabled and (Trim(Args) = 'full') then
+      WritelnLogMultiline('Memory', TextureMemoryProfiler.Summary);
   end else
   if Cmd = 'scripts' then
   begin
@@ -3458,6 +3510,7 @@ begin
     begin
       FProfileFrames := 0;
       LoadProfileLog(Format('Map "%s"', [MapName]));
+      LogMemory(Format('Map "%s" (load %d)', [MapName, FMapLoads]));
       if Profiler.Enabled then
         WritelnLogMultiline('Time Profile', Profiler.Summary);
       SamplerStopAndReport(Format('Map "%s"', [MapName]));

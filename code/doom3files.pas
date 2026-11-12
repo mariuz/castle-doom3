@@ -123,6 +123,10 @@ function D3FsUrl(const APath: String): String;
 procedure LoadProfileStart;
 procedure LoadProfileStep(const Name: String);
 procedure LoadProfileLog(const Title: String);
+{ The process's memory: private bytes and working set (Windows; 0
+  elsewhere) and the Pascal heap in use, in MB. }
+procedure ProcessMemory(out PrivateMB, WorkingSetMB, HeapMB: Single);
+function ProcessMemoryText: String;
 
 var
   D3Fs: TDoom3FileSystem;
@@ -144,6 +148,48 @@ uses
 
 var
   LoadProfileTime, LoadProfileStartTime: TTimerResult;
+
+{$ifdef MSWINDOWS}
+type
+  TD3ProcessMemoryCounters = record
+    cb: DWORD;
+    PageFaultCount: DWORD;
+    PeakWorkingSetSize, WorkingSetSize, QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage,
+      QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage, PagefileUsage, PeakPagefileUsage,
+      PrivateUsage: PtrUInt;
+  end;
+
+function D3GetProcessMemoryInfo(Process: THandle; out Counters: TD3ProcessMemoryCounters;
+  Size: DWORD): LongBool; stdcall; external 'psapi.dll' name 'GetProcessMemoryInfo';
+{$endif}
+
+procedure ProcessMemory(out PrivateMB, WorkingSetMB, HeapMB: Single);
+{$ifdef MSWINDOWS}
+var
+  C: TD3ProcessMemoryCounters;
+{$endif}
+begin
+  PrivateMB := 0;
+  WorkingSetMB := 0;
+  HeapMB := GetFPCHeapStatus.CurrHeapUsed / (1024 * 1024);
+  {$ifdef MSWINDOWS}
+  FillChar(C, SizeOf(C), 0);
+  C.cb := SizeOf(C);
+  if D3GetProcessMemoryInfo(GetCurrentProcess, C, SizeOf(C)) then
+  begin
+    PrivateMB := C.PrivateUsage / (1024 * 1024);
+    WorkingSetMB := C.WorkingSetSize / (1024 * 1024);
+  end;
+  {$endif}
+end;
+
+function ProcessMemoryText: String;
+var
+  P, W, H: Single;
+begin
+  ProcessMemory(P, W, H);
+  Result := Format('process %.0f MB (working set %.0f MB), Pascal heap %.0f MB', [P, W, H]);
+end;
 
 procedure LoadProfileStart;
 begin

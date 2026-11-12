@@ -12,7 +12,7 @@ implementation
 uses
   SysUtils, Classes,
   CastleWindow, CastleLog, CastleUIControls, CastleApplicationProperties, CastleParameters,
-  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils, CastleGLShaders, CastleInternalRenderer,
+  CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils, CastleGLShaders, CastleGLImages, CastleInternalRenderer,
   Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level, Doom3LightEffects
   {$region 'Castle Initialization Uses'}
   // The content here may be automatically updated by CGE editor.
@@ -178,8 +178,15 @@ initialization
   { keep the shader programs no shape uses now (a monster that moved away
     from a light, the last projectile of a kind): the next one needs them
     again, and linking them again stalls (CD3_KEEP_PROGRAMS=0 compares) }
-  if GetEnvironmentVariable('CD3_KEEP_PROGRAMS') <> '0' then
+  { CD3_KEEP_PROGRAMS=<n>: keep that many (0: none) }
+  if GetEnvironmentVariable('CD3_KEEP_PROGRAMS') <> '' then
+    InternalKeepUnusedShaderPrograms := StrToIntDef(GetEnvironmentVariable('CD3_KEEP_PROGRAMS'), 8192)
+  else
     InternalKeepUnusedShaderPrograms := 8192;
+  { CD3_TEXMEM=1: CGE counts the textures' GPU memory (the Memory log
+    line, console "meminfo full" lists them) }
+  if GetEnvironmentVariable('CD3_TEXMEM') <> '' then
+    TextureMemoryProfiler.Enabled := True;
   Application.OnInitialize := @ApplicationInitialize;
 
   Window := TCastleWindow.Create(Application);

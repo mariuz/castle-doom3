@@ -3,8 +3,10 @@
 # from our log, dhewm3 runs it, its screenshots go to <OutDir>\<map>, then
 # dhewm3_compare.py makes <OutDir>\<map>_compare.jpg (ours left).
 #   .\tools\dhewm3_refs.ps1 -Maps mars_city2,hell1 -Logs playthrough
+# Without -Maps: every map with a log in -Logs (game_<map>.log). At the end
+# <OutDir>\summary.md is the table of all maps compared so far.
 param(
-  [Parameter(Mandatory = $true)] [string[]] $Maps,
+  [string[]] $Maps = @(),
   [string] $Logs = "playthrough",
   [string] $OutDir = "dhewm3_ref",
   [string] $Dhewm3 = "F:\work\dhewm3\dhewm3\dhewm3.exe",
@@ -15,6 +17,9 @@ param(
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $Shots = Join-Path $SavePath "base\screenshots"
+if ($Maps.Count -eq 0) {
+  $Maps = Get-ChildItem $Logs -Filter "game_*.log" | ForEach-Object { $_.BaseName.Substring(5) }
+}
 foreach ($Map in $Maps) {
   $Log = Join-Path $Logs "game_$Map.log"
   python tools/dhewm3_compare.py cfg $Log (Join-Path $SavePath "base\ref_$Map.cfg") --every $Every --wait 900
@@ -29,3 +34,4 @@ foreach ($Map in $Maps) {
   python tools/dhewm3_compare.py compare $Log $Dest (Join-Path $OutDir "${Map}_compare.jpg") --every $Every | Set-Content -Encoding utf8 (Join-Path $OutDir "${Map}_compare.txt")
   Write-Host "$Map : $((Get-ChildItem $Dest).Count) shots"
 }
+python tools/dhewm3_compare.py table $OutDir (Join-Path $OutDir "summary.md")
