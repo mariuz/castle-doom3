@@ -5171,8 +5171,9 @@ var
   Game: TD3Game;
   Mon: TD3Monster;
   P: TVector3;
-  Health0, I, Debris0: Integer;
-  Trails: Integer;
+  Health0, I, J, Debris0: Integer;
+  Trails, Flying: Integer;
+  TrailsAlive: Boolean;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -5219,6 +5220,33 @@ begin
         Inc(Trails);
     CheckEquals(Game.Brass.Count - Debris0, Trails, 'every gib trails its smoke_trail');
     Check(Trails > 0, 'gibs flew');
+    { test_blood has 1 cycle and ends after 0.6 s: the emitter must stay
+      while a flying gib points at it (it was freed, and the gib's
+      destructor wrote into the freed emitter) }
+    TrailsAlive := True;
+    Flying := 0;
+    { one thrown up in room B: in the air for about a second }
+    Check(Game.SpawnDebris(Decls.EntityDef('item_test_gib'), D3ToCge(Vector3(420, -250, 60)),
+      Vector3(0, 400, 0), TVector3.Zero, 0, 0) <> nil, 'a gib thrown up');
+    for J := 1 to 80 do
+    begin
+      Game.Update(0.05, P + Vector3(0, PlayerEyeHeight, 0));
+      for I := 0 to Game.Brass.Count - 1 do
+        if Game.Brass[I].Trail <> nil then
+        begin
+          if J * 0.05 > 0.65 then
+            Inc(Flying);
+          if Game.Emitters.IndexOf(Game.Brass[I].Trail) < 0 then
+            TrailsAlive := False;
+        end;
+    end;
+    Check(TrailsAlive, 'a gib''s trail emitter lives as long as the gib points at it');
+    Trails := 0;
+    for I := 0 to Game.Emitters.Count - 1 do
+      if Pos('smoke_trail', Game.Emitters[I].Name) > 0 then
+        Inc(Trails);
+    CheckEquals(0, Trails, 'the trails are freed once the gibs rest or go');
+    Check(Flying > 0, 'a gib was still flying after its trail''s particles ended');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
