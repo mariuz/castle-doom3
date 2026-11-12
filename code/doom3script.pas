@@ -233,6 +233,10 @@ type
     procedure FreeThread(const T: TD3ScriptThread);
     { Run the threads that are done waiting. }
     procedure Update(const ATime: Single);
+    { One thread's turn at a time before the next Update's (Doom 3's game
+      runs 60 tics a second and sys.waitFrame waits for one: a weapon's
+      script counts them between shots). }
+    procedure UpdateThread(const T: TD3ScriptThread; const ATime: Single);
     procedure KillThreads;
     function GlobalValue(const AName: String): TD3Value;
     { the global variables by index (saved games) }
@@ -3000,6 +3004,16 @@ begin
   for I := FThreads.Count - 1 downto 0 do
     if (FThreads[I].State = tsDone) and not FThreads[I].Persistent then
       FThreads.Delete(I);
+end;
+
+procedure TD3ScriptVM.UpdateThread(const T: TD3ScriptThread; const ATime: Single);
+begin
+  FTime := ATime;
+  if (T <> nil) and (FThreads.IndexOf(T) >= 0) and (T.State <> tsDone) and Ready(T) then
+  begin
+    T.State := tsRunning;
+    Execute(T);
+  end;
 end;
 
 function NumOp(const Op: TD3Op; const A, B: Single): Single;
