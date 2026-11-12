@@ -1125,8 +1125,6 @@ type
     procedure BuildDamageZones(const Mon: TD3Monster);
     function MonsterHitZone(const Mon: TD3Monster; const HitPoint: TVector3; out Scale: Single): String;
     function SpawnGibs(const E: TD3MapEntity; const Def: TStringList; const Center, Direction: TVector3): Integer;
-    function SpawnDebris(const Def: TStringList; const Position, Velocity, AngularVelocity: TVector3;
-      const Yaw, Fuse: Single): TD3Brass;
     { the player's view axes (Doom 3 rows: forward, left, up) }
     function PlayerViewAxis: TMatrix3;
     procedure UpdateMoveables(const SecondsPassed: Single);
@@ -1393,6 +1391,10 @@ type
     function EjectBrass(const W: TD3Weapon): Boolean;
     { brass and debris (gibs) flying around }
     property Brass: specialize TObjectList<TD3Brass> read FBrass;
+    { A casing or gib of the entity def Def flying from Position (CGE);
+      Fuse 0: the def's "fuse". Nil without a static model. }
+    function SpawnDebris(const Def: TStringList; const Position, Velocity, AngularVelocity: TVector3;
+      const Yaw, Fuse: Single): TD3Brass;
     { A damage def's values (damage_* entityDef): Found false when missing
       (the Damage is then Default). }
     function DamageInfo(const DefName: String; const DefaultDamage: Integer = 10): TD3DamageInfo;
@@ -5041,8 +5043,13 @@ begin
   B.Bounce := StrToFloatDef(Def.Values['bouncyness'], 0.6, DefaultFormatSettings);
   B.BounceSound := Def.Values['snd_bounce'];
   if Def.Values['smoke_trail'] <> '' then
+  begin
     B.Trail := AddEmitter(Def.Values['smoke_trail'], CgeToD3(Position), AxisFromDirection(Vector3(0, 0, 1)),
       False, B.Kind + ' smoke_trail');
+    { kept while the debris points at it (see the projectiles' smoke_fly) }
+    if B.Trail <> nil then
+      B.Trail.Persistent := True;
+  end;
   B.Holder.Translation := B.Position;
   SetD3Rotation(B.Holder, AnglesMatrix(B.Angles));
   if FBrass.Count >= MaxDebris then
@@ -7111,7 +7118,10 @@ end;
 destructor TD3Brass.Destroy;
 begin
   if Trail <> nil then
+  begin
     Trail.Stopped := True;
+    Trail.Persistent := False;
+  end;
   if (Scene <> nil) and (Holder <> nil) then
     Holder.Remove(Scene);
   FreeAndNil(Scene);
@@ -7257,6 +7267,7 @@ begin
         if B.Trail <> nil then
         begin
           B.Trail.Stopped := True;
+          B.Trail.Persistent := False;
           B.Trail := nil;
         end;
       end;
@@ -10851,7 +10862,10 @@ begin
     if FProjectiles[I] = W.HeldProjectile then
     begin
       if FProjectiles[I].Trail <> nil then
+      begin
         FProjectiles[I].Trail.Stopped := True;
+        FProjectiles[I].Trail.Persistent := False;
+      end;
       FProjectiles.Delete(I);
     end;
   W.HeldProjectile := nil;
@@ -11248,8 +11262,16 @@ begin
   Result.DetonateDecal := Def.Values['mtr_detonate'];
   Result.DecalSize := DefFloat('decal_size', 6);
   if Def.Values['smoke_fly'] <> '' then
+  begin
     Result.Trail := AddEmitter(Def.Values['smoke_fly'], CgeToD3(From),
       AxisFromDirection(CgeToD3(Velocity)), False, Owner + ' smoke_fly');
+    { kept while the projectile points at it: a smoke with a finite number
+      of cycles was freed when it finished, and the projectile went on
+      writing its place into the freed emitter (heap corruption: a crash
+      minutes later, in game/hell1 when a casing's scene was freed) }
+    if Result.Trail <> nil then
+      Result.Trail.Persistent := True;
+  end;
   if DefFloat('light_radius', 0) > 0 then
   begin
     { a glowing ball in the light's color (the particles are item 7) }
@@ -11390,7 +11412,10 @@ var
       P.HeldBy.Missile := nil;
     { its trail fades out by itself }
     if P.Trail <> nil then
+    begin
       P.Trail.Stopped := True;
+      P.Trail.Persistent := False;
+    end;
     FProjectiles.Delete(I);
   end;
 
