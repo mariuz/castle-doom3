@@ -3035,6 +3035,15 @@ end;
 
 { One step of the fighting playthrough; True while the walk waits (a
   fight, a death). }
+{ The fight's save: "fight", or env CD3_FIGHT_SAVE (two games fighting at
+  once must not share a save). }
+function FightSaveName: String;
+begin
+  Result := GetEnvironmentVariable('CD3_FIGHT_SAVE');
+  if Result = '' then
+    Result := 'fight';
+end;
+
 function TViewPlay.FightStep(const SecondsPassed: Single): Boolean;
 const
   FightSaveEvery = 20;
@@ -3073,7 +3082,7 @@ begin
       FRoute := nil;
       Exit(True);
     end;
-    LoadGame('fight');
+    LoadGame(FightSaveName);
     FRoute := Copy(FFightRoute);
     FRouteSeg := FFightSeg;
     FRouteAlong := FFightAlong;
@@ -3160,7 +3169,7 @@ begin
      ((FGame.Health >= FightSaveHealth) or (FFightSinceSave >= FightSaveAnyway) or not FFightHasSave) then
   begin
     FFightSinceSave := 0;
-    SaveGame('fight');
+    SaveGame(FightSaveName);
     FFightHasSave := True;
     Inc(FFightSaves);
     FFightDeathsHere := 0;

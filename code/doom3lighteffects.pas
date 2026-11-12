@@ -204,25 +204,55 @@ end;
 
 { N is the light's uniform name suffix: its index, or "<Light>" (CGE puts
   the light number there) for the shared effects. }
+function LightEffectCodeKind(const N: String; const Shape: TD3LightShape;
+  const Projected, KindUniform: Boolean): String; forward;
+
 function LightEffectCode(const N: String; const Shape: TD3LightShape; const Projected: Boolean): String;
-var
-  ProjCode, FallCode: String;
 begin
-  case Shape of
-    { gradients brightest at the center, like lights/squarelight1 and
-      lights/round }
-    lsSquare:
-      ProjCode := '  vec2 d2 = abs(st * 2.0 - 1.0);' + LineEnding +
-                  '  float projection = 1.0 - smoothstep(0.0, 1.0, max(d2.x, d2.y));' + LineEnding;
-    lsFull:
-      ProjCode := '  float projection = 1.0;' + LineEnding;
+  Result := LightEffectCodeKind(N, Shape, Projected, False);
+end;
+
+{ With KindUniform the shape and Projected come from the per-light uniform
+  d3_light_kind_<N> (x: 0 round, 1 square, 2 full; y: 1 projected), so
+  lights of all kinds share one code: a shape's shader program then depends
+  on how many lights reach it, not on their kinds in each slot (in
+  game/caverns1 that was 600 programs for the first view and 200 to 500
+  more after most loads of a save, when other lights were on). }
+function LightEffectCodeKind(const N: String; const Shape: TD3LightShape;
+  const Projected, KindUniform: Boolean): String;
+var
+  ProjCode, FallCode, KindDecl: String;
+begin
+  KindDecl := '';
+  if KindUniform then
+  begin
+    KindDecl := 'uniform vec2 d3_light_kind_' + N + ';' + LineEnding;
+    ProjCode :=
+      '  vec2 d2 = abs(st * 2.0 - 1.0);' + LineEnding +
+      '  float dist = (d3_light_kind_' + N + '.x > 0.5) ? max(d2.x, d2.y) : length(d2);' + LineEnding +
+      '  float projection = (d3_light_kind_' + N + '.x > 1.5) ? 1.0 : 1.0 - smoothstep(0.0, 1.0, dist);' + LineEnding;
+    FallCode :=
+      '  float falloff = (d3_light_kind_' + N + '.y > 0.5) ?' + LineEnding +
+      '    (1.0 - smoothstep(0.85, 1.0, p.z)) * smoothstep(0.0, 0.05, p.z) :' + LineEnding +
+      '    1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
+  end else
+  begin
+    case Shape of
+      { gradients brightest at the center, like lights/squarelight1 and
+        lights/round }
+      lsSquare:
+        ProjCode := '  vec2 d2 = abs(st * 2.0 - 1.0);' + LineEnding +
+                    '  float projection = 1.0 - smoothstep(0.0, 1.0, max(d2.x, d2.y));' + LineEnding;
+      lsFull:
+        ProjCode := '  float projection = 1.0;' + LineEnding;
+      else
+        ProjCode := '  float projection = 1.0 - smoothstep(0.0, 1.0, length(st * 2.0 - 1.0));' + LineEnding;
+    end;
+    if Projected then
+      FallCode := '  float falloff = (1.0 - smoothstep(0.85, 1.0, p.z)) * smoothstep(0.0, 0.05, p.z);' + LineEnding
     else
-      ProjCode := '  float projection = 1.0 - smoothstep(0.0, 1.0, length(st * 2.0 - 1.0));' + LineEnding;
+      FallCode := '  float falloff = 1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
   end;
-  if Projected then
-    FallCode := '  float falloff = (1.0 - smoothstep(0.85, 1.0, p.z)) * smoothstep(0.0, 0.05, p.z);' + LineEnding
-  else
-    FallCode := '  float falloff = 1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
 
   { On OpenGLES all fragment shader parts are glued into one source: the
     Phong shader declares castle_vertex_eye, the EyeWorldSpace library
@@ -237,6 +267,7 @@ begin
     'vec4 position_eye_to_world_space(vec4 position_eye);' + LineEnding +
     '#endif' + LineEnding +
     'uniform mat4 d3_light_matrix_' + N + ';' + LineEnding +
+    KindDecl +
     'void PLUG_light_scale(inout float scale, const in vec3 normal_eye, const in vec3 light_dir)' + LineEnding +
     '{' + LineEnding +
     '  vec4 p = d3_light_matrix_' + N + ' * position_eye_to_world_space(castle_vertex_eye);' + LineEnding +
@@ -320,19 +351,23 @@ begin
     Exit;
   end;
   Shape := ProjectionShape(ProjectionImage);
-  if Shared[Shape, Projected] = nil then
+  { one effect for all kinds (kept in the first slot) }
+  if Shared[lsRound, False] = nil then
   begin
-    Shared[Shape, Projected] := TEffectNode.Create;
-    Shared[Shape, Projected].Language := slGLSL;
-    Shared[Shape, Projected].UniformMissing := umIgnore;
+    Shared[lsRound, False] := TEffectNode.Create;
+    Shared[lsRound, False].Language := slGLSL;
+    Shared[lsRound, False].UniformMissing := umIgnore;
     Part := TEffectPartNode.Create;
     Part.ShaderType := stFragment;
-    Part.Contents := LightEffectCode('<Light>', Shape, Projected);
-    Shared[Shape, Projected].SetParts([Part]);
+    Part.Contents := LightEffectCodeKind('<Light>', lsRound, False, True);
+    Shared[lsRound, False].SetParts([Part]);
   end;
-  { the uniform d3_light_matrix_<Light> of the shared code }
+  { the uniforms d3_light_matrix_<Light> and d3_light_kind_<Light> of the
+    shared code }
   Light.AddCustomField(TSFMatrix4f.Create(Light, True, 'd3_light_matrix_', M));
-  Light.SetEffects([Shared[Shape, Projected]]);
+  Light.AddCustomField(TSFVec2f.Create(Light, True, 'd3_light_kind_',
+    Vector2(Ord(Shape), Ord(Projected))));
+  Light.SetEffects([Shared[lsRound, False]]);
 end;
 
 function SmoothStep(const E0, E1, X: Single): Single;

@@ -1320,7 +1320,7 @@ begin
     Format('%s: expected %s, got %s', [What, Expected.ToString, Actual.ToString]));
 end;
 
-{ Lights of one kind share an Effect with per-light matrices when CGE
+{ All lights share one Effect with per-light matrices and kinds when CGE
   supports custom fields on lights; otherwise an effect each. }
 procedure TestSharedLightEffects;
 var
@@ -1340,9 +1340,16 @@ begin
     SetLightVolume(C, Shared, 2, M, '', True);
     CheckEquals(1, A.FdEffects.Count, 'light A has one effect');
     CheckEquals(1, C.FdEffects.Count, 'light C has one effect');
-    Check(A.FdEffects[0] <> C.FdEffects[0], 'projected and point lights have different effects');
     if SharedLightEffectsAvailable then
     begin
+      { the kind is a uniform: one program whatever the lights' kinds }
+      Check(A.FdEffects[0] = C.FdEffects[0], 'projected and point lights share their effect');
+      Field := A.Field('d3_light_kind_');
+      Check((Field is TSFVec2f) and TVector2.PerfectlyEquals(TSFVec2f(Field).Value, Vector2(0, 0)),
+        'light A kind: round, point');
+      Field := C.Field('d3_light_kind_');
+      Check((Field is TSFVec2f) and TVector2.PerfectlyEquals(TSFVec2f(Field).Value, Vector2(0, 1)),
+        'light C kind: round, projected');
       Check(A.FdEffects[0] = B.FdEffects[0], 'point lights share their effect');
       Field := A.Field('d3_light_matrix_');
       Check(Field is TSFMatrix4f, 'light A has the d3_light_matrix_ field');
@@ -1352,7 +1359,10 @@ begin
         (TEffectNode(A.FdEffects[0]).FdParts[0] as TEffectPartNode).Contents) > 0,
         'shared code uses the <Light> uniform');
     end else
+    begin
       Check(A.FdEffects[0] <> B.FdEffects[0], 'without CGE support, an effect each');
+      Check(A.FdEffects[0] <> C.FdEffects[0], 'projected and point lights have different effects');
+    end;
 
     { r_sharedLightEffects 0 }
     SharedLightEffects := False;
