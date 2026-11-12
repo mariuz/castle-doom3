@@ -1233,6 +1233,7 @@ type
     { a segment blocked for monsters (MASK_MONSTERSOLID: solid and
       monsterclip, not playerclip) }
     function MonsterSegmentCollision(const A, B: TVector3): Boolean;
+    function CollisionBenchmark(const Eye: TVector3): String;
     { idEntity::BindToJoint: Child follows Model's joint (Oriented: its
       rotation too). False without such a joint. }
     function BindToJoint(const Child: TCastleTransform; const Model: TD3ModelEntity;
@@ -1796,7 +1797,7 @@ implementation
 
 uses
   Math,
-  CastleLog, CastleUtils, CastleQuaternions,
+  CastleLog, CastleUtils, CastleQuaternions, CastleTimeUtils,
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
@@ -5644,6 +5645,65 @@ begin
     FMap.MonsterCollision.Collides := False;
     FMap.WorldCollision.Collides := WasPlayer;
   end;
+end;
+
+function TD3Game.CollisionBenchmark(const Eye: TVector3): String;
+const
+  Count = 300;
+
+  function Run(const Monster: Boolean): Single;
+  var
+    I: Integer;
+    T: TTimerResult;
+    B: TVector3;
+  begin
+    T := Timer;
+    for I := 1 to Count do
+    begin
+      B := Eye + Vector3(8 * Sin(I), 4 * Cos(I * 0.7), 8 * Cos(I));
+      if Monster then
+        MonsterSegmentCollision(Eye, B)
+      else
+        FMap.World.WorldSegmentCollision(Eye, B);
+    end;
+    Result := TimerSeconds(Timer, T) * 1000000 / Count;
+  end;
+
+var
+  All, Monster, Others, Without: Single;
+  WasWorld: Boolean;
+  I, Colliding: Integer;
+  Child: TCastleTransform;
+begin
+  { the colliding children around the eye, and what each costs }
+  Colliding := 0;
+  All := Run(False);
+  for I := 0 to FMap.Count - 1 do
+  begin
+    Child := FMap.Items[I];
+    if not (Child.Exists and Child.Collides) then
+      Continue;
+    Inc(Colliding);
+    if not Child.WorldBoundingBox.Contains(Eye) then
+      Continue;
+    Child.Collides := False;
+    Without := Run(False);
+    Child.Collides := True;
+    WritelnLog('Benchmark', 'Colliding child "%s" (%s) around the eye: %.0f us of %.0f',
+      [Child.Name, Child.ClassName, All - Without, All]);
+  end;
+  WritelnLog('Benchmark', '%d of the map''s %d children collide', [Colliding, FMap.Count]);
+  Monster := Run(True);
+  Others := 0;
+  if FMap.WorldCollision <> nil then
+  begin
+    WasWorld := FMap.WorldCollision.Collides;
+    FMap.WorldCollision.Collides := False;
+    Others := Run(False);
+    FMap.WorldCollision.Collides := WasWorld;
+  end;
+  Result := Format('Segment collision (12 units, %d runs): %.0f us against the world, %.0f us for monsters, %.0f us without the collision model',
+    [Count, All, Monster, Others]);
 end;
 
 function TD3Game.StepTowards(const From, Step: TVector3; const Radius, Height: Single): TVector3;

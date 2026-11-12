@@ -38,6 +38,7 @@ tour_output*/
 tour_test/
 playthrough*/
 playthrough_run.txt
-dhewm3_ref/
+dhewm3_ref*/
+tour_ab*/
 fight_output*/
 fight_dbg*/
