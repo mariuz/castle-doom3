@@ -2345,6 +2345,35 @@ begin
     VM.Free;
     Host.Free;
   end;
+
+  { a thread's turns between two updates (the weapon's script gets one per
+    60 Hz game tic in a long frame) }
+  VM := TD3ScriptVM.Create;
+  try
+    VM.CompileText(
+      'scriptEvent void waitFrame();' + LineEnding +
+      'scriptEvent void wait( float time );' + LineEnding +
+      'float tics;' + LineEnding +
+      'float late;' + LineEnding +
+      'void main() { while ( 1 ) { tics++; sys.waitFrame(); } }' + LineEnding +
+      'void sleeper() { sys.wait( 0.5 ); late = 1; }' + LineEnding, 'tics.script');
+    T := VM.StartThread(VM.FindFunction('main'));
+    CheckNear(1, VM.GlobalValue('tics').F, 'the tic counter started');
+    for I := 1 to 5 do
+      VM.UpdateThread(T, I / 60);
+    CheckNear(6, VM.GlobalValue('tics').F, 'UpdateThread: a turn per call');
+    VM.Update(0.1);
+    CheckNear(7, VM.GlobalValue('tics').F, 'and the update''s turn');
+    T := VM.StartThread(VM.FindFunction('sleeper'));
+    VM.UpdateThread(T, 0.3);
+    CheckNear(0, VM.GlobalValue('late').F, 'UpdateThread: a waiting thread waits');
+    VM.UpdateThread(T, 0.7);
+    CheckNear(1, VM.GlobalValue('late').F, 'UpdateThread: it goes on at its time');
+    VM.UpdateThread(T, 0.8);
+    VM.UpdateThread(nil, 0.9);
+  finally
+    VM.Free;
+  end;
 end;
 
 { The test map's scripts (maps/testmap.script) run by a TD3Game. }
@@ -3626,6 +3655,14 @@ begin
     Game.AttackOnce;
     Step(0.6);
     CheckEquals(Shots0 + 1, Game.Weapon.Shots, 'AttackOnce: one shot');
+    { a long frame gives the weapon's script a turn per game tic: the
+      pulse still fires once, the held button as often as in short frames }
+    Game.AttackOnce;
+    Game.Update(0.45, Eye);
+    Map.Update(0.45, RemoveMe);
+    Game.Update(0.45, Eye);
+    Map.Update(0.45, RemoveMe);
+    CheckEquals(Shots0 + 2, Game.Weapon.Shots, 'AttackOnce in a long frame: one shot');
 
     { reload: the clip fills from the ammo }
     Game.ReloadWeapon;

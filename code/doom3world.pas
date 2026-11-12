@@ -1043,6 +1043,8 @@ type
     procedure InitInventory;
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
     procedure UpdateWeapon(const SecondsPassed: Single);
+    procedure UpdateWeaponFlags(const W: TD3Weapon);
+    procedure WeaponScriptTics(const SecondsPassed: Single);
     procedure UpdateGuiFocus;
     function GuiWithinReach: Boolean;
     { idPlayer::UpdateFocus for characters: one ready to talk in front of
@@ -3859,27 +3861,7 @@ begin
     Exit;
   if W.Scripted then
   begin
-    { a state asked last frame (idWeapon::SetState) }
-    if W.HasIdeal then
-    begin
-      W.HasIdeal := False;
-      W.StateName := W.IdealName;
-      FScript.RestartThread(W.Thread, W.IdealFunction, WeaponHandle);
-    end;
-    { looking at a GUI, the attack button clicks it (idPlayer::Weapon_GUI) }
-    W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil) and
-      (FTalkFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0));
-    { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus, and
-      while weapons are disabled (hiddenWeapon) }
-    if ((FGuiFocus <> nil) or (FTalkFocus <> nil) or FWeaponsDisabled or (FInfluenceLevel <> 0)) and
-       (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
-      W.SetFlag('WEAPON_LOWERWEAPON', True)
-    else
-    if (FGuiFocus = nil) and (FTalkFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0) and
-       (W.Status = wsHolstered) and
-       (W.Slot = FIdealSlot) and
-       not PlayerDead then
-      W.SetFlag('WEAPON_RAISEWEAPON', True);
+    UpdateWeaponFlags(W);
     W.SetFlag('WEAPON_RELOAD', FReloadRequested);
   end;
   FReloadRequested := False;
@@ -3895,6 +3877,58 @@ begin
   { its sounds follow the player }
   if FSoundSources.TryGetValue(WeaponHandle, Source) and (Source.Parent <> nil) then
     Source.Parent.Translation := FPlayerEye;
+end;
+
+procedure TD3Game.UpdateWeaponFlags(const W: TD3Weapon);
+begin
+  { a state asked by the script's last turn (idWeapon::SetState) }
+  if W.HasIdeal then
+  begin
+    W.HasIdeal := False;
+    W.StateName := W.IdealName;
+    FScript.RestartThread(W.Thread, W.IdealFunction, WeaponHandle);
+  end;
+  { looking at a GUI, the attack button clicks it (idPlayer::Weapon_GUI) }
+  W.SetFlag('WEAPON_ATTACK', (Attack or (FAttackPulse > 0)) and not PlayerDead and (FGuiFocus = nil) and
+    (FTalkFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0));
+  { idPlayer::Weapon_GUI lowers the weapon while a GUI has the focus, and
+    while weapons are disabled (hiddenWeapon) }
+  if ((FGuiFocus <> nil) or (FTalkFocus <> nil) or FWeaponsDisabled or (FInfluenceLevel <> 0)) and
+     (W.Status in [wsReady, wsOutOfAmmo, wsReload]) then
+    W.SetFlag('WEAPON_LOWERWEAPON', True)
+  else
+  if (FGuiFocus = nil) and (FTalkFocus = nil) and not FWeaponsDisabled and (FInfluenceLevel = 0) and
+     (W.Status = wsHolstered) and
+     (W.Slot = FIdealSlot) and
+     not PlayerDead then
+    W.SetFlag('WEAPON_RAISEWEAPON', True);
+end;
+
+procedure TD3Game.WeaponScriptTics(const SecondsPassed: Single);
+const
+  Tic = 1 / 60;
+  { a stalled frame (a load, a shader compile) is not played again }
+  MaxTics = 30;
+var
+  I, Extra: Integer;
+  W: TD3Weapon;
+begin
+  { Doom 3's game runs 60 tics a second whatever the frame rate, and the
+    weapons' scripts count them (the chaingun waits 7 between shots): in
+    a long frame the weapon's thread gets the turns of the tics that
+    passed, or the weapons fire slower the lower the frame rate is. The
+    frame's last tic is the VM's own Update. }
+  W := FWeapon;
+  if (W = nil) or not W.Scripted or (W.Thread = nil) or (FScript = nil) then
+    Exit;
+  Extra := Min(Round(SecondsPassed / Tic) - 1, MaxTics);
+  for I := 1 to Extra do
+  begin
+    FScript.UpdateThread(W.Thread, FTime - (Extra + 1 - I) * Tic);
+    if FWeapon <> W then
+      Exit;
+    UpdateWeaponFlags(W);
+  end;
 end;
 
 { Doom 3 matrix helpers (rows are the axes): A * B, and V * M (the sum of
@@ -6806,7 +6840,10 @@ begin
   UpdatePlayerInfo;
   UpdateWeapon(SecondsPassed);
   if (FScript <> nil) and not ScriptsPaused then
+  begin
+    WeaponScriptTics(SecondsPassed);
     FScript.Update(FTime);
+  end;
   { after its script: a shot of this frame shows its flash now }
   UpdateWeaponView(SecondsPassed);
   UpdatePlayerModel(SecondsPassed);
@@ -7760,6 +7797,8 @@ var
   ME: TD3ModelEntity;
   A: TD3Actor;
   MonsterCount: Integer;
+  Mon: TD3Monster;
+  Plain: TStringList;
 begin
   if FScript = nil then
     Exit;
@@ -7772,6 +7811,26 @@ begin
   end;
   if FActors.Count > 0 then
     WritelnLog('Doom3World', 'Actors: %d run their AI scripts (%d monsters)', [FActors.Count, MonsterCount]);
+  { monsters left with the built-in behavior (walk to the player, hit):
+    their script object is not in ScriptedMonsterObjects }
+  Plain := TStringList.Create;
+  try
+    Plain.Sorted := True;
+    Plain.Duplicates := dupIgnore;
+    for Mon in FMonsters do
+      if (Mon.Actor = nil) and (Mon.Model <> nil) and (Mon.Model.Entity.Value('spawnclass') = 'idAI') and
+         not Mon.Model.Entity.BoolValue('cinematic') then
+        Plain.Add(Mon.Model.Entity.ClassName_ + ' (' + Mon.Model.Entity.Value('scriptobject') + ')');
+    if Plain.Count > 0 then
+    begin
+      Plain.Delimiter := ',';
+      Plain.StrictDelimiter := True;
+      WritelnLog('Doom3World', 'Monsters without their AI script (built-in behavior): %s',
+        [StringReplace(Plain.DelimitedText, ',', ', ', [rfReplaceAll])]);
+    end;
+  finally
+    Plain.Free;
+  end;
 end;
 
 function TD3Game.ActorChannel(const A: TD3Actor; const Channel: Single): TD3ActorChannel;
@@ -14055,7 +14114,8 @@ initialization
     'monster_demon_hellknight', 'monster_demon_mancubus', 'monster_demon_revenant',
     'monster_demon_maggot', 'monster_demon_pinky', 'monster_demon_trite', 'monster_demon_tick',
     'monster_demon_cherub', 'monster_demon_wraith', 'monster_demon_archvile',
-    'monster_zombie_commando', 'monster_zombie_commando_cgun',
+    'monster_zombie_commando_tentacle', 'monster_zombie_commando_cgun',
+    'monster_zombie_morgue', 'monster_zombie_sawyer',
     { flying monsters (setMoveType( MOVETYPE_FLY ) in their scripts) and
       bosses, unchecked too }
     'monster_flying_cacodemon', 'monster_flying_lostsoul',

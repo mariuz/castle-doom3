@@ -3059,6 +3059,8 @@ var
   Slot: Integer;
 begin
   Result := False;
+  { the fire button is held only while there is a target }
+  FGame.Attack := False;
   FFightTime := FFightTime + SecondsPassed;
   if FGame.Kills > FFightLastKills then
   begin
@@ -3143,7 +3145,9 @@ begin
     Dir := Target - Camera.Translation;
     if Dir.Length > 0.01 then
       Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
-    FGame.AttackOnce;
+    { held, not a pulse per frame: a shot ends a pulse, and the weapon's
+      script gets a turn per game tic (several in a long frame) }
+    FGame.Attack := True;
     { sidestep: fireballs and bursts aimed at where it stood miss }
     Side := TVector3.CrossProduct(Dir, Vector3(0, 1, 0));
     if Side.Length > 0.01 then
