@@ -210,6 +210,15 @@ type
     procedure FinishPose;
     procedure LockPoseOrigin;
     procedure FireFrameCommands(const FromTime, ToTime: Single);
+  private
+    { the playing anim's lines of FrameCommands (their frames and
+      commands), found once per anim: the list has every anim's }
+    FCmdAnim: String;
+    FCmdList: Pointer;
+    FCmdListCount: Integer;
+    FCmdFrames: array of Integer;
+    FCmdTexts: array of String;
+  public
     procedure BuildShadowHulls(const Root: TX3DRootNode);
     procedure FreeReplacedAppearances;
   public
@@ -2236,8 +2245,8 @@ end;
 
 procedure TD3Md5Instance.FireFrameCommands(const FromTime, ToTime: Single);
 var
-  I, K, KF, Frame, F0, F1, N: Integer;
-  Line: String;
+  I, K, KF, Frame, F0, F1, N, Count: Integer;
+  Line, Anim: String;
 begin
   { the frames (0-based) entered in (FromTime, ToTime], looping like PoseAt }
   N := FAnim.NumFrames;
@@ -2257,14 +2266,43 @@ begin
         Break;
       KF := K;
     end;
-    for I := 0 to FrameCommands.Count - 1 do
+    { a command may change the anim (and so the lines) }
+    if (FCmdAnim <> PlayingAnim) or (FCmdList <> Pointer(FrameCommands)) or
+       (FCmdListCount <> FrameCommands.Count) then
     begin
-      if FrameCommands.Names[I] <> PlayingAnim then
-        Continue;
-      Line := FrameCommands.ValueFromIndex[I];
-      Frame := StrToIntDef(Copy(Line, 1, Pos(' ', Line) - 1), 1) - 1;
+      FCmdAnim := PlayingAnim;
+      FCmdList := Pointer(FrameCommands);
+      FCmdListCount := FrameCommands.Count;
+      Count := 0;
+      SetLength(FCmdFrames, 0);
+      SetLength(FCmdTexts, 0);
+      for I := 0 to FrameCommands.Count - 1 do
+      begin
+        if FrameCommands.Names[I] <> PlayingAnim then
+          Continue;
+        Line := FrameCommands.ValueFromIndex[I];
+        SetLength(FCmdFrames, Count + 1);
+        SetLength(FCmdTexts, Count + 1);
+        FCmdFrames[Count] := StrToIntDef(Copy(Line, 1, Pos(' ', Line) - 1), 1) - 1;
+        FCmdTexts[Count] := Copy(Line, Pos(' ', Line) + 1, MaxInt);
+        Inc(Count);
+      end;
+    end;
+    I := 0;
+    while I <= High(FCmdFrames) do
+    begin
+      Frame := FCmdFrames[I];
       if Frame = KF then
-        OnFrameCommand(Self, Copy(Line, Pos(' ', Line) + 1, MaxInt));
+      begin
+        Line := FCmdTexts[I];
+        Anim := PlayingAnim;
+        OnFrameCommand(Self, Line);
+        { the command started another anim: the old loop went on with the
+          list's next lines, which are not this anim's any more }
+        if (Anim <> PlayingAnim) or (FCmdAnim <> Anim) then
+          Break;
+      end;
+      Inc(I);
     end;
   end;
 end;

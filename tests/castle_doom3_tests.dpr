@@ -1157,6 +1157,8 @@ var
   Areas: TD3IntArray;
   Door: TD3IntArray;
   DoorBox: TBox3D;
+  Around: TD3BoolArray;
+  Ent: TD3MapEntity;
 begin
   { clipping a square by a plane keeps the inside half }
   Poly := ClipPolygon([Vector3(-1, 0, -1), Vector3(1, 0, -1), Vector3(1, 0, 1), Vector3(-1, 0, 1)],
@@ -1197,6 +1199,34 @@ begin
       { no planes, outside the map }
       V.Compute(EyeA, -1, []);
       CheckEquals(2, V.VisibleCount, 'outside the map: everything');
+      { the portal's sides are known: the flow passes it only towards the
+        eye's side, so it never comes back through it (2 calls: room A,
+        room B), and sees the same areas as the flow through every portal }
+      CheckEquals(1, V.KnownSideCount, 'the side of the portal is known');
+      V.Compute(EyeA, 0, ViewPlanes(EyeA, Vector3(1, 0, 0)));
+      CheckEquals(2, V.FlowCalls, 'the flow does not come back through the doorway');
+      V.UseSides := False;
+      V.Compute(EyeA, 0, ViewPlanes(EyeA, Vector3(1, 0, 0)));
+      CheckEquals(2, V.VisibleCount, 'the flow through every portal sees the same');
+      Check(V.FlowCalls > 2, 'the flow through every portal comes back');
+      V.UseSides := True;
+      { all around (the dormancy set): the eye in CGE coordinates }
+      Around := nil;
+      V.ComputeAround(EyeA, 0, Around);
+      Check((Length(Around) = 2) and Around[0] and Around[1], 'all around: both rooms');
+      CheckEquals(2, V.FlowCalls, 'all around: 2 flow calls');
+      { a map entity's name follows its pairs (it is kept between asks) }
+      Ent := TD3MapEntity.Create;
+      try
+        Ent.SetValue('name', 'first');
+        Check(Ent.Name = 'first', 'entity name');
+        Ent.SetValue('name', 'second');
+        Check(Ent.Name = 'second', 'entity name after a change');
+        Ent.Pairs.Values['name'] := 'third';
+        Check(Ent.Name = 'third', 'entity name after a change of the pairs');
+      finally
+        Ent.Free;
+      end;
       { lights reach areas through nearby portals only }
       Areas := V.AreasWithinRadius(D3ToCge(Vector3(0, 0, 160)), 320, 0);
       CheckEquals(2, Length(Areas), 'a light near the doorway reaches room B');
