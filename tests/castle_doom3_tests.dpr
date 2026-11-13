@@ -7510,6 +7510,10 @@ var
   Steam, Ring: TD3EmitterEntity;
   FxEntity: TD3MapEntity;
   Em: TD3ParticleEmitter;
+  BroadSame, BroadHits, BroadI: Integer;
+  BroadA, BroadB: TVector3;
+  BroadHit, BroadRay: Boolean;
+  BroadDist, BroadDist2: Single;
   I, Trails, Wounds: Integer;
   M: TD3Monster;
   A: TD3Actor;
@@ -7630,6 +7634,29 @@ begin
     Step(1.2);
     CheckEquals(0, Game.Fx.Count, 'the fx is over after its last action (0.3 + 2 s)');
     Check(EmitterNamed('fx/test_blast') = nil, 'its emitters are gone');
+
+    { the collision first pass (bounding boxes of the map's scenes) gives
+      the world's own answers }
+    BroadSame := 0;
+    BroadHits := 0;
+    for BroadI := 1 to 400 do
+    begin
+      BroadA := D3ToCge(Vector3(-240 + (BroadI * 37) mod 1100, -330 + (BroadI * 53) mod 660, 10 + (BroadI * 11) mod 150));
+      BroadB := BroadA + D3ToCge(Vector3(((BroadI * 7) mod 120) - 60, ((BroadI * 13) mod 120) - 60, ((BroadI * 5) mod 60) - 30));
+      Game.Broadphase := True;
+      BroadHit := Game.MapSegmentCollision(BroadA, BroadB);
+      BroadRay := Game.MapRayDown(BroadA, 300, BroadDist);
+      Game.Broadphase := False;
+      if (BroadHit = Game.MapSegmentCollision(BroadA, BroadB)) and
+         (BroadRay = Game.MapRayDown(BroadA, 300, BroadDist2)) and
+         ((not BroadRay) or (Abs(BroadDist - BroadDist2) < 0.01)) then
+        Inc(BroadSame);
+      if BroadHit then
+        Inc(BroadHits);
+    end;
+    Game.Broadphase := True;
+    CheckEquals(400, BroadSame, 'segment and floor ray queries: the same with the bounding box first pass');
+    Check((BroadHits > 20) and (BroadHits < 380), Format('some of the segments hit (%d)', [BroadHits]));
 
     { the pistol's muzzle smoke }
     Step(0.6);

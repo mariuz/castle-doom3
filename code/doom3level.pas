@@ -72,6 +72,10 @@ type
       ("neverdormant", the script's setNeverDormant) }
     LastInPvs: Single;
     NeverDormant: Boolean;
+    { the entity's "neverdormant" / "cinematic" keys, looked up once
+      (CheckDormant runs for every monster every frame): 0 not yet, 1 it
+      can go dormant, 2 never }
+    DormantKeys: Byte;
     { Place the head at its joint. }
     procedure UpdateHead;
     destructor Destroy; override;
@@ -2231,6 +2235,7 @@ begin
     Exit;
   end;
   WorldModel := FCollision.World;
+  LoadProfileStep('cm file');
   FWorldCollision := TD3Scene.Create(nil);
   FWorldCollision.SetTransient;
   FWorldCollision.Name := 'WorldCollision';
@@ -2242,6 +2247,7 @@ begin
   FWorldCollision.Pickable := False;
   FWorldCollision.CastShadows := False;
   Add(FWorldCollision);
+  LoadProfileStep('world collision');
   FMonsterCollision := TD3Scene.Create(nil);
   FMonsterCollision.SetTransient;
   FMonsterCollision.Name := 'MonsterCollision';
@@ -2255,6 +2261,7 @@ begin
   for I := 0 to High(FAreaScenes) do
     if FAreaScenes[I] <> nil then
       FAreaScenes[I].Collides := False;
+  LoadProfileStep('monster collision');
   BuildShadowCasters(WorldModel);
 end;
 
@@ -2749,7 +2756,7 @@ begin
   BuildWorld;
   LoadProfileStep('world');
   BuildCollision(Base);
-  LoadProfileStep('collision');
+  LoadProfileStep('shadow casters');
   BuildBrushEntities;
   LoadProfileStep('brushes');
   WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
