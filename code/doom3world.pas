@@ -9212,10 +9212,12 @@ end;
 procedure TD3Game.EndFxAction(const Fx: TD3Fx; const Index: Integer);
 begin
   FreeAndNil(Fx.Actions[Index].Light);
-  if (Fx.Actions[Index].Emitter <> nil) and (Fx.Decl.Actions[Index].Kind = fxModel) then
+  if Fx.Actions[Index].Emitter <> nil then
   begin
+    { the action lets go of its emitter (kept until now: FxEmitterStarted) }
+    Fx.Actions[Index].Emitter.Persistent := False;
     { the model goes at once, a one-shot particle finishes by itself }
-    if Fx.Decl.Actions[Index].Duration > 0 then
+    if (Fx.Decl.Actions[Index].Kind = fxModel) and (Fx.Decl.Actions[Index].Duration > 0) then
       FEmitters.Remove(Fx.Actions[Index].Emitter);
     Fx.Actions[Index].Emitter := nil;
   end;
@@ -9288,6 +9290,14 @@ begin
         if A.TrackOrigin then
           St^.Light.Translation := D3ToCge(F.Origin + AxisToWorld(F.Axis, A.Offset));
       end;
+      { the emitter stays while the action points at it: a model whose
+        particle has a set number of cycles is finished before the
+        action's duration is over; freed then, the action's end removed
+        whatever emitter had its address by that time (a projectile's
+        trail, an emitter entity's: their owners then wrote into freed
+        memory) }
+      if St^.Emitter <> nil then
+        St^.Emitter.Persistent := True;
       if (St^.Emitter <> nil) and A.TrackOrigin then
         St^.Emitter.Origin := F.Origin + AxisToWorld(F.Axis, A.Offset);
       if A.Duration > 0 then
