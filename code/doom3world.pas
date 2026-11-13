@@ -1233,6 +1233,30 @@ type
     { a segment blocked for monsters (MASK_MONSTERSOLID: solid and
       monsterclip, not playerclip) }
     function MonsterSegmentCollision(const A, B: TVector3): Boolean;
+  private
+    { The map's children and their bounding boxes at FBroadTime (see
+      MapSegmentCollision). The pointers are only compared, never used. }
+    FBroadItems: array of Pointer;
+    FBroadIndex: array of Integer;
+    FBroadBoxes: array of TBox3D;
+    FBroadCount, FBroadMapCount: Integer;
+    FBroadTime: Single;
+    procedure BroadphaseUpdate;
+    { The map's child of candidate K, nil when the map's children changed
+      since the boxes were taken. }
+    function BroadChild(const K: Integer): TCastleTransform;
+  public
+    { console r_broadphase: off, the world's own collision methods }
+    Broadphase: Boolean;
+    { Like the world's WorldSegmentCollision, but only the map's scenes
+      whose bounding box the segment reaches are asked (a map has a
+      thousand, and monsters ask several times each every frame). }
+    function MapSegmentCollision(const A, B: TVector3): Boolean;
+    { The distance from Origin straight down to what a ray cast hits (the
+      world's WorldRayCast), when it is within MaxDist. }
+    function MapRayDown(const Origin: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
+    { The same along Direction (normalized). }
+    function MapRay(const Origin, Direction: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
     function CollisionBenchmark(const Eye: TVector3): String;
     { idEntity::BindToJoint: Child follows Model's joint (Oriented: its
       rotation too). False without such a joint. }
@@ -2051,6 +2075,8 @@ begin
   inherited Create;
   FMap := AMap;
   DormancyEnabled := True;
+  Broadphase := GetEnvironmentVariable('CD3_BROADPHASE') <> '0';
+  FBroadTime := -1;
   FMovers := specialize TObjectList<TD3Mover>.Create(True);
   FElevators := specialize TObjectList<TD3Elevator>.Create(True);
   FBrass := specialize TObjectList<TD3Brass>.Create(True);
@@ -2224,6 +2250,9 @@ begin
   { before the VM goes (it owns the actors' threads) }
   FActors.Clear;
   FProjectiles.Clear;
+  FBroadCount := 0;
+  FBroadMapCount := -1;
+  FBroadTime := -1;
   { the FX before their emitters and lights go }
   FFx.Clear;
   FEmitterEntities.Clear;
@@ -5669,6 +5698,158 @@ begin
   end;
 end;
 
+type
+  { SegmentCollision is protected }
+  TTransformAccess = class(TCastleTransform);
+
+procedure TD3Game.BroadphaseUpdate;
+var
+  I: Integer;
+  C: TCastleTransform;
+  Box: TBox3D;
+begin
+  if (FBroadTime = FTime) and (FBroadMapCount = FMap.Count) then
+    Exit;
+  FBroadTime := FTime;
+  FBroadMapCount := FMap.Count;
+  if Length(FBroadItems) < FMap.Count then
+  begin
+    SetLength(FBroadItems, FMap.Count + 256);
+    SetLength(FBroadIndex, FMap.Count + 256);
+    SetLength(FBroadBoxes, FMap.Count + 256);
+  end;
+  FBroadCount := 0;
+  for I := 0 to FMap.Count - 1 do
+  begin
+    C := FMap[I];
+    { what can collide or be picked in this frame (the two collision
+      models take turns: MonsterSegmentCollision) }
+    if not C.Exists then
+      Continue;
+    if not (C.Collides or C.Pickable or (C = FMap.MonsterCollision) or (C = FMap.WorldCollision)) then
+      Continue;
+    Box := C.BoundingBox;
+    if Box.IsEmpty then
+      Continue;
+    FBroadItems[FBroadCount] := Pointer(C);
+    FBroadIndex[FBroadCount] := I;
+    FBroadBoxes[FBroadCount] := Box;
+    Inc(FBroadCount);
+  end;
+end;
+
+function TD3Game.BroadChild(const K: Integer): TCastleTransform;
+var
+  I: Integer;
+begin
+  I := FBroadIndex[K];
+  if (I < FMap.Count) and (Pointer(FMap[I]) = FBroadItems[K]) then
+    Result := FMap[I]
+  else
+    Result := nil;
+end;
+
+const
+  { things move a little within a frame after their boxes were taken }
+  BroadMargin = 24;
+
+function BoxesTouch(const A, B: TBox3D): Boolean; inline;
+begin
+  Result :=
+    (A.Data[0].X <= B.Data[1].X) and (B.Data[0].X <= A.Data[1].X) and
+    (A.Data[0].Y <= B.Data[1].Y) and (B.Data[0].Y <= A.Data[1].Y) and
+    (A.Data[0].Z <= B.Data[1].Z) and (B.Data[0].Z <= A.Data[1].Z);
+end;
+
+function TD3Game.MapSegmentCollision(const A, B: TVector3): Boolean;
+var
+  Root: TCastleAbstractRootTransform;
+  I, K: Integer;
+  C: TCastleTransform;
+  SegBox: TBox3D;
+begin
+  Root := FMap.World;
+  if not Broadphase or (FMap.Parent <> Root) or not (FMap.Exists and FMap.Collides) then
+    Exit(Root.WorldSegmentCollision(A, B));
+  BroadphaseUpdate;
+  SegBox := TBox3D.Empty;
+  SegBox.Include(A);
+  SegBox.Include(B);
+  SegBox := SegBox.Grow(BroadMargin);
+  for K := 0 to FBroadCount - 1 do
+  begin
+    if not BoxesTouch(FBroadBoxes[K], SegBox) then
+      Continue;
+    C := BroadChild(K);
+    { a scene went or came since the boxes were taken: the plain way }
+    if C = nil then
+      Exit(Root.WorldSegmentCollision(A, B));
+    if C.Exists and C.Collides and TTransformAccess(C).SegmentCollision(A, B, nil, False) then
+      Exit(True);
+  end;
+  { what is beside the map }
+  for I := 0 to Root.Count - 1 do
+    if (Root[I] <> FMap) and TTransformAccess(Root[I]).SegmentCollision(A, B, nil, False) then
+      Exit(True);
+  Result := False;
+end;
+
+function TD3Game.MapRayDown(const Origin: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
+begin
+  Result := MapRay(Origin, Vector3(0, -1, 0), MaxDist, Dist);
+end;
+
+function TD3Game.MapRay(const Origin, Direction: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
+var
+  Root: TCastleAbstractRootTransform;
+  I, K: Integer;
+  C: TCastleTransform;
+  RayBox: TBox3D;
+
+  procedure Ask(const T: TCastleTransform);
+  var
+    R: TRayCollision;
+  begin
+    R := T.InternalRayCollision(Origin, Direction);
+    if R <> nil then
+    begin
+      if (R.Count <> 0) and (R.Distance < Dist) then
+        Dist := R.Distance;
+      FreeAndNil(R);
+    end;
+  end;
+
+  function Plain: Boolean;
+  begin
+    Result := (Root.WorldRayCast(Origin, Direction, Dist) <> nil) and (Dist < MaxDist);
+  end;
+
+begin
+  Root := FMap.World;
+  if not Broadphase or (FMap.Parent <> Root) or not (FMap.Exists and FMap.Pickable) then
+    Exit(Plain);
+  BroadphaseUpdate;
+  Dist := MaxSingle;
+  RayBox := TBox3D.Empty;
+  RayBox.Include(Origin);
+  RayBox.Include(Origin + Direction * MaxDist);
+  RayBox := RayBox.Grow(BroadMargin);
+  for K := 0 to FBroadCount - 1 do
+  begin
+    if not BoxesTouch(FBroadBoxes[K], RayBox) then
+      Continue;
+    C := BroadChild(K);
+    if C = nil then
+      Exit(Plain);
+    if C.Exists and C.Pickable then
+      Ask(C);
+  end;
+  for I := 0 to Root.Count - 1 do
+    if Root[I] <> FMap then
+      Ask(Root[I]);
+  Result := Dist < MaxDist;
+end;
+
 function TD3Game.MonsterSegmentCollision(const A, B: TVector3): Boolean;
 var
   WasPlayer: Boolean;
@@ -5676,12 +5857,12 @@ begin
   { MASK_MONSTERSOLID: the collision model's solid and monsterclip
     polygons instead of the player's (solid and playerclip) }
   if (FMap.WorldCollision = nil) or (FMap.MonsterCollision = nil) then
-    Exit(FMap.World.WorldSegmentCollision(A, B));
+    Exit(MapSegmentCollision(A, B));
   WasPlayer := FMap.WorldCollision.Collides;
   FMap.WorldCollision.Collides := False;
   FMap.MonsterCollision.Collides := True;
   try
-    Result := FMap.World.WorldSegmentCollision(A, B);
+    Result := MapSegmentCollision(A, B);
   finally
     FMap.MonsterCollision.Collides := False;
     FMap.WorldCollision.Collides := WasPlayer;
@@ -5774,8 +5955,7 @@ begin
   end;
   { follow the floor (steps up to 18, falls) }
   FloorStart := NewPos + Vector3(0, 24, 0);
-  Hit := FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist);
-  if (Hit <> nil) and (FloorDist < 24 + 400) then
+  if MapRayDown(FloorStart, 24 + 400, FloorDist) then
     NewPos.Y := FloorStart.Y - FloorDist;
   Result := NewPos;
 end;
@@ -6624,7 +6804,7 @@ begin
   Dist := (B - A).Length;
   if Dist < 1 then
     Exit(True);
-  Result := (FMap.World.WorldRayCast(A, (B - A) / Dist, HitDist) = nil) or (HitDist >= Dist);
+  Result := not MapRay(A, (B - A) / Dist, Dist, HitDist);
 end;
 
 procedure TD3Game.UpdateMonster(const M: TD3Monster; const SecondsPassed: Single;
@@ -9687,9 +9867,15 @@ var
   Area: Integer;
 begin
   Result := False;
+  if (ME <> nil) and (ME.DormantKeys = 0) then
+  begin
+    if ME.Entity.BoolValue('neverdormant') or ME.Entity.BoolValue('cinematic') then
+      ME.DormantKeys := 2
+    else
+      ME.DormantKeys := 1;
+  end;
   if (ME <> nil) and FPvsValid and DormancyEnabled and not ME.NeverDormant and
-     ME.Holder.Exists and not ME.Entity.BoolValue('neverdormant') and
-     not ME.Entity.BoolValue('cinematic') then
+     ME.Holder.Exists and (ME.DormantKeys = 1) then
   begin
     Area := FMap.AreaAt(ME.Holder.WorldTranslation + Vector3(0, 16, 0));
     if (Area < 0) or (Area > High(FPvs)) or FPvs[Area] then

@@ -148,6 +148,9 @@ uses
 
 var
   LoadProfileTime, LoadProfileStartTime: TTimerResult;
+  { the Pascal heap after the last step, and "name +MB" of the steps }
+  LoadProfileHeap: PtrUInt;
+  LoadProfileHeapSteps: String;
 
 {$ifdef MSWINDOWS}
 type
@@ -196,17 +199,24 @@ begin
   LoadProfile := '';
   LoadProfileTime := Timer;
   LoadProfileStartTime := LoadProfileTime;
+  LoadProfileHeap := GetFPCHeapStatus.CurrHeapUsed;
+  LoadProfileHeapSteps := Format('before %.0f', [LoadProfileHeap / (1024 * 1024)]);
 end;
 
 procedure LoadProfileStep(const Name: String);
 var
   Now: TTimerResult;
+  Heap: PtrUInt;
 begin
   Now := Timer;
   if LoadProfile <> '' then
     LoadProfile := LoadProfile + ', ';
   LoadProfile := LoadProfile + Format('%s %.2f', [Name, TimerSeconds(Now, LoadProfileTime)]);
   LoadProfileTime := Now;
+  Heap := GetFPCHeapStatus.CurrHeapUsed;
+  LoadProfileHeapSteps := LoadProfileHeapSteps + Format(', %s %.0f',
+    [Name, (Int64(Heap) - Int64(LoadProfileHeap)) / (1024 * 1024)]);
+  LoadProfileHeap := Heap;
 end;
 
 procedure LoadProfileLog(const Title: String);
@@ -214,6 +224,8 @@ begin
   WritelnLog('Profile', '%s: %.2f s (%s; %d file reads %.2f s, %d image programs %.2f s)',
     [Title, TimerSeconds(Timer, LoadProfileStartTime), LoadProfile,
      ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds]);
+  { where the Pascal heap went: MB added by each step }
+  WritelnLog('Profile', '%s: Pascal heap by step, MB (%s)', [Title, LoadProfileHeapSteps]);
   ProfileReadSeconds := 0;
   ProfileImageSeconds := 0;
   ProfileReadCount := 0;

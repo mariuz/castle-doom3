@@ -174,8 +174,6 @@ var
   CoordNode: TCoordinateNode;
   Geometry: TIndexedTriangleSetNode;
   Shape: TShapeNode;
-  Appearance: TAppearanceNode;
-  Unlit: TUnlitMaterialNode;
 begin
   Result := TX3DRootNode.Create;
   for B := 0 to High(Brushes) do
@@ -206,15 +204,12 @@ begin
       { counter-clockwise from outside (D3ToCge is a rotation) }
       Geometry.Ccw := True;
       Geometry.Solid := True;
-      Unlit := TUnlitMaterialNode.Create;
-      Unlit.EmissiveColor := Vector3(0, 0, 0);
-      Appearance := TAppearanceNode.Create;
-      Appearance.Material := Unlit;
       Shape := TShapeNode.Create;
       Shape.Geometry := Geometry;
-      Shape.Appearance := Appearance;
       { a shadow-only caster: not rendered, CGE still casts its shadow
-        volumes (with caps, mariuz/castle-engine#5) }
+        volumes (with caps, mariuz/castle-engine#5). No appearance: it is
+        never drawn, and a map has thousands of these shapes (two nodes
+        less each) }
       Shape.Visible := False;
       Result.AddChildren(Shape);
     finally

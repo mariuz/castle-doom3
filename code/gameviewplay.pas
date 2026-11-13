@@ -9,7 +9,7 @@ interface
 uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
-  CastleCameras, CastleTransform, CastleScene, X3DNodes, X3DFields, CastleTimeUtils,
+  CastleCameras, CastleTransform, CastleScene, CastleSceneCore, X3DNodes, X3DFields, CastleTimeUtils,
   Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui, Doom3RenderDoc;
 
 type
@@ -584,9 +584,23 @@ var
 begin
   S := Format('%s: %s, %d shader programs linked (%d by this load)',
     [Title, ProcessMemoryText, InternalProgramsLinked, InternalProgramsLinked - FProgramsAtLoad]);
+  { files and images read since the load's profile line: reads during play
+    mean something is loaded again and again }
+  S := S + Format(', %d file reads (%.2f s) and %d image programs (%.2f s) since the load',
+    [ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds]);
   if TextureMemoryProfiler.Enabled then
     S := S + ', ' + Copy(TextureMemoryProfiler.Summary, 1, Pos(#10, TextureMemoryProfiler.Summary + #10) - 1);
   WritelnLog('Memory', S);
+end;
+
+procedure FreeTextureData(const T: TCastleTransform);
+var
+  I: Integer;
+begin
+  if T is TCastleSceneCore then
+    TCastleSceneCore(T).FreeResources([frTextureDataInNodes]);
+  for I := 0 to T.Count - 1 do
+    FreeTextureData(T[I]);
 end;
 
 procedure TViewPlay.LoadLevel(const AMapName: String);
@@ -653,6 +667,14 @@ begin
     MainViewport.PrepareResources(Map, [prRenderSelf, prBoundingBox]);
     Map.UpdateVisibility(MainViewport.Camera);
     LoadProfileStep('prepare');
+    { the decoded images are in the GPU's textures now: the copies in the
+      texture nodes go (hundreds of MB in a big map; a texture needed
+      again, by a scene made later, is read again) }
+    if GetEnvironmentVariable('CD3_FREE_TEXTURE_DATA') <> '0' then
+    begin
+      FreeTextureData(Map);
+      LoadProfileStep('texture data freed');
+    end;
   end;
   FProfileFrames := 1;
   FLastUpdateValid := False;
@@ -1118,8 +1140,8 @@ const
   { software rendered: at most this many redraws a second when the state
     or an event changed something, else (the flickers and scrolls of its
     time expressions) IdleRate }
-  RedrawRate = 20;
-  IdleRate = 10;
+  RedrawRate = 15;
+  IdleRate = 5;
 var
   HudParent: TCastleUserInterface;
 begin
@@ -2815,6 +2837,13 @@ begin
       SamplerStopAndReport('Sample of ' + MapName);
       Console.Print('Samples written (samples.txt)');
     end;
+  end else
+  if Cmd = 'r_broadphase' then
+  begin
+    { monsters' collision queries ask only the scenes near them (1), or
+      the world's own methods (0) }
+    FGame.Broadphase := StrToIntDef(Trim(Args), Ord(not FGame.Broadphase)) <> 0;
+    Console.Print('r_broadphase ' + IntToStr(Ord(FGame.Broadphase)));
   end else
   if Cmd = 'colbench' then
   begin
