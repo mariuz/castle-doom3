@@ -1493,6 +1493,8 @@ begin
   FreeAndNil(FAllGlobalLights);
 
   FPortals := TD3PortalVisibility.Create(FProc);
+  WritelnLog('Doom3Level', 'Portals: %d between %d areas, the sides of %d known',
+    [FPortals.PortalCount, FPortals.AreaCount, FPortals.KnownSideCount]);
   for I := 0 to High(FLights) do
   begin
     { like Doom 3, a light belongs to all areas its volume touches (its

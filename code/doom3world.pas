@@ -9943,7 +9943,9 @@ begin
   { outside every area (noclip in a wall): keep the last one }
   if Area < 0 then
     Exit;
-  FMap.Portals.ComputeAround(CgeToD3(Eye), Area, FPvs);
+  { the portals are in CGE coordinates, like Eye (CgeToD3( Eye ) was
+    passed here: a set seen from somewhere else) }
+  FMap.Portals.ComputeAround(Eye, Area, FPvs);
   FPvsValid := True;
   FPvsEye := Eye;
   FPvsArea := Area;

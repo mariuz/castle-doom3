@@ -27,6 +27,18 @@ type
   TD3BoolArray = array of Boolean;
   TD3PointArray = array of TVector3;
 
+  { A flow's view volume and clipped portal: fixed arrays, no heap (the
+    flow is called thousands of times a frame in open maps). }
+  TD3FlowPlanes = record
+    Count: Integer;
+    P: array [0..31] of TVector4;
+  end;
+
+  TD3FlowPoly = record
+    Count: Integer;
+    P: array [0..95] of TVector3;
+  end;
+
   TD3PortalVisibility = class
   strict private
     FAreaCount: Integer;
@@ -36,9 +48,21 @@ type
     { area -> portals touching it }
     FAreaPortals: array of TD3IntArray;
     FFlowCalls: Integer;
+    { the portal's plane, and on which side of it the portal's positive
+      area is (1 the normal's, -1 the other, 0 unknown) }
+    FPlanes: array of TVector4;
+    FSides: array of Integer;
+    FCheckCount: Integer;
+    FCheckCalls, FCheckCallsOld: Int64;
     procedure Flow(const Eye: TVector3; const Area: Integer;
-      const Planes: TD3PlaneArray; const Depth: Integer);
+      const Planes: TD3FlowPlanes; const Depth: Integer);
   public
+    { Flow only through portals that face the eye (default). False: the
+      older flow through every portal, to compare. }
+    UseSides: Boolean;
+    { Every Compute also flows without UseSides and logs a warning when
+      the areas differ (env CD3_PORTAL_CHECK=1). }
+    CheckSides: Boolean;
     { Per portal: closed (a closed door). }
     PortalClosed: array of Boolean;
     { Result of Compute, per area. }
@@ -48,6 +72,11 @@ type
     constructor Create(const Proc: TD3ProcFile);
     function AreaCount: Integer;
     function PortalCount: Integer;
+    { Portals whose sides (which area is in front) are known: the flow
+      only passes those towards the eye's side. }
+    function KnownSideCount: Integer;
+    { Flow calls of the last Compute / ComputeAround. }
+    property FlowCalls: Integer read FFlowCalls;
     { Mark visible areas seen from Eye (in StartArea) within the planes
       (usually the camera frustum's side planes; may be empty). }
     procedure Compute(const Eye: TVector3; const StartArea: Integer;
@@ -78,7 +107,7 @@ function ClipPolygon(const Points: array of TVector3; const Plane: TVector4): TD
 implementation
 
 uses
-  Math,
+  Math, CastleLog,
   Doom3MapFile;
 
 const
@@ -120,6 +149,49 @@ end;
 { TD3PortalVisibility }
 
 constructor TD3PortalVisibility.Create(const Proc: TD3ProcFile);
+
+  { On which side of portal I its positive area is: points a little off
+    the portal's middle, asked from the BSP tree. }
+  procedure FindSide(const I: Integer);
+  const
+    Offsets: array [0..1] of Single = (4, 16);
+  var
+    J, K, Front, Back: Integer;
+    Middle, Normal: TVector3;
+  begin
+    FSides[I] := 0;
+    FPlanes[I] := TVector4.Zero;
+    if (Length(FPoints[I]) < 3) or (Length(Proc.Nodes) = 0) or (FAreas[I][0] = FAreas[I][1]) then
+      Exit;
+    Middle := TVector3.Zero;
+    for J := 0 to High(FPoints[I]) do
+      Middle := Middle + FPoints[I][J];
+    Middle := Middle / Length(FPoints[I]);
+    Normal := TVector3.Zero;
+    for J := 2 to High(FPoints[I]) do
+    begin
+      Normal := TVector3.CrossProduct(FPoints[I][1] - FPoints[I][0], FPoints[I][J] - FPoints[I][0]);
+      if Normal.Length > 1e-3 then
+        Break;
+    end;
+    if Normal.Length <= 1e-3 then
+      Exit;
+    Normal := Normal.Normalize;
+    FPlanes[I] := Vector4(Normal, -TVector3.DotProduct(Normal, FPoints[I][0]));
+    for K := 0 to High(Offsets) do
+    begin
+      Front := Proc.PointInArea(CgeToD3(Middle + Normal * Offsets[K]));
+      Back := Proc.PointInArea(CgeToD3(Middle - Normal * Offsets[K]));
+      if (Front = FAreas[I][0]) and (Back = FAreas[I][1]) then
+        FSides[I] := 1
+      else
+      if (Front = FAreas[I][1]) and (Back = FAreas[I][0]) then
+        FSides[I] := -1;
+      if FSides[I] <> 0 then
+        Exit;
+    end;
+  end;
+
 var
   I, J, A: Integer;
   Count: Integer;
@@ -131,6 +203,8 @@ begin
   SetLength(FBoxMin, Count);
   SetLength(FBoxMax, Count);
   SetLength(FAreas, Count);
+  SetLength(FPlanes, Count);
+  SetLength(FSides, Count);
   SetLength(PortalClosed, Count);
   SetLength(FAreaPortals, FAreaCount);
   SetLength(AreaVisible, FAreaCount);
@@ -154,6 +228,7 @@ begin
     end;
     FAreas[I][0] := Proc.Portals[I].PositiveArea;
     FAreas[I][1] := Proc.Portals[I].NegativeArea;
+    FindSide(I);
     for J := 0 to 1 do
     begin
       A := FAreas[I][J];
@@ -164,6 +239,8 @@ begin
       end;
     end;
   end;
+  UseSides := True;
+  CheckSides := GetEnvironmentVariable('CD3_PORTAL_CHECK') = '1';
   AllVisible;
 end;
 
@@ -175,6 +252,16 @@ end;
 function TD3PortalVisibility.PortalCount: Integer;
 begin
   Result := Length(FPoints);
+end;
+
+function TD3PortalVisibility.KnownSideCount: Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 0 to High(FSides) do
+    if FSides[I] <> 0 then
+      Inc(Result);
 end;
 
 procedure TD3PortalVisibility.AllVisible;
@@ -191,14 +278,44 @@ begin
   Result := (FBoxMin[I] + FBoxMax[I]) * 0.5;
 end;
 
+{ Poly clipped by a plane (keeps the inside), like ClipPolygon. }
+procedure ClipFlowPoly(const Source: TD3FlowPoly; const Plane: TVector4; out Dest: TD3FlowPoly);
+var
+  I: Integer;
+  A, B: TVector3;
+  DA, DB: Single;
+begin
+  Dest.Count := 0;
+  for I := 0 to Source.Count - 1 do
+  begin
+    A := Source.P[I];
+    if I + 1 < Source.Count then
+      B := Source.P[I + 1]
+    else
+      B := Source.P[0];
+    DA := PlaneDist(Plane, A);
+    DB := PlaneDist(Plane, B);
+    if (DA >= 0) and (Dest.Count <= High(Dest.P)) then
+    begin
+      Dest.P[Dest.Count] := A;
+      Inc(Dest.Count);
+    end;
+    if ((DA >= 0) <> (DB >= 0)) and (Dest.Count <= High(Dest.P)) then
+    begin
+      Dest.P[Dest.Count] := A + (B - A) * (DA / (DA - DB));
+      Inc(Dest.Count);
+    end;
+  end;
+end;
+
 procedure TD3PortalVisibility.Flow(const Eye: TVector3; const Area: Integer;
-  const Planes: TD3PlaneArray; const Depth: Integer);
+  const Planes: TD3FlowPlanes; const Depth: Integer);
 var
   K, P, Other, J, N: Integer;
-  Poly: TD3PointArray;
-  NewPlanes: TD3PlaneArray;
+  Poly, Clipped: TD3FlowPoly;
+  NewPlanes: TD3FlowPlanes;
   Center, Normal, A, B: TVector3;
-  Plane: TVector4;
+  D: Single;
 begin
   Inc(FFlowCalls);
   if not AreaVisible[Area] then
@@ -219,38 +336,56 @@ begin
       Other := FAreas[P][0];
     if (Other < 0) or (Other >= FAreaCount) or (Other = Area) then
       Continue;
+    { only through portals that face the eye from this area
+      (idRenderWorldLocal::FloodViewThroughArea_r): never back through the
+      portal the view came by, which made the flow bounce between two
+      areas, thousands of calls in open maps. Not from the start area: the
+      eye may be outside it (noclip in a wall). }
+    if UseSides and (Depth > 0) and (FSides[P] <> 0) then
+    begin
+      D := PlaneDist(FPlanes[P], Eye) * FSides[P];
+      if FAreas[P][0] <> Area then
+        D := -D;
+      if D < -1 then
+        Continue;
+    end;
 
     { clip the portal by the current view volume }
-    Poly := Copy(FPoints[P]);
-    for J := 0 to High(Planes) do
+    Poly.Count := Min(Length(FPoints[P]), Length(Poly.P) div 2);
+    for J := 0 to Poly.Count - 1 do
+      Poly.P[J] := FPoints[P][J];
+    for J := 0 to Planes.Count - 1 do
     begin
-      if Length(Poly) < 3 then
+      if Poly.Count < 3 then
         Break;
-      Poly := ClipPolygon(Poly, Planes[J]);
+      ClipFlowPoly(Poly, Planes.P[J], Clipped);
+      Poly := Clipped;
     end;
-    if Length(Poly) < 3 then
+    if Poly.Count < 3 then
       Continue;
 
     { the eye is (almost) in the portal: we see everything through it }
     Center := TVector3.Zero;
-    for J := 0 to High(Poly) do
-      Center := Center + Poly[J];
-    Center := Center / Length(Poly);
-    Normal := TVector3.CrossProduct(Poly[1] - Poly[0], Poly[2] - Poly[0]);
+    for J := 0 to Poly.Count - 1 do
+      Center := Center + Poly.P[J];
+    Center := Center / Poly.Count;
+    Normal := TVector3.CrossProduct(Poly.P[1] - Poly.P[0], Poly.P[2] - Poly.P[0]);
     if (Normal.Length < 1e-6) or
-       (Abs(TVector3.DotProduct(Normal.Normalize, Eye - Poly[0])) < 1) then
+       (Abs(TVector3.DotProduct(Normal.Normalize, Eye - Poly.P[0])) < 1) or
+       { more edges than planes fit (never seen): the view stays as wide }
+       (Poly.Count > Length(NewPlanes.P)) then
     begin
       Flow(Eye, Other, Planes, Depth + 1);
       Continue;
     end;
 
     { narrow the view to the planes through the eye and the portal's edges }
-    N := Length(Poly);
-    SetLength(NewPlanes, N);
+    N := Poly.Count;
+    NewPlanes.Count := N;
     for J := 0 to N - 1 do
     begin
-      A := Poly[J] - Eye;
-      B := Poly[(J + 1) mod N] - Eye;
+      A := Poly.P[J] - Eye;
+      B := Poly.P[(J + 1) mod N] - Eye;
       Normal := TVector3.CrossProduct(A, B);
       if Normal.Length < 1e-9 then
         Normal := TVector3.Zero
@@ -258,8 +393,7 @@ begin
         Normal := Normal.Normalize;
       if TVector3.DotProduct(Normal, Center - Eye) < 0 then
         Normal := -Normal;
-      Plane := Vector4(Normal, -TVector3.DotProduct(Normal, Eye));
-      NewPlanes[J] := Plane;
+      NewPlanes.P[J] := Vector4(Normal, -TVector3.DotProduct(Normal, Eye));
     end;
     Flow(Eye, Other, NewPlanes, Depth + 1);
   end;
@@ -268,8 +402,9 @@ end;
 procedure TD3PortalVisibility.Compute(const Eye: TVector3; const StartArea: Integer;
   const Planes: array of TVector4);
 var
-  I: Integer;
-  Start: TD3PlaneArray;
+  I, Calls, Differ, Missing: Integer;
+  Start: TD3FlowPlanes;
+  WithSides: array of Boolean;
 begin
   if (StartArea < 0) or (StartArea >= FAreaCount) then
   begin
@@ -281,15 +416,51 @@ begin
     AreaVisible[I] := False;
   VisibleCount := 0;
   FFlowCalls := 0;
-  SetLength(Start, 0);
+  Start.Count := 0;
   for I := 0 to High(Planes) do
     { skip unset planes (a camera before its first render) }
-    if Vector3(Planes[I].X, Planes[I].Y, Planes[I].Z).Length > 1e-6 then
+    if (Vector3(Planes[I].X, Planes[I].Y, Planes[I].Z).Length > 1e-6) and (Start.Count <= High(Start.P)) then
     begin
-      SetLength(Start, Length(Start) + 1);
-      Start[High(Start)] := Planes[I];
+      Start.P[Start.Count] := Planes[I];
+      Inc(Start.Count);
     end;
   Flow(Eye, StartArea, Start, 0);
+  if CheckSides and UseSides then
+  begin
+    WithSides := Copy(AreaVisible);
+    Calls := FFlowCalls;
+    UseSides := False;
+    for I := 0 to High(AreaVisible) do
+      AreaVisible[I] := False;
+    FFlowCalls := 0;
+    Flow(Eye, StartArea, Start, 0);
+    UseSides := True;
+    Differ := 0;
+    Missing := 0;
+    for I := 0 to High(AreaVisible) do
+      if AreaVisible[I] <> WithSides[I] then
+      begin
+        Inc(Differ);
+        { seen only without the sides }
+        if AreaVisible[I] then
+          Inc(Missing);
+      end;
+    if Differ > 0 then
+      WritelnWarning('Doom3Portals', 'Side check: %d areas differ (%d seen only without sides) from eye %s in area %d (%d planes; %d flow calls with sides, %d without)',
+        [Differ, Missing, Eye.ToString, StartArea, Start.Count, Calls, FFlowCalls]);
+    Inc(FCheckCount);
+    FCheckCalls := FCheckCalls + Calls;
+    FCheckCallsOld := FCheckCallsOld + FFlowCalls;
+    if FCheckCount mod 2000 = 0 then
+      WritelnLog('Doom3Portals', 'Side check: %d computes, %d flow calls with sides, %d without',
+        [FCheckCount, FCheckCalls, FCheckCallsOld]);
+    AreaVisible := WithSides;
+    VisibleCount := 0;
+    for I := 0 to High(AreaVisible) do
+      if AreaVisible[I] then
+        Inc(VisibleCount);
+    FFlowCalls := Calls;
+  end;
 end;
 
 procedure TD3PortalVisibility.ComputeAround(const Eye: TVector3; const StartArea: Integer;

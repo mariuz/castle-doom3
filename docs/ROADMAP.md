@@ -226,6 +226,7 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 
 | V | Effects without uniforms hashed by their code: equal Effect nodes share a shader program | In `doom3-port` (2026-11-12; not yet proposed upstream) | 4 to 5 times fewer shader programs per map, none again when a map is loaded again (memory, load time) |
 | W | Scene collisions reject by the bounding box before the octree | In `doom3-port` (2026-11-12; not yet proposed upstream) | Collision tests in maps with a thousand small colliding scenes (monsters' moves) |
+| X | Silhouette shadow volumes reuse their lists, skip identity transforms | In `doom3-port` (2026-11-13, branch `shadow-volumes-scratch-lists`; not yet proposed upstream) | A third of the shadow volumes' CPU time in maps with thousands of small shadow casters |
 
 A, B, C, D, F, J, M, N and O were checked against the CGE source, P, Q and R against CGE master (October 2026); the others come from building this port.
 
@@ -342,3 +343,5 @@ Local branch `light-order-programs` (2026-11-07, to merge into `doom3-port`):
 In `doom3-port` (2026-11-12): an effect without interface declarations has no uniform values of its own, so `TEffectNode.InternalCodeHash` hashes its language, shader libraries and parts (`TEffectPartNode.InternalContentsHash`, cached with the contents), and `TShaderCodeHash.AddEffect` uses that; effects with uniforms are still added by the node. Test `TestEffectCodeHash`. Per-light uniforms (change K) live on the light node, so the shared light effects qualify.
 
 **W. Bounding box before the octree.** `TCastleSceneCore.LocalSegmentCollision` (and the sphere, box and ray ones) asked the scene's octree directly. A scene with a few triangles has a single leaf as its octree, so every query tested all its triangles, also far away from it: with 1140 small colliding scenes a 12 unit segment took 620 us. In `doom3-port` (2026-11-12): the scene's cached `LocalBoundingBoxNoChildren` is checked first (the segment's extents against the box, `TBox3D.SphereCollision`, `Collision`, `TryRayEntrance`): 79 us.
+
+**X. Shadow volume lists.** `TRenderShapeShadowVolumes.RenderSilhouetteShadowVolume` created a `TVector4List` and a `TBooleanList` for every shape and light, grew them from zero, and `Clear`ed the vertex list (which frees its memory) after the caps. A sampling profile of a fight in `game/commoutside` (thousands of shadow caster brushes, each a shape) had 19% of the CPU in `LocalRenderShadowVolume`, a third of that in the lists' reallocations. In `doom3-port` (2026-11-13): unit level lists shared by all calls (`Count := 0` keeps the capacity), and `Transform.MultPoint` is skipped when the transform is identity.

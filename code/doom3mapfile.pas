@@ -15,6 +15,11 @@ type
   TD3MapEntity = class
   strict private
     FPairs: TStringList;
+    { the name, asked every frame by the game's loops: looked up once
+      (until a pair changes) }
+    FName: String;
+    FNameKnown: Boolean;
+    procedure PairsChanged(Sender: TObject);
   public
     { Has brushes or patches (a brush entity, its geometry is a .proc model
       named like the entity). }
@@ -166,6 +171,12 @@ begin
   inherited Create;
   FPairs := TStringList.Create;
   FPairs.CaseSensitive := False;
+  FPairs.OnChange := @PairsChanged;
+end;
+
+procedure TD3MapEntity.PairsChanged(Sender: TObject);
+begin
+  FNameKnown := False;
 end;
 
 destructor TD3MapEntity.Destroy;
@@ -236,7 +247,12 @@ end;
 
 function TD3MapEntity.Name: String;
 begin
-  Result := Value('name');
+  if not FNameKnown then
+  begin
+    FName := Value('name');
+    FNameKnown := True;
+  end;
+  Result := FName;
 end;
 
 function TD3MapEntity.Origin: TVector3;
