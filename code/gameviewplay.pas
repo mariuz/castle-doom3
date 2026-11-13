@@ -131,6 +131,9 @@ type
     FHudImage: TCastleImageControl;
     FHudTimeMs: Double;
     FHudRedraw: Single;
+    { "sample start <seconds>": the sampler stops by itself (a demo script
+      can't, while its R: step walks a route) }
+    FSampleLeft: Single;
     FUseHudGui, FHudGuiTried: Boolean;
     { under the menu: no game time, no navigation (the mouse look's state
       to restore) }
@@ -151,6 +154,9 @@ type
       when new areas come into view: textures, shaders) }
     FLastUpdate: TTimerResult;
     FLastUpdateValid: Boolean;
+    { seconds of the last Update's parts, for the long frame log line }
+    FPartGame, FPartVisibility, FPartHud, FPartDemo, FPartUpdate: Single;
+    FPartGameParts: String;
     { the map's efxs/<map>.efx (nil when missing), the effect in
       SoundEngine.Reverb (nil = reverb off), console s_useEAXReverb }
     FEfx: TD3EfxFile;
@@ -1140,8 +1146,8 @@ const
   { software rendered: at most this many redraws a second when the state
     or an event changed something, else (the flickers and scrolls of its
     time expressions) IdleRate }
-  RedrawRate = 15;
-  IdleRate = 5;
+  RedrawRate = 8;
+  IdleRate = 4;
 var
   HudParent: TCastleUserInterface;
 begin
@@ -2828,9 +2834,10 @@ begin
   begin
     { the sampling profiler (Doom3Sampler): "sample start", "sample stop"
       writes samples.txt next to the exe (tools/resolve_samples.py) }
-    if Args = 'start' then
+    if Copy(Args, 1, 5) = 'start' then
     begin
       SamplerStart;
+      FSampleLeft := StrToFloatDef(Trim(Copy(Args, 6, MaxInt)), 0);
       Console.Print('Sampling');
     end else
     begin
@@ -3512,10 +3519,20 @@ end;
 procedure TViewPlay.Update(const SecondsPassed: Single; var HandleInput: Boolean);
 var
   Firing: Boolean;
+  PartTimer: TTimerResult;
 begin
   inherited Update(SecondsPassed, HandleInput);
   if FGame = nil then
     Exit;
+  if FSampleLeft > 0 then
+  begin
+    FSampleLeft := FSampleLeft - SecondsPassed;
+    if FSampleLeft <= 0 then
+    begin
+      SamplerStopAndReport('Sample of ' + MapName);
+      WritelnLog('GameViewPlay', 'Samples written (samples.txt)');
+    end;
+  end;
   if FPaused then
   begin
     { a demo script goes on under the menu (console "menu") }
@@ -3538,9 +3555,13 @@ begin
   UpdatePdaGui(SecondsPassed);
   if (FProfileFrames = 0) and FLastUpdateValid and
      (TimerSeconds(Timer, FLastUpdate) > LongFrameSeconds) then
-    WritelnLog('Profile', 'Long frame: %.2f s (eye %s, yaw %.0f, area %d, visible areas %d)',
+    { the parts are of the frame's own Update (the one before this); the
+      rest is the rendering, the map's Update (animations, GUIs) and the
+      buffer swap }
+    WritelnLog('Profile', 'Long frame: %.2f s (eye %s, yaw %.0f, area %d, visible areas %d; update %.2f: game %.2f, visibility %.2f, hud %.2f, demo %.2f; game:%s)',
       [TimerSeconds(Timer, FLastUpdate), CgeToD3(Camera.Translation).ToString, CameraYaw,
-       Map.AreaAt(Camera.Translation), Map.VisibleAreaCount]);
+       Map.AreaAt(Camera.Translation), Map.VisibleAreaCount,
+       FPartUpdate, FPartGame, FPartVisibility, FPartHud, FPartDemo, FPartGameParts]);
   FLastUpdate := Timer;
   FLastUpdateValid := True;
   if FProfileFrames > 0 then
@@ -3555,7 +3576,9 @@ begin
       LogMemory(Format('Map "%s" (load %d)', [MapName, FMapLoads]));
       if Profiler.Enabled then
         WritelnLogMultiline('Time Profile', Profiler.Summary);
-      SamplerStopAndReport(Format('Map "%s"', [MapName]));
+{ a timed sample (console "sample start <seconds>") goes on }
+      if FSampleLeft <= 0 then
+        SamplerStopAndReport(Format('Map "%s"', [MapName]));
     end;
   end;
   LabelFps.Caption := 'FPS: ' + Container.Fps.ToString;
@@ -3596,12 +3619,17 @@ begin
   ApplyKnockback(SecondsPassed);
 
   { during cinematics the player stays where the camera was }
+  PartTimer := Timer;
   if FInCinematic then
     FGame.Update(SecondsPassed, FPlayerEye)
   else
     FGame.Update(SecondsPassed, Camera.Translation);
+  FPartGame := TimerSeconds(Timer, PartTimer);
+  FPartGameParts := FGame.UpdateParts;
   UpdateCinematic;
+  PartTimer := Timer;
   Map.UpdateVisibility(Camera);
+  FPartVisibility := TimerSeconds(Timer, PartTimer);
   UpdateReverb;
   UpdateMuzzleFlash;
 
@@ -3613,10 +3641,15 @@ begin
   UpdateRemoteViews(SecondsPassed);
   Hud.FlashlightOn := Flashlight.Exists;
   Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
+  PartTimer := Timer;
   UpdateHudGui(SecondsPassed);
+  FPartHud := TimerSeconds(Timer, PartTimer);
 
+  PartTimer := Timer;
   if AutoTestPrefix <> '' then
     RunDemoStep(SecondsPassed);
+  FPartDemo := TimerSeconds(Timer, PartTimer);
+  FPartUpdate := TimerSeconds(Timer, FLastUpdate);
 end;
 
 { A key to a GUI: backspace 8, enter 13, escape 27, else the character. }

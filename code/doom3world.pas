@@ -811,7 +811,12 @@ type
     { the map's box (CGE coordinates, empty until a moveable needs it):
       moveables leaving it stop (idPhysics_RigidBody's world bounds) }
     FWorldBox: TBox3D;
-    FPvsTime: Single;
+    FPvsTime, FPvsFull: Single;
+    FPvsEye: TVector3;
+    FPvsArea: Integer;
+    FGuiReach: Boolean;
+    FGuiReachTime: Single;
+    FGuiReachEye: TVector3;
     FPvsValid: Boolean;
     FDormantCount: Integer;
     procedure UpdatePvs(const Eye: TVector3);
@@ -1241,6 +1246,7 @@ type
     FBroadBoxes: array of TBox3D;
     FBroadCount, FBroadMapCount: Integer;
     FBroadTime: Single;
+    FUpdateParts: array [0..14] of Single;
     procedure BroadphaseUpdate;
     { The map's child of candidate K, nil when the map's children changed
       since the boxes were taken. }
@@ -1248,6 +1254,9 @@ type
   public
     { console r_broadphase: off, the world's own collision methods }
     Broadphase: Boolean;
+    { The parts of the last Update that took 5 ms or more: " actors 0.12
+      scripts 0.03" (the long frame log line). }
+    function UpdateParts: String;
     { Like the world's WorldSegmentCollision, but only the map's scenes
       whose bounding box the segment reaches are asked (a map has a
       thousand, and monsters ask several times each every frame). }
@@ -1257,6 +1266,9 @@ type
     function MapRayDown(const Origin: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
     { The same along Direction (normalized). }
     function MapRay(const Origin, Direction: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
+    { The nearest hit of the ray among the scenes within MaxDist of its
+      start (nil: none; the caller frees it). }
+    function MapRayCollision(const Origin, Direction: TVector3; const MaxDist: Single): TRayCollision;
     function CollisionBenchmark(const Eye: TVector3): String;
     { idEntity::BindToJoint: Child follows Model's joint (Oriented: its
       rotation too). False without such a joint. }
@@ -5424,7 +5436,8 @@ begin
             Offset.Data[(Axis + 1) mod 3] := M.HalfSize.Data[(Axis + 1) mod 3] * 0.9 * (1 - 2 * ((Corner - 1) and 1));
             Offset.Data[(Axis + 2) mod 3] := M.HalfSize.Data[(Axis + 2) mod 3] * 0.9 * (1 - 2 * ((Corner - 1) shr 1));
           end;
-          if (FMap.World.WorldRayCast(D3ToCge(Center + Offset), D3ToCge(Dir), CornerDist) <> nil) and
+          { only a hit within the step matters: the scenes near it are asked }
+          if MapRay(D3ToCge(Center + Offset), D3ToCge(Dir), Abs(D) + Extent + 1, CornerDist) and
              (CornerDist < HitDist) then
             HitDist := CornerDist;
         end;
@@ -5546,8 +5559,7 @@ begin
   if A.MoveType <> MoveTypeFly then
   begin
     FloorStart := From + D3ToCge(Move) + Vector3(0, 24, 0);
-    if (FMap.World.WorldRayCast(FloorStart, Vector3(0, -1, 0), FloorDist) = nil) or
-       (FloorDist > 24 + 18) then
+    if not MapRayDown(FloorStart, 24 + 18 + 0.001, FloorDist) then
       Exit(False);
   end;
   Result := True;
@@ -5801,6 +5813,19 @@ end;
 
 function TD3Game.MapRay(const Origin, Direction: TVector3; const MaxDist: Single; out Dist: Single): Boolean;
 var
+  R: TRayCollision;
+begin
+  R := MapRayCollision(Origin, Direction, MaxDist);
+  Result := (R <> nil) and (R.Count <> 0) and (R.Distance < MaxDist);
+  if Result then
+    Dist := R.Distance
+  else
+    Dist := MaxSingle;
+  R.Free;
+end;
+
+function TD3Game.MapRayCollision(const Origin, Direction: TVector3; const MaxDist: Single): TRayCollision;
+var
   Root: TCastleAbstractRootTransform;
   I, K: Integer;
   C: TCastleTransform;
@@ -5811,25 +5836,22 @@ var
     R: TRayCollision;
   begin
     R := T.InternalRayCollision(Origin, Direction);
-    if R <> nil then
+    if R = nil then
+      Exit;
+    if (R.Count <> 0) and ((Result = nil) or (R.Distance < Result.Distance)) then
     begin
-      if (R.Count <> 0) and (R.Distance < Dist) then
-        Dist := R.Distance;
-      FreeAndNil(R);
-    end;
-  end;
-
-  function Plain: Boolean;
-  begin
-    Result := (Root.WorldRayCast(Origin, Direction, Dist) <> nil) and (Dist < MaxDist);
+      Result.Free;
+      Result := R;
+    end else
+      R.Free;
   end;
 
 begin
+  Result := nil;
   Root := FMap.World;
   if not Broadphase or (FMap.Parent <> Root) or not (FMap.Exists and FMap.Pickable) then
-    Exit(Plain);
+    Exit(Root.WorldRay(Origin, Direction));
   BroadphaseUpdate;
-  Dist := MaxSingle;
   RayBox := TBox3D.Empty;
   RayBox.Include(Origin);
   RayBox.Include(Origin + Direction * MaxDist);
@@ -5839,15 +5861,18 @@ begin
     if not BoxesTouch(FBroadBoxes[K], RayBox) then
       Continue;
     C := BroadChild(K);
+    { a scene went or came since the boxes were taken: the plain way }
     if C = nil then
-      Exit(Plain);
+    begin
+      FreeAndNil(Result);
+      Exit(Root.WorldRay(Origin, Direction));
+    end;
     if C.Exists and C.Pickable then
       Ask(C);
   end;
   for I := 0 to Root.Count - 1 do
     if Root[I] <> FMap then
       Ask(Root[I]);
-  Result := Dist < MaxDist;
 end;
 
 function TD3Game.MonsterSegmentCollision(const A, B: TVector3): Boolean;
@@ -6955,7 +6980,20 @@ var
   Mover: TD3Mover;
   Mon: TD3Monster;
   Feet: TVector3;
+  PartTimer: TTimerResult;
+
+  { the time since the last call goes to part Index (UpdateParts) }
+  procedure Part(const Index: Integer);
+  var
+    Now: TTimerResult;
+  begin
+    Now := Timer;
+    FUpdateParts[Index] := TimerSeconds(Now, PartTimer);
+    PartTimer := Now;
+  end;
+
 begin
+  PartTimer := Timer;
   FFireCooldown := Max(0, FFireCooldown - SecondsPassed);
   SinceFire := SinceFire + SecondsPassed;
   FTime := FTime + SecondsPassed;
@@ -6984,6 +7022,7 @@ begin
       for P in Mover.Portals do
         FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
+  Part(0);
   UpdateElevators;
   UpdateShakes;
   UpdateBurns;
@@ -6993,7 +7032,9 @@ begin
     UpdateScriptMovers;
   UpdateBindings;
   UpdateLightBindings;
+  Part(1);
   UpdateMoveables(SecondsPassed * WorldTimeScale);
+  Part(2);
   UpdateMisc(SecondsPassed * WorldTimeScale);
   UpdateThrownMoveables;
   UpdateAir(SecondsPassed);
@@ -7004,26 +7045,37 @@ begin
   UpdateCamera;
   UpdateLightFades;
   UpdateAnimated;
+  Part(3);
   UpdateProjectiles(SecondsPassed * WorldTimeScale);
+  Part(4);
   UpdateBrass(SecondsPassed);
+  Part(5);
   UpdateParticles;
+  Part(6);
   UpdatePvs(PlayerEye);
+  Part(7);
   for Mon in FMonsters do
     if not CheckDormant(Mon.Model) then
       UpdateMonster(Mon, SecondsPassed * WorldTimeScale, Feet);
+  Part(8);
   UpdateTriggers(Feet);
+  Part(9);
   if (FScript <> nil) and not ScriptsPaused then
     UpdateActors(SecondsPassed * WorldTimeScale);
+  Part(10);
   UpdateGuiFocus;
   UpdateTalkFocus;
   UpdateGuiCommands;
   UpdatePlayerInfo;
+  Part(11);
   UpdateWeapon(SecondsPassed);
   if (FScript <> nil) and not ScriptsPaused then
   begin
     WeaponScriptTics(SecondsPassed);
+    Part(12);
     FScript.Update(FTime);
   end;
+  Part(13);
   { after its script: a shot of this frame shows its flash now }
   UpdateWeaponView(SecondsPassed);
   UpdatePlayerModel(SecondsPassed);
@@ -7035,6 +7087,20 @@ begin
     if FWeapon <> nil then
       EjectBrass(FWeapon);
   end;
+  Part(14);
+end;
+
+function TD3Game.UpdateParts: String;
+const
+  Names: array [0..14] of String = ('movers', 'bindings', 'moveables', 'misc', 'projectiles', 'brass',
+    'particles', 'pvs', 'monsters', 'triggers', 'actors', 'focus', 'weapon', 'scripts', 'views');
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(Names) do
+    if FUpdateParts[I] >= 0.005 then
+      Result := Result + Format(' %s %.2f', [Names[I], FUpdateParts[I]]);
 end;
 
 procedure TD3Game.SpawnPlayerModel;
@@ -7355,7 +7421,8 @@ begin
   Result := False;
   Distance := MaxDist;
   N := -Dir;
-  R := FMap.World.WorldRay(From, Dir);
+  { ragdolls' particles, casings and gibs ask this many times a frame }
+  R := MapRayCollision(From, Dir, MaxDist);
   if R = nil then
     Exit;
   try
@@ -9567,10 +9634,19 @@ begin
   { the focus needs an interactive GUI within GuiFocusDistance: without
     one near, no world ray every frame (most of a big map) }
   Eye := FPlayerEye;
+  { the surfaces' boxes are looked at again when the eye moved, or a
+    quarter of a second later (a map has hundreds of GUI surfaces) }
+  if (FTime >= FGuiReachTime) and (FTime - FGuiReachTime < 0.25) and
+     (PointsDistanceSqr(Eye, FGuiReachEye) < Sqr(8)) then
+    Exit(FGuiReach);
+  FGuiReachTime := FTime;
+  FGuiReachEye := Eye;
+  FGuiReach := True;
   for S in FMap.GuiSurfaces do
     if (S.Scene <> nil) and S.Gui.Interactive and not S.Scene.WorldBoundingBox.IsEmpty and
-       (S.Scene.WorldBoundingBox.PointDistanceSqr(Eye) <= Sqr(GuiFocusDistance + 16)) then
+       (S.Scene.WorldBoundingBox.PointDistanceSqr(Eye) <= Sqr(GuiFocusDistance + 16 + 8)) then
       Exit(True);
+  FGuiReach := False;
   Result := False;
 end;
 
@@ -9592,7 +9668,8 @@ begin
   S := nil;
   if (FMap <> nil) and not PlayerDead and not PlayerViewDir.IsZero and GuiWithinReach then
   begin
-    Hit := FMap.World.WorldRay(FPlayerEye, PlayerViewDir);
+    { only what is nearer than the GUI matters }
+    Hit := MapRayCollision(FPlayerEye, PlayerViewDir.Normalize, GuiFocusDistance + 16);
     try
       { the GUI surfaces' own triangles (their entities collide and are
         picked with their clip models), unless something nearer than the
@@ -9845,18 +9922,32 @@ end;
 procedure TD3Game.UpdatePvs(const Eye: TVector3);
 const
   PvsInterval = 0.25;
+  { computed again when the eye moved this far }
+  PvsMove = 32;
 var
   Area: Integer;
 begin
   if (FMap.Portals = nil) or (FPvsValid and (FTime - FPvsTime < PvsInterval) and (FTime >= FPvsTime)) then
     Exit;
   FPvsTime := FTime;
+  { the set is of the map's geometry (closed doors don't count), so it
+    only changes with the eye: the flood through the portals takes 20 to
+    60 ms in an open map (game/commoutside) }
+  if FPvsValid and (PointsDistanceSqr(Eye, FPvsEye) < Sqr(PvsMove)) then
+    Exit;
+  { in the same area: once a second is enough (monsters go dormant 3 s
+    after they left the set) }
+  if FPvsValid and (FMap.AreaAt(Eye) = FPvsArea) and (FTime >= FPvsFull) and (FTime - FPvsFull < 1) then
+    Exit;
   Area := FMap.AreaAt(Eye);
   { outside every area (noclip in a wall): keep the last one }
   if Area < 0 then
     Exit;
   FMap.Portals.ComputeAround(CgeToD3(Eye), Area, FPvs);
   FPvsValid := True;
+  FPvsEye := Eye;
+  FPvsArea := Area;
+  FPvsFull := FTime;
 end;
 
 function TD3Game.CheckDormant(const ME: TD3ModelEntity): Boolean;
