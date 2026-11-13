@@ -7613,7 +7613,15 @@ begin
     Check(Game.Fx[0].Actions[3].Started, 'the steam model started');
     Check(Game.Fx[0].Actions[3].Emitter <> nil, 'as an emitter');
     Check(not Game.Fx[0].Actions[3].Emitter.OneShot, 'that repeats for its duration');
+    { a model whose particles end before the action's duration (a set
+      number of cycles; here one cycle, long ago) stays until the action ends: the
+      action still points at it }
+    Game.Fx[0].Actions[3].Emitter.OneShot := True;
+    Game.Fx[0].Actions[3].Emitter.StartTime := Game.Fx[0].Actions[3].Emitter.StartTime - 100;
     Step(0.5);
+    Check(Game.Fx[0].Actions[3].Emitter.Finished(Game.Time), 'the fx model''s particles ended');
+    Check(Game.Emitters.IndexOf(Game.Fx[0].Actions[3].Emitter) >= 0,
+      'an fx action''s finished emitter is kept while the action points at it');
     Check(Game.Fx[0].Actions[0].Light.Intensity < 0.9, Format('the light fades out over its last 0.8 s (%.2f)',
       [Game.Fx[0].Actions[0].Light.Intensity]));
     Step(0.5);
