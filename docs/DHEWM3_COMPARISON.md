@@ -67,7 +67,7 @@ The same five maps toured with `CD3_GLOBAL_AMBIENT=0` (console `r_globalAmbient 
 
 ## Again after the light fixes (2026-11-16)
 
-The same 27 maps toured again (`tour_output6`) against the same dhewm3 views, after lights moved to their `light_origin`, took their projection image's hue and their `sound` amplitude (see the changelog): 199 of 270 views have an image difference under 5 (192 before), the median stays 3.9. The maps with the most moved and sound driven lights changed most: `delta2a` median image difference 7.8 -> 5.8 (its yellow lamp room, view 5: luma 10.5 -> 29, dhewm3 32), `comm1` 4.8 -> 4.1, `commoutside` 5.5 -> 5.2, `mc_underground` view 6 (a sound driven light 6 units from a box) 10 -> 59, dhewm3 96.
+The same 27 maps toured again (`tour_output6`) against the same dhewm3 views, after lights moved to their `light_origin`, took their projection image's hue and their `sound` amplitude (see the changelog): 199 of 270 views have an image difference under 5 (192 before), the median stays 3.9. The maps with the most moved and sound driven lights changed most: `delta2a` median image difference 7.8 -> 5.8 (its yellow lamp room, view 5: luma 10.5 -> 28.8, dhewm3 31.9), `comm1` 4.8 -> 4.1, `commoutside` 5.5 -> 5.2, `mc_underground` view 6 (a flickering sound driven light 6 units from a box) 10 -> 26, dhewm3 96.
 
 What still differs most, by view:
 
