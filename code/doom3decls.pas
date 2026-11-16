@@ -1652,6 +1652,16 @@ begin
                 Break;
               Command := Lexer.NextStr;
             end else
+            if SameText(Tok, 'ai_no_turn') or SameText(Tok, 'anim_turn') or
+               SameText(Tok, 'prevent_idle_override') or SameText(Tok, 'random_cycle_start') then
+            begin
+              { an anim flag (idDeclModelDef::ParseAnim), not part of the
+                frame command before it (delta2a's "frame 97 sound_body
+                snd_footstep" with ai_no_turn on the next line) }
+              if Command <> '' then
+                Result.FrameCommands.Add(AnimName + '=' + Command);
+              Command := '';
+            end else
             if Command <> '' then
               Command := Command + ' ' + Tok;
           end;

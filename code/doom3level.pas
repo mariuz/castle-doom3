@@ -99,6 +99,9 @@ type
     Animated: Boolean;
     { Current color (after the shader) }
     Color: TVector3;
+    { The projection image's hue (ProjectionTint), multiplied into the
+      color: the light volumes' analytic shapes are white }
+    Tint: TVector3;
     { The light volume (Doom3LightEffects), also when LightVolumes is off }
     Matrix: TMatrix4;
     Projected: Boolean;
@@ -380,6 +383,9 @@ type
     procedure SetLightParm(const I, Parm: Integer; const Value: Single);
     { Scale a light's color (0..1), for fading lights in and out. }
     procedure SetLightFade(const I: Integer; const Value: Single);
+    { The amplitude (0..1) of a light's sound now, its shader's "sound"
+      (lights/squareishlight_snd: the color follows its flickering sound) }
+    procedure SetLightSound(const I: Integer; const Value: Single);
     { the remoteRenderMap viewpoints at their cameras (after the map loaded) }
     procedure PlaceRemoteViews;
     { a remote view looking from a camera entity (its place, axis, fov) }
@@ -1228,7 +1234,7 @@ end;
 procedure TDoom3Map.BuildLights(const Root: TX3DRootNode);
 var
   E: TD3MapEntity;
-  LightRadius, LightCenter, LightColor, TargetVec, UpVec, RightVec, LightDir: TVector3;
+  LightRadius, LightCenter, LightColor, TargetVec, UpVec, RightVec, LightDir, LOrigin: TVector3;
   Rot: TMatrix3;
   R: Single;
   Point: TPointLightNode;
@@ -1256,7 +1262,8 @@ begin
     if (Shader <> nil) and (Shader.IsFogLight or Shader.IsBlendLight) then
       Continue;
     LightColor := E.VectorValue('_color', Vector3(1, 1, 1));
-    Rot := E.Rotation;
+    LOrigin := E.LightOrigin;
+    Rot := E.LightRotation;
     Projected := E.HasKey('light_target');
     { Doom 3's default light shaders, when the game data has them }
     if (Shader = nil) and Projected and Decls.HasDecl(dtMaterial, 'lights/defaultprojectedlight') then
@@ -1282,11 +1289,11 @@ begin
     end;
 
     if Projected then
-      LightMatrix := ProjectedLightMatrix(E.Origin, Rot, TargetVec, UpVec, RightVec,
+      LightMatrix := ProjectedLightMatrix(LOrigin, Rot, TargetVec, UpVec, RightVec,
         E.VectorValue('light_start', TVector3.Zero), E.VectorValue('light_end', TargetVec),
         E.HasKey('light_start') or E.HasKey('light_end'))
     else
-      LightMatrix := PointLightMatrix(E.Origin, Rot, LightRadius);
+      LightMatrix := PointLightMatrix(LOrigin, Rot, LightRadius);
     ProjectionImage := '';
     if Shader <> nil then
       ProjectionImage := Shader.StageImage;
@@ -1300,11 +1307,11 @@ begin
       Point.Attenuation := Vector3(1, 0, 0);
       if Projected then
       begin
-        Point.Location := D3ToCge(E.Origin);
+        Point.Location := D3ToCge(LOrigin);
         Point.Radius := R * 1.2;
       end else
       begin
-        Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
+        Point.Location := D3ToCge(LOrigin) + D3RotateCge(Rot, D3ToCge(LightCenter));
         Point.Radius := LightRadius.Length + LightCenter.Length + 1;
       end;
       SetLightVolume(Point, SharedEffects, N, LightMatrix, ProjectionImage, Projected);
@@ -1314,7 +1321,7 @@ begin
     begin
       { a spot light along light_target }
       Spot := TSpotLightNode.Create;
-      Spot.Location := D3ToCge(E.Origin);
+      Spot.Location := D3ToCge(LOrigin);
       LightDir := D3RotateCge(Rot, D3ToCge(TargetVec));
       if LightDir.IsZero then
         LightDir := Vector3(0, -1, 0);
@@ -1330,7 +1337,7 @@ begin
     end else
     begin
       Point := TPointLightNode.Create;
-      Point.Location := D3ToCge(E.Origin) + D3RotateCge(Rot, D3ToCge(LightCenter));
+      Point.Location := D3ToCge(LOrigin) + D3RotateCge(Rot, D3ToCge(LightCenter));
       { spheres fading to zero at the box's size (CGE's radiusFalloff):
         0.59 of the center's light at half of it, like Doom 3's round falloff }
       Point.Radius := Max(1, R);
@@ -1363,7 +1370,7 @@ begin
     else
       FLights[N].Location := TSpotLightNode(Node).Location;
     FLights[N].Areas := nil;
-    LightVolumeBox(E.Origin, Rot, Projected, LightCenter, LightRadius, TargetVec, UpVec, RightVec,
+    LightVolumeBox(LOrigin, Rot, Projected, LightCenter, LightRadius, TargetVec, UpVec, RightVec,
       FLights[N].VolumeMin, FLights[N].VolumeMax);
     { shader parameters: _color, shaderParm0..11 }
     FLights[N].Parms := DefaultExprContext;
@@ -1381,6 +1388,7 @@ begin
     FLights[N].Matrix := LightMatrix;
     FLights[N].Projected := Projected;
     FLights[N].Shape := ProjectionShape(ProjectionImage);
+    FLights[N].Tint := ProjectionTint(ProjectionImage);
     FLights[N].NoShadows := E.BoolValue('noshadows') or
       ((Shader <> nil) and Shader.NoShadows);
     FLights[N].Animated := (Shader <> nil) and Shader.StageColorAnimated;
@@ -1406,12 +1414,12 @@ var
 begin
   if FLights[I].Shader = nil then
     Exit(Vector3(FLights[I].Parms.Parms[0], FLights[I].Parms.Parms[1], FLights[I].Parms.Parms[2]) *
-      FLights[I].Fade);
+      FLights[I].Fade * FLights[I].Tint);
   Ctx := FLights[I].Parms;
   { shaderParm4 is Doom 3's time offset (SHADERPARM_TIMEOFFSET) }
   Ctx.Time := FTime - FLights[I].Parms.Parms[4];
   C := FLights[I].Shader.EvalStageColor(Ctx);
-  Result := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z)) * FLights[I].Fade;
+  Result := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z)) * FLights[I].Fade * FLights[I].Tint;
 end;
 
 procedure TDoom3Map.ApplyLightColor(const I: Integer; const C: TVector3);
@@ -3250,6 +3258,12 @@ begin
   if FLights[I].Node is TSpotLightNode then
     TSpotLightNode(FLights[I].Node).Location := Location;
   SetLightVolumeMatrix(FLights[I].Node, Matrix);
+end;
+
+procedure TDoom3Map.SetLightSound(const I: Integer; const Value: Single);
+begin
+  if (I >= 0) and (I <= High(FLights)) then
+    FLights[I].Parms.Sound := Value;
 end;
 
 procedure TDoom3Map.SetLightFade(const I: Integer; const Value: Single);

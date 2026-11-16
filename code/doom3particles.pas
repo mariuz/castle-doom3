@@ -1243,7 +1243,9 @@ begin
   if FxCache.TryGetValue(Key, Result) then
     Exit;
   Result := nil;
-  if (Decls <> nil) and Decls.DeclBody(dtFx, Key, Body) then
+  { a decl declared with its extension (fx/teleporter3.fx names itself
+    "fx/teleporter3.fx"; Doom 3 drops it there too) }
+  if (Decls <> nil) and (Decls.DeclBody(dtFx, Key, Body) or Decls.DeclBody(dtFx, Key + '.fx', Body)) then
   begin
     Result := TD3FxDecl.Create;
     Result.Name := Key;

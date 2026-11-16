@@ -54,6 +54,13 @@ type
 { The shape for a projection image name ('' = Doom 3's default). }
 function ProjectionShape(const ImageName: String): TD3LightShape;
 
+{ The hue of a light's projection image, which the analytic shapes lose
+  (lights/hellgate1 is red, lights/vivlight cyan): the image's colors summed
+  over the sum of each pixel's brightest channel, so a white or gray image
+  gives (1, 1, 1) and the brightest channel stays near 1. (1, 1, 1) when the
+  image is missing. Cached by name. }
+function ProjectionTint(const ImageName: String): TVector3;
+
 { The Effect for light number Index (names its uniform uniquely). The
   falloff along the light's depth follows Doom 3's default falloff images
   for point lights (a box fading at both ends) and projected lights
@@ -101,8 +108,67 @@ var
 implementation
 
 uses
-  Math,
-  Doom3MapFile;
+  Math, Generics.Collections,
+  CastleImages,
+  Doom3MapFile, Doom3Images;
+
+var
+  TintCache: specialize TDictionary<String, TVector3>;
+
+function ProjectionTint(const ImageName: String): TVector3;
+var
+  Key: String;
+  Img: TCastleImage;
+  X, Y, StepX, StepY: Integer;
+  C: TVector4;
+  SumR, SumG, SumB, SumMax, M: Double;
+begin
+  Result := Vector3(1, 1, 1);
+  Key := LowerCase(Trim(ImageName));
+  if Key = '' then
+    Exit;
+  if TintCache = nil then
+    TintCache := specialize TDictionary<String, TVector3>.Create;
+  if TintCache.TryGetValue(Key, Result) then
+    Exit;
+  Result := Vector3(1, 1, 1);
+  try
+    Img := EvaluateImageProgram(Key, ikColor);
+  except
+    Img := nil;
+  end;
+  if Img <> nil then
+  try
+    SumR := 0;
+    SumG := 0;
+    SumB := 0;
+    SumMax := 0;
+    { 64 x 64 samples are plenty for a hue }
+    StepX := Max(1, Img.Width div 64);
+    StepY := Max(1, Img.Height div 64);
+    Y := 0;
+    while Y < Img.Height do
+    begin
+      X := 0;
+      while X < Img.Width do
+      begin
+        C := Img.Colors[X, Y, 0];
+        M := Max(C.X, Max(C.Y, C.Z));
+        SumR := SumR + C.X;
+        SumG := SumG + C.Y;
+        SumB := SumB + C.Z;
+        SumMax := SumMax + M;
+        Inc(X, StepX);
+      end;
+      Inc(Y, StepY);
+    end;
+    if SumMax > 0 then
+      Result := Vector3(SumR / SumMax, SumG / SumMax, SumB / SumMax);
+  finally
+    Img.Free;
+  end;
+  TintCache.AddOrSetValue(Key, Result);
+end;
 
 { Set row R of M to (A, B, C, D): M * v = sum over rows. CGE's TMatrix4 is
   column-major, Data[Column, Row]. }
@@ -413,4 +479,6 @@ begin
     Root.AddChildren(LightLibraryEffect);
 end;
 
+finalization
+  FreeAndNil(TintCache);
 end.
