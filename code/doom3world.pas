@@ -52,7 +52,7 @@ interface
 
 uses
   SysUtils, Classes, Generics.Collections,
-  CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
+  CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors, CastleTimeUtils,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
   Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals;
@@ -812,6 +812,12 @@ type
     FCameraCycles: Integer;
     { skipping a cinematic also skips the cameras started by it until then }
     FSkipUntil: Single;
+    { a skip runs the game fast (TViewPlay.Update steps it) until the
+      cinematic ends, like Doom 3's skipCinematic; FSkipStart and
+      FSkipMaxTime are game times }
+    FSkipping: Boolean;
+    FSkipStart, FSkipMaxTime, FSkipVolume: Single;
+    FSkipTimer: TTimerResult;
     { screen fade (idPlayerView::Fade) }
     FFadeFrom, FFadeTo: TVector4;
     FFadeStart, FFadeTime: Single;
@@ -1095,6 +1101,8 @@ type
     procedure SetSpeakerDemonic(const AName: String; const Demonic: Boolean);
     procedure SetGuisDemonic(const AName: String; const Demonic: Boolean);
     procedure ApplyInfluence(const Inf: TD3Influence);
+    procedure StartSkipping;
+    procedure UpdateSkipping;
     procedure RestoreInfluence(const Inf: TD3Influence);
     procedure UpdateInfluences;
     function ActivatePlayerInfo(const E: TD3MapEntity; const Cls: String): Boolean;
@@ -1539,8 +1547,12 @@ type
     { The cinematic camera's view in CGE coordinates, its horizontal field
       of view in degrees. }
     procedure CinematicView(out Position, Direction, Up: TVector3; out FovDeg: Single);
-    { Stop the cinematic camera (its targets fire), like Escape in Doom 3. }
+    { Skip the cinematic, like Escape in Doom 3: the game runs (Skipping)
+      until its cameras are done, with the sound muted. }
     procedure SkipCinematic;
+    { A skipped cinematic still runs: step the game (1/60 s at a time,
+      without drawing) until this is false. }
+    property Skipping: Boolean read FSkipping;
     { Color over the screen (alpha 0: nothing), from trigger_fade and the
       scripts' fades. }
     function FadeColor: TVector4;
@@ -1866,7 +1878,7 @@ implementation
 
 uses
   Math,
-  CastleLog, CastleUtils, CastleQuaternions, CastleTimeUtils,
+  CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
@@ -2286,6 +2298,9 @@ begin
   FCameraEntity := nil;
   FCameraAnim := nil;
   FSkipUntil := 0;
+  if FSkipping then
+    SoundEngine.Volume := FSkipVolume;
+  FSkipping := False;
   FFadeFrom := Vector4(0, 0, 0, 0);
   FFadeTo := Vector4(0, 0, 0, 0);
   FFadeTime := 0;
@@ -7215,6 +7230,7 @@ begin
     FScript.Update(FTime);
   end;
   Part(13);
+  UpdateSkipping;
   { after its script: a shot of this frame shows its flash now }
   UpdateWeaponView(SecondsPassed);
   UpdatePlayerModel(SecondsPassed);
@@ -12404,12 +12420,9 @@ begin
   FCameraEntity := E;
   FCameraStart := FTime;
   WritelnLog('Doom3World', 'Cinematic camera %s', [E.Name]);
-  if FTime < FSkipUntil then
-  begin
+  if (FTime < FSkipUntil) and not FSkipping then
     { the cinematic goes on with this camera: skip it too }
-    FSkipUntil := FTime + 1;
-    StopCamera;
-  end;
+    StartSkipping;
 end;
 
 procedure TD3Game.StopCamera;
@@ -12440,13 +12453,33 @@ end;
 
 procedure TD3Game.SkipCinematic;
 begin
-  if FCameraEntity <> nil then
-  begin
-    { like gameLocal.SkipCinematic: the cameras the cinematic starts next
-      (a chain of shots) are skipped too }
-    FSkipUntil := FTime + 1;
-    StopCamera;
-  end;
+  if (FCameraEntity <> nil) and not FSkipping then
+    StartSkipping;
+end;
+
+procedure TD3Game.StartSkipping;
+begin
+  { gameLocal.SkipCinematic: the game runs on (its relays, fades and
+    scripts keep their timing) until the cinematic is over, muted }
+  FSkipping := True;
+  FSkipStart := FTime;
+  FSkipTimer := Timer;
+  FSkipMaxTime := FTime + 600;
+  FSkipVolume := SoundEngine.Volume;
+  SoundEngine.Volume := 0;
+end;
+
+procedure TD3Game.UpdateSkipping;
+begin
+  if not FSkipping or ((FCameraEntity <> nil) and (FTime < FSkipMaxTime)) then
+    Exit;
+  { the cameras a cinematic starts soon after (a chain of shots) are
+    skipped too }
+  FSkipping := False;
+  FSkipUntil := FTime + 1;
+  SoundEngine.Volume := FSkipVolume;
+  WritelnLog('Doom3World', 'Cinematic skipped: %.1f s of game time in %.1f s',
+    [FTime - FSkipStart, TimerSeconds(Timer, FSkipTimer)]);
 end;
 
 function TD3Game.CinematicActive: Boolean;
@@ -12506,6 +12539,8 @@ begin
   FFadeTo := Target;
   FFadeStart := FTime;
   FFadeTime := Max(0, Seconds);
+  if not TVector4.PerfectlyEquals(FFadeFrom, FFadeTo) then
+    WritelnLog('Doom3World', 'Fade to %s in %.2f s', [FFadeTo.ToString, FFadeTime]);
 end;
 
 function TD3Game.FadeColor: TVector4;

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Skipping a cinematic runs the game on, like Doom 3**: _Escape_ (console `skipcinematic`) stopped the camera at once, so whatever the map timed from its start still came later. `game/monorail`'s intro fades to black 20.4 s after the start and the camera's end fades back in; skipped, the fade to black came after the fade in and the rest of the map stayed black (half the monorail tour's views). Now the game runs on without drawing, sound muted, until the camera is done (`gameLocal.SkipCinematic`): Mars City 1's 90 s intro in 3 to 6 s, monorail's 18.7 s in 1.5 s. Screen fades are logged.
 - **Lights where Doom 3 puts them, with their colors and their sounds' flicker** (from comparing the 27 maps with dhewm3 again):
   - A light with a fixture model is at its `light_origin` (and turned by `light_rotation`), not at the model's `origin`, like Doom 3's `ParseSpawnArgsToRenderLight`: 2069 of the 14169 lights of the 27 maps were in the wrong place, and their precomputed shadow volumes (dmap builds them from `light_origin`) were cast from the wrong point. In `game/delta2a` a yellow lamp's room was black (shadowed by its own volume): now lit like dhewm3 (luma 28.8, dhewm3 31.9; 11.1 before).
   - A light's color takes its projection image's hue (`lights/hellgate1` red: 45 lights in the hell maps, `lights/redlight01`, `lights/vivlight` cyan; 144 lights): the analytic light shapes were white.

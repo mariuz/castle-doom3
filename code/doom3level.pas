@@ -419,6 +419,9 @@ type
     { the speed of the md5 models' animations (TD3Game: 0.25 during
       d3xp's hell time) }
     AnimTimeScale: Single;
+    { Update only what the game needs (the time, md5 animations and their
+      frame commands), nothing drawn: a skipped cinematic runs on (TViewPlay). }
+    FastForward: Boolean;
     { Not spawned at the current skill (idGameLocal::InhibitEntitySpawn:
       "not_easy", "not_medium", "not_hard"; nightmare counts as hard). }
     class function EntityInhibited(const E: TD3MapEntity): Boolean;
@@ -3304,25 +3307,28 @@ begin
     FTime := FTime + SecondsPassed;
   { the clock of videos (videomap) }
   RoqClock := FTime;
-  { scrolling / rotating textures, pulsing glows }
-  if FProc <> nil then
-    UpdateAnimatedSurfaces(FTime);
-  { GUI time lines, transitions and redraws }
-  UpdateGuis;
-  { light shaders: strobes, flickers, pulses }
-  for I := 0 to High(FLights) do
-    if FLights[I].Animated and FLights[I].Node.IsOn then
-    begin
-      C := LightShaderColor(I);
-      if not TVector3.Equals(C, FLights[I].Color, 0.002) then
-        ApplyLightColor(I, C);
-    end;
+  if not FastForward then
+  begin
+    { scrolling / rotating textures, pulsing glows }
+    if FProc <> nil then
+      UpdateAnimatedSurfaces(FTime);
+    { GUI time lines, transitions and redraws }
+    UpdateGuis;
+    { light shaders: strobes, flickers, pulses }
+    for I := 0 to High(FLights) do
+      if FLights[I].Animated and FLights[I].Node.IsOn then
+      begin
+        C := LightShaderColor(I);
+        if not TVector3.Equals(C, FLights[I].Color, 0.002) then
+          ApplyLightColor(I, C);
+      end;
+  end;
   { animate md5 models (also in the editor, it's nice to see them move) }
   for ME in FModels do
   begin
     { skinning is the slow part: only for models that can be seen (portal
       visibility hides the others) }
-    ME.Instance.Shown := ME.Holder.Visible and ME.Holder.Exists;
+    ME.Instance.Shown := ME.Holder.Visible and ME.Holder.Exists and not FastForward;
     if ME.Dormant then
       Continue;
     ME.Instance.Update(SecondsPassed * AnimTimeScale);
