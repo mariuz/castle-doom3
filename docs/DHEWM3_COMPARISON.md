@@ -64,3 +64,14 @@ The same five maps toured with `CD3_GLOBAL_AMBIENT=0` (console `r_globalAmbient 
 - Black is black, and the image difference gets smaller in all five maps (median 2.9 instead of 3.9).
 - Lit places are then darker than dhewm3's (about 55 to 65% of its luma): the lights' middles match, their soft outer parts don't. The port draws the lights' projection and falloff images as analytic shapes (roadmap item 10, exact light images); the gray had hidden that.
 - The default is unchanged for now (CGE's 0.2).
+
+## Again after the light fixes (2026-11-16)
+
+The same 27 maps toured again (`tour_output6`) against the same dhewm3 views, after lights moved to their `light_origin`, took their projection image's hue and their `sound` amplitude (see the changelog): 199 of 270 views have an image difference under 5 (192 before), the median stays 3.9. The maps with the most moved and sound driven lights changed most: `delta2a` median image difference 7.8 -> 5.8 (its yellow lamp room, view 5: luma 10.5 -> 29, dhewm3 32), `comm1` 4.8 -> 4.1, `commoutside` 5.5 -> 5.2, `mc_underground` view 6 (a sound driven light 6 units from a box) 10 -> 59, dhewm3 96.
+
+What still differs most, by view:
+
+- Views from outside every area (the eye in a wall or in a parked monorail car: `caverns2`, `delta4`, `monorail`): Doom 3 draws all areas there, this port the last area the view was in (drawing all of them compiles shaders for every light at once).
+- Sealed item closets: dhewm3 draws them black, here the sky shows through (`alphalabs2`, `delta5`, `site3`).
+- Doors open here and stay shut in dhewm3: the tour flies with noclip, and Doom 3 doesn't touch triggers in noclip (this port does, for the routes).
+- The global ambient gray and the lights' soft outer parts (analytic shapes, roadmap item 10), as before.
