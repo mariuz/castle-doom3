@@ -223,11 +223,12 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 | R | Shadow map atlas and cascaded shadow maps | Merged into `doom3-port` ([mariuz/castle-engine#12](https://github.com/mariuz/castle-engine/pull/12), with B; follow-ups [#13](https://github.com/mariuz/castle-engine/pull/13); not yet proposed upstream) | Soft shadows from every light (items 2 and 13), with B |
 | S | Shadow volume casters per light, depth bounds per light | Merged into `doom3-port` ([mariuz/castle-engine#14](https://github.com/mariuz/castle-engine/pull/14); not yet proposed upstream) | Item 2 (precomputed volumes with several lights, `r_useDepthBounds`) |
 | T | Shadowed pass sharing the lit pass's shaders, preparing shapes with the scene lights, lights per scene | Merged into `doom3-port` (branch `shadow-volumes-zero-lights`, 2026-11-06; not yet proposed upstream) | Fewer shader compiles (stalls) when new places come into view (item 1) |
-
-| V | Effects without uniforms hashed by their code: equal Effect nodes share a shader program | In `doom3-port` (2026-11-12; not yet proposed upstream) | 4 to 5 times fewer shader programs per map, none again when a map is loaded again (memory, load time) |
-| W | Scene collisions reject by the bounding box before the octree | In `doom3-port` (2026-11-12; not yet proposed upstream) | Collision tests in maps with a thousand small colliding scenes (monsters' moves) |
+| U | Lights enabled sorted by their shader code, unused shader programs kept for reuse | In `doom3-port` (2026-11-07, branch `light-order-programs`; not yet proposed upstream) | Fewer programs linked again and again while monsters and projectiles move among lights (shader stalls, item 18) |
+| V | Effects without uniforms hashed by their code: equal Effect nodes share a shader program | In `doom3-port` (2026-11-12, branch `effect-code-hash`; castle-engine/castle-engine#753) | 4 to 5 times fewer shader programs per map, none again when a map is loaded again (memory, load time) |
+| W | Scene collisions reject by the bounding box before the octree | In `doom3-port` (2026-11-12, branch `scene-collision-bounding-box`; castle-engine/castle-engine#754) | Collision tests in maps with a thousand small colliding scenes (monsters' moves) |
 | X | Silhouette shadow volumes reuse their lists, skip identity transforms | In `doom3-port` (2026-11-13, branch `shadow-volumes-scratch-lists`; castle-engine/castle-engine#756) | A third of the shadow volumes' CPU time in maps with thousands of small shadow casters |
 | Y | Light uniforms looked up once per program and light number | In `doom3-port` (2026-11-16, branch `light-uniform-locations`; castle-engine/castle-engine#757) | About 1% of the CPU in fights (many shapes sharing programs, lit by different lights) |
+| Z | `ChangedAll` forgets the transformations scheduled for the freed shape tree (use-after-free bug) | In `doom3-port` (2026-11-11, branch `fix-changedall-transformation-dirty`; castle-engine/castle-engine#752) | No access violations minutes into long fights (a shape added to a live scene, then a moved transform) |
 
 A, B, C, D, F, J, M, N and O were checked against the CGE source, P, Q and R against CGE master (October 2026); the others come from building this port.
 
@@ -335,7 +336,7 @@ Merged into `doom3-port` (2026-11-06):
 - a shape's program depends on which kind of light is at each light number, so a monster moving among lights got a new program for the same kinds in another order;
 - a program is freed as soon as no shape uses it, so the next projectile of a kind, or a monster coming back to a light, links it again.
 
-Local branch `light-order-programs` (2026-11-07, to merge into `doom3-port`):
+Branch `light-order-programs` (2026-11-07), merged into `doom3-port`:
 - `TLightsRenderer` enables a shape's lights sorted by what decides their shader code (effects, node class, attenuation, radius and ambient defines); lights add up, so the image is the same;
 - `InternalKeepUnusedShaderPrograms` (default 0: the old behavior) keeps that many unused programs for reuse, the oldest freed first. Programs bound to X3D node fields (`TX3DShaderProgram.BoundToNodes`: shader node uniforms, texture fields) are never kept, since their nodes may be freed and new nodes at the same addresses would match their hash. The kept ones are freed when the last OpenGL context closes (`TRendererCache.FreeUnusedPrograms`). Here: 8192 (`CD3_KEEP_PROGRAMS=0` turns it off).
 
