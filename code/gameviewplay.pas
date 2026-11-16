@@ -293,6 +293,10 @@ end;
 procedure TViewPlay.Start;
 begin
   inherited Start;
+  { env CD3_PRECOMPRESSED=0: plain color images from their TGA, not from
+    Doom 3's compressed dds/ copies (console image_usePrecompressedTextures) }
+  if GetEnvironmentVariable('CD3_PRECOMPRESSED') = '0' then
+    UsePrecompressedImages := False;
   { env CD3_GLOBAL_AMBIENT=0: black where no light reaches, like Doom 3
     (console r_globalAmbient; CGE's default is 0.2) }
   if GetEnvironmentVariable('CD3_GLOBAL_AMBIENT') <> '' then
@@ -2464,6 +2468,13 @@ begin
     if Args <> '' then
       FUsePdaGui := StrToIntDef(Args, 0) <> 0;
     Console.Print('g_pdaGui ' + Iff(FUsePdaGui, '1', '0') + ' (guis/pda.gui when the data has it, else the text panel)');
+  end else
+  if Cmd = 'image_useprecompressedtextures' then
+  begin
+    { plain color images from Doom 3's compressed dds/ copies }
+    if Args <> '' then
+      UsePrecompressedImages := StrToIntDef(Args, 1) <> 0;
+    Console.Print('image_usePrecompressedTextures ' + Iff(UsePrecompressedImages, '1', '0') + ' (used by the next map loaded)');
   end else
   if Cmd = 'r_prepareresources' then
   begin

@@ -13,6 +13,12 @@
   - d3img:/color/<program>   makeIntensity, makeAlpha, invertColor...
     approximated by their source image.
 
+  - d3img:/dds/<name>.dds  a plain color image from Doom 3's compressed copy
+    dds/<name>.dds (DXT1 or DXT3, uploaded to the GPU as it is: a sixth or
+    a quarter of the memory of the TGA, and no decoding), like Doom 3's
+    image_usePrecompressedTextures; its TGA when the copy isn't DXT
+    (RXGB normal maps).
+
   Processed images are encoded as uncompressed TGA (fast to write and read). }
 unit Doom3Images;
 
@@ -39,6 +45,12 @@ function ImageProgramUrl(const AProgram: String; const Kind: TD3ImageKind): Stri
 function EvaluateImageProgram(const AProgram: String; const Kind: TD3ImageKind): TCastleImage;
 
 procedure RegisterImageProtocol;
+
+var
+  { Plain color images come from their dds/ copies (console
+    image_usePrecompressedTextures, env CD3_PRECOMPRESSED=0 turns it off);
+    for the materials made after a change. }
+  UsePrecompressedImages: Boolean = True;
 
 { Simple uncompressed TGA writer (bottom-up rows, matching CGE images). }
 procedure SaveTga(const Image: TCastleImage; const Stream: TStream);
@@ -140,6 +152,14 @@ begin
   if IsPlainName(AProgram) then
   begin
     F := FindImageFile(AProgram);
+    { Doom 3's compressed copy, unless a stage asked for full quality }
+    if UsePrecompressedImages and (Copy(F, Length(F) - 3, 4) = '.tga') and
+       not D3Fs.IsBfg and not Decls.IsHighQualityImage(AProgram) and
+       D3Fs.FileExists('dds/' + StripExt(F) + '.dds') then
+      { ending with .dds: CGE reads it as a composite image, with its
+        mipmaps }
+      Result := 'd3img:/dds/' + StripExt(F) + '.dds'
+    else
     if F <> '' then
       Result := D3FsUrl(F)
     else
@@ -582,6 +602,56 @@ begin
   end;
 end;
 
+{ The dds/ copy of a plain image when it is DXT1, DXT3 or DXT5 with
+  mipmaps (what CGE uploads compressed), else its TGA. }
+function ReadDds(const Base: String; out MimeType: String): TStream;
+const
+  { DDS header: "DDS ", then the pixel format's flags at 80, its FourCC
+    at 84 }
+  DdpfFourCC = 4;
+var
+  Stream: TStream;
+  Header: array [0..127] of Byte;
+  Four: String;
+  Img: TCastleImage;
+begin
+  Stream := D3Fs.OpenFile('dds/' + Base + '.dds');
+  if Stream <> nil then
+  begin
+    if (Stream.Read(Header, SizeOf(Header)) = SizeOf(Header)) and
+       (Header[0] = Ord('D')) and (Header[1] = Ord('D')) and (Header[2] = Ord('S')) and
+       ((Header[80] and DdpfFourCC) <> 0) then
+    begin
+      SetString(Four, PChar(@Header[84]), 4);
+      { with its mipmaps (at 28; GL can't make them for a compressed
+        texture: one file of the 2004 data has none) }
+      if ((Four = 'DXT1') or (Four = 'DXT3') or (Four = 'DXT5')) and
+         (PCardinal(@Header[28])^ > 1) then
+      begin
+        Stream.Position := 0;
+        MimeType := 'image/x-dds';
+        Inc(ProfileDdsCount);
+        Exit(Stream);
+      end;
+    end;
+    Stream.Free;
+  end;
+  { RXGB (a normal map's swizzle) or uncompressed: the TGA, as an
+    uncompressed DDS (the URL ends with .dds, so CGE reads a DDS) }
+  Inc(ProfileDdsFallbackCount);
+  Img := LoadPlain(Base);
+  if Img = nil then
+    raise EFOpenError.Create('Cannot read Doom 3 image: ' + Base);
+  try
+    Result := TMemoryStream.Create;
+    SaveImage(Img, 'image/x-dds', Result);
+    Result.Position := 0;
+  finally
+    Img.Free;
+  end;
+  MimeType := 'image/x-dds';
+end;
+
 type
   THandler = class
     function Read(const Url: String; out MimeType: String): TStream;
@@ -602,6 +672,12 @@ begin
   Path := RawUriDecode(UriDeleteProtocol(Url));
   while (Path <> '') and (Path[1] = '/') do
     Delete(Path, 1, 1);
+  if Copy(Path, 1, 4) = 'dds/' then
+  begin
+    Result := ReadDds(StripExt(Copy(Path, 5, MaxInt)), MimeType);
+    ProfileImageSeconds := ProfileImageSeconds + TimerSeconds(Timer, Start);
+    Exit;
+  end;
   if Copy(Path, 1, 7) = 'normal/' then
   begin
     Kind := ikNormal;
