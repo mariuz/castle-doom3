@@ -427,6 +427,10 @@ type
     class function EntityInhibited(const E: TD3MapEntity): Boolean;
     { Area of a CGE point, -1 outside. }
     function AreaAt(const P: TVector3): Integer;
+    { The area a view at P looks from: AreaAt, else (an eye in a wall or a
+      ceiling) the area of a point a little below or beside it, -1 when
+      none is near. }
+    function NearAreaAt(const P: TVector3): Integer;
   published
     { Map name: "testmap" means maps/testmap.proc and maps/testmap.map. }
     property MapName: String read FMapName write SetMapName;
@@ -1667,11 +1671,11 @@ begin
   begin
     for P := fpLeft to fpTop do
       Planes[Ord(P)] := Camera.Frustum.Planes[P];
-    { outside every area (in a wall, noclip): from the last area the view
-      was in. Doom 3 draws everything there, but with all areas the lights
-      of all areas reach every shape: new shaders for all, a frame of a
-      minute (alphalabs1) }
-    Area := AreaAt(Camera.WorldTranslation);
+    { outside every area (in a wall, noclip): from the area just next to
+      the eye, else the last area the view was in. Doom 3 draws everything
+      there, but with all areas the lights of all areas reach every shape:
+      new shaders for all, a frame of a minute (alphalabs1) }
+    Area := NearAreaAt(Camera.WorldTranslation);
     if Area >= 0 then
       FLastViewArea := Area
     else
@@ -3294,6 +3298,29 @@ begin
   if FProc = nil then
     Exit(-1);
   Result := FProc.PointInArea(CgeToD3(P));
+end;
+
+function TDoom3Map.NearAreaAt(const P: TVector3): Integer;
+const
+  { CGE directions: down first (an eye in a ceiling over its floor), then
+    the sides, then up }
+  Dirs: array [0..5] of TVector3 = (
+    (X: 0; Y: -1; Z: 0), (X: 1; Y: 0; Z: 0), (X: -1; Y: 0; Z: 0),
+    (X: 0; Y: 0; Z: 1), (X: 0; Y: 0; Z: -1), (X: 0; Y: 1; Z: 0));
+  Steps: array [0..4] of Single = (8, 16, 32, 64, 96);
+var
+  S, D: Integer;
+begin
+  Result := AreaAt(P);
+  if (Result >= 0) or (FProc = nil) then
+    Exit;
+  for S := 0 to High(Steps) do
+    for D := 0 to High(Dirs) do
+    begin
+      Result := AreaAt(P + Dirs[D] * Steps[S]);
+      if Result >= 0 then
+        Exit;
+    end;
 end;
 
 procedure TDoom3Map.Update(const SecondsPassed: Single; var RemoveMe: TRemoveType);
