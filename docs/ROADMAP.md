@@ -227,7 +227,7 @@ Things this port works around because Castle Game Engine (7.0-alpha.3) can't do 
 | V | Effects without uniforms hashed by their code: equal Effect nodes share a shader program | In `doom3-port` (2026-11-12; not yet proposed upstream) | 4 to 5 times fewer shader programs per map, none again when a map is loaded again (memory, load time) |
 | W | Scene collisions reject by the bounding box before the octree | In `doom3-port` (2026-11-12; not yet proposed upstream) | Collision tests in maps with a thousand small colliding scenes (monsters' moves) |
 | X | Silhouette shadow volumes reuse their lists, skip identity transforms | In `doom3-port` (2026-11-13, branch `shadow-volumes-scratch-lists`; castle-engine/castle-engine#756) | A third of the shadow volumes' CPU time in maps with thousands of small shadow casters |
-| Y | Light uniforms looked up once per program and light number | In `doom3-port` (2026-11-16, branch `light-uniform-locations`; not yet proposed upstream) | About 1% of the CPU in fights (many shapes sharing programs, lit by different lights) |
+| Y | Light uniforms looked up once per program and light number | In `doom3-port` (2026-11-16, branch `light-uniform-locations`; castle-engine/castle-engine#757) | About 1% of the CPU in fights (many shapes sharing programs, lit by different lights) |
 
 A, B, C, D, F, J, M, N and O were checked against the CGE source, P, Q and R against CGE master (October 2026); the others come from building this port.
 
