@@ -1675,6 +1675,22 @@ begin
     end;
 end;
 
+{ Pixels with some light (anti-aliased text's thin strokes too). }
+function LitPixels(const Img: TCastleImage; const X0, Y0, X1, Y1: Integer): Integer;
+var
+  X, Y: Integer;
+  C: TVector4;
+begin
+  Result := 0;
+  for Y := Y0 to Y1 do
+    for X := X0 to X1 do
+    begin
+      C := PixelAt(Img, X, Y);
+      if C.X + C.Y + C.Z > 1.2 then
+        Inc(Result);
+    end;
+end;
+
 procedure TestGuis;
 var
   Gui: TD3Gui;
@@ -6981,7 +6997,9 @@ begin
     Gui.FindWindow('status').SetProp('visible', '1');
     Img := RenderGui(Gui, nil);
     try
-      Check(BrightPixels(Img, 30, 440, 190, 470) > 20, 'the status text (CLICKED) drawn at textscale 0.3 (12 pt font)');
+      { the glyphs are filtered (anti-aliased): thin strokes aren't all white }
+      Check(LitPixels(Img, 30, 440, 190, 470) > 100, Format('the status text (CLICKED) drawn at textscale 0.3 (12 pt font): %d lit pixels',
+        [LitPixels(Img, 30, 440, 190, 470)]));
     finally
       Img.Free;
     end;
