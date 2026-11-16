@@ -4675,6 +4675,19 @@ void test_spawn() {
     sys.print( "spawned\\n" );
 }
 
+// a light made by a script (sys.spawn "light", like hell1's guardian):
+// green, then fading out
+void test_spawn_light() {
+    entity light;
+    sys.setSpawnArg( "name", "light_spawned_1" );
+    sys.setSpawnArg( "light", "200" );
+    light = sys.spawn( "light" );
+    light.setOrigin( '420 -100 64' );
+    light.setColor( 0, 1, 0 );
+    sys.wait( 0.3 );
+    light.fadeOutLight( 0.2 );
+}
+
 void test_trigger_called() {
     trigger_calls++;
     // the character in room A walks to its path_corner

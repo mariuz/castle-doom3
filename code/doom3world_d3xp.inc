@@ -498,6 +498,9 @@ begin
               else
                 WritelnLog('Doom3World', 'Script spawned %s (%s)', [Other.Name, Other.ClassName_]);
             end else
+            if (ME = nil) and (SameText(Other.ClassName_, 'light') or (Other.Value('spawnclass') = 'idLight')) then
+              SpawnScriptLight(Other)
+            else
             if Other.Value('spawnclass') <> 'idProjectile' then
               Unsupported('sys.spawn of ' + ArgStr(0) + ' (the entity exists for scripts; no light or behavior is made)');
           end;

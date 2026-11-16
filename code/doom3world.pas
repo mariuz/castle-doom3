@@ -102,6 +102,21 @@ type
     RestoreOnTrigger: Boolean;
   end;
 
+  { A light a script spawned (sys.spawn of "light", or of an entityDef with
+    spawnclass idLight: the guardian's and its seekers' lights): a CGE
+    point light, placed, bound and moved like other entities
+    (TD3Game.TransformOf). }
+  TD3ScriptLight = class
+    Entity: TD3MapEntity;
+    Light: TCastlePointLight;
+    { "_color" / setColor, and the hue of the shader's image }
+    Color, Tint: TVector3;
+    On: Boolean;
+    { fadeInLight / fadeOutLight: Fade goes from FadeFrom to FadeTo }
+    Fade, FadeFrom, FadeTo, FadeStart, FadeTime: Single;
+    destructor Destroy; override;
+  end;
+
   TD3MoverKind = (mkDoor, mkRotating, mkBobbing, mkPendulum);
   TD3DoorState = (dsClosed, dsOpening, dsOpen, dsClosing);
 
@@ -774,6 +789,7 @@ type
     FSoundLastFile: specialize TDictionary<String, Integer>;
     { SoundEnvelope's results by sound URL }
     FSoundEnvelopes: specialize TDictionary<String, TBytes>;
+    FScriptLights: specialize TObjectList<TD3ScriptLight>;
     FLightSounds: array of TD3LightSound;
     { sound occlusion: each portal's shortest way to the listener (crossing
       it), for FSoundDistListener at game time FSoundDistTime; the portals
@@ -1053,6 +1069,13 @@ type
     function SoundEnvelope(const Url: String): TBytes;
     { lights whose shader follows their sound ("sound"): their amplitude now }
     procedure UpdateLightSounds;
+    procedure SpawnScriptLight(const E: TD3MapEntity);
+    procedure ApplyScriptLight(const SL: TD3ScriptLight);
+    procedure SetScriptLightShader(const SL: TD3ScriptLight; const ShaderName: String);
+    procedure SetScriptLightRadius(const SL: TD3ScriptLight; const Radius: Single);
+    function ScriptLightEvent(const SL: TD3ScriptLight; const N: String; const Args: TD3ValueArray;
+      var EventResult: TD3Value): Boolean;
+    procedure UpdateScriptLights;
     procedure SpawnLightSound(const E: TD3MapEntity);
     procedure OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single;
       const Sound: TCastleSound = nil);
@@ -1531,6 +1554,8 @@ type
     procedure Activate(const E: TD3MapEntity);
     { The map entity with this name, nil if none. }
     function FindEntity(const AName: String): TD3MapEntity;
+    { The light a script spawned with this name, nil when none. }
+    function ScriptLightOf(const AName: String): TD3ScriptLight;
     { For TD3GameScriptHost: scripts' entity handles and events. }
     function ScriptFindEntity(const AName: String): Integer;
     function ScriptEntityName(const Handle: Integer): String;
@@ -1882,7 +1907,7 @@ uses
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
-  Doom3AF, Doom3Images,
+  Doom3AF, Doom3Images, Doom3Materials, Doom3LightEffects,
   CastleInternalSoundFile;
 
 const
@@ -2170,6 +2195,7 @@ begin
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
   FEmitters := specialize TObjectList<TD3ParticleEmitter>.Create(True);
+  FScriptLights := specialize TObjectList<TD3ScriptLight>.Create(True);
   FEmitterEntities := specialize TObjectList<TD3EmitterEntity>.Create(True);
   FFx := specialize TObjectList<TD3Fx>.Create(True);
   FDecals := TD3DecalSystem.Create(nil);
@@ -2206,6 +2232,7 @@ begin
   FSounds.Free;
   FSoundLastFile.Free;
   FSoundEnvelopes.Free;
+  FScriptLights.Free;
   FTriggers.Free;
   FEntities.Free;
   FPending.Free;
@@ -2317,6 +2344,7 @@ begin
   FFx.Clear;
   FEmitterEntities.Clear;
   FEmitters.Clear;
+  FScriptLights.Clear;
   FDecals.Clear;
   FGuiFocus := nil;
   FTalkFocus := nil;
@@ -2495,6 +2523,152 @@ begin
     end;
     FMap.SetLightSound(FLightSounds[I].Light, Amplitude);
   end;
+end;
+
+destructor TD3ScriptLight.Destroy;
+begin
+  FreeAndNil(Light);
+  inherited;
+end;
+
+procedure TD3Game.SpawnScriptLight(const E: TD3MapEntity);
+var
+  SL: TD3ScriptLight;
+  Radius: TVector3;
+  R: Single;
+begin
+  SL := TD3ScriptLight.Create;
+  SL.Entity := E;
+  SL.Color := E.VectorValue('_color', Vector3(1, 1, 1));
+  SL.Tint := Vector3(1, 1, 1);
+  SL.On := not E.BoolValue('start_off');
+  SL.Fade := 1;
+  SL.Light := TCastlePointLight.Create(nil);
+  SL.Light.Translation := D3ToCge(E.LightOrigin);
+  { like the map's lights that aren't light volumes: a sphere fading to
+    zero at the light's size (idLight's "light_radius", else "light") }
+  SL.Light.RadiusFalloff := True;
+  Radius := E.VectorValue('light_radius', TVector3.Zero);
+  if Radius.IsZero then
+    R := E.FloatValue('light', 300)
+  else
+    R := Max(Radius.X, Max(Radius.Y, Radius.Z));
+  SetScriptLightRadius(SL, R);
+  SetScriptLightShader(SL, E.Value('texture'));
+  FMap.Add(SL.Light);
+  FScriptLights.Add(SL);
+  ApplyScriptLight(SL);
+  WritelnLog('Doom3World', 'Script spawned the light %s (%s, radius %.0f)', [E.Name, E.Value('texture'), R]);
+end;
+
+function TD3Game.ScriptLightOf(const AName: String): TD3ScriptLight;
+begin
+  for Result in FScriptLights do
+    if SameText(Result.Entity.Name, AName) then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.ApplyScriptLight(const SL: TD3ScriptLight);
+begin
+  SL.Light.Exists := SL.On and (SL.Fade > 0.001);
+  SL.Light.Color := Vector3(SL.Color.X * SL.Tint.X, SL.Color.Y * SL.Tint.Y, SL.Color.Z * SL.Tint.Z);
+  SL.Light.Intensity := 1.5 * FMap.LightScale * SL.Fade;
+end;
+
+procedure TD3Game.SetScriptLightShader(const SL: TD3ScriptLight; const ShaderName: String);
+var
+  Shader: TD3Material;
+begin
+  SL.Tint := Vector3(1, 1, 1);
+  if ShaderName = '' then
+    Exit;
+  Shader := Decls.Material(ShaderName);
+  if (Shader <> nil) and Shader.Defined then
+    SL.Tint := ProjectionTint(Shader.StageImage);
+end;
+
+procedure TD3Game.SetScriptLightRadius(const SL: TD3ScriptLight; const Radius: Single);
+begin
+  SL.Light.Radius := Max(1, Radius);
+  SL.Light.Attenuation := Vector3(1, 0, 2 / Sqr(SL.Light.Radius));
+end;
+
+{ idLight's script events on a script light; false for the others (bind,
+  setOrigin, remove... go on like for other entities). }
+function TD3Game.ScriptLightEvent(const SL: TD3ScriptLight; const N: String; const Args: TD3ValueArray;
+  var EventResult: TD3Value): Boolean;
+
+  function ArgF(const Index: Integer): Single;
+  begin
+    if Index <= High(Args) then
+      Result := D3ValueToFloat(Args[Index])
+    else
+      Result := 0;
+  end;
+
+  procedure StartLightFade(const Target, Seconds: Single);
+  begin
+    SL.FadeFrom := SL.Fade;
+    SL.FadeTo := Target;
+    SL.FadeStart := FTime;
+    SL.FadeTime := Seconds;
+    if Seconds <= 0 then
+      SL.Fade := Target;
+  end;
+
+begin
+  Result := True;
+  case N of
+    { idLight::Hide / Show turn it off / on }
+    'On', 'show':
+      begin
+        SL.On := True;
+        SL.FadeTime := 0;
+        SL.Fade := 1;
+      end;
+    'Off', 'hide':
+      begin
+        SL.On := False;
+        SL.FadeTime := 0;
+      end;
+    'isHidden': EventResult := D3FloatValue(Ord(not SL.On));
+    'fadeOutLight': StartLightFade(0, ArgF(0));
+    'fadeInLight':
+      begin
+        { an off light comes on dark, then brightens }
+        if not SL.On then
+        begin
+          SL.On := True;
+          SL.Fade := 0;
+        end;
+        StartLightFade(1, ArgF(0));
+      end;
+    'setColor': SL.Color := Vector3(ArgF(0), ArgF(1), ArgF(2));
+    'setShaderParm', 'setLightParm':
+      if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 2) then
+        SL.Color.Data[Round(ArgF(0))] := ArgF(1);
+    'setShader': SetScriptLightShader(SL, D3ValueToString(Args[0]));
+    'setRadius': SetScriptLightRadius(SL, ArgF(0));
+    'setRadiusXYZ': SetScriptLightRadius(SL, Max(ArgF(0), Max(ArgF(1), ArgF(2))));
+    else
+      Exit(False);
+  end;
+  ApplyScriptLight(SL);
+end;
+
+procedure TD3Game.UpdateScriptLights;
+var
+  SL: TD3ScriptLight;
+begin
+  for SL in FScriptLights do
+    if SL.FadeTime > 0 then
+    begin
+      SL.Fade := SL.FadeFrom + (SL.FadeTo - SL.FadeFrom) * EnsureRange((FTime - SL.FadeStart) / SL.FadeTime, 0, 1);
+      if FTime >= SL.FadeStart + SL.FadeTime then
+        SL.FadeTime := 0;
+      ApplyScriptLight(SL);
+    end;
 end;
 
 procedure TD3Game.NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
@@ -6575,7 +6749,14 @@ var
   ME: TD3ModelEntity;
   Mon: TD3Monster;
   S: TD3Speaker;
+  SL: TD3ScriptLight;
 begin
+  SL := ScriptLightOf(E.Name);
+  if SL <> nil then
+  begin
+    SL.On := False;
+    ApplyScriptLight(SL);
+  end;
   I := FMap.FindLight(E.Name);
   if I >= 0 then
     FMap.SetLightOn(I, False);
@@ -7179,6 +7360,7 @@ begin
   UpdateElevators;
   UpdateShakes;
   UpdateLightSounds;
+  UpdateScriptLights;
   UpdateBurns;
   UpdateSoundOcclusion;
   UpdateSoundFades;
@@ -12770,7 +12952,11 @@ function TD3Game.TransformOf(const AName: String): TCastleTransform;
 var
   B: TD3BrushEntity;
   ME: TD3ModelEntity;
+  SL: TD3ScriptLight;
 begin
+  SL := ScriptLightOf(AName);
+  if SL <> nil then
+    Exit(SL.Light);
   B := FMap.FindBrush(AName);
   if B <> nil then
     Exit(B.Scene);
@@ -13697,6 +13883,10 @@ begin
     if N = 'numTargets' then
       EventResult := D3FloatValue(Count);
   end else
+  { idLight's events on a light a script spawned }
+  if (ScriptLightOf(E.Name) <> nil) and
+     ScriptLightEvent(ScriptLightOf(E.Name), N, Args, EventResult) then
+  else
   if (N = 'hide') or (N = 'show') or (N = 'isHidden') or (N = 'remove') then
   begin
     if N = 'remove' then
