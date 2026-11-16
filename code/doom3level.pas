@@ -190,6 +190,11 @@ type
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
     FModels: specialize TObjectList<TD3ModelEntity>;
+    { FindBrush / FindModelEntity: the first of each lowercase name
+      (elevators and the player's info look them up every frame) }
+    FBrushByName: specialize TDictionary<String, TD3BrushEntity>;
+    FModelByName: specialize TDictionary<String, TD3ModelEntity>;
+    FLightByName: specialize TDictionary<String, Integer>;
     FHeadCount: Integer;
     FGuiTextures: TX3DNodeList;
     { live GUIs (one per scene and GUI texture), updated every frame }
@@ -618,6 +623,9 @@ begin
   FGuiSurfaces := specialize TObjectList<TD3GuiSurface>.Create(True);
   FRemoteViews := specialize TObjectList<TD3RemoteView>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
+  FBrushByName := specialize TDictionary<String, TD3BrushEntity>.Create;
+  FModelByName := specialize TDictionary<String, TD3ModelEntity>.Create;
+  FLightByName := specialize TDictionary<String, Integer>.Create;
 end;
 
 destructor TDoom3Map.Destroy;
@@ -627,6 +635,9 @@ begin
   FreeAndNil(FGuiSurfaces);
   FreeAndNil(FRemoteViews);
   FreeAndNil(FModels);
+  FreeAndNil(FBrushByName);
+  FreeAndNil(FModelByName);
+  FreeAndNil(FLightByName);
   inherited Destroy;
 end;
 
@@ -661,11 +672,14 @@ begin
   FShadowLights := nil;
   FStaticModelCount := 0;
   FModels.Clear;
+  FModelByName.Clear;
   FHeadCount := 0;
   FGuiSurfaces.Clear;
   FGuiRenders := 0;
   FBrushes.Clear;
+  FBrushByName.Clear;
   FLights := nil;
+  FLightByName.Clear;
   for I := 0 to High(FAreaScenes) do
   begin
     FreeAndNil(FAreaScenes[I]);
@@ -1339,6 +1353,7 @@ begin
     Root.AddChildren(Node);
     SetLength(FLights, N + 1);
     FLights[N].Entity := E;
+    FLightByName.TryAdd(LowerCase(E.Name), N);
     FLights[N].Node := Node;
     FLights[N].BaseColor := LightColor;
     FLights[N].Radius := R;
@@ -2431,6 +2446,7 @@ begin
     Add(B.Scene);
     B.SetHidden(E.IntValue('hide', 0) <> 0);
     FBrushes.Add(B);
+    FBrushByName.TryAdd(LowerCase(E.Name), B);
   end;
   if FClipModelBrushes > 0 then
     WritelnLog('Doom3Level', 'Brush entities: %d collide with their clip models', [FClipModelBrushes]);
@@ -2513,6 +2529,7 @@ begin
     Add(B.Scene);
     B.SetHidden(E.IntValue('hide', 0) <> 0);
     FBrushes.Add(B);
+    FBrushByName.TryAdd(LowerCase(E.Name), B);
     Inc(FStaticModelCount);
   end;
 end;
@@ -2590,6 +2607,7 @@ begin
   ME.Holder.Exists := not ME.Hidden;
   Add(ME.Holder);
   FModels.Add(ME);
+  FModelByName.TryAdd(LowerCase(E.Name), ME);
   Result := ME;
 end;
 
@@ -2867,10 +2885,8 @@ end;
 
 function TDoom3Map.FindLight(const AName: String): Integer;
 begin
-  for Result := 0 to High(FLights) do
-    if SameText(FLights[Result].Entity.Name, AName) then
-      Exit;
-  Result := -1;
+  if not FLightByName.TryGetValue(LowerCase(AName), Result) then
+    Result := -1;
 end;
 
 procedure TDoom3Map.SetLightOn(const I: Integer; const Value: Boolean);
@@ -3246,18 +3262,14 @@ end;
 
 function TDoom3Map.FindBrush(const AName: String): TD3BrushEntity;
 begin
-  for Result in FBrushes do
-    if SameText(Result.Entity.Name, AName) then
-      Exit;
-  Result := nil;
+  if not FBrushByName.TryGetValue(LowerCase(AName), Result) then
+    Result := nil;
 end;
 
 function TDoom3Map.FindModelEntity(const AName: String): TD3ModelEntity;
 begin
-  for Result in FModels do
-    if SameText(Result.Entity.Name, AName) then
-      Exit;
-  Result := nil;
+  if not FModelByName.TryGetValue(LowerCase(AName), Result) then
+    Result := nil;
 end;
 
 function TDoom3Map.AreaAt(const P: TVector3): Integer;

@@ -3755,12 +3755,24 @@ begin
   Gui.Dirty := False;
 end;
 
+var
+  { UnpremultiplyTable[A, C] = Min(255, C * 255 div A), for A in 1..254 }
+  UnpremultiplyTable: array of array [Byte] of Byte;
+
 function RenderGuiTransparent(const Gui: TD3Gui): TRGBAlphaImage;
 var
   Painter: TGuiPainter;
   P: PVector4Byte;
-  I, A: Integer;
+  I, A, C: Integer;
+  Row: PByte;
 begin
+  if UnpremultiplyTable = nil then
+  begin
+    SetLength(UnpremultiplyTable, 255);
+    for A := 1 to 254 do
+      for C := 0 to 255 do
+        UnpremultiplyTable[A][C] := Min(255, C * 255 div A);
+  end;
   Result := TRGBAlphaImage.Create(GuiImageWidth, GuiImageHeight);
   Result.Clear(Vector4Byte(0, 0, 0, 0));
   if (Gui = nil) or (Gui.Desktop = nil) then
@@ -3784,18 +3796,23 @@ begin
   end;
   Gui.Dirty := False;
   { the painter blends over black: the colors are premultiplied; added
-    light over nothing has no alpha yet (its brightness is) }
+    light over nothing has no alpha yet (its brightness is). Most of the
+    HUD is empty: those pixels are skipped; the divisions are a table. }
   P := Result.PixelPtr(0, 0);
   for I := 0 to Result.Width * Result.Height - 1 do
   begin
-    A := Max(P^.W, Max(P^.X, Max(P^.Y, P^.Z)));
-    if (A > 0) and (A < 255) then
+    if PCardinal(P)^ <> 0 then
     begin
-      P^.X := Min(255, P^.X * 255 div A);
-      P^.Y := Min(255, P^.Y * 255 div A);
-      P^.Z := Min(255, P^.Z * 255 div A);
+      A := Max(P^.W, Max(P^.X, Max(P^.Y, P^.Z)));
+      if A < 255 then
+      begin
+        Row := @UnpremultiplyTable[A][0];
+        P^.X := Row[P^.X];
+        P^.Y := Row[P^.Y];
+        P^.Z := Row[P^.Z];
+      end;
+      P^.W := A;
     end;
-    P^.W := A;
     Inc(P);
   end;
 end;
