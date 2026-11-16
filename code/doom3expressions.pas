@@ -41,6 +41,9 @@ type
     Time: Single;
     Parms: array [0..11] of Single;
     Globals: array [0..7] of Single;
+    { "sound": the amplitude (0..1) of the entity's sound now (a light's
+      s_shader: idSoundEmitter::CurrentAmplitude); 0 without one }
+    Sound: Single;
   end;
 
   TD3Expr = class
@@ -166,7 +169,7 @@ type
     function IsConstant: Boolean; override;
   end;
 
-  TRegisterKind = (rkTime, rkParm, rkGlobal);
+  TRegisterKind = (rkTime, rkParm, rkGlobal, rkSound);
 
   TRegisterExpr = class(TD3Expr)
     Kind: TRegisterKind;
@@ -215,13 +218,15 @@ begin
   case Kind of
     rkTime: Result := Ctx.Time;
     rkParm: Result := Ctx.Parms[Index];
+    rkSound: Result := Ctx.Sound;
     else    Result := Ctx.Globals[Index];
   end;
 end;
 
 function TRegisterExpr.UsesTime: Boolean;
 begin
-  Result := Kind = rkTime;
+  { a sound's amplitude changes all the time }
+  Result := Kind in [rkTime, rkSound];
 end;
 
 function TTableExpr.UsesTime: Boolean;
@@ -469,11 +474,17 @@ begin
     R.Index := StrToInt(Copy(L, 7, 1));
     Exit(R);
   end;
-  if (L = 'sound') or (L = 'fragmentprograms') then
+  if L = 'sound' then
   begin
-    { no sound amplitude; fragment programs are always "supported" }
+    R := TRegisterExpr.Create;
+    R.Kind := rkSound;
+    Exit(R);
+  end;
+  if L = 'fragmentprograms' then
+  begin
+    { fragment programs are always "supported" }
     C := TConstExpr.Create;
-    C.Value := BoolF(L = 'fragmentprograms');
+    C.Value := 1;
     Exit(C);
   end;
   { a table lookup }
@@ -541,6 +552,7 @@ begin
     Result.Parms[I] := 1;
   for I := 0 to High(Result.Globals) do
     Result.Globals[I] := 0;
+  Result.Sound := 0;
 end;
 
 end.

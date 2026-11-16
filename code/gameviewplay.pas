@@ -1845,7 +1845,7 @@ var
   P: TVector3;
   I, J: Integer;
   L: TD3LightInfo;
-  S: String;
+  S, ShaderName: String;
   Words: TStringArray;
   E: TD3MapEntity;
   Dist: Single;
@@ -2962,7 +2962,12 @@ begin
     for I := 0 to Map.LightCount - 1 do
     begin
       L := Map.Light(I);
-      S := Format('%s %s color %.2f %.2f %.2f%s%s%s', [L.Entity.Name, Iff(L.Shader <> nil, L.Shader.Name, '(default)'),
+      { not Iff: it evaluates both arguments (L.Shader may be nil) }
+      if L.Shader <> nil then
+        ShaderName := L.Shader.Name
+      else
+        ShaderName := '(default)';
+      S := Format('%s %s color %.2f %.2f %.2f%s%s%s', [L.Entity.Name, ShaderName,
         L.Color.X, L.Color.Y, L.Color.Z, BoolToStr(L.Animated, ' animated', ''),
         BoolToStr(L.Node.IsOn, '', ' off'), BoolToStr(L.Node.ShadowVolumesMain, ' shadows', '')]);
       Console.Print(S);

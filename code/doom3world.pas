@@ -243,6 +243,17 @@ type
     destructor Destroy; override;
   end;
 
+  { A light's s_shader sound, for its shader's "sound" (its amplitude):
+    not played (a thousand buzzing lights would take the sound sources
+    from the fight), only its time }
+  TD3LightSound = record
+    Light: Integer;
+    { the sound's peak amplitude per 1/60 s (SoundEnvelope) }
+    Envelope: TBytes;
+    Looping: Boolean;
+    StartTime: Single;
+  end;
+
   TD3SoundFade = record
     Key: String;
     From, ToVolume, Start, Time: Single;
@@ -314,6 +325,12 @@ type
     Swaying: Boolean;
     SwayBase, SwayAmplitude: TVector3;
     SwayStart, SwayQuarter: Single;
+    { bob (idMover::Event_Bob): the origin goes up and down around BobBase
+      the same way, BobAmplitude (twice the depth), BobQuarter seconds from
+      the middle to an end }
+    Bobbing: Boolean;
+    BobBase, BobAmplitude: TVector3;
+    BobStart, BobQuarter: Single;
     { where it spawned, for restorePosition }
     SpawnOrigin, SpawnAngles: TVector3;
     { startSpline: moving along a curve (control points, Doom 3
@@ -755,6 +772,9 @@ type
     { the file of each sound shader played last (no repeats when it has
       several: idSoundShader's random choice) }
     FSoundLastFile: specialize TDictionary<String, Integer>;
+    { SoundEnvelope's results by sound URL }
+    FSoundEnvelopes: specialize TDictionary<String, TBytes>;
+    FLightSounds: array of TD3LightSound;
     { sound occlusion: each portal's shortest way to the listener (crossing
       it), for FSoundDistListener at game time FSoundDistTime; the portals
       of each area }
@@ -1019,6 +1039,15 @@ type
     function EntityOriginNow(const E: TD3MapEntity): TVector3;
     procedure NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
     procedure UpdateShakes;
+    { A sound file's amplitude every 1/60 s (like Doom 3 BFG's
+      idSoundSample amplitude data): the range (highest minus lowest, 0..2
+      of full scale) * 127 of the 64 samples (at 44.1 kHz) from that time,
+      idSoundWorldLocal::FindAmplitude's window; cached, empty if the file
+      doesn't decode. }
+    function SoundEnvelope(const Url: String): TBytes;
+    { lights whose shader follows their sound ("sound"): their amplitude now }
+    procedure UpdateLightSounds;
+    procedure SpawnLightSound(const E: TD3MapEntity);
     procedure OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single;
       const Sound: TCastleSound = nil);
     procedure UpdateSoundOcclusion;
@@ -1841,7 +1870,8 @@ uses
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
-  Doom3AF, Doom3Images;
+  Doom3AF, Doom3Images,
+  CastleInternalSoundFile;
 
 const
   MonsterWalkSpeed = 90;
@@ -2099,6 +2129,7 @@ begin
   FSpeakers := specialize TObjectList<TD3Speaker>.Create(True);
   FSounds := specialize TObjectDictionary<String, TCastleSound>.Create([doOwnsValues]);
   FSoundLastFile := specialize TDictionary<String, Integer>.Create;
+  FSoundEnvelopes := specialize TDictionary<String, TBytes>.Create;
   FTriggers := specialize TObjectList<TD3Trigger>.Create(True);
   FEntities := specialize TDictionary<String, TD3MapEntity>.Create;
   FPending := specialize TList<TD3PendingTargets>.Create;
@@ -2162,6 +2193,7 @@ begin
   FSpeakers.Free;
   FSounds.Free;
   FSoundLastFile.Free;
+  FSoundEnvelopes.Free;
   FTriggers.Free;
   FEntities.Free;
   FPending.Free;
@@ -2232,6 +2264,7 @@ begin
   FElevators.Clear;
   FMonsters.Clear;
   FSpeakers.Clear;
+  FLightSounds := nil;
   FTriggers.Clear;
   FEntities.Clear;
   FPending.Clear;
@@ -2348,6 +2381,105 @@ begin
   end else
     WritelnLog('Doom3World', 'Sound file "%s" of "%s" not found', [Shader.Files[I], ShaderName]);
   FSounds.Add(Key, Result);
+end;
+
+function TD3Game.SoundEnvelope(const Url: String): TBytes;
+var
+  F: TSoundFile;
+  Samples: PSmallInt;
+  Frames, Block, Window, Blocks, B, I, High_, Low_, V: Integer;
+  Channels: Cardinal;
+begin
+  Result := nil;
+  if Url = '' then
+    Exit;
+  if FSoundEnvelopes.TryGetValue(Url, Result) then
+    Exit;
+  try
+    F := TSoundFile.Create(Url);
+    try
+      F.ConvertTo16bit;
+      Channels := Max(1, F.Channels);
+      Frames := F.DataSize div (2 * Channels);
+      Block := Max(1, Round(F.Frequency / 60));
+      Window := Max(1, Round(64 * F.Frequency / 44100));
+      Blocks := (Frames + Block - 1) div Block;
+      SetLength(Result, Blocks);
+      Samples := F.Data;
+      for B := 0 to Blocks - 1 do
+      begin
+        High_ := 0;
+        Low_ := 0;
+        for I := B * Block * Integer(Channels) to Min(Frames, B * Block + Window) * Integer(Channels) - 1 do
+        begin
+          V := Samples[I];
+          if V > High_ then
+            High_ := V;
+          if V < Low_ then
+            Low_ := V;
+        end;
+        Result[B] := Min(255, (High_ - Low_) * 127 div 32767);
+      end;
+    finally
+      F.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      WritelnLog('Doom3World', 'Sound amplitude of "%s": %s', [Url, E.Message]);
+      Result := nil;
+    end;
+  end;
+  FSoundEnvelopes.AddOrSetValue(Url, Result);
+end;
+
+procedure TD3Game.SpawnLightSound(const E: TD3MapEntity);
+var
+  Snd: TCastleSound;
+  Shader: TD3SoundShader;
+  N, I: Integer;
+begin
+  N := FMap.FindLight(E.Name);
+  if N < 0 then
+    Exit;
+  Snd := SoundFromShader(E.Value('s_shader'));
+  if Snd = nil then
+    Exit;
+  Shader := Decls.SoundShader(E.Value('s_shader'));
+  I := Length(FLightSounds);
+  SetLength(FLightSounds, I + 1);
+  FLightSounds[I].Light := N;
+  FLightSounds[I].Envelope := SoundEnvelope(Snd.Url);
+  FLightSounds[I].Looping := (Shader <> nil) and (Shader.Looping or E.BoolValue('s_looping'));
+  FLightSounds[I].StartTime := FTime;
+  { waiting for a trigger: silent }
+  if E.BoolValue('s_waitfortrigger') then
+    FLightSounds[I].StartTime := 1E9;
+end;
+
+procedure TD3Game.UpdateLightSounds;
+var
+  I: Integer;
+  Index: Int64;
+  Amplitude: Single;
+begin
+  for I := 0 to High(FLightSounds) do
+  begin
+    Amplitude := 0;
+    if (Length(FLightSounds[I].Envelope) > 0) and (FTime >= FLightSounds[I].StartTime) then
+    begin
+      Index := Trunc((FTime - FLightSounds[I].StartTime) * 60);
+      if FLightSounds[I].Looping then
+        Index := Index mod Length(FLightSounds[I].Envelope);
+      if Index < Length(FLightSounds[I].Envelope) then
+        { idSoundWorldLocal::FindAmplitude: atan of the samples' range
+          over full scale, 1 at 45 degrees; the samples' own level, not
+          scaled by the shader's volume (light_flicker_117 is -30 dB and
+          lights its room fully) }
+        Amplitude := ArcTan(FLightSounds[I].Envelope[Index] / 127) / (Pi / 4);
+    end;
+    FMap.SetLightSound(FLightSounds[I].Light, Amplitude);
+  end;
 end;
 
 procedure TD3Game.NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
@@ -6230,6 +6362,8 @@ begin
       if E.Name <> '' then
         FEntities.AddOrSetValue(LowerCase(E.Name), E);
       Cls := LowerCase(E.ClassName_);
+      if (Cls = 'light') and E.HasKey('s_shader') then
+        SpawnLightSound(E);
       if Cls = 'speaker' then
         SpawnSpeaker(E)
       else
@@ -7025,6 +7159,7 @@ begin
   Part(0);
   UpdateElevators;
   UpdateShakes;
+  UpdateLightSounds;
   UpdateBurns;
   UpdateSoundOcclusion;
   UpdateSoundFades;
@@ -13107,6 +13242,11 @@ begin
       M.Angles := M.SwayBase + M.SwayAmplitude * Sin((FTime - M.SwayStart) / M.SwayQuarter * Pi / 2);
       Changed := True;
     end;
+    if M.Bobbing and (M.BobQuarter > 0) then
+    begin
+      M.Origin := M.BobBase + M.BobAmplitude * Sin((FTime - M.BobStart) / M.BobQuarter * Pi / 2);
+      Changed := True;
+    end;
     if M.Rotating then
     begin
       if M.RotContinuous then
@@ -13705,7 +13845,23 @@ begin
       'stopMoving', 'stopSpline':
         begin
           M.Moving := False;
+          M.Bobbing := False;
           M.Spline := nil;
+        end;
+      'bob':
+        begin
+          { bob( speed, phase, depth ): EXTRAPOLATION_DECELSINE | NOSTOP
+            from the origin, delta depth * 2 over speed * 0.5 s, started
+            speed * phase seconds ago }
+          if ArgF(0) > 0 then
+          begin
+            M.Moving := False;
+            M.Bobbing := True;
+            M.BobBase := M.Origin;
+            M.BobAmplitude := Args[2].V * 2;
+            M.BobQuarter := ArgF(0) * 0.5;
+            M.BobStart := FTime - ArgF(0) * ArgF(1);
+          end;
         end;
       'startSpline':
         begin
@@ -13752,6 +13908,7 @@ begin
         begin
           { setWorldOrigin is the same for an unbound mover }
           M.Moving := False;
+          M.Bobbing := False;
           M.Origin := Args[0].V;
           ApplyScriptMover(M);
         end;
@@ -13759,6 +13916,7 @@ begin
         begin
           { back where it spawned (idEntity::Event_RestorePosition) }
           M.Moving := False;
+          M.Bobbing := False;
           M.Rotating := False;
           M.Swaying := False;
           M.Origin := M.SpawnOrigin;

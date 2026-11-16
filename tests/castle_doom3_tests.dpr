@@ -813,6 +813,24 @@ begin
   finally
     MapFile.Free;
   end;
+  { a light with a model: "light_origin" / "light_rotation" place the light
+    (Doom 3's ParseSpawnArgsToRenderLight; delta2a's light_4257) }
+  E := TD3MapEntity.Create;
+  try
+    E.SetValue('origin', '-159 729 -64');
+    E.SetValue('rotation', '0 1 0 -1 0 0 0 0 1');
+    CheckNear(-64, E.LightOrigin.Z, 'light origin without light_origin');
+    CheckNear(1, E.LightRotation.Data[0, 1], 'light rotation without light_rotation');
+    E.SetValue('light_origin', '-160 728 -128');
+    E.SetValue('light_rotation', '1 0 0 0 1 0 0 0 1');
+    CheckNear(-128, E.LightOrigin.Z, 'light_origin');
+    CheckNear(-160, E.LightOrigin.X, 'light_origin x');
+    CheckNear(-64, E.Origin.Z, 'origin stays the model''s');
+    CheckNear(1, E.LightRotation.Data[0, 0], 'light_rotation');
+    CheckNear(0, E.LightRotation.Data[0, 1], 'light_rotation over rotation');
+  finally
+    E.Free;
+  end;
   { coordinates: Doom 3 Z up -> CGE Y up }
   Check(TVector3.Equals(D3ToCge(Vector3(1, 2, 3)), Vector3(1, 3, -2)), 'D3ToCge');
   Check(TVector3.Equals(CgeToD3(D3ToCge(Vector3(1, 2, 3))), Vector3(1, 2, 3)), 'CgeToD3 inverts D3ToCge');
@@ -1292,6 +1310,22 @@ begin
   E := ParseD3ExpressionString('sinTable[ time ]', @Decls.Table);
   try
     Check((E <> nil) and not E.IsConstant, 'table of time is not constant');
+  finally
+    E.Free;
+  end;
+  { "sound": the entity's sound amplitude (lights/squareishlight_snd) }
+  E := ParseD3ExpressionString('sound * Parm0', @Decls.Table);
+  try
+    Check(E <> nil, 'sound parses');
+    if E <> nil then
+    begin
+      Check(E.UsesTime, 'sound changes with time');
+      Ctx := DefaultExprContext;
+      CheckNear(0, E.Eval(Ctx), 'no sound: 0');
+      Ctx.Sound := 0.5;
+      Ctx.Parms[0] := 0.8;
+      CheckNear(0.4, E.Eval(Ctx), 'sound amplitude times parm0');
+    end;
   finally
     E.Free;
   end;

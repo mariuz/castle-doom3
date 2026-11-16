@@ -44,6 +44,12 @@ type
     { "rotation" 3x3 matrix (rows), identity / from "angle" when missing.
       Doom 3 coordinates. }
     function Rotation: TMatrix3;
+    { A light's position and axes: "light_origin" / "light_rotation" when
+      set (a light with a model: "origin" is the model's), else Origin /
+      Rotation, like Doom 3's ParseSpawnArgsToRenderLight (dmap builds the
+      precomputed shadow volumes from them too) }
+    function LightOrigin: TVector3;
+    function LightRotation: TMatrix3;
     property Pairs: TStringList read FPairs;
   end;
 
@@ -258,6 +264,26 @@ end;
 function TD3MapEntity.Origin: TVector3;
 begin
   Result := VectorValue('origin', TVector3.Zero);
+end;
+
+function TD3MapEntity.LightOrigin: TVector3;
+begin
+  if HasKey('light_origin') then
+    Result := VectorValue('light_origin', TVector3.Zero)
+  else
+    Result := Origin;
+end;
+
+function TD3MapEntity.LightRotation: TMatrix3;
+var
+  Parts: TStringArray;
+  I: Integer;
+begin
+  Parts := Trim(Value('light_rotation')).Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+  if Length(Parts) < 9 then
+    Exit(Rotation);
+  for I := 0 to 8 do
+    Result.Data[I div 3, I mod 3] := D3StrToFloat(Parts[I]);
 end;
 
 function TD3MapEntity.Rotation: TMatrix3;
