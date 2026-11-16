@@ -6798,14 +6798,18 @@ begin
     begin
       if Mover.Kind = mkDoor then
       begin
-        { idDoor::Event_Activate: unlock, else open / close (the team) }
+        { idDoor::Event_Activate: unlock, else open / close (the team);
+          nothing while disabled (Use_BinaryMover) }
         if Mover.Locked then
           LockTeam(Mover, False)
         else
-        if Mover.State in [dsClosed, dsClosing] then
-          OpenTeam(Mover)
-        else
-          CloseTeam(Mover);
+        if not Mover.Disabled then
+        begin
+          if Mover.State in [dsClosed, dsClosing] then
+            OpenTeam(Mover)
+          else
+            CloseTeam(Mover);
+        end;
       end else
         { idRotater: start / stop }
         Mover.Running := not Mover.Running;
@@ -13763,13 +13767,17 @@ begin
 
   { doors (idDoor) }
   if (DoorOf(E) <> nil) and ((N = 'open') or (N = 'close') or (N = 'lock') or
-     (N = 'isOpen') or (N = 'isLocked')) then
+     (N = 'isOpen') or (N = 'isLocked') or (N = 'enable') or (N = 'disable')) then
   begin
     Door := DoorOf(E);
     case N of
       'open': OpenTeam(Door);
       'close': CloseTeam(Door);
       'lock': LockTeam(Door, ArgF(0) <> 0);
+      { idMover_Binary::Enable: a disabled door ignores touches and
+        activation (Use_BinaryMover), a script still opens it }
+      'enable': Door.Disabled := False;
+      'disable': Door.Disabled := True;
       'isOpen': EventResult := D3FloatValue(Ord(Door.State <> dsClosed));
       else EventResult := D3FloatValue(Ord(Door.Locked));
     end;
