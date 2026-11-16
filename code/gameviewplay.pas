@@ -1362,8 +1362,17 @@ var
   Major, Minor, Sends: TALint;
   Effect, Slot: TALuint;
   Err: TALenum;
+  I, Playing: Integer;
 begin
   Result := Format('Sound: %s', [SoundEngine.InformationSummary]);
+  { the sources in use: when all of MaxAllocatedSources play, a new sound
+    takes one of a lower or equal priority }
+  Playing := 0;
+  for I := 0 to SoundEngine.InternalAllocatedSources.Count - 1 do
+    if SoundEngine.InternalAllocatedSources[I].PlayingOrPaused then
+      Inc(Playing);
+  Result := Result + LineEnding + Format('Sources: %d playing, %d allocated, at most %d', [
+    Playing, SoundEngine.InternalAllocatedSources.Count, SoundEngine.MaxAllocatedSources]);
   if not SoundEngine.IsContextOpenSuccess or (alcGetCurrentContext() = nil) then
     Exit(Result + LineEnding + 'No OpenAL context');
   Device := alcGetContextsDevice(alcGetCurrentContext());
@@ -1392,12 +1401,22 @@ begin
     Result := Result + LineEnding + Format('EAX reverb effect: not supported, standard reverb: %s', [
       Iff(Err = AL_NO_ERROR, 'OK', 'error ' + IntToStr(Err))]);
   end;
+  { a second slot: Creative's driver has one, the game's reverb may hold it
+    (AL_OUT_OF_MEMORY); delete only a slot made here, or the game's reverb
+    slot goes with it }
+  Slot := 0;
   alGenAuxiliaryEffectSlots(1, @Slot);
-  alAuxiliaryEffectSloti(Slot, AL_EFFECTSLOT_EFFECT, Effect);
   Err := alGetError();
-  Result := Result + LineEnding + Format('Auxiliary effect slot with the reverb: %s', [
-    Iff(Err = AL_NO_ERROR, 'OK', 'error ' + IntToStr(Err))]);
-  alDeleteAuxiliaryEffectSlots(1, @Slot);
+  if Err = AL_NO_ERROR then
+  begin
+    alAuxiliaryEffectSloti(Slot, AL_EFFECTSLOT_EFFECT, Effect);
+    Err := alGetError();
+    alDeleteAuxiliaryEffectSlots(1, @Slot);
+    Result := Result + LineEnding + Format('Auxiliary effect slot with the reverb: %s', [
+      Iff(Err = AL_NO_ERROR, 'OK', 'error ' + IntToStr(Err))]);
+  end else
+    Result := Result + LineEnding + Format('Auxiliary effect slot: no other one (error %d; the reverb''s is in use: %s)', [
+      Err, Iff(SoundEngine.ReverbSupported, 'yes', 'no')]);
   alDeleteEffects(1, @Effect);
 end;
 

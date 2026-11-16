@@ -368,7 +368,7 @@ begin
         SaveFloat(El.ReturnAt), SaveFloat(El.LastTouch), IntToStr(El.RetryFloor)]);
     for Sp in FSpeakers do
       if Sp.Looping then
-        Add(['speaker', Sp.Entity.Name, IntToStr(Ord(Sp.Source.Sound <> nil))]);
+        Add(['speaker', Sp.Entity.Name, IntToStr(Ord(Sp.On))]);
 
     { entities }
     for I := 0 to FMap.LightCount - 1 do
@@ -738,10 +738,11 @@ begin
           for Sp in FSpeakers do
             if (Sp.Entity.Name = Name) and Sp.Looping then
             begin
-              if (FieldInt(2) <> 0) and (Sp.Source.Sound = nil) then
+              Sp.On := FieldInt(2) <> 0;
+              if Sp.On and (Sp.Source.Sound = nil) then
                 Sp.Source.Sound := Sp.Sound
               else
-              if (FieldInt(2) = 0) and (Sp.Source.Sound <> nil) then
+              if not Sp.On and (Sp.Source.Sound <> nil) then
                 Sp.Source.Sound := nil;
             end;
         'lightparms':
