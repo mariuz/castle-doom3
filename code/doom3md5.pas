@@ -83,6 +83,10 @@ type
   TD3Md5Anim = class
     Name: String;
     NumFrames, FrameRate, NumAnimatedComponents: Integer;
+    { the second frame of PoseAt / LocalPoseAt, kept between calls (an
+      array of joints made and freed for every model every frame costs
+      a string reference per joint) }
+    ScratchPose: TD3JointArray;
     Hierarchy: array of record
       Name: String;
       Parent, Flags, StartIndex: Integer;
@@ -99,6 +103,8 @@ type
     function Duration: Single;
     { Absolute (model space) joints of a frame. }
     procedure FramePose(const Frame: Integer; var Pose: TD3JointArray);
+    { The first joint's position in a frame (what FramePose gives for it). }
+    function RootPosition(const Frame: Integer): TVector3;
     { Interpolated pose at a time (seconds), looping or clamped. }
     procedure PoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
     { The joints relative to their parents (not composed), interpolated. }
@@ -797,7 +803,10 @@ begin
     if (Hierarchy[I].Flags and 8) <> 0 then begin O.X := Comp[K]; Inc(K); end;
     if (Hierarchy[I].Flags and 16) <> 0 then begin O.Y := Comp[K]; Inc(K); end;
     if (Hierarchy[I].Flags and 32) <> 0 then begin O.Z := Comp[K]; end;
-    Pose[I].Name := Hierarchy[I].Name;
+    { the same string already (a pose kept between frames): no reference
+      counting for every joint of every frame }
+    if Pointer(Pose[I].Name) <> Pointer(Hierarchy[I].Name) then
+      Pose[I].Name := Hierarchy[I].Name;
     Pose[I].Parent := Hierarchy[I].Parent;
     Pose[I].Orientation := QuatFromXYZ(O);
     if Hierarchy[I].Parent >= 0 then
@@ -810,6 +819,20 @@ begin
     end else
       Pose[I].Position := P;
   end;
+end;
+
+function TD3Md5Anim.RootPosition(const Frame: Integer): TVector3;
+var
+  K, F: Integer;
+begin
+  if Length(Hierarchy) = 0 then
+    Exit(TVector3.Zero);
+  F := EnsureRange(Frame, 0, NumFrames - 1);
+  Result := BaseFrame[0].Position;
+  K := Hierarchy[0].StartIndex;
+  if (Hierarchy[0].Flags and 1) <> 0 then begin Result.X := Frames[F][K]; Inc(K); end;
+  if (Hierarchy[0].Flags and 2) <> 0 then begin Result.Y := Frames[F][K]; Inc(K); end;
+  if (Hierarchy[0].Flags and 4) <> 0 then Result.Z := Frames[F][K];
 end;
 
 procedure TD3Md5Anim.LocalFramePose(const Frame: Integer; var Pose: TD3JointArray);
@@ -833,7 +856,10 @@ begin
     if (Hierarchy[I].Flags and 8) <> 0 then begin O.X := Comp[K]; Inc(K); end;
     if (Hierarchy[I].Flags and 16) <> 0 then begin O.Y := Comp[K]; Inc(K); end;
     if (Hierarchy[I].Flags and 32) <> 0 then begin O.Z := Comp[K]; end;
-    Pose[I].Name := Hierarchy[I].Name;
+    { the same string already (a pose kept between frames): no reference
+      counting for every joint of every frame }
+    if Pointer(Pose[I].Name) <> Pointer(Hierarchy[I].Name) then
+      Pose[I].Name := Hierarchy[I].Name;
     Pose[I].Parent := Hierarchy[I].Parent;
     Pose[I].Position := P;
     Pose[I].Orientation := QuatFromXYZ(O);
@@ -844,7 +870,6 @@ procedure TD3Md5Anim.LocalPoseAt(const Time: Single; const Loop: Boolean; var Po
 var
   FrameF, T: Single;
   F0, F1, I: Integer;
-  PoseB: TD3JointArray;
 begin
   FrameF := Time * FrameRate;
   if Loop and (NumFrames > 1) then
@@ -864,12 +889,11 @@ begin
   LocalFramePose(F0, Pose);
   if (T < 0.001) or (F1 = F0) then
     Exit;
-  PoseB := nil;
-  LocalFramePose(F1, PoseB);
+  LocalFramePose(F1, ScratchPose);
   for I := 0 to High(Pose) do
   begin
-    Pose[I].Position := Lerp(T, Pose[I].Position, PoseB[I].Position);
-    Pose[I].Orientation := QuatNlerp(Pose[I].Orientation, PoseB[I].Orientation, T);
+    Pose[I].Position := Lerp(T, Pose[I].Position, ScratchPose[I].Position);
+    Pose[I].Orientation := QuatNlerp(Pose[I].Orientation, ScratchPose[I].Orientation, T);
   end;
 end;
 
@@ -893,7 +917,6 @@ procedure TD3Md5Anim.PoseAt(const Time: Single; const Loop: Boolean; var Pose: T
 var
   FrameF, T: Single;
   F0, F1, I: Integer;
-  PoseB: TD3JointArray;
 begin
   FrameF := Time * FrameRate;
   if Loop and (NumFrames > 1) then
@@ -913,12 +936,11 @@ begin
   FramePose(F0, Pose);
   if (T < 0.001) or (F1 = F0) then
     Exit;
-  PoseB := nil;
-  FramePose(F1, PoseB);
+  FramePose(F1, ScratchPose);
   for I := 0 to High(Pose) do
   begin
-    Pose[I].Position := Lerp(T, Pose[I].Position, PoseB[I].Position);
-    Pose[I].Orientation := QuatNlerp(Pose[I].Orientation, PoseB[I].Orientation, T);
+    Pose[I].Position := Lerp(T, Pose[I].Position, ScratchPose[I].Position);
+    Pose[I].Orientation := QuatNlerp(Pose[I].Orientation, ScratchPose[I].Orientation, T);
   end;
 end;
 
@@ -2169,13 +2191,11 @@ end;
 
 procedure TD3Md5Instance.LockPoseOrigin;
 var
-  First: TD3JointArray;
-  D: TVector3;
+  First, D: TVector3;
   I: Integer;
 begin
-  First := nil;
-  FAnim.FramePose(0, First);
-  D := Vector3(FPose[0].Position.X - First[0].Position.X, FPose[0].Position.Y - First[0].Position.Y, 0);
+  First := FAnim.RootPosition(0);
+  D := Vector3(FPose[0].Position.X - First.X, FPose[0].Position.Y - First.Y, 0);
   for I := 0 to High(FPose) do
     FPose[I].Position := FPose[I].Position - D;
 end;
@@ -2311,7 +2331,6 @@ end;
 procedure TD3Md5Instance.Update(const SecondsPassed: Single);
 var
   OldTime: Single;
-  First, Last: TD3JointArray;
   I: Integer;
 begin
   if Length(FReplacedAppearances) > 0 then
@@ -2363,11 +2382,8 @@ begin
     if FLoop and (FAnim.Duration > 0) and
        (Floor(FAnimTime / FAnim.Duration) <> Floor(OldTime / FAnim.Duration)) then
     begin
-      First := nil;
-      Last := nil;
-      FAnim.FramePose(0, First);
-      FAnim.FramePose(FAnim.NumFrames - 1, Last);
-      LastOriginDelta := (Last[0].Position - FPrevOrigin) + (FPose[0].Position - First[0].Position);
+      LastOriginDelta := (FAnim.RootPosition(FAnim.NumFrames - 1) - FPrevOrigin) +
+        (FPose[0].Position - FAnim.RootPosition(0));
     end else
       LastOriginDelta := FPose[0].Position - FPrevOrigin;
     LastOriginDelta.Z := 0;
