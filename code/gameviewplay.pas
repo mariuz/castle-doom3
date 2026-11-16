@@ -93,6 +93,9 @@ type
     FFight: Boolean;
     FFightKills, FFightDeaths, FFightSaves, FFightDeathsHere, FFightLastKills, FFightGaveUp: Integer;
     FFightSinceSave, FFightOnTarget, FFightSkipUntil, FFightTime: Single;
+    { the route's units walked at the furthest death since the save; in
+      god mode no save (which ends it) before the walk is past that }
+    FFightDeathWalked, FFightGodUntil: Single;
     FFightTarget, FFightIgnore: String;
     FFightHasSave, FFightGod: Boolean;
     FFightRoute: TD3PointArray;
@@ -1834,6 +1837,9 @@ var
   Dist: Single;
   Gui: TD3Gui;
   GuiImage: TCastleImage;
+  GuiStart: TTimerResult;
+  GuiSum: QWord;
+  GuiRuns: Integer;
   Hit: TRayCollision;
   HitDistance: Single;
   HitNormal: TVector3;
@@ -2082,6 +2088,8 @@ begin
     FFightLastKills := FGame.Kills;
     FFightHasSave := False;
     FFightGod := False;
+    FFightDeathWalked := 0;
+    FFightGodUntil := 0;
     FFightIgnore := '';
     FFightTarget := '';
     FFightTime := 0;
@@ -2653,6 +2661,20 @@ begin
           Console.Print('Saved ' + S);
           WritelnLog('GuiDump', '%s (%d windows) -> %s', [Args, Gui.WindowCount, S]);
         finally FreeAndNil(GuiImage) end;
+        { the software painter's time and a checksum of its pixels (to
+          compare painter changes) }
+        GuiStart := Timer;
+        GuiSum := 0;
+        GuiRuns := Max(1, StrToIntDef(GetEnvironmentVariable('CD3_GUIDUMP_RUNS'), 10));
+        for I := 1 to GuiRuns do
+        begin
+          GuiImage := RenderGui(Gui, nil);
+          if I = GuiRuns then
+            for J := 0 to GuiImage.Width * GuiImage.Height * 4 - 1 do
+              GuiSum := (GuiSum * 31 + PByte(GuiImage.RawPixels)[J]) and $FFFFFFFF;
+          FreeAndNil(GuiImage);
+        end;
+        WritelnLog('GuiDump', '%s: %.2f ms a render, checksum %d', [Args, TimerSeconds(Timer, GuiStart) * 1000 / GuiRuns, GuiSum]);
       end else
         Console.Print('Cannot load GUI ' + Args);
     finally FreeAndNil(Gui) end;
@@ -3112,6 +3134,7 @@ begin
     Inc(FFightDeathsHere);
     WritelnLog('GameViewPlay', 'Fight: died at %s (death %d, %d since the save)',
       [CgeToD3(Camera.Translation).ToString, FFightDeaths, FFightDeathsHere]);
+    FFightDeathWalked := Max(FFightDeathWalked, FRouteWalked);
     if not FFightHasSave then
     begin
       WritelnLog('GameViewPlay', 'Fight: no save to load: the fight ends');
@@ -3130,13 +3153,18 @@ begin
     FFightLastKills := FGame.Kills;
     FFightTarget := '';
     FFightIgnore := '';
+    FFightSinceSave := 0;
     if FFightDeathsHere >= 3 then
     begin
-      { it can't get past here alive: on in god mode, until the next save }
+      { it can't get past here alive: on in god mode, until the next save,
+        which waits until the walk is past the place of the deaths (a
+        save right after this load ended the god mode thousands of units
+        before it: the run died there again and again) }
       Inc(FFightGaveUp);
       FFightGod := True;
-      WritelnLog('GameViewPlay', 'Fight: gave up at %s after %d deaths: god mode until the next save',
-        [CgeToD3(Camera.Translation).ToString, FFightDeathsHere]);
+      FFightGodUntil := FFightDeathWalked + 400;
+      WritelnLog('GameViewPlay', 'Fight: gave up at %s after %d deaths: god mode until the next save, %.0f units on',
+        [CgeToD3(Camera.Translation).ToString, FFightDeathsHere, FFightGodUntil - FRouteWalked]);
     end;
     FGame.God := FFightGod;
     Exit(True);
@@ -3206,13 +3234,20 @@ begin
   { quiet: save now and then }
   FFightSinceSave := FFightSinceSave + SecondsPassed;
   if (FFightSinceSave >= FightSaveEvery) and not FGame.CinematicActive and (FGame.Health > 0) and
-     ((FGame.Health >= FightSaveHealth) or (FFightSinceSave >= FightSaveAnyway) or not FFightHasSave) then
+     ((FGame.Health >= FightSaveHealth) or (FFightSinceSave >= FightSaveAnyway) or not FFightHasSave) and
+     (not FFightGod or (FRouteWalked >= FFightGodUntil)) then
   begin
     FFightSinceSave := 0;
     SaveGame(FightSaveName);
     FFightHasSave := True;
     Inc(FFightSaves);
-    FFightDeathsHere := 0;
+    { the deaths count on until the walk is past their place: a save
+      before it is no progress (the run died there once per save) }
+    if FRouteWalked > FFightDeathWalked then
+    begin
+      FFightDeathsHere := 0;
+      FFightDeathWalked := 0;
+    end;
     FFightRoute := Copy(FRoute);
     FFightSeg := FRouteSeg;
     FFightAlong := FRouteAlong;

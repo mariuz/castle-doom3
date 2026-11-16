@@ -3037,9 +3037,10 @@ const
   RenderBudget = 0.006;
   { a GUI waits CostFactor times its last redraw's time before the next
     (software rendering: a 60 window GUI with full screen layers takes
-    ~30 ms, which every frame halved the frame rate), unless the player
-    is using it }
-  CostFactor = 4;
+    ~14 ms, which every frame halved the frame rate), unless the player
+    is using it: an animated panel in view takes at most an eighth of
+    the time }
+  CostFactor = 8;
   { the GUI texture's size follows the GUI's size on screen: the pixels
     across a screen of radius r at distance d are about
     FocalPixels * 2 * r / d (a 900 pixels high view with a 90 degree fov) }
