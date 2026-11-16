@@ -3075,16 +3075,17 @@ begin
     if S.Gui.HasVideo then
       S.Gui.Dirty := True;
     { unchanged: only one drawn small may need a sharper redraw }
-    if (not S.Gui.Dirty and ((S.RenderedSize = 0) or (S.RenderedSize >= GuiImageWidth))) or
+    if (not S.Gui.Dirty and (S.RenderedSize >= GuiImageWidth)) or
        (Renders >= MaxRenders) then
       Continue;
     if (Renders > 0) and (TimerSeconds(Timer, Start) > RenderBudget) then
       Continue;
-    { out of the view: it redraws when seen (the time lines still run);
-      far away: less often }
+    { out of the view: it redraws when seen (the time lines still run;
+      before its first redraw it shows the small static picture); far
+      away: less often and smaller }
     Interval := MinInterval;
     Size := GuiImageWidth;
-    if FGuiViewKnown and (S.Scene <> nil) and not S.Gui.CursorShown and (S.Renders > 0) then
+    if FGuiViewKnown and (S.Scene <> nil) and not S.Gui.CursorShown then
     begin
       if not S.HasLocalBox then
         GuiSurfaceBox(S);

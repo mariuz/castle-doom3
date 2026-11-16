@@ -138,6 +138,9 @@ var
     their reads); LoadProfileLog writes and resets them }
   ProfileReadSeconds, ProfileImageSeconds: Double;
   ProfileReadCount, ProfileImageCount: Integer;
+  { Doom3Images' d3img:/dds/ images served compressed, and as their TGA
+    (the dds/ copy isn't DXT) }
+  ProfileDdsCount, ProfileDdsFallbackCount: Integer;
 
 implementation
 
@@ -221,15 +224,18 @@ end;
 
 procedure LoadProfileLog(const Title: String);
 begin
-  WritelnLog('Profile', '%s: %.2f s (%s; %d file reads %.2f s, %d image programs %.2f s)',
+  WritelnLog('Profile', '%s: %.2f s (%s; %d file reads %.2f s, %d image programs %.2f s, %d compressed images, %d without a DXT copy)',
     [Title, TimerSeconds(Timer, LoadProfileStartTime), LoadProfile,
-     ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds]);
+     ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds,
+     ProfileDdsCount, ProfileDdsFallbackCount]);
   { where the Pascal heap went: MB added by each step }
   WritelnLog('Profile', '%s: Pascal heap by step, MB (%s)', [Title, LoadProfileHeapSteps]);
   ProfileReadSeconds := 0;
   ProfileImageSeconds := 0;
   ProfileReadCount := 0;
   ProfileImageCount := 0;
+  ProfileDdsCount := 0;
+  ProfileDdsFallbackCount := 0;
 end;
 
 function NormalizeD3Path(const S: String): String;

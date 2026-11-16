@@ -284,6 +284,11 @@ const
     it is (it would resize 640 x 480 for every GUI, slowly). }
   GuiImageWidth = 512;
   GuiImageHeight = 512;
+  { The static picture of a GUI (GuiImageUrl) shown until its live surface
+    redraws it in view, at the size that view needs: what a GUI far away
+    is drawn at anyway. Mars City 1 has 74 of them: at 512 x 512 they took
+    103 MB of texture memory and a second of the load. }
+  GuiStaticSize = 128;
   { idPlayer::UpdateFocus: how far the player's view reaches a GUI }
   GuiFocusDistance = 80;
 
@@ -356,7 +361,8 @@ type
     HasLocalBox: Boolean;
     { the texture size for the next redraw (0: GuiImageWidth x
       GuiImageHeight); UpdateGuis makes it smaller for GUIs that are small on
-      screen. RenderedSize is the last texture's (0 before the first). }
+      screen. RenderedSize is the last texture's (GuiStaticSize, the
+      static picture's, before the first). }
     RenderSize: Integer;
     RenderedSize: Integer;
     { its estimated size on screen (pixels across) and its box's radius,
@@ -3863,7 +3869,7 @@ begin
       { the static picture: the state the windows start in }
       Gui.Activate(0);
       I := GuiKeys.Add(FullKey);
-      GuiImages.Add('gui' + IntToStr(I), RenderGui(Gui, nil));
+      GuiImages.Add('gui' + IntToStr(I), RenderGui(Gui, nil, GuiStaticSize, GuiStaticSize));
       WritelnLog('Doom3Gui', 'Rendered "%s" (%d windows) as gui%d', [Gui.Name, Gui.WindowCount, I]);
     finally
       Gui.Free;
@@ -3949,6 +3955,8 @@ begin
   Inc(SurfaceCount);
   FKey := 'gi' + IntToStr(SurfaceCount);
   Surfaces.Add(FKey, Self);
+  { showing the static picture: redrawn sharper when seen closer }
+  RenderedSize := GuiStaticSize;
   RegisterGuiProtocol;
 end;
 

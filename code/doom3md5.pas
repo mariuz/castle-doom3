@@ -165,6 +165,10 @@ type
     FOverlays: array of TShapeNode;
     FEyeballs: array of TD3Md5Eyeball;
     FMatrices: TD3JointMatrixArray;
+    { UpdateNormalsAndTangents: per mesh, each face's tangent factors (from
+      its texture coordinates), and the tangents' sums (scratch) }
+    FTanFactors: array of array of TVector2;
+    FTanSums: array of TVector3;
     { the pose changed since the meshes were last skinned }
     FSkinPending, FShown: Boolean;
     { the animation's pose, and the one shown (FPose with the joint mods
@@ -1557,81 +1561,155 @@ var
   UVs: TVector2List;
   Normals: TVector3List;
   Tangents: TVector4List;
-  Sums: array of TVector3;
   Tris: array of Int32;
-  T, V, A, B, C: Integer;
-  E1, E2, N, Tan: TVector3;
+  T, V, A, B, C, K, Count, NumTris: Integer;
+  PP, PN, PS: PVector3;
+  Factors: PVector2;
+  IsEye, HasTan: Boolean;
+  E1X, E1Y, E1Z, E2X, E2Y, E2Z, NX, NY, NZ, TX, TY, TZ, D: Single;
   DU1, DV1, DU2, DV2, Det: Single;
+  Tan: TVector3;
+const
+  { Math.IsZero's for Single (SZeroResolution) }
+  ZeroTol = 1E-4;
 begin
   { like CGE's smooth normals: the sum of the unit face normals at each
     vertex (Doom 3's triangles are clockwise from the front); tangents:
     the direction of increasing s on each face, summed and made
-    orthogonal to the normal (CGE's convention, w 1) }
+    orthogonal to the normal (CGE's convention, w 1). Plain arithmetic:
+    with vector operators, IsZero and an array made per call this was
+    8% of the CPU with Mars City 1's characters. A vector is zero like
+    TVector3.IsZero: every component within FPC's IsZero tolerance. }
   Points := FCoords[I].FdPoint.Items;
   if (Points.Count = 0) or (FNormals[I] = nil) then
     Exit;
+  Count := Points.Count;
   UVs := FTexCoords[I].FdPoint.Items;
   Tris := FModel.Meshes[I].Tris;
+  NumTris := Length(Tris) div 3;
   Normals := FNormals[I].FdVector.Items;
   Tangents := FTangents[I].FdVector.Items;
-  Normals.Count := Points.Count;
-  Tangents.Count := Points.Count;
-  SetLength(Sums, Points.Count);
-  for V := 0 to Points.Count - 1 do
+  Normals.Count := Count;
+  Tangents.Count := Count;
+
+  { each face's tangent is E1 * F.X - E2 * F.Y, F from its texture
+    coordinates: computed once (an eyeball's change with every pose) }
+  IsEye := False;
+  for K := 0 to High(FEyeballs) do
+    if FEyeballs[K].MeshIndex = I then
+      IsEye := True;
+  if Length(FTanFactors) <> Length(FCoords) then
+    SetLength(FTanFactors, Length(FCoords));
+  HasTan := UVs.Count = Count;
+  if HasTan and (IsEye or (Length(FTanFactors[I]) <> NumTris)) then
   begin
-    Normals.L[V] := TVector3.Zero;
-    Sums[V] := TVector3.Zero;
-  end;
-  for T := 0 to Length(Tris) div 3 - 1 do
-  begin
-    A := Tris[T * 3];
-    B := Tris[T * 3 + 1];
-    C := Tris[T * 3 + 2];
-    if (A >= Points.Count) or (B >= Points.Count) or (C >= Points.Count) then
-      Continue;
-    E1 := Points.L[B] - Points.L[A];
-    E2 := Points.L[C] - Points.L[A];
-    N := TVector3.CrossProduct(E2, E1);
-    if not N.IsZero then
+    SetLength(FTanFactors[I], NumTris);
+    for T := 0 to NumTris - 1 do
     begin
-      N := N.Normalize;
-      Normals.L[A] := Normals.L[A] + N;
-      Normals.L[B] := Normals.L[B] + N;
-      Normals.L[C] := Normals.L[C] + N;
-    end;
-    if UVs.Count = Points.Count then
-    begin
+      A := Tris[T * 3];
+      B := Tris[T * 3 + 1];
+      C := Tris[T * 3 + 2];
+      FTanFactors[I][T] := TVector2.Zero;
+      if (A >= Count) or (B >= Count) or (C >= Count) then
+        Continue;
       DU1 := UVs.L[B].X - UVs.L[A].X;
       DV1 := UVs.L[B].Y - UVs.L[A].Y;
       DU2 := UVs.L[C].X - UVs.L[A].X;
       DV2 := UVs.L[C].Y - UVs.L[A].Y;
       Det := DU1 * DV2 - DU2 * DV1;
       if Abs(Det) > 1e-12 then
+        FTanFactors[I][T] := Vector2(DV2 / Det, DV1 / Det);
+    end;
+  end;
+  HasTan := HasTan and (Length(FTanFactors[I]) = NumTris) and (NumTris > 0);
+
+  if Length(FTanSums) < Count then
+    SetLength(FTanSums, Count);
+  PP := PVector3(Points.L);
+  PN := PVector3(Normals.L);
+  PS := PVector3(@FTanSums[0]);
+  FillChar(PN^, Count * SizeOf(TVector3), 0);
+  FillChar(PS^, Count * SizeOf(TVector3), 0);
+  Factors := nil;
+  if HasTan then
+    Factors := PVector2(@FTanFactors[I][0]);
+  for T := 0 to NumTris - 1 do
+  begin
+    A := Tris[T * 3];
+    B := Tris[T * 3 + 1];
+    C := Tris[T * 3 + 2];
+    if (A >= Count) or (B >= Count) or (C >= Count) then
+      Continue;
+    E1X := PP[B].X - PP[A].X;
+    E1Y := PP[B].Y - PP[A].Y;
+    E1Z := PP[B].Z - PP[A].Z;
+    E2X := PP[C].X - PP[A].X;
+    E2Y := PP[C].Y - PP[A].Y;
+    E2Z := PP[C].Z - PP[A].Z;
+    { E2 x E1 }
+    NX := E2Y * E1Z - E2Z * E1Y;
+    NY := E2Z * E1X - E2X * E1Z;
+    NZ := E2X * E1Y - E2Y * E1X;
+    if not ((Abs(NX) <= ZeroTol) and (Abs(NY) <= ZeroTol) and (Abs(NZ) <= ZeroTol)) then
+    begin
+      D := 1 / Sqrt(NX * NX + NY * NY + NZ * NZ);
+      NX := NX * D;
+      NY := NY * D;
+      NZ := NZ * D;
+      PN[A].X := PN[A].X + NX; PN[A].Y := PN[A].Y + NY; PN[A].Z := PN[A].Z + NZ;
+      PN[B].X := PN[B].X + NX; PN[B].Y := PN[B].Y + NY; PN[B].Z := PN[B].Z + NZ;
+      PN[C].X := PN[C].X + NX; PN[C].Y := PN[C].Y + NY; PN[C].Z := PN[C].Z + NZ;
+    end;
+    if Factors <> nil then
+    begin
+      TX := E1X * Factors[T].X - E2X * Factors[T].Y;
+      TY := E1Y * Factors[T].X - E2Y * Factors[T].Y;
+      TZ := E1Z * Factors[T].X - E2Z * Factors[T].Y;
+      if not ((Abs(TX) <= ZeroTol) and (Abs(TY) <= ZeroTol) and (Abs(TZ) <= ZeroTol)) then
       begin
-        Tan := (E1 * DV2 - E2 * DV1) * (1 / Det);
-        if not Tan.IsZero then
-        begin
-          Tan := Tan.Normalize;
-          Sums[A] := Sums[A] + Tan;
-          Sums[B] := Sums[B] + Tan;
-          Sums[C] := Sums[C] + Tan;
-        end;
+        D := 1 / Sqrt(TX * TX + TY * TY + TZ * TZ);
+        TX := TX * D;
+        TY := TY * D;
+        TZ := TZ * D;
+        PS[A].X := PS[A].X + TX; PS[A].Y := PS[A].Y + TY; PS[A].Z := PS[A].Z + TZ;
+        PS[B].X := PS[B].X + TX; PS[B].Y := PS[B].Y + TY; PS[B].Z := PS[B].Z + TZ;
+        PS[C].X := PS[C].X + TX; PS[C].Y := PS[C].Y + TY; PS[C].Z := PS[C].Z + TZ;
       end;
     end;
   end;
-  for V := 0 to Points.Count - 1 do
+  for V := 0 to Count - 1 do
   begin
-    if not Normals.L[V].IsZero then
-      Normals.L[V] := Normals.L[V].Normalize
-    else
-      Normals.L[V] := Vector3(0, 1, 0);
-    Tan := Sums[V];
-    if Tan.IsZero then
-      Tan := Vector3(1, 0, 0);
-    Tan := Tan - Normals.L[V] * TVector3.DotProduct(Tan, Normals.L[V]);
-    if Tan.IsZero then
-      Tan := AnyOrthogonalVector(Normals.L[V]);
-    Tangents.L[V] := Vector4(Tan.Normalize, 1);
+    if not ((Abs(PN[V].X) <= ZeroTol) and (Abs(PN[V].Y) <= ZeroTol) and (Abs(PN[V].Z) <= ZeroTol)) then
+    begin
+      D := 1 / Sqrt(Sqr(PN[V].X) + Sqr(PN[V].Y) + Sqr(PN[V].Z));
+      PN[V].X := PN[V].X * D;
+      PN[V].Y := PN[V].Y * D;
+      PN[V].Z := PN[V].Z * D;
+    end else
+      PN[V] := Vector3(0, 1, 0);
+    TX := PS[V].X;
+    TY := PS[V].Y;
+    TZ := PS[V].Z;
+    if (Abs(TX) <= ZeroTol) and (Abs(TY) <= ZeroTol) and (Abs(TZ) <= ZeroTol) then
+    begin
+      TX := 1;
+      TY := 0;
+      TZ := 0;
+    end;
+    { orthogonal to the normal }
+    D := TX * PN[V].X + TY * PN[V].Y + TZ * PN[V].Z;
+    TX := TX - PN[V].X * D;
+    TY := TY - PN[V].Y * D;
+    TZ := TZ - PN[V].Z * D;
+    if not ((Abs(TX) <= ZeroTol) and (Abs(TY) <= ZeroTol) and (Abs(TZ) <= ZeroTol)) then
+    begin
+      D := 1 / Sqrt(TX * TX + TY * TY + TZ * TZ);
+      Tangents.L[V] := Vector4(TX * D, TY * D, TZ * D, 1);
+    end else
+    begin
+      Tan := AnyOrthogonalVector(PN[V]).Normalize;
+      Tangents.L[V] := Vector4(Tan, 1);
+    end;
   end;
   FNormals[I].FdVector.Changed;
   FTangents[I].FdVector.Changed;

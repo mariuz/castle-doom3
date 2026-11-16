@@ -132,9 +132,9 @@ Proposed 2026-11-10 after the full playthroughs (Doom 3, Resurrection of Evil) a
 
 **Performance** (the CPU is the limit at most views; the Resurrection of Evil maps ran at a median of 11 to 28 FPS)
 
-15. **Compressed textures straight to the GPU**: BFG's images are DXT already, and are decoded to RGBA and written as TGA in memory today (`game/delta1` used 3.1 GB). The 2004 game's `dds/` files the same way.
+15. **Compressed textures straight to the GPU**: the 2004 game's plain color images: done (unreleased; `dds/` copies, Mars City 1 361 -> 126 MB of textures with the smaller static GUI pictures). Left: BFG's images are DXT already, and are decoded to RGBA and written as TGA in memory today (`game/delta1` used 3.1 GB); normal maps (RXGB in `dds/`, BFG's DXT5 normal format) need a swizzle in the shader to stay compressed.
 16. **A disk cache for the prepare step** (shader programs, decoded images, by map): prepare is 15 of Mars City 1's 22 s.
-17. **Skinning on the GPU**: BFG's meshes have four joints and weights per vertex, the layout a vertex shader needs; the text md5 meshes can be converted to it.
+17. **Skinning on the GPU**: BFG's meshes have four joints and weights per vertex, the layout a vertex shader needs; the text md5 meshes can be converted to it. Measured 2026-11-16 on Mars City 1 (its characters in view): after making the normals and tangents cheaper, the vertex work GPU skinning would remove is about 3% of the CPU (positions 0.7%, normals and tangents 2.4%); the joints' poses stay on the CPU. CGE's `TSkinNode` skins on the CPU for scenes that cast shadow volumes, and decals, eyeballs and closed shadow casters need the skinned positions on the CPU: not worth it yet.
 18. **Shader stalls**: `game/erebus5` still had 157 s of stalls over 0.3 s in its playthrough; continue CGE changes T and U until a playthrough has none.
 
 ## Classic Doom 3

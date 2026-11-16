@@ -225,6 +225,7 @@ type
     FBodies: array [TD3DeclType] of specialize TDictionary<String, String>;
     FClearHooks: array of TProcedure;
     FMaterials: specialize TObjectDictionary<String, TD3Material>;
+    FHighQualityImages: specialize TDictionary<String, Boolean>;
     FModels: specialize TObjectDictionary<String, TD3ModelDecl>;
     FSkins: specialize TObjectDictionary<String, TD3Skin>;
     FSounds: specialize TObjectDictionary<String, TD3SoundShader>;
@@ -251,6 +252,10 @@ type
 
     { Material by name; never nil (an implicit one when not declared). }
     function Material(const Name: String): TD3Material;
+    { An image named by a stage with forceHighQuality, highquality or
+      uncompressed (of a material parsed already): its dds/ copy (compressed)
+      isn't used. }
+    function IsHighQualityImage(const ImageName: String): Boolean;
     { Entity definition with "inherit" resolved: Names=Values, child keys
       override parents. nil when not declared. Owned by the manager. }
     function EntityDef(const Name: String): TStringList;
@@ -580,6 +585,7 @@ begin
   for T := Low(T) to High(T) do
     FBodies[T] := specialize TDictionary<String, String>.Create;
   FMaterials := specialize TObjectDictionary<String, TD3Material>.Create([doOwnsValues]);
+  FHighQualityImages := specialize TDictionary<String, Boolean>.Create;
   FModels := specialize TObjectDictionary<String, TD3ModelDecl>.Create([doOwnsValues]);
   FSkins := specialize TObjectDictionary<String, TD3Skin>.Create([doOwnsValues]);
   FSounds := specialize TObjectDictionary<String, TD3SoundShader>.Create([doOwnsValues]);
@@ -595,6 +601,7 @@ begin
   for T := Low(T) to High(T) do
     FBodies[T].Free;
   FMaterials.Free;
+  FHighQualityImages.Free;
   FModels.Free;
   FSkins.Free;
   FSounds.Free;
@@ -681,6 +688,7 @@ begin
   for T := Low(T) to High(T) do
     FBodies[T].Clear;
   FMaterials.Clear;
+  FHighQualityImages.Clear;
   FModels.Clear;
   FSkins.Clear;
   FSounds.Clear;
@@ -919,7 +927,7 @@ var
   StageBlendMode: TD3BlendMode;
   StageSpecial, HasBlend, HasStageColor, StageSkyTexGen, StageVC, StageInvVC, StageMaskColor: Boolean;
   StageCubeMap: String;
-  StageCameraCubeMap, StageReflectTexGen: Boolean;
+  StageCameraCubeMap, StageReflectTexGen, StageHighQuality: Boolean;
   StageMirrorW, StageMirrorH, StageRemoteW, StageRemoteH: Integer;
   StageProgram: String;
   StageFragmentMaps: array [0..2] of String;
@@ -1002,6 +1010,7 @@ begin
         StageVC := False;
         StageMaskColor := False;
         StageInvVC := False;
+        StageHighQuality := False;
         FreeAndNil(StageCond);
         for I := 0 to 3 do
           FreeAndNil(Regs[I]);
@@ -1163,6 +1172,9 @@ begin
           if L = 'vertexcolor' then
             StageVC := True
           else
+          if (L = 'forcehighquality') or (L = 'highquality') or (L = 'uncompressed') then
+            StageHighQuality := True
+          else
           if L = 'inversevertexcolor' then
             StageInvVC := True
           else
@@ -1173,6 +1185,8 @@ begin
           if Tok = '{' then
             Lexer.SkipBracedSection;
         end;
+        if StageHighQuality and (StageMap <> '') then
+          FHighQualityImages.AddOrSetValue(LowerCase(StageMap), True);
         { heat haze: the first stage with a heatHaze* program }
         if (Copy(StageProgram, 1, Length('heathaze')) = 'heathaze') and
            (Result.HazeNormalMap = '') and (StageFragmentMaps[1] <> '') then
@@ -1466,6 +1480,11 @@ begin
     Result.Parse(Body);
   end;
   FTables.Add(Key, Result);
+end;
+
+function TD3DeclManager.IsHighQualityImage(const ImageName: String): Boolean;
+begin
+  Result := FHighQualityImages.ContainsKey(LowerCase(ImageName));
 end;
 
 function TD3DeclManager.Material(const Name: String): TD3Material;
