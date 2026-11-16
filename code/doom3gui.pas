@@ -174,6 +174,9 @@ type
   private
     FState: TStringList;
     FTransitions: specialize TList<TD3GuiTransition>;
+    { windows by lowercase name (FindWindow: expressions name windows at
+      every redraw) }
+    FWindowsByName: specialize TDictionary<String, TD3GuiWindow>;
     FCmd: String;
     FTime: Integer;
     FInteractive: Boolean;
@@ -1060,6 +1063,7 @@ begin
   inherited Create;
   FState := TStringList.Create;
   FTransitions := specialize TList<TD3GuiTransition>.Create;
+  FWindowsByName := specialize TDictionary<String, TD3GuiWindow>.Create;
 end;
 
 destructor TD3Gui.Destroy;
@@ -1067,6 +1071,7 @@ begin
   FreeAndNil(Desktop);
   FreeAndNil(FTransitions);
   FreeAndNil(FState);
+  FreeAndNil(FWindowsByName);
   inherited Destroy;
 end;
 
@@ -1076,6 +1081,7 @@ var
   Tok: String;
 begin
   FreeAndNil(Desktop);
+  FWindowsByName.Clear;
   FTransitions.Clear;
   L := TDoom3Lexer.Create(AText);
   try
@@ -1139,11 +1145,17 @@ begin
 end;
 
 function TD3Gui.FindWindow(const AName: String): TD3GuiWindow;
+var
+  Key: String;
 begin
   if Desktop = nil then
-    Result := nil
-  else
-    Result := FindIn(Desktop, AName);
+    Exit(nil);
+  { the windows are made by the load only: a name found (or not) stays }
+  Key := LowerCase(AName);
+  if FWindowsByName.TryGetValue(Key, Result) then
+    Exit;
+  Result := FindIn(Desktop, AName);
+  FWindowsByName.Add(Key, Result);
 end;
 
 procedure TD3Gui.SetState(const Key, Value: String);
@@ -2699,10 +2711,12 @@ end;
 type
   TGuiPainter = class
   strict private
-    { scratch images for DrawTransformed, one per nesting level, reused
-      for every transformed window of a render (hud.gui has ~20) }
-    FScratches: array of TRGBAlphaImage;
+    { the nesting level of DrawTransformed (its scratch image) }
     FScratchDepth: Integer;
+    { DrawImage's source pixel per column }
+    FColumns: array of Integer;
+    { DrawTransformed's sums per column }
+    FColumnsX, FColumnsY: array of Single;
   public
     Image: TRGBAlphaImage;
     { the window being drawn by DrawTransformed (not transformed again) }
@@ -2735,9 +2749,14 @@ type
       onto Image around its center (idWindow::SetupTransforms) }
     function DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
     procedure DrawCursor;
-  public
-    destructor Destroy; override;
   end;
+
+var
+  { Scratch images for DrawTransformed, one per nesting level, used by
+    every transformed window (hud.gui has ~20) of every render: megabyte
+    images made again at each HUD redraw cost page faults. One may be
+    larger than the image drawn. }
+  GuiScratches: array of TRGBAlphaImage;
 
 procedure TGuiPainter.BlendBytes(const X, Y: Integer; const R, G, B, A: Integer);
 var
@@ -2842,14 +2861,31 @@ end;
 
 procedure TGuiPainter.DrawImage(const R: TFloatRectangle; const Src: TCastleImage; const Tint: TVector4;
   const Additive: Boolean);
+type
+  TByteTable = array [0..255] of Byte;
 var
   X, Y, X0, Y0, X1, Y1, SY, TR, TG, TB, TA: Integer;
-  Columns: array of Integer;
-  Row, P, D: PVector4Byte;
+  CX0, CX1, CY0, CY1, Count, SA, V, SrcW, SrcH: Integer;
+  Row: PByte;
+  P, D: PVector4Byte;
+  Col: PInteger;
   Rgba: TRGBAlphaImage;
   FlipX, FlipY: Boolean;
   F: Single;
-  CX0, CX1, SR, SG, SB, SA, V: Integer;
+  LR, LG, LB, LA: TByteTable;
+
+  { a source byte times the tint's: V div 255 as (V + 128 + ((V + 128) shr 8)) shr 8 }
+  procedure FillTable(out T: TByteTable; const Tint: Integer);
+  var
+    I, M: Integer;
+  begin
+    for I := 0 to 255 do
+    begin
+      M := I * Tint + 128;
+      T[I] := (M + (M shr 8)) shr 8;
+    end;
+  end;
+
 begin
   PixelBox(R, X0, Y0, X1, Y1);
   { idDeviceContext::DrawMaterial: a negative width or height mirrors the
@@ -2871,79 +2907,88 @@ begin
     highlight layers) }
   if (not Additive and (TA = 0)) or (Additive and (TR = 0) and (TG = 0) and (TB = 0)) then
     Exit;
-  if (Max(ClipX0, X0) >= Min(ClipX1, X1)) or (Max(ClipY0, Y0) >= Min(ClipY1, Y1)) then
+  CX0 := Max(ClipX0, X0);
+  CX1 := Min(ClipX1, X1);
+  CY0 := Max(ClipY0, Y0);
+  CY1 := Min(ClipY1, Y1);
+  if (CX0 >= CX1) or (CY0 >= CY1) then
     Exit;
-  { the source column of each pixel column }
-  SetLength(Columns, X1 - X0);
-  for X := X0 to X1 - 1 do
+  Count := CX1 - CX0;
+  SrcW := Rgba.Width;
+  SrcH := Rgba.Height;
+  { the source pixel (its byte offset in the row) of each pixel column
+    drawn; the list is kept between calls }
+  if Length(FColumns) < Count then
+    SetLength(FColumns, Count + 64);
+  for X := CX0 to CX1 - 1 do
   begin
     F := (X - X0 + 0.5) / (X1 - X0);
     if FlipX then
       F := 1 - F;
-    Columns[X - X0] := Min(Rgba.Width - 1, Trunc(F * Rgba.Width));
+    FColumns[X - CX0] := Min(SrcW - 1, Trunc(F * SrcW)) * SizeOf(TVector4Byte);
   end;
-  for Y := Max(ClipY0, Y0) to Min(ClipY1, Y1) - 1 do
+  { the tint's products by table: the full screen layers of the GUIs make
+    these loops the painter's hot spot }
+  FillTable(LR, TR);
+  FillTable(LG, TG);
+  FillTable(LB, TB);
+  FillTable(LA, TA);
+  for Y := CY0 to CY1 - 1 do
   begin
     { GUI y goes down, the source image's rows go up }
     F := (Y - Y0 + 0.5) / (Y1 - Y0);
     if FlipY then
       F := 1 - F;
-    SY := Min(Rgba.Height - 1, Trunc((1 - F) * Rgba.Height));
-    Row := Rgba.PixelPtr(0, SY);
-    CX0 := Max(ClipX0, X0);
-    CX1 := Min(ClipX1, X1);
+    SY := Min(SrcH - 1, Trunc((1 - F) * SrcH));
+    Row := PByte(Rgba.PixelPtr(0, SY));
     D := Image.PixelPtr(CX0, Image.Height - 1 - Y);
-    for X := CX0 to CX1 - 1 do
+    Col := @FColumns[0];
+    if Additive then
     begin
-      P := Row;
-      Inc(P, Columns[X - X0]);
-      { the blend written out (the menu's full screen layers make this the
-        hot loop); V div 255 as (V + 1 + V shr 8) shr 8 }
-      if Additive then
+      for X := 1 to Count do
       begin
-        SR := D^.X + (P^.X * TR + 128 + ((P^.X * TR + 128) shr 8)) shr 8;
-        SG := D^.Y + (P^.Y * TG + 128 + ((P^.Y * TG + 128) shr 8)) shr 8;
-        SB := D^.Z + (P^.Z * TB + 128 + ((P^.Z * TB + 128) shr 8)) shr 8;
-        if SR > 255 then SR := 255;
-        if SG > 255 then SG := 255;
-        if SB > 255 then SB := 255;
-        D^.X := SR;
-        D^.Y := SG;
-        D^.Z := SB;
-      end else
-      if P^.W <> 0 then
+        P := PVector4Byte(Row + Col^);
+        V := D^.X + LR[P^.X];
+        if V > 255 then V := 255;
+        D^.X := V;
+        V := D^.Y + LG[P^.Y];
+        if V > 255 then V := 255;
+        D^.Y := V;
+        V := D^.Z + LB[P^.Z];
+        if V > 255 then V := 255;
+        D^.Z := V;
+        Inc(D);
+        Inc(Col);
+      end;
+    end else
+      for X := 1 to Count do
       begin
-        SA := P^.W * TA;
-        SA := (SA + 128 + ((SA + 128) shr 8)) shr 8;
+        P := PVector4Byte(Row + Col^);
+        SA := LA[P^.W];
+        if SA >= 255 then
+        begin
+          D^.X := LR[P^.X];
+          D^.Y := LG[P^.Y];
+          D^.Z := LB[P^.Z];
+          D^.W := 255;
+        end else
         if SA > 0 then
         begin
-          SR := P^.X * TR;
-          SR := (SR + 128 + ((SR + 128) shr 8)) shr 8;
-          SG := P^.Y * TG;
-          SG := (SG + 128 + ((SG + 128) shr 8)) shr 8;
-          SB := P^.Z * TB;
-          SB := (SB + 128 + ((SB + 128) shr 8)) shr 8;
-          if SA >= 255 then
+          V := D^.X * (255 - SA) + LR[P^.X] * SA + 128;
+          D^.X := (V + (V shr 8)) shr 8;
+          V := D^.Y * (255 - SA) + LG[P^.Y] * SA + 128;
+          D^.Y := (V + (V shr 8)) shr 8;
+          V := D^.Z * (255 - SA) + LB[P^.Z] * SA + 128;
+          D^.Z := (V + (V shr 8)) shr 8;
+          if D^.W <> 255 then
           begin
-            D^.X := SR;
-            D^.Y := SG;
-            D^.Z := SB;
-            D^.W := 255;
-          end else
-          begin
-            V := D^.X * (255 - SA) + SR * SA + 128;
-            D^.X := (V + (V shr 8)) shr 8;
-            V := D^.Y * (255 - SA) + SG * SA + 128;
-            D^.Y := (V + (V shr 8)) shr 8;
-            V := D^.Z * (255 - SA) + SB * SA + 128;
-            D^.Z := (V + (V shr 8)) shr 8;
             V := (255 - D^.W) * SA + 128;
             D^.W := D^.W + (V + (V shr 8)) shr 8;
           end;
         end;
+        Inc(D);
+        Inc(Col);
       end;
-      Inc(D);
-    end;
   end;
 end;
 
@@ -3187,26 +3232,17 @@ begin
   end;
 end;
 
-destructor TGuiPainter.Destroy;
-var
-  I: Integer;
-begin
-  for I := 0 to High(FScratches) do
-    FreeAndNil(FScratches[I]);
-  inherited;
-end;
-
 function TGuiPainter.DrawTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single): Boolean;
 var
   Angle, ShearX, ShearY, CosA, SinA, Det, CX, CY, DX, DY, SX, SY, Margin: Single;
-  M00, M01, M10, M11, I00, I01, I10, I11: Single;
+  M00, M01, M10, M11, I00, I01, I10, I11, RowX, RowY: Single;
   V: TVector4;
   Scratch, Main: TRGBAlphaImage;
   Parts: TStringArray;
   X, Y, PX, PY, K, BX0, BY0, BX1, BY1: Integer;
   SaveX0, SaveY0, SaveX1, SaveY1: Integer;
-  RX0, RY0, RX1, RY1, Row: Integer;
-  P: PVector4Byte;
+  RX0, RY0, RX1, RY1, Row, ScratchW, ScratchH: Integer;
+  P, D, ScratchPixels: PVector4Byte;
   OuterInTransform: TD3GuiWindow;
 begin
   Result := False;
@@ -3241,14 +3277,14 @@ begin
     Exit;
   { the window and its children, untransformed, on a clear scratch image }
   Main := Image;
-  if FScratchDepth >= Length(FScratches) then
-    SetLength(FScratches, FScratchDepth + 1);
-  Scratch := FScratches[FScratchDepth];
-  if (Scratch = nil) or (Scratch.Width <> Main.Width) or (Scratch.Height <> Main.Height) then
+  if FScratchDepth >= Length(GuiScratches) then
+    SetLength(GuiScratches, FScratchDepth + 1);
+  Scratch := GuiScratches[FScratchDepth];
+  if (Scratch = nil) or (Scratch.Width < Main.Width) or (Scratch.Height < Main.Height) then
   begin
-    FreeAndNil(FScratches[FScratchDepth]);
+    FreeAndNil(GuiScratches[FScratchDepth]);
     Scratch := TRGBAlphaImage.Create(Main.Width, Main.Height);
-    FScratches[FScratchDepth] := Scratch;
+    GuiScratches[FScratchDepth] := Scratch;
   end;
   Inc(FScratchDepth);
   try
@@ -3329,25 +3365,53 @@ begin
     ClipX1 := Image.Width;
     ClipY1 := Image.Height;
     { every pixel there from where it comes in the scratch image }
+    ScratchPixels := PVector4Byte(Scratch.RawPixels);
+    ScratchW := Scratch.Width;
+    ScratchH := Scratch.Height;
+    if BX1 <= BX0 then
+      Exit;
+    { the columns' parts of the sums, once }
+    if Length(FColumnsX) < BX1 - BX0 then
+    begin
+      SetLength(FColumnsX, BX1 - BX0 + 64);
+      SetLength(FColumnsY, BX1 - BX0 + 64);
+    end;
+    for X := BX0 to BX1 - 1 do
+    begin
+      { in GUI units (the pixels aren't square) }
+      DX := (X + 0.5 - CX) / ScaleX;
+      FColumnsX[X - BX0] := I00 * DX;
+      FColumnsY[X - BX0] := I10 * DX;
+    end;
     for Y := BY0 to BY1 - 1 do
-      for X := BX0 to BX1 - 1 do
+    begin
+      DY := (Y + 0.5 - CY) / ScaleY;
+      RowX := I01 * DY;
+      RowY := I11 * DY;
+      D := Image.PixelPtr(BX0, Image.Height - 1 - Y);
+      for X := 0 to BX1 - BX0 - 1 do
       begin
-        { in GUI units (the pixels aren't square) }
-        DX := (X + 0.5 - CX) / ScaleX;
-        DY := (Y + 0.5 - CY) / ScaleY;
-        SX := CX + (I00 * DX + I01 * DY) * ScaleX;
-        SY := CY + (I10 * DX + I11 * DY) * ScaleY;
-        PX := Floor(SX);
-        PY := Floor(SY);
+        SX := CX + (FColumnsX[X] + RowX) * ScaleX;
+        SY := CY + (FColumnsY[X] + RowY) * ScaleY;
+        { Floor (Math.Floor's call was a third of a HUD redraw) }
+        PX := Trunc(SX);
+        if SX < PX then
+          Dec(PX);
+        PY := Trunc(SY);
+        if SY < PY then
+          Dec(PY);
         { only the part drawn and cleared this time }
-        if (PX < RX0) or (PY < RY0) or (PX >= RX1) or (PY >= RY1) then
-          Continue;
-        P := Scratch.PixelPtr(PX, Scratch.Height - 1 - PY);
-        { blended onto a clear image its colors are times its alpha }
-        if P^.W > 0 then
-          BlendBytes(X, Y, Min(255, P^.X * 255 div P^.W), Min(255, P^.Y * 255 div P^.W),
-            Min(255, P^.Z * 255 div P^.W), P^.W);
+        if (PX >= RX0) and (PY >= RY0) and (PX < RX1) and (PY < RY1) then
+        begin
+          P := ScratchPixels + ((ScratchH - 1 - PY) * ScratchW + PX);
+          { blended onto a clear image its colors are times its alpha }
+          if P^.W > 0 then
+            BlendInto(D, Min(255, P^.X * 255 div P^.W), Min(255, P^.Y * 255 div P^.W),
+              Min(255, P^.Z * 255 div P^.W), P^.W);
+        end;
+        Inc(D);
       end;
+    end;
     ClipX0 := SaveX0;
     ClipY0 := SaveY0;
     ClipX1 := SaveX1;
@@ -3926,8 +3990,18 @@ begin
   Result := True;
 end;
 
+procedure FreeGuiScratches;
+var
+  I: Integer;
+begin
+  for I := 0 to High(GuiScratches) do
+    FreeAndNil(GuiScratches[I]);
+  GuiScratches := nil;
+end;
+
 procedure ClearGuiCache;
 begin
+  FreeGuiScratches;
   GuiImages.Clear;
   GuiSources.Clear;
   GuiKeys.Clear;
@@ -3954,6 +4028,7 @@ initialization
   DynamicImages := specialize TObjectDictionary<String, TRGBAlphaImage>.Create([doOwnsValues]);
   WantedDynamic := TStringList.Create;
 finalization
+  FreeGuiScratches;
   FreeAndNil(DynamicImages);
   FreeAndNil(WantedDynamic);
   FreeAndNil(GuiCvars);
