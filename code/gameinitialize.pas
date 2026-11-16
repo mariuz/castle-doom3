@@ -92,7 +92,15 @@ begin
     RegisterImageProtocol;
     RegisterGuiProtocol;
     if SoundEngine <> nil then
+    begin
       SoundEngine.DistanceModel := dmLinear;
+      { CGE plays 16 sounds at once by default, and a new sound takes the
+        source of the oldest one of the same priority: with footsteps,
+        machines and speakers, characters' voice lines were cut off. Not
+        64: then Creative's OpenAL ("Generic Software") has no memory left
+        for the reverb's effect slot (console soundinfo). }
+      SoundEngine.MaxAllocatedSources := 32;
+    end;
 
     { Data: the bundled test level first, then a Doom 3 install (later
       sources override earlier ones, like idFileSystem's search path). }

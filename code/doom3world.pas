@@ -250,6 +250,10 @@ type
     Source: TCastleSoundSource;
     Sound: TCastleSound;
     Looping: Boolean;
+    { a looping speaker is on (triggers toggle it); it plays only while it
+      can be heard (UpdateSoundOcclusion), so far speakers don't take the
+      sound sources }
+    On: Boolean;
     { fadeSound on the speaker: its volume factor, going from FadeFrom to
       FadeTo over FadeTime seconds from FadeStart }
     FadeFrom, FadeTo, FadeStart, FadeTime: Single;
@@ -2880,6 +2884,16 @@ begin
     { fadeSound }
     if (S.Source <> nil) and S.Faded then
       S.Source.Volume := S.Source.Volume * S.FadeFactor(FTime);
+    { a looping speaker out of hearing stops (it would hold a sound source
+      at volume 0: Mars City 1 had 63 playing), and starts again in reach }
+    if S.Looping and S.On and (S.Source <> nil) then
+    begin
+      if S.Source.Volume <= 0 then
+        S.Source.Sound := nil
+      else
+      if S.Source.Sound = nil then
+        S.Source.Sound := S.Sound;
+    end;
   end;
   for M in FMovers do
     OccludeSoundSource(M.Sounds, 0);
@@ -3369,7 +3383,8 @@ begin
   S.Looping := (Shader <> nil) and (Shader.Looping or E.BoolValue('s_looping'));
   if S.Looping then
   begin
-    if not E.BoolValue('s_waitfortrigger') then
+    S.On := not E.BoolValue('s_waitfortrigger');
+    if S.On then
       S.Source.Sound := Snd;
   end else
   if not E.BoolValue('s_waitfortrigger') then
@@ -6778,6 +6793,7 @@ begin
   for S in FSpeakers do
     if S.Entity = E then
     begin
+      S.On := False;
       S.Source.Sound := nil;
     end;
 end;
@@ -6968,10 +6984,11 @@ begin
       { idSound::Event_Trigger: start / stop }
       if S.Looping then
       begin
-        if S.Source.Sound <> nil then
-          S.Source.Sound := nil
+        S.On := not S.On;
+        if S.On then
+          S.Source.Sound := S.Sound
         else
-          S.Source.Sound := S.Sound;
+          S.Source.Sound := nil;
       end else
         S.Source.Play(S.Sound);
       Exit;
@@ -12838,6 +12855,10 @@ begin
   Playing.Sound := Snd;
   { channel 0 sounds free themselves (set before playing) }
   Playing.FreeOnStop := Channel = 0;
+  { voices (SND_CHANNEL_VOICE, VOICE2) keep their source when all are in
+    use: other sounds (priority 0.5) don't cut a line off }
+  if Channel in [1, 2] then
+    Playing.Priority := 2;
   Source.Play(Playing);
   if Channel <> 0 then
     FScriptSounds.AddOrSetValue(IntToStr(Handle) + ':' + IntToStr(Channel), Playing);
