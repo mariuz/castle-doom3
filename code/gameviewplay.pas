@@ -170,6 +170,7 @@ type
     procedure SetReverbEffect(const Effect: TD3ReverbEffect; const Why: String);
     function ReverbStatus: String;
     procedure UpdateCinematic;
+    procedure RunSkippedCinematic;
     procedure LoadLevel(const AMapName: String);
     { route all: FRoute through every touch trigger and item, nearest
       first, ending at Goal (Doom 3 feet); FRouteGaps sums the hops }
@@ -584,8 +585,42 @@ begin
   end;
   Hud.Exists := not FInCinematic;
   C := FGame.FadeColor;
+  { a skipped cinematic runs on behind black }
+  if FGame.Skipping then
+    C := Vector4(0, 0, 0, 1);
   FadeRect.Exists := C.W > 0.002;
   FadeRect.Color := C;
+end;
+
+{ A skipped cinematic (TD3Game.Skipping) runs on in 0.1 s steps (the game
+  copes with 3 FPS), without drawing, like Doom 3's skipCinematic; at most
+  0.2 s of work a frame keeps the window alive. }
+procedure TViewPlay.RunSkippedCinematic;
+const
+  Step = 0.1;
+  Budget = 0.2;
+var
+  StepsStart: TTimerResult;
+  RemoveMe: TRemoveType;
+begin
+  StepsStart := Timer;
+  while FGame.Skipping and (TimerSeconds(Timer, StepsStart) < Budget) do
+  begin
+    if FInCinematic then
+      FGame.Update(Step, FPlayerEye)
+    else
+      FGame.Update(Step, Camera.Translation);
+    RemoveMe := rtNone;
+    Map.FastForward := True;
+    try
+      Map.Update(Step, RemoveMe);
+    finally
+      Map.FastForward := False;
+    end;
+    UpdateCinematic;
+  end;
+  { not a long frame to look at }
+  FLastUpdateValid := False;
 end;
 
 { One log line: the process's memory, the Pascal heap, the shader programs
@@ -3688,6 +3723,8 @@ begin
   FPartGame := TimerSeconds(Timer, PartTimer);
   FPartGameParts := FGame.UpdateParts;
   UpdateCinematic;
+  if FGame.Skipping then
+    RunSkippedCinematic;
   PartTimer := Timer;
   Map.UpdateVisibility(Camera);
   FPartVisibility := TimerSeconds(Timer, PartTimer);
@@ -3707,7 +3744,8 @@ begin
   FPartHud := TimerSeconds(Timer, PartTimer);
 
   PartTimer := Timer;
-  if AutoTestPrefix <> '' then
+  { a demo script waits for a skipped cinematic to end }
+  if (AutoTestPrefix <> '') and not FGame.Skipping then
     RunDemoStep(SecondsPassed);
   FPartDemo := TimerSeconds(Timer, PartTimer);
   FPartUpdate := TimerSeconds(Timer, FLastUpdate);

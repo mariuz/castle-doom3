@@ -52,7 +52,7 @@ interface
 
 uses
   SysUtils, Classes, Generics.Collections,
-  CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors,
+  CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors, CastleTimeUtils,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
   Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals;
@@ -100,6 +100,21 @@ type
     LightColors: array of TVector3;
     Delay, ActivateAt, ClearFlashAt, FlashSeconds, RestoreAt, FovEndAt: Single;
     RestoreOnTrigger: Boolean;
+  end;
+
+  { A light a script spawned (sys.spawn of "light", or of an entityDef with
+    spawnclass idLight: the guardian's and its seekers' lights): a CGE
+    point light, placed, bound and moved like other entities
+    (TD3Game.TransformOf). }
+  TD3ScriptLight = class
+    Entity: TD3MapEntity;
+    Light: TCastlePointLight;
+    { "_color" / setColor, and the hue of the shader's image }
+    Color, Tint: TVector3;
+    On: Boolean;
+    { fadeInLight / fadeOutLight: Fade goes from FadeFrom to FadeTo }
+    Fade, FadeFrom, FadeTo, FadeStart, FadeTime: Single;
+    destructor Destroy; override;
   end;
 
   TD3MoverKind = (mkDoor, mkRotating, mkBobbing, mkPendulum);
@@ -774,6 +789,7 @@ type
     FSoundLastFile: specialize TDictionary<String, Integer>;
     { SoundEnvelope's results by sound URL }
     FSoundEnvelopes: specialize TDictionary<String, TBytes>;
+    FScriptLights: specialize TObjectList<TD3ScriptLight>;
     FLightSounds: array of TD3LightSound;
     { sound occlusion: each portal's shortest way to the listener (crossing
       it), for FSoundDistListener at game time FSoundDistTime; the portals
@@ -812,6 +828,12 @@ type
     FCameraCycles: Integer;
     { skipping a cinematic also skips the cameras started by it until then }
     FSkipUntil: Single;
+    { a skip runs the game fast (TViewPlay.Update steps it) until the
+      cinematic ends, like Doom 3's skipCinematic; FSkipStart and
+      FSkipMaxTime are game times }
+    FSkipping: Boolean;
+    FSkipStart, FSkipMaxTime, FSkipVolume: Single;
+    FSkipTimer: TTimerResult;
     { screen fade (idPlayerView::Fade) }
     FFadeFrom, FFadeTo: TVector4;
     FFadeStart, FFadeTime: Single;
@@ -1047,6 +1069,13 @@ type
     function SoundEnvelope(const Url: String): TBytes;
     { lights whose shader follows their sound ("sound"): their amplitude now }
     procedure UpdateLightSounds;
+    procedure SpawnScriptLight(const E: TD3MapEntity);
+    procedure ApplyScriptLight(const SL: TD3ScriptLight);
+    procedure SetScriptLightShader(const SL: TD3ScriptLight; const ShaderName: String);
+    procedure SetScriptLightRadius(const SL: TD3ScriptLight; const Radius: Single);
+    function ScriptLightEvent(const SL: TD3ScriptLight; const N: String; const Args: TD3ValueArray;
+      var EventResult: TD3Value): Boolean;
+    procedure UpdateScriptLights;
     procedure SpawnLightSound(const E: TD3MapEntity);
     procedure OccludeSoundSource(const Source: TCastleSoundSource; const MaxDistance: Single;
       const Sound: TCastleSound = nil);
@@ -1095,6 +1124,8 @@ type
     procedure SetSpeakerDemonic(const AName: String; const Demonic: Boolean);
     procedure SetGuisDemonic(const AName: String; const Demonic: Boolean);
     procedure ApplyInfluence(const Inf: TD3Influence);
+    procedure StartSkipping;
+    procedure UpdateSkipping;
     procedure RestoreInfluence(const Inf: TD3Influence);
     procedure UpdateInfluences;
     function ActivatePlayerInfo(const E: TD3MapEntity; const Cls: String): Boolean;
@@ -1523,6 +1554,8 @@ type
     procedure Activate(const E: TD3MapEntity);
     { The map entity with this name, nil if none. }
     function FindEntity(const AName: String): TD3MapEntity;
+    { The light a script spawned with this name, nil when none. }
+    function ScriptLightOf(const AName: String): TD3ScriptLight;
     { For TD3GameScriptHost: scripts' entity handles and events. }
     function ScriptFindEntity(const AName: String): Integer;
     function ScriptEntityName(const Handle: Integer): String;
@@ -1539,8 +1572,12 @@ type
     { The cinematic camera's view in CGE coordinates, its horizontal field
       of view in degrees. }
     procedure CinematicView(out Position, Direction, Up: TVector3; out FovDeg: Single);
-    { Stop the cinematic camera (its targets fire), like Escape in Doom 3. }
+    { Skip the cinematic, like Escape in Doom 3: the game runs (Skipping)
+      until its cameras are done, with the sound muted. }
     procedure SkipCinematic;
+    { A skipped cinematic still runs: step the game (1/60 s at a time,
+      without drawing) until this is false. }
+    property Skipping: Boolean read FSkipping;
     { Color over the screen (alpha 0: nothing), from trigger_fade and the
       scripts' fades. }
     function FadeColor: TVector4;
@@ -1866,11 +1903,11 @@ implementation
 
 uses
   Math,
-  CastleLog, CastleUtils, CastleQuaternions, CastleTimeUtils,
+  CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
-  Doom3AF, Doom3Images,
+  Doom3AF, Doom3Images, Doom3Materials, Doom3LightEffects,
   CastleInternalSoundFile;
 
 const
@@ -2158,6 +2195,7 @@ begin
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
   FEmitters := specialize TObjectList<TD3ParticleEmitter>.Create(True);
+  FScriptLights := specialize TObjectList<TD3ScriptLight>.Create(True);
   FEmitterEntities := specialize TObjectList<TD3EmitterEntity>.Create(True);
   FFx := specialize TObjectList<TD3Fx>.Create(True);
   FDecals := TD3DecalSystem.Create(nil);
@@ -2194,6 +2232,7 @@ begin
   FSounds.Free;
   FSoundLastFile.Free;
   FSoundEnvelopes.Free;
+  FScriptLights.Free;
   FTriggers.Free;
   FEntities.Free;
   FPending.Free;
@@ -2286,6 +2325,9 @@ begin
   FCameraEntity := nil;
   FCameraAnim := nil;
   FSkipUntil := 0;
+  if FSkipping then
+    SoundEngine.Volume := FSkipVolume;
+  FSkipping := False;
   FFadeFrom := Vector4(0, 0, 0, 0);
   FFadeTo := Vector4(0, 0, 0, 0);
   FFadeTime := 0;
@@ -2302,6 +2344,7 @@ begin
   FFx.Clear;
   FEmitterEntities.Clear;
   FEmitters.Clear;
+  FScriptLights.Clear;
   FDecals.Clear;
   FGuiFocus := nil;
   FTalkFocus := nil;
@@ -2480,6 +2523,152 @@ begin
     end;
     FMap.SetLightSound(FLightSounds[I].Light, Amplitude);
   end;
+end;
+
+destructor TD3ScriptLight.Destroy;
+begin
+  FreeAndNil(Light);
+  inherited;
+end;
+
+procedure TD3Game.SpawnScriptLight(const E: TD3MapEntity);
+var
+  SL: TD3ScriptLight;
+  Radius: TVector3;
+  R: Single;
+begin
+  SL := TD3ScriptLight.Create;
+  SL.Entity := E;
+  SL.Color := E.VectorValue('_color', Vector3(1, 1, 1));
+  SL.Tint := Vector3(1, 1, 1);
+  SL.On := not E.BoolValue('start_off');
+  SL.Fade := 1;
+  SL.Light := TCastlePointLight.Create(nil);
+  SL.Light.Translation := D3ToCge(E.LightOrigin);
+  { like the map's lights that aren't light volumes: a sphere fading to
+    zero at the light's size (idLight's "light_radius", else "light") }
+  SL.Light.RadiusFalloff := True;
+  Radius := E.VectorValue('light_radius', TVector3.Zero);
+  if Radius.IsZero then
+    R := E.FloatValue('light', 300)
+  else
+    R := Max(Radius.X, Max(Radius.Y, Radius.Z));
+  SetScriptLightRadius(SL, R);
+  SetScriptLightShader(SL, E.Value('texture'));
+  FMap.Add(SL.Light);
+  FScriptLights.Add(SL);
+  ApplyScriptLight(SL);
+  WritelnLog('Doom3World', 'Script spawned the light %s (%s, radius %.0f)', [E.Name, E.Value('texture'), R]);
+end;
+
+function TD3Game.ScriptLightOf(const AName: String): TD3ScriptLight;
+begin
+  for Result in FScriptLights do
+    if SameText(Result.Entity.Name, AName) then
+      Exit;
+  Result := nil;
+end;
+
+procedure TD3Game.ApplyScriptLight(const SL: TD3ScriptLight);
+begin
+  SL.Light.Exists := SL.On and (SL.Fade > 0.001);
+  SL.Light.Color := Vector3(SL.Color.X * SL.Tint.X, SL.Color.Y * SL.Tint.Y, SL.Color.Z * SL.Tint.Z);
+  SL.Light.Intensity := 1.5 * FMap.LightScale * SL.Fade;
+end;
+
+procedure TD3Game.SetScriptLightShader(const SL: TD3ScriptLight; const ShaderName: String);
+var
+  Shader: TD3Material;
+begin
+  SL.Tint := Vector3(1, 1, 1);
+  if ShaderName = '' then
+    Exit;
+  Shader := Decls.Material(ShaderName);
+  if (Shader <> nil) and Shader.Defined then
+    SL.Tint := ProjectionTint(Shader.StageImage);
+end;
+
+procedure TD3Game.SetScriptLightRadius(const SL: TD3ScriptLight; const Radius: Single);
+begin
+  SL.Light.Radius := Max(1, Radius);
+  SL.Light.Attenuation := Vector3(1, 0, 2 / Sqr(SL.Light.Radius));
+end;
+
+{ idLight's script events on a script light; false for the others (bind,
+  setOrigin, remove... go on like for other entities). }
+function TD3Game.ScriptLightEvent(const SL: TD3ScriptLight; const N: String; const Args: TD3ValueArray;
+  var EventResult: TD3Value): Boolean;
+
+  function ArgF(const Index: Integer): Single;
+  begin
+    if Index <= High(Args) then
+      Result := D3ValueToFloat(Args[Index])
+    else
+      Result := 0;
+  end;
+
+  procedure StartLightFade(const Target, Seconds: Single);
+  begin
+    SL.FadeFrom := SL.Fade;
+    SL.FadeTo := Target;
+    SL.FadeStart := FTime;
+    SL.FadeTime := Seconds;
+    if Seconds <= 0 then
+      SL.Fade := Target;
+  end;
+
+begin
+  Result := True;
+  case N of
+    { idLight::Hide / Show turn it off / on }
+    'On', 'show':
+      begin
+        SL.On := True;
+        SL.FadeTime := 0;
+        SL.Fade := 1;
+      end;
+    'Off', 'hide':
+      begin
+        SL.On := False;
+        SL.FadeTime := 0;
+      end;
+    'isHidden': EventResult := D3FloatValue(Ord(not SL.On));
+    'fadeOutLight': StartLightFade(0, ArgF(0));
+    'fadeInLight':
+      begin
+        { an off light comes on dark, then brightens }
+        if not SL.On then
+        begin
+          SL.On := True;
+          SL.Fade := 0;
+        end;
+        StartLightFade(1, ArgF(0));
+      end;
+    'setColor': SL.Color := Vector3(ArgF(0), ArgF(1), ArgF(2));
+    'setShaderParm', 'setLightParm':
+      if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 2) then
+        SL.Color.Data[Round(ArgF(0))] := ArgF(1);
+    'setShader': SetScriptLightShader(SL, D3ValueToString(Args[0]));
+    'setRadius': SetScriptLightRadius(SL, ArgF(0));
+    'setRadiusXYZ': SetScriptLightRadius(SL, Max(ArgF(0), Max(ArgF(1), ArgF(2))));
+    else
+      Exit(False);
+  end;
+  ApplyScriptLight(SL);
+end;
+
+procedure TD3Game.UpdateScriptLights;
+var
+  SL: TD3ScriptLight;
+begin
+  for SL in FScriptLights do
+    if SL.FadeTime > 0 then
+    begin
+      SL.Fade := SL.FadeFrom + (SL.FadeTo - SL.FadeFrom) * EnsureRange((FTime - SL.FadeStart) / SL.FadeTime, 0, 1);
+      if FTime >= SL.FadeStart + SL.FadeTime then
+        SL.FadeTime := 0;
+      ApplyScriptLight(SL);
+    end;
 end;
 
 procedure TD3Game.NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
@@ -6560,7 +6749,14 @@ var
   ME: TD3ModelEntity;
   Mon: TD3Monster;
   S: TD3Speaker;
+  SL: TD3ScriptLight;
 begin
+  SL := ScriptLightOf(E.Name);
+  if SL <> nil then
+  begin
+    SL.On := False;
+    ApplyScriptLight(SL);
+  end;
   I := FMap.FindLight(E.Name);
   if I >= 0 then
     FMap.SetLightOn(I, False);
@@ -7164,6 +7360,7 @@ begin
   UpdateElevators;
   UpdateShakes;
   UpdateLightSounds;
+  UpdateScriptLights;
   UpdateBurns;
   UpdateSoundOcclusion;
   UpdateSoundFades;
@@ -7215,6 +7412,7 @@ begin
     FScript.Update(FTime);
   end;
   Part(13);
+  UpdateSkipping;
   { after its script: a shot of this frame shows its flash now }
   UpdateWeaponView(SecondsPassed);
   UpdatePlayerModel(SecondsPassed);
@@ -12404,12 +12602,9 @@ begin
   FCameraEntity := E;
   FCameraStart := FTime;
   WritelnLog('Doom3World', 'Cinematic camera %s', [E.Name]);
-  if FTime < FSkipUntil then
-  begin
+  if (FTime < FSkipUntil) and not FSkipping then
     { the cinematic goes on with this camera: skip it too }
-    FSkipUntil := FTime + 1;
-    StopCamera;
-  end;
+    StartSkipping;
 end;
 
 procedure TD3Game.StopCamera;
@@ -12440,13 +12635,33 @@ end;
 
 procedure TD3Game.SkipCinematic;
 begin
-  if FCameraEntity <> nil then
-  begin
-    { like gameLocal.SkipCinematic: the cameras the cinematic starts next
-      (a chain of shots) are skipped too }
-    FSkipUntil := FTime + 1;
-    StopCamera;
-  end;
+  if (FCameraEntity <> nil) and not FSkipping then
+    StartSkipping;
+end;
+
+procedure TD3Game.StartSkipping;
+begin
+  { gameLocal.SkipCinematic: the game runs on (its relays, fades and
+    scripts keep their timing) until the cinematic is over, muted }
+  FSkipping := True;
+  FSkipStart := FTime;
+  FSkipTimer := Timer;
+  FSkipMaxTime := FTime + 600;
+  FSkipVolume := SoundEngine.Volume;
+  SoundEngine.Volume := 0;
+end;
+
+procedure TD3Game.UpdateSkipping;
+begin
+  if not FSkipping or ((FCameraEntity <> nil) and (FTime < FSkipMaxTime)) then
+    Exit;
+  { the cameras a cinematic starts soon after (a chain of shots) are
+    skipped too }
+  FSkipping := False;
+  FSkipUntil := FTime + 1;
+  SoundEngine.Volume := FSkipVolume;
+  WritelnLog('Doom3World', 'Cinematic skipped: %.1f s of game time in %.1f s',
+    [FTime - FSkipStart, TimerSeconds(Timer, FSkipTimer)]);
 end;
 
 function TD3Game.CinematicActive: Boolean;
@@ -12506,6 +12721,8 @@ begin
   FFadeTo := Target;
   FFadeStart := FTime;
   FFadeTime := Max(0, Seconds);
+  if not TVector4.PerfectlyEquals(FFadeFrom, FFadeTo) then
+    WritelnLog('Doom3World', 'Fade to %s in %.2f s', [FFadeTo.ToString, FFadeTime]);
 end;
 
 function TD3Game.FadeColor: TVector4;
@@ -12735,7 +12952,11 @@ function TD3Game.TransformOf(const AName: String): TCastleTransform;
 var
   B: TD3BrushEntity;
   ME: TD3ModelEntity;
+  SL: TD3ScriptLight;
 begin
+  SL := ScriptLightOf(AName);
+  if SL <> nil then
+    Exit(SL.Light);
   B := FMap.FindBrush(AName);
   if B <> nil then
     Exit(B.Scene);
@@ -13662,6 +13883,10 @@ begin
     if N = 'numTargets' then
       EventResult := D3FloatValue(Count);
   end else
+  { idLight's events on a light a script spawned }
+  if (ScriptLightOf(E.Name) <> nil) and
+     ScriptLightEvent(ScriptLightOf(E.Name), N, Args, EventResult) then
+  else
   if (N = 'hide') or (N = 'show') or (N = 'isHidden') or (N = 'remove') then
   begin
     if N = 'remove' then

@@ -2469,7 +2469,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(46, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(47, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -7900,6 +7900,7 @@ var
   I, Monsters, Models: Integer;
   ME: TD3ModelEntity;
   RemoveMe: TRemoveType;
+  SL: TD3ScriptLight;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -7934,6 +7935,26 @@ begin
     end;
     Check(Game.FindEntity('ball_spawned_1') <> nil, 'the script''s projectile is an entity');
     Check(Game.Projectiles.Count > 0, 'the projectile flies');
+
+    { a light a script spawns: placed, colored, faded out }
+    Check(Game.ScriptLightOf('light_spawned_1') = nil, 'no script light yet');
+    Game.RunScriptFunction('test_spawn_light');
+    Game.Update(0.05, Eye);
+    SL := Game.ScriptLightOf('light_spawned_1');
+    Check(SL <> nil, 'the script spawned a light');
+    if SL <> nil then
+    begin
+      Check(SL.Light.Exists, 'the script light is on');
+      CheckVectorNear(D3ToCge(Vector3(420, -100, 64)), SL.Light.Translation, 'the script placed the light', 0.01);
+      CheckVectorNear(Vector3(0, 1, 0), SL.Light.Color, 'setColor made it green', 0.01);
+      CheckNear(200, SL.Light.Radius, 'its radius is the "light" key', 0.01);
+      for I := 1 to 8 do
+        Game.Update(0.05, Eye);
+      Check(SL.Fade < 0.99, 'fadeOutLight dims it');
+      for I := 1 to 6 do
+        Game.Update(0.05, Eye);
+      Check(not SL.Light.Exists, 'faded out, the light is off');
+    end;
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
