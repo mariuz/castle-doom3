@@ -41,7 +41,9 @@ type
     { An item pickup line (idPlayer::GiveItem's itemtextN and
       itemPickupN; up to 5 cycle). }
     procedure Pickup(const Text: String);
-    function Render: TRGBAlphaImage;
+    { The HUD at Width x Height pixels (the screen's, so its text is sharp;
+      0: the GUIs' 512 x 512). }
+    function Render(const Width: Integer = 0; const Height: Integer = 0): TRGBAlphaImage;
     property Gui: TD3Gui read FGui;
     { every named event sent, oldest first (logged, read by tests) }
     property Events: TStringList read FEvents;
@@ -256,17 +258,17 @@ begin
   end;
 end;
 
-function TD3HudGui.Render: TRGBAlphaImage;
+function TD3HudGui.Render(const Width: Integer = 0; const Height: Integer = 0): TRGBAlphaImage;
 var
   Start: TTimerResult;
 begin
   Start := Timer;
-  Result := RenderGuiTransparent(FGui);
+  Result := RenderGuiTransparent(FGui, Width, Height);
   FGui.Dirty := False;
   FRenderSeconds := FRenderSeconds + TimerSeconds(Timer, Start);
   Inc(FRenders);
   if FRenders = 50 then
-    WritelnLog('Doom3HudGui', 'HUD GUI: %d renders, %.1f ms each', [FRenders, RenderMs]);
+    WritelnLog('Doom3HudGui', 'HUD GUI: %d renders, %.1f ms each (%d x %d)', [FRenders, RenderMs, Result.Width, Result.Height]);
 end;
 
 function TD3HudGui.RenderMs: Single;

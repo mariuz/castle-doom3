@@ -1200,8 +1200,10 @@ const
     time expressions) IdleRate }
   RedrawRate = 8;
   IdleRate = 4;
+  HudGuiMaxPixels = 1000000;
 var
   HudParent: TCastleUserInterface;
+  HudScale: Single;
 begin
   if not FUseHudGui then
   begin
@@ -1245,7 +1247,13 @@ begin
   if FHudImage.Exists and ((FHudImage.Image = nil) or (FHudRedraw >= 1 / IdleRate) or
      (FHudGui.Gui.Dirty and (FHudRedraw >= 1 / RedrawRate))) then
   begin
-    FHudImage.Image := FHudGui.Render;
+    { near the screen's size, so the text is sharp (512 x 512 stretched
+      over the screen blurred it); at most about a million pixels: the
+      painter's time grows with them (1600 x 900: 14 ms a redraw, at
+      1333 x 750 about 10) }
+    HudScale := Min(1, Sqrt(HudGuiMaxPixels / Max(1, Container.PixelsWidth * Container.PixelsHeight)));
+    FHudImage.Image := FHudGui.Render(Max(64, Round(Container.PixelsWidth * HudScale)),
+      Max(48, Round(Container.PixelsHeight * HudScale)));
     FHudImage.OwnsImage := True;
     FHudRedraw := 0;
   end;
@@ -2741,9 +2749,16 @@ begin
         GuiStart := Timer;
         GuiSum := 0;
         GuiRuns := Max(1, StrToIntDef(GetEnvironmentVariable('CD3_GUIDUMP_RUNS'), 10));
+        { env CD3_GUIDUMP_SIZE=<w>x<h>: the transparent render at that size
+          (the HUD at the screen's size) }
+        S := GetEnvironmentVariable('CD3_GUIDUMP_SIZE');
         for I := 1 to GuiRuns do
         begin
-          GuiImage := RenderGui(Gui, nil);
+          if Pos('x', S) > 0 then
+            GuiImage := RenderGuiTransparent(Gui, StrToIntDef(Copy(S, 1, Pos('x', S) - 1), 0),
+              StrToIntDef(Copy(S, Pos('x', S) + 1, MaxInt), 0))
+          else
+            GuiImage := RenderGui(Gui, nil);
           if I = GuiRuns then
             for J := 0 to GuiImage.Width * GuiImage.Height * 4 - 1 do
               GuiSum := (GuiSum * 31 + PByte(GuiImage.RawPixels)[J]) and $FFFFFFFF;

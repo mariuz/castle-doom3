@@ -316,8 +316,10 @@ function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage; ov
 { The same at another size (the full screen main menu) }
 function RenderGui(const Gui: TD3Gui; const State: TStrings; const Width, Height: Integer): TRGBAlphaImage; overload;
 { The same over a transparent background (the HUD over the view): not
-  premultiplied, additive stages get the alpha of their brightness. }
-function RenderGuiTransparent(const Gui: TD3Gui): TRGBAlphaImage;
+  premultiplied, additive stages get the alpha of their brightness. At
+  Width x Height (0: GuiImageWidth x GuiImageHeight). }
+function RenderGuiTransparent(const Gui: TD3Gui; const Width: Integer = 0;
+  const Height: Integer = 0): TRGBAlphaImage;
 
 { The texture URL of a GUI drawn with some state, '' when the GUI file is
   missing. Rendered once per (path, state) and cached; static (no events). }
@@ -2998,12 +3000,88 @@ begin
   end;
 end;
 
+{ The source pixels (and their weights, summing to 256) one destination
+  pixel of an axis reads: the source span it covers, averaged, when the
+  image is made smaller (a glyph's thin strokes stay, point sampling
+  dropped them), else the two nearest pixels (bilinear). Indexes stay within
+  First .. Last (the glyph's own part of its font page). }
+type
+  TGuiTaps = record
+    Index: array of Integer;
+    Weight: array of Integer;
+    { taps of destination pixel I: Start[I] .. Start[I + 1] - 1 }
+    Start: array of Integer;
+  end;
+
+procedure GuiAxisTaps(const Src0, SrcSize: Single; const DstSize, First, Last: Integer; out Taps: TGuiTaps);
+var
+  D, I, N, K, W, Sum, Best: Integer;
+  F0, F1, Step, C, Frac: Single;
+begin
+  SetLength(Taps.Start, DstSize + 1);
+  SetLength(Taps.Index, 0);
+  SetLength(Taps.Weight, 0);
+  Step := SrcSize / DstSize;
+  N := 0;
+  for D := 0 to DstSize - 1 do
+  begin
+    Taps.Start[D] := N;
+    F0 := Src0 + D * Step;
+    F1 := F0 + Step;
+    if Step > 1 then
+    begin
+      { box: every source pixel the span overlaps, by its overlap }
+      Sum := 0;
+      for I := Floor(F0) to Ceil(F1) - 1 do
+      begin
+        W := Round((Min(F1, I + 1) - Max(F0, I)) / Step * 256);
+        if W <= 0 then
+          Continue;
+        SetLength(Taps.Index, N + 1);
+        SetLength(Taps.Weight, N + 1);
+        Taps.Index[N] := Clamped(I, First, Last);
+        Taps.Weight[N] := W;
+        Inc(Sum, W);
+        Inc(N);
+      end;
+      { rounding: the sum is 256 }
+      if N > Taps.Start[D] then
+      begin
+        Best := Taps.Start[D];
+        for K := Taps.Start[D] to N - 1 do
+          if Taps.Weight[K] > Taps.Weight[Best] then
+            Best := K;
+        Taps.Weight[Best] := Taps.Weight[Best] + 256 - Sum;
+      end;
+    end else
+    begin
+      { bilinear between the two pixels around the span's center }
+      C := (F0 + F1) / 2 - 0.5;
+      I := Floor(C);
+      Frac := C - I;
+      W := Round(Frac * 256);
+      SetLength(Taps.Index, N + 2);
+      SetLength(Taps.Weight, N + 2);
+      Taps.Index[N] := Clamped(I, First, Last);
+      Taps.Weight[N] := 256 - W;
+      Taps.Index[N + 1] := Clamped(I + 1, First, Last);
+      Taps.Weight[N + 1] := W;
+      Inc(N, 2);
+    end;
+  end;
+  Taps.Start[DstSize] := N;
+end;
+
 procedure TGuiPainter.DrawImagePart(const X0, Y0, DstW, DstH: Integer; const Src: TRGBAlphaImage;
   const S, T, S2, T2: Single; const CR, CG, CB, CA: Integer);
 var
-  GX, GY, SX, SY, A: Integer;
+  GX, GY, KX, KY, A, Acc, RowAcc: Integer;
   P: PVector4Byte;
   SrcX0, SrcY0, SrcW, SrcH: Single;
+  TapsX, TapsY: TGuiTaps;
+  { the glyph's coverage (0..255) per source pixel of its part }
+  Coverage: array of Byte;
+  PartX0, PartY0, PartW, PartH, X, Y, SY: Integer;
 begin
   if (Src = nil) or (DstW <= 0) or (DstH <= 0) then
     Exit;
@@ -3012,21 +3090,44 @@ begin
   { Doom 3 t goes down the image; CGE rows go up }
   SrcY0 := T * Src.Height;
   SrcH := (T2 - T) * Src.Height;
-  for GY := 0 to DstH - 1 do
+  if (SrcW <= 0) or (SrcH <= 0) then
+    Exit;
+  { the part's pixels (rows down), read once }
+  PartX0 := Clamped(Floor(SrcX0), 0, Src.Width - 1);
+  PartY0 := Clamped(Floor(SrcY0), 0, Src.Height - 1);
+  PartW := Clamped(Ceil(SrcX0 + SrcW), PartX0 + 1, Src.Width) - PartX0;
+  PartH := Clamped(Ceil(SrcY0 + SrcH), PartY0 + 1, Src.Height) - PartY0;
+  SetLength(Coverage, PartW * PartH);
+  for Y := 0 to PartH - 1 do
   begin
-    SY := Trunc(SrcY0 + (GY + 0.5) / DstH * SrcH);
-    SY := Src.Height - 1 - Clamped(SY, 0, Src.Height - 1);
-    for GX := 0 to DstW - 1 do
+    SY := Src.Height - 1 - (PartY0 + Y);
+    for X := 0 to PartW - 1 do
     begin
-      SX := Clamped(Trunc(SrcX0 + (GX + 0.5) / DstW * SrcW), 0, Src.Width - 1);
-      P := Src.PixelPtr(SX, SY);
+      P := Src.PixelPtr(PartX0 + X, SY);
       { the glyph is in the alpha (white RGB), or a gray image }
       A := P^.W;
       if A = 255 then
         A := Max(P^.X, Max(P^.Y, P^.Z));
-      BlendBytes(X0 + GX, Y0 + GY, CR, CG, CB, CA * A div 255);
+      Coverage[Y * PartW + X] := A;
     end;
   end;
+  GuiAxisTaps(SrcX0 - PartX0, SrcW, DstW, 0, PartW - 1, TapsX);
+  GuiAxisTaps(SrcY0 - PartY0, SrcH, DstH, 0, PartH - 1, TapsY);
+  for GY := 0 to DstH - 1 do
+    for GX := 0 to DstW - 1 do
+    begin
+      Acc := 0;
+      for KY := TapsY.Start[GY] to TapsY.Start[GY + 1] - 1 do
+      begin
+        RowAcc := 0;
+        for KX := TapsX.Start[GX] to TapsX.Start[GX + 1] - 1 do
+          Inc(RowAcc, Coverage[TapsY.Index[KY] * PartW + TapsX.Index[KX]] * TapsX.Weight[KX]);
+        Inc(Acc, (RowAcc shr 8) * TapsY.Weight[KY]);
+      end;
+      A := Acc shr 8;
+      if A > 0 then
+        BlendBytes(X0 + GX, Y0 + GY, CR, CG, CB, CA * Min(255, A) div 255);
+    end;
 end;
 
 { Doom 3 color escapes ("^8" gray...) left out }
@@ -3759,13 +3860,21 @@ var
   { UnpremultiplyTable[A, C] = Min(255, C * 255 div A), for A in 1..254 }
   UnpremultiplyTable: array of array [Byte] of Byte;
 
-function RenderGuiTransparent(const Gui: TD3Gui): TRGBAlphaImage;
+function RenderGuiTransparent(const Gui: TD3Gui; const Width: Integer = 0;
+  const Height: Integer = 0): TRGBAlphaImage;
 var
   Painter: TGuiPainter;
   P: PVector4Byte;
-  I, A, C: Integer;
+  I, A, C, W, H: Integer;
   Row: PByte;
 begin
+  W := Width;
+  H := Height;
+  if (W <= 0) or (H <= 0) then
+  begin
+    W := GuiImageWidth;
+    H := GuiImageHeight;
+  end;
   if UnpremultiplyTable = nil then
   begin
     SetLength(UnpremultiplyTable, 255);
@@ -3773,15 +3882,15 @@ begin
       for C := 0 to 255 do
         UnpremultiplyTable[A][C] := Min(255, C * 255 div A);
   end;
-  Result := TRGBAlphaImage.Create(GuiImageWidth, GuiImageHeight);
+  Result := TRGBAlphaImage.Create(W, H);
   Result.Clear(Vector4Byte(0, 0, 0, 0));
   if (Gui = nil) or (Gui.Desktop = nil) then
     Exit;
   Painter := TGuiPainter.Create;
   try
     Painter.Image := Result;
-    Painter.ScaleX := GuiImageWidth / GuiWidth;
-    Painter.ScaleY := GuiImageHeight / GuiHeight;
+    Painter.ScaleX := W / GuiWidth;
+    Painter.ScaleY := H / GuiHeight;
     Painter.Gui := Gui;
     Painter.Font := Font_DefaultUi;
     Painter.ClipX0 := 0;
