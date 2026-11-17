@@ -263,6 +263,48 @@ uses
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
   Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq;
 
+type
+  { Saves a screenshot in its own thread: without libpng (no DLL next to
+    the exe) PNGs are written by FPImage, 0.3 to 0.9 s for a 1600 x 900
+    image, which was most of a route's stalls (game/monorail: 77 of 80). }
+  TScreenshotSaver = class(TThread)
+  public
+    Img: TCastleImage;
+    Path, Error: String;
+    SaveTime: Single;
+    procedure Execute; override;
+  end;
+
+var
+  ScreenshotSaver: TScreenshotSaver;
+
+procedure TScreenshotSaver.Execute;
+var
+  SaveStart: TTimerResult;
+begin
+  SaveStart := Timer;
+  try
+    SaveImage(Img, Path);
+  except
+    on E: Exception do
+      Error := E.ClassName + ': ' + E.Message;
+  end;
+  FreeAndNil(Img);
+  SaveTime := TimerSeconds(Timer, SaveStart);
+end;
+
+{ Wait until the screenshot being saved is written (before the next one,
+  when the view stops and when the program ends). }
+procedure WaitScreenshotSaved;
+begin
+  if ScreenshotSaver = nil then
+    Exit;
+  ScreenshotSaver.WaitFor;
+  if ScreenshotSaver.Error <> '' then
+    WritelnWarning('Screenshot "%s" not saved: %s', [ScreenshotSaver.Path, ScreenshotSaver.Error]);
+  FreeAndNil(ScreenshotSaver);
+end;
+
 { idGameLocal::CalcFov: Doom 3's fov (degrees) is the horizontal one of a
   4:3 view; wider screens keep its vertical fov and see more on the sides
   (like dhewm3 and Doom 3 with r_aspectRatio). Radians. }
@@ -515,6 +557,7 @@ end;
 
 procedure TViewPlay.Stop;
 begin
+  WaitScreenshotSaved;
   FPaused := False;
   MainViewport.Exists := True;
   WalkNavigation.Exists := True;
@@ -1845,6 +1888,11 @@ begin
     MuzzleFlash.Radius := R;
     { Doom 3's light color is the light at its center }
     MuzzleFlash.Intensity := 1;
+    { a light volume like the map's (once: its custom fields stay), or
+      every shape a shot lights links a new shader program }
+    if MuzzleFlash.InternalLightNode.Field('d3_light_matrix_') = nil then
+      Map.DynamicLightVolume(MuzzleFlash, CgeToD3(P), R, Map.PointLightProfile(''));
+    Map.MoveDynamicLightVolume(MuzzleFlash, CgeToD3(P), R);
   end else
   begin
     { the built-in pistol: a short flash in front of the camera }
@@ -1854,6 +1902,8 @@ begin
     MuzzleFlash.Color := Vector3(1, 0.8, 0.4);
     MuzzleFlash.Radius := 400;
     MuzzleFlash.Intensity := 2;
+    if MuzzleFlash.Exists then
+      Map.MoveDynamicLightVolume(MuzzleFlash, CgeToD3(MuzzleFlash.WorldTranslation), 400);
   end;
 end;
 
@@ -3154,8 +3204,11 @@ var
   Path, ShadowName: String;
   Img: TCastleImage;
   I: Integer;
+  ShotStart: TTimerResult;
+  CaptureTime, SaveTime: Single;
 begin
   Inc(FShots);
+  ShotStart := Timer;
   if AutoTestPrefix <> '' then
     Path := AutoTestPrefix + '_' + IntToStr(FShots) + '.png'
   else
@@ -3164,11 +3217,14 @@ begin
     Img := SaveScreenOffscreen
   else
     Img := Container.SaveScreen;
-  try
-    SaveImage(Img, Path);
-  finally
-    Img.Free;
-  end;
+  CaptureTime := TimerSeconds(Timer, ShotStart);
+  { the previous one is long written by now (shots are seconds apart) }
+  WaitScreenshotSaved;
+  SaveTime := TimerSeconds(Timer, ShotStart) - CaptureTime;
+  ScreenshotSaver := TScreenshotSaver.Create(True);
+  ScreenshotSaver.Img := Img;
+  ScreenshotSaver.Path := Path;
+  ScreenshotSaver.Start;
   ShadowName := '';
   for I in Map.ShadowLights do
   begin
@@ -3178,10 +3234,10 @@ begin
   end;
   if ShadowName = '' then
     ShadowName := 'none';
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, programs %d, dormant %d, shadows %s%s)',
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, programs %d, dormant %d, capture %.2f s, waited %.2f s, shadows %s%s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
      Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, InternalProgramsLinked, FGame.DormantCount,
-     ShadowName,
+     CaptureTime, SaveTime, ShadowName,
      Iff(FGame.CinematicName <> '', ', cinematic ' + FGame.CinematicName, '')]);
 end;
 
@@ -3720,6 +3776,7 @@ begin
   else
   if Action = 'Q' then
   begin
+    WaitScreenshotSaved;
     FQuitting := True;
     Application.Terminate;
     Exit;
@@ -3997,4 +4054,6 @@ begin
   end;
 end;
 
+finalization
+  WaitScreenshotSaved;
 end.

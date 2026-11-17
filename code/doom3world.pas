@@ -114,6 +114,11 @@ type
     On: Boolean;
     { fadeInLight / fadeOutLight: Fade goes from FadeFrom to FadeTo }
     Fade, FadeFrom, FadeTo, FadeStart, FadeTime: Single;
+    { a light volume (TDoom3Map.DynamicLightVolume): its radius, and the
+      world place (CGE) its matrix was made for }
+    Volume: Boolean;
+    VolumeRadius: Single;
+    VolumeAt: TVector3;
     destructor Destroy; override;
   end;
 
@@ -2560,6 +2565,10 @@ begin
     R := Max(Radius.X, Max(Radius.Y, Radius.Z));
   SetScriptLightRadius(SL, R);
   SetScriptLightShader(SL, E.Value('texture'));
+  SL.VolumeRadius := R;
+  SL.VolumeAt := SL.Light.Translation;
+  SL.Volume := FMap.DynamicLightVolume(SL.Light, E.LightOrigin, R,
+    FMap.PointLightProfile(E.Value('texture')));
   FMap.Add(SL.Light);
   FScriptLights.Add(SL);
   ApplyScriptLight(SL);
@@ -2595,6 +2604,12 @@ end;
 
 procedure TD3Game.SetScriptLightRadius(const SL: TD3ScriptLight; const Radius: Single);
 begin
+  if SL.Volume then
+  begin
+    SL.VolumeRadius := Radius;
+    FMap.MoveDynamicLightVolume(SL.Light, CgeToD3(SL.VolumeAt), Radius);
+    Exit;
+  end;
   SL.Light.Radius := Max(1, Radius);
   SL.Light.Attenuation := Vector3(1, 0, 2 / Sqr(SL.Light.Radius));
 end;
@@ -2665,8 +2680,20 @@ end;
 procedure TD3Game.UpdateScriptLights;
 var
   SL: TD3ScriptLight;
+  At: TVector3;
 begin
   for SL in FScriptLights do
+  begin
+    { a light volume moved (bound to a mover, setOrigin): its matrix }
+    if SL.Volume and (SL.Light.Parent <> nil) then
+    begin
+      At := SL.Light.WorldTranslation;
+      if not TVector3.PerfectlyEquals(At, SL.VolumeAt) then
+      begin
+        SL.VolumeAt := At;
+        FMap.MoveDynamicLightVolume(SL.Light, CgeToD3(At), SL.VolumeRadius);
+      end;
+    end;
     if SL.FadeTime > 0 then
     begin
       SL.Fade := SL.FadeFrom + (SL.FadeTo - SL.FadeFrom) * EnsureRange((FTime - SL.FadeStart) / SL.FadeTime, 0, 1);
@@ -2674,6 +2701,7 @@ begin
         SL.FadeTime := 0;
       ApplyScriptLight(SL);
     end;
+  end;
 end;
 
 procedure TD3Game.NoteShakes(const ShaderName: String; const Position: TVector3; const Duration: Single);
@@ -9777,6 +9805,9 @@ begin
         else
           Light.Intensity := 1;
         Light.CastShadows := False;
+        { a light volume like the map's (its shader's images), or every
+          shape it reaches links a new shader program }
+        FMap.DynamicLightVolume(Light, Pos, Max(1, A.LightRadius), FMap.PointLightProfile(A.Data));
         FMap.Add(Light);
         Fx.Actions[Index].Light := Light;
       end;
@@ -9890,7 +9921,11 @@ begin
           Intensity := Min(Intensity, Max(0, (A.Duration - Elapsed) / A.FadeOut));
         St^.Light.Intensity := Intensity;
         if A.TrackOrigin then
+        begin
           St^.Light.Translation := D3ToCge(F.Origin + AxisToWorld(F.Axis, A.Offset));
+          FMap.MoveDynamicLightVolume(St^.Light, F.Origin + AxisToWorld(F.Axis, A.Offset),
+            Max(1, A.LightRadius));
+        end;
       end;
       { the emitter stays while the action points at it: a model whose
         particle has a set number of cycles is finished before the

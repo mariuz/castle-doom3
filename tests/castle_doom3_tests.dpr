@@ -7950,6 +7950,7 @@ var
   ME: TD3ModelEntity;
   RemoveMe: TRemoveType;
   SL: TD3ScriptLight;
+  Field: TX3DField;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -7996,8 +7997,24 @@ begin
       Check(SL.Light.Exists, 'the script light is on');
       CheckVectorNear(D3ToCge(Vector3(420, -100, 64)), SL.Light.Translation, 'the script placed the light', 0.01);
       CheckVectorNear(Vector3(0, 1, 0), SL.Light.Color, 'setColor made it green', 0.01);
-      CheckNear(200, SL.Light.Radius, 'its radius is the "light" key', 0.01);
-      for I := 1 to 8 do
+      { a light volume like the map's: a box of the "light" key's size
+        around the place setOrigin gave it (its matrix follows) }
+      Check(SL.Volume, 'the script light is a light volume');
+      CheckNear(200, SL.VolumeRadius, 'its radius is the "light" key', 0.01);
+      { the script moved it after this frame's UpdateScriptLights }
+      Game.Update(0.05, Eye);
+      Field := SL.Light.InternalLightNode.Field('d3_light_matrix_');
+      Check(Field is TSFMatrix4f, 'the script light has its volume matrix');
+      if Field is TSFMatrix4f then
+      begin
+        CheckVectorNear(Vector3(0.5, 0.5, 0.5),
+          LightTexCoord(TSFMatrix4f(Field).Value, D3ToCge(Vector3(420, -100, 64))),
+          'the volume is centered where the script placed the light', 0.01);
+        CheckVectorNear(Vector3(1, 0.5, 0.5),
+          LightTexCoord(TSFMatrix4f(Field).Value, D3ToCge(Vector3(620, -100, 64))),
+          'the volume reaches 200 units', 0.01);
+      end;
+      for I := 1 to 7 do
         Game.Update(0.05, Eye);
       Check(SL.Fade < 0.99, 'fadeOutLight dims it');
       for I := 1 to 6 do
