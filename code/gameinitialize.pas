@@ -28,7 +28,7 @@ var
   I: Integer;
   AutoTestMap, AutoTestPrefix, AutoTestDemo, CmdMap, BasePath, GameDir: String;
   Pk4s: TStringList;
-  LoadedGame: Boolean;
+  LoadedGame, Mute: Boolean;
 begin
   { OpenGLES: highp fragment shaders. With mediump (16-bit floats on Mesa
     and many mobile GPUs) light distances overflow past 256 units, so
@@ -40,6 +40,7 @@ begin
     ApplicationProperties.LimitFps := StrToFloatDef(GetEnvironmentVariable('CD3_LIMIT_FPS'), 0);
 
   AutoTestMap := '';
+  Mute := false;
   CmdMap := '';
   BasePath := '';
   GameDir := '';
@@ -83,7 +84,17 @@ begin
       begin
         Pk4s.Add(Parameters[I + 1]);
         Inc(I);
-      end;
+      end else
+      { --mute (or env CD3_MUTE=1): no sound out, for test runs; the sounds
+        still play (their lengths, the speakers' state) at volume 0 }
+      if Parameters[I] = '--mute' then
+        Mute := true
+      else
+      { --minimized: the window starts minimized (for runs started by
+        another program, like RenderDoc's renderdoccmd); screenshots then
+        render offscreen }
+      if Parameters[I] = '--minimized' then
+        StartMinimized := true;
       Inc(I);
     end;
 
@@ -100,6 +111,11 @@ begin
         64: then Creative's OpenAL ("Generic Software") has no memory left
         for the reverb's effect slot (console soundinfo). }
       SoundEngine.MaxAllocatedSources := 32;
+      if Mute or (GetEnvironmentVariable('CD3_MUTE') = '1') then
+      begin
+        SoundEngine.Volume := 0;
+        WritelnLog('Sound muted (--mute)');
+      end;
     end;
 
     { Data: the bundled test level first, then a Doom 3 install (later

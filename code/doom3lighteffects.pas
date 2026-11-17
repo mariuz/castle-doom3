@@ -17,9 +17,12 @@
 // The light matrix maps CGE world coordinates to (s * w, t * w, q, w);
 // point lights have w = 1, projected lights divide by depth.
 //
-// The projection / falloff images are approximated analytically (a soft
-// disc or square, Doom 3's default falloff curves): textures referenced only
-// by light effects aren't bound by CGE's renderer (they read as black).
+// Textures referenced only by light effects aren't bound by CGE's renderer
+// (they read as black), so the images are measured instead (LightProfile):
+// the projection image's brightness from its center to its edge (9 samples,
+// averaged over the 4 axes) and how square it is (the norm measuring the
+// distance from the center), the falloff image's brightness along q (9
+// samples). The shader interpolates them (per-light mat3 uniforms).
 unit Doom3LightEffects;
 
 {$mode objfpc}{$H+}
@@ -54,6 +57,31 @@ type
 { The shape for a projection image name ('' = Doom 3's default). }
 function ProjectionShape(const ImageName: String): TD3LightShape;
 
+type
+  TD3LightProfileSamples = array [0..8] of Single;
+
+  { A light's projection and falloff images as the shader uses them. }
+  TD3LightProfile = record
+    { the projection image's brightness at distance i / 8 from its center
+      (1 = the edge), the average of the 4 axes }
+    Projection: TD3LightProfileSamples;
+    { the distance from the center is (|x|^Norm + |y|^Norm)^(1 / Norm):
+      2 for round images, more for square ones (over 15: max(|x|, |y|)) }
+    Norm: Single;
+    { the falloff image's brightness at q = i / 8 }
+    Falloff: TD3LightProfileSamples;
+  end;
+
+{ The profile of a light's projection image and falloff image (image
+  programs, '' = none; Doom 3's _noFalloff is 1 everywhere). Images that
+  don't load get the analytic stand-ins of ProjectionShape and Doom 3's
+  default falloff curves. Cached. }
+function LightProfile(const ProjectionImage, FalloffImage: String;
+  const Projected: Boolean): TD3LightProfile;
+
+{ The profile's value at X (0..1), linear between the samples. }
+function ProfileAt(const Samples: TD3LightProfileSamples; const X: Single): Single;
+
 { The hue of a light's projection image, which the analytic shapes lose
   (lights/hellgate1 is red, lights/vivlight cyan): the image's colors summed
   over the sum of each pixel's brightest channel, so a white or gray image
@@ -66,7 +94,7 @@ function ProjectionTint(const ImageName: String): TVector3;
   for point lights (a box fading at both ends) and projected lights
   (fading towards light_end). }
 function CreateLightEffect(const Index: Integer; const M: TMatrix4;
-  const ProjectionImage: String; const Projected: Boolean): TEffectNode;
+  const Profile: TD3LightProfile): TEffectNode;
 
 type
   { One shared Effect per light shape and kind (point / projected), for a
@@ -79,7 +107,7 @@ type
   CGE change K): lights of the same kind then share shader programs.
   Otherwise its own Effect (CreateLightEffect, Index names the uniform). }
 procedure SetLightVolume(const Light: TAbstractLightNode; var Shared: TD3SharedLightEffects;
-  const Index: Integer; const M: TMatrix4; const ProjectionImage: String; const Projected: Boolean);
+  const Index: Integer; const M: TMatrix4; const Profile: TD3LightProfile);
 { Move a light's volume (SetLightVolume's matrix) when the light moves. }
 procedure SetLightVolumeMatrix(const Light: TAbstractLightNode; const M: TMatrix4);
 
@@ -89,8 +117,8 @@ function SharedLightEffectsAvailable: Boolean;
 
 { The light's strength (0..1) at a CGE world point: the same volume, shape
   and falloff as the shader (for picking the shadow casting light). }
-function LightVolumeStrength(const M: TMatrix4; const Shape: TD3LightShape;
-  const Projected: Boolean; const WorldCge: TVector3): Single;
+function LightVolumeStrength(const M: TMatrix4; const Profile: TD3LightProfile;
+  const WorldCge: TVector3): Single;
 
 { An Effect enabling CGE's EyeWorldSpace shader library for a group. }
 function LightLibraryEffect: TEffectNode;
@@ -114,6 +142,135 @@ uses
 
 var
   TintCache: specialize TDictionary<String, TVector3>;
+  ProfileCache: specialize TDictionary<String, TD3LightProfile>;
+
+function SmoothStep(const E0, E1, X: Single): Single; forward;
+
+function ProfileAt(const Samples: TD3LightProfileSamples; const X: Single): Single;
+var
+  T: Single;
+  I: Integer;
+begin
+  T := EnsureRange(X, 0, 1) * 8;
+  I := Min(7, Trunc(T));
+  Result := Samples[I] + (Samples[I + 1] - Samples[I]) * (T - I);
+end;
+
+{ The brightest channel of the pixel nearest to (S, T), clamped to the image. }
+function ImageValue(const Img: TCastleImage; const S, T: Single): Single;
+var
+  C: TVector4;
+begin
+  C := Img.Colors[
+    EnsureRange(Round(S * (Img.Width - 1)), 0, Img.Width - 1),
+    EnsureRange(Round(T * (Img.Height - 1)), 0, Img.Height - 1), 0];
+  Result := Max(C.X, Max(C.Y, C.Z));
+end;
+
+function LoadProfileImage(const Name: String): TCastleImage;
+begin
+  try
+    Result := EvaluateImageProgram(Name, ikColor);
+  except
+    Result := nil;
+  end;
+end;
+
+function LightProfile(const ProjectionImage, FalloffImage: String;
+  const Projected: Boolean): TD3LightProfile;
+const
+  Norms: array [0..7] of Single = (1, 1.5, 2, 3, 4, 6, 8, 100);
+var
+  Key, Fall: String;
+  Img: TCastleImage;
+  I, J, Best: Integer;
+  D, H, Err, BestErr, Predicted, Diag: Single;
+begin
+  Key := LowerCase(Trim(ProjectionImage)) + '|' + LowerCase(Trim(FalloffImage)) + '|' +
+    BoolToStr(Projected, '1', '0');
+  if ProfileCache = nil then
+    ProfileCache := specialize TDictionary<String, TD3LightProfile>.Create;
+  if ProfileCache.TryGetValue(Key, Result) then
+    Exit;
+
+  { the projection }
+  Img := nil;
+  if Trim(ProjectionImage) <> '' then
+    Img := LoadProfileImage(LowerCase(Trim(ProjectionImage)));
+  if Img <> nil then
+  try
+    for I := 0 to 8 do
+    begin
+      H := I / 16;
+      Result.Projection[I] := (ImageValue(Img, 0.5 - H, 0.5) + ImageValue(Img, 0.5 + H, 0.5) +
+        ImageValue(Img, 0.5, 0.5 - H) + ImageValue(Img, 0.5, 0.5 + H)) / 4;
+    end;
+    { the norm whose distances predict the diagonals best }
+    Best := 2;
+    BestErr := MaxSingle;
+    for J := 0 to High(Norms) do
+    begin
+      Err := 0;
+      for I := 1 to 6 do
+      begin
+        D := I / 8; // along each axis
+        H := D / 2;
+        Diag := (ImageValue(Img, 0.5 - H, 0.5 - H) + ImageValue(Img, 0.5 + H, 0.5 - H) +
+          ImageValue(Img, 0.5 - H, 0.5 + H) + ImageValue(Img, 0.5 + H, 0.5 + H)) / 4;
+        if Norms[J] > 15 then
+          Predicted := ProfileAt(Result.Projection, D)
+        else
+          Predicted := ProfileAt(Result.Projection, D * Power(2, 1 / Norms[J]));
+        Err := Err + Sqr(Predicted - Diag);
+      end;
+      if Err < BestErr then
+      begin
+        BestErr := Err;
+        Best := J;
+      end;
+    end;
+    Result.Norm := Norms[Best];
+  finally
+    Img.Free;
+  end else
+  begin
+    { no image: the analytic stand-ins }
+    for I := 0 to 8 do
+      if ProjectionShape(ProjectionImage) = lsFull then
+        Result.Projection[I] := 1
+      else
+        Result.Projection[I] := 1 - SmoothStep(0, 1, I / 8);
+    if ProjectionShape(ProjectionImage) = lsSquare then
+      Result.Norm := 100
+    else
+      Result.Norm := 2;
+  end;
+
+  { the falloff }
+  Fall := LowerCase(Trim(FalloffImage));
+  Img := nil;
+  if (Fall <> '') and (Fall <> '_nofalloff') then
+    Img := LoadProfileImage(Fall);
+  if Img <> nil then
+  try
+    for I := 0 to 8 do
+      Result.Falloff[I] := ImageValue(Img, I / 8, 0.5);
+  finally
+    Img.Free;
+  end else
+  if Fall = '_nofalloff' then
+  begin
+    for I := 0 to 8 do
+      Result.Falloff[I] := 1;
+  end else
+    for I := 0 to 8 do
+      if Projected then
+        Result.Falloff[I] := (1 - SmoothStep(0.85, 1, I / 8)) * SmoothStep(0, 0.05, I / 8)
+      else
+        Result.Falloff[I] := 1 - SmoothStep(0.3, 1, Abs(I / 8 * 2 - 1));
+
+  ProfileCache.AddOrSetValue(Key, Result);
+end;
 
 function ProjectionTint(const ImageName: String): TVector3;
 var
@@ -268,62 +425,72 @@ begin
     Result := lsRound;
 end;
 
-{ N is the light's uniform name suffix: its index, or "<Light>" (CGE puts
-  the light number there) for the shared effects. }
-function LightEffectCodeKind(const N: String; const Shape: TD3LightShape;
-  const Projected, KindUniform: Boolean): String; forward;
-
-function LightEffectCode(const N: String; const Shape: TD3LightShape; const Projected: Boolean): String;
+function GlslFloat(const F: Single): String;
 begin
-  Result := LightEffectCodeKind(N, Shape, Projected, False);
+  Result := FormatFloat('0.0#####', F, DefaultFormatSettings);
 end;
 
-{ With KindUniform the shape and Projected come from the per-light uniform
-  d3_light_kind_<N> (x: 0 round, 1 square, 2 full; y: 1 projected), so
-  lights of all kinds share one code: a shape's shader program then depends
-  on how many lights reach it, not on their kinds in each slot (in
-  game/caverns1 that was 600 programs for the first view and 200 to 500
-  more after most loads of a save, when other lights were on). }
-function LightEffectCodeKind(const N: String; const Shape: TD3LightShape;
-  const Projected, KindUniform: Boolean): String;
+{ The samples as a GLSL mat3 constructor (column i holds samples 3i..3i+2). }
+function GlslMat3(const Samples: TD3LightProfileSamples): String;
 var
-  ProjCode, FallCode, KindDecl: String;
+  I: Integer;
 begin
-  KindDecl := '';
-  if KindUniform then
+  Result := 'mat3(';
+  for I := 0 to 8 do
   begin
-    KindDecl := 'uniform vec2 d3_light_kind_' + N + ';' + LineEnding;
-    ProjCode :=
-      '  vec2 d2 = abs(st * 2.0 - 1.0);' + LineEnding +
-      '  float dist = (d3_light_kind_' + N + '.x > 0.5) ? max(d2.x, d2.y) : length(d2);' + LineEnding +
-      '  float projection = (d3_light_kind_' + N + '.x > 1.5) ? 1.0 : 1.0 - smoothstep(0.0, 1.0, dist);' + LineEnding;
-    FallCode :=
-      '  float falloff = (d3_light_kind_' + N + '.y > 0.5) ?' + LineEnding +
-      '    (1.0 - smoothstep(0.85, 1.0, p.z)) * smoothstep(0.0, 0.05, p.z) :' + LineEnding +
-      '    1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
+    if I > 0 then
+      Result := Result + ', ';
+    Result := Result + GlslFloat(Samples[I]);
+  end;
+  Result := Result + ')';
+end;
+
+function ProfileMatrix(const Samples: TD3LightProfileSamples): TMatrix3;
+var
+  I: Integer;
+begin
+  for I := 0 to 8 do
+    Result.Data[I div 3, I mod 3] := Samples[I];
+end;
+
+{ The light volume's code. N is the light's uniform name suffix: its index,
+  or "<Light>" (CGE puts the light number there) for the shared effect,
+  whose profile comes from the per-light uniforms d3_light_proj_<N>,
+  d3_light_fall_<N> (mat3: 9 samples) and d3_light_norm_<N>; so all lights
+  share one code and a shape's shader program depends on how many lights
+  reach it, not on their kinds in each slot (in game/caverns1 that was 600
+  programs for the first view and 200 to 500 more after most loads of a
+  save, when other lights were on). Without Uniforms the profile is in the
+  code (an effect per light). }
+function LightEffectCodeProfile(const N: String; const Profile: TD3LightProfile;
+  const Uniforms: Boolean): String;
+var
+  Decl, ProjM, FallM, NormV: String;
+begin
+  if Uniforms then
+  begin
+    Decl :=
+      'uniform mat3 d3_light_proj_' + N + ';' + LineEnding +
+      'uniform mat3 d3_light_fall_' + N + ';' + LineEnding +
+      'uniform float d3_light_norm_' + N + ';' + LineEnding;
+    ProjM := 'd3_light_proj_' + N;
+    FallM := 'd3_light_fall_' + N;
+    NormV := 'd3_light_norm_' + N;
   end else
   begin
-    case Shape of
-      { gradients brightest at the center, like lights/squarelight1 and
-        lights/round }
-      lsSquare:
-        ProjCode := '  vec2 d2 = abs(st * 2.0 - 1.0);' + LineEnding +
-                    '  float projection = 1.0 - smoothstep(0.0, 1.0, max(d2.x, d2.y));' + LineEnding;
-      lsFull:
-        ProjCode := '  float projection = 1.0;' + LineEnding;
-      else
-        ProjCode := '  float projection = 1.0 - smoothstep(0.0, 1.0, length(st * 2.0 - 1.0));' + LineEnding;
-    end;
-    if Projected then
-      FallCode := '  float falloff = (1.0 - smoothstep(0.85, 1.0, p.z)) * smoothstep(0.0, 0.05, p.z);' + LineEnding
-    else
-      FallCode := '  float falloff = 1.0 - smoothstep(0.3, 1.0, abs(p.z * 2.0 - 1.0));' + LineEnding;
+    Decl := '';
+    ProjM := GlslMat3(Profile.Projection);
+    FallM := GlslMat3(Profile.Falloff);
+    NormV := GlslFloat(Profile.Norm);
   end;
 
   { On OpenGLES all fragment shader parts are glued into one source: the
     Phong shader declares castle_vertex_eye, the EyeWorldSpace library
     castle_CameraInverseMatrix, and every light's effect is in it, so the
-    shared declarations are guarded (separate sources on desktop OpenGL). }
+    shared declarations are guarded (separate sources on desktop OpenGL,
+    so the profile lookup is a macro: a function in each would be defined
+    twice in the program). D3_PROFILE(m, x): the 9 samples of m at x (0..1),
+    linear between them (a tent of width 1/8 around each). }
   Result :=
     '#ifndef D3_LIGHT_VOLUME_DECLARATIONS' + LineEnding +
     '#define D3_LIGHT_VOLUME_DECLARATIONS' + LineEnding +
@@ -332,8 +499,14 @@ begin
     '#endif' + LineEnding +
     'vec4 position_eye_to_world_space(vec4 position_eye);' + LineEnding +
     '#endif' + LineEnding +
+    '#ifndef D3_PROFILE' + LineEnding +
+    '#define D3_PROFILE(m, x) (' +
+      'dot((m)[0], max(vec3(0.0), 1.0 - abs((x) * 8.0 - vec3(0.0, 1.0, 2.0)))) + ' +
+      'dot((m)[1], max(vec3(0.0), 1.0 - abs((x) * 8.0 - vec3(3.0, 4.0, 5.0)))) + ' +
+      'dot((m)[2], max(vec3(0.0), 1.0 - abs((x) * 8.0 - vec3(6.0, 7.0, 8.0)))))' + LineEnding +
+    '#endif' + LineEnding +
     'uniform mat4 d3_light_matrix_' + N + ';' + LineEnding +
-    KindDecl +
+    Decl +
     'void PLUG_light_scale(inout float scale, const in vec3 normal_eye, const in vec3 light_dir)' + LineEnding +
     '{' + LineEnding +
     '  vec4 p = d3_light_matrix_' + N + ' * position_eye_to_world_space(castle_vertex_eye);' + LineEnding +
@@ -341,13 +514,21 @@ begin
     '  vec2 st = p.xy / p.w;' + LineEnding +
     '  if (st.x < 0.0 || st.x > 1.0 || st.y < 0.0 || st.y > 1.0 || p.z < 0.0 || p.z > 1.0)' + LineEnding +
     '  { scale = 0.0; return; }' + LineEnding +
-    ProjCode + FallCode +
+    '  vec2 d2 = max(abs(st * 2.0 - 1.0), vec2(1e-6));' + LineEnding +
+    '  float norm = ' + NormV + ';' + LineEnding +
+    { round and square images without pow (most lights; the branch is
+      on a uniform, the same for the whole draw) }
+    '  float dist = min(1.0, (norm > 15.0) ? max(d2.x, d2.y) :' + LineEnding +
+    '    (abs(norm - 2.0) < 0.01) ? length(d2) :' + LineEnding +
+    '    pow(pow(d2.x, norm) + pow(d2.y, norm), 1.0 / norm));' + LineEnding +
+    '  float projection = D3_PROFILE(' + ProjM + ', dist);' + LineEnding +
+    '  float falloff = D3_PROFILE(' + FallM + ', p.z);' + LineEnding +
     '  scale *= projection * falloff;' + LineEnding +
     '}' + LineEnding;
 end;
 
 function CreateLightEffect(const Index: Integer; const M: TMatrix4;
-  const ProjectionImage: String; const Projected: Boolean): TEffectNode;
+  const Profile: TD3LightProfile): TEffectNode;
 var
   N: String;
   Part: TEffectPartNode;
@@ -359,7 +540,7 @@ begin
   Result.AddCustomField(TSFMatrix4f.Create(Result, True, 'd3_light_matrix_' + N, M));
   Part := TEffectPartNode.Create;
   Part.ShaderType := stFragment;
-  Part.Contents := LightEffectCode(N, ProjectionShape(ProjectionImage), Projected);
+  Part.Contents := LightEffectCodeProfile(N, Profile, False);
   Result.SetParts([Part]);
 end;
 
@@ -406,18 +587,16 @@ begin
 end;
 
 procedure SetLightVolume(const Light: TAbstractLightNode; var Shared: TD3SharedLightEffects;
-  const Index: Integer; const M: TMatrix4; const ProjectionImage: String; const Projected: Boolean);
+  const Index: Integer; const M: TMatrix4; const Profile: TD3LightProfile);
 var
-  Shape: TD3LightShape;
   Part: TEffectPartNode;
 begin
   if not (SharedLightEffects and SharedLightEffectsAvailable) then
   begin
-    Light.SetEffects([CreateLightEffect(Index, M, ProjectionImage, Projected)]);
+    Light.SetEffects([CreateLightEffect(Index, M, Profile)]);
     Exit;
   end;
-  Shape := ProjectionShape(ProjectionImage);
-  { one effect for all kinds (kept in the first slot) }
+  { one effect for all lights (kept in the first slot) }
   if Shared[lsRound, False] = nil then
   begin
     Shared[lsRound, False] := TEffectNode.Create;
@@ -425,14 +604,16 @@ begin
     Shared[lsRound, False].UniformMissing := umIgnore;
     Part := TEffectPartNode.Create;
     Part.ShaderType := stFragment;
-    Part.Contents := LightEffectCodeKind('<Light>', lsRound, False, True);
+    Part.Contents := LightEffectCodeProfile('<Light>', Profile, True);
     Shared[lsRound, False].SetParts([Part]);
   end;
-  { the uniforms d3_light_matrix_<Light> and d3_light_kind_<Light> of the
-    shared code }
+  { the per-light uniforms of the shared code }
   Light.AddCustomField(TSFMatrix4f.Create(Light, True, 'd3_light_matrix_', M));
-  Light.AddCustomField(TSFVec2f.Create(Light, True, 'd3_light_kind_',
-    Vector2(Ord(Shape), Ord(Projected))));
+  Light.AddCustomField(TSFMatrix3f.Create(Light, True, 'd3_light_proj_',
+    ProfileMatrix(Profile.Projection)));
+  Light.AddCustomField(TSFMatrix3f.Create(Light, True, 'd3_light_fall_',
+    ProfileMatrix(Profile.Falloff)));
+  Light.AddCustomField(TSFFloat.Create(Light, True, 'd3_light_norm_', Profile.Norm));
   Light.SetEffects([Shared[lsRound, False]]);
 end;
 
@@ -444,25 +625,22 @@ begin
   Result := T * T * (3 - 2 * T);
 end;
 
-function LightVolumeStrength(const M: TMatrix4; const Shape: TD3LightShape;
-  const Projected: Boolean; const WorldCge: TVector3): Single;
+function LightVolumeStrength(const M: TMatrix4; const Profile: TD3LightProfile;
+  const WorldCge: TVector3): Single;
 var
   TC: TVector3;
-  Projection, Falloff: Single;
+  DX, DY, Dist: Single;
 begin
   TC := LightTexCoord(M, WorldCge);
   if (TC.X < 0) or (TC.X > 1) or (TC.Y < 0) or (TC.Y > 1) or (TC.Z < 0) or (TC.Z > 1) then
     Exit(0);
-  case Shape of
-    lsSquare: Projection := 1 - SmoothStep(0, 1, Max(Abs(TC.X * 2 - 1), Abs(TC.Y * 2 - 1)));
-    lsFull: Projection := 1;
-    else Projection := 1 - SmoothStep(0, 1, Sqrt(Sqr(TC.X * 2 - 1) + Sqr(TC.Y * 2 - 1)));
-  end;
-  if Projected then
-    Falloff := (1 - SmoothStep(0.85, 1, TC.Z)) * SmoothStep(0, 0.05, TC.Z)
+  DX := Max(1e-6, Abs(TC.X * 2 - 1));
+  DY := Max(1e-6, Abs(TC.Y * 2 - 1));
+  if Profile.Norm > 15 then
+    Dist := Max(DX, DY)
   else
-    Falloff := 1 - SmoothStep(0.3, 1, Abs(TC.Z * 2 - 1));
-  Result := Projection * Falloff;
+    Dist := Power(Power(DX, Profile.Norm) + Power(DY, Profile.Norm), 1 / Profile.Norm);
+  Result := ProfileAt(Profile.Projection, Min(1, Dist)) * ProfileAt(Profile.Falloff, TC.Z);
 end;
 
 function LightLibraryEffect: TEffectNode;
@@ -481,4 +659,5 @@ end;
 
 finalization
   FreeAndNil(TintCache);
+  FreeAndNil(ProfileCache);
 end.

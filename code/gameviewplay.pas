@@ -244,6 +244,8 @@ type
 
 var
   ViewPlay: TViewPlay;
+  { --minimized: minimize the window when the view starts }
+  StartMinimized: Boolean;
 
 { A key to a GUI: backspace 8, enter 13, escape 27, else the character
   (only to a focused edit, escape always). }
@@ -291,9 +293,16 @@ begin
   inherited Destroy;
 end;
 
+procedure MinimizeGameWindow; forward;
+
 procedure TViewPlay.Start;
 begin
   inherited Start;
+  if StartMinimized then
+  begin
+    StartMinimized := false;
+    MinimizeGameWindow;
+  end;
   { env CD3_PRECOMPRESSED=0: plain color images from their TGA, not from
     Doom 3's compressed dds/ copies (console image_usePrecompressedTextures) }
   if GetEnvironmentVariable('CD3_PRECOMPRESSED') = '0' then
@@ -3070,7 +3079,77 @@ begin
     Console.Print('Unknown command "' + Cmd + '"');
 end;
 
+{$ifdef MSWINDOWS}
+{ user32 calls declared here: the Windows unit's names would hide
+  SysUtils' (GetEnvironmentVariable) }
+type
+  TEnumWindowsProc = function(Wnd: PtrUInt; Param: PtrInt): LongBool; stdcall;
+function EnumThreadWindows(ThreadId: LongWord; Proc: TEnumWindowsProc; Param: PtrInt): LongBool; stdcall; external 'user32.dll';
+function IsIconic(Wnd: PtrUInt): LongBool; stdcall; external 'user32.dll';
+function IsWindowVisible(Wnd: PtrUInt): LongBool; stdcall; external 'user32.dll';
+function ShowWindow(Wnd: PtrUInt; CmdShow: Integer): LongBool; stdcall; external 'user32.dll';
+function GetCurrentThreadId: LongWord; stdcall; external 'kernel32.dll';
+
+function IconicWindowFound(Wnd: PtrUInt; Param: PtrInt): LongBool; stdcall;
+begin
+  if IsWindowVisible(Wnd) and IsIconic(Wnd) then
+    PBoolean(Param)^ := true;
+  Result := true;
+end;
+{$endif}
+
+{$ifdef MSWINDOWS}
+function MinimizeWindowFound(Wnd: PtrUInt; Param: PtrInt): LongBool; stdcall;
+const
+  SW_MINIMIZE = 6;
+begin
+  if IsWindowVisible(Wnd) then
+    ShowWindow(Wnd, SW_MINIMIZE);
+  Result := true;
+end;
+{$endif}
+
+procedure MinimizeGameWindow;
+begin
+  {$ifdef MSWINDOWS}
+  EnumThreadWindows(GetCurrentThreadId, @MinimizeWindowFound, 0);
+  {$endif}
+end;
+
+{ Is the game's window minimized (test runs started minimized): then its
+  pixels aren't drawn, a screenshot read from it is black. }
+function GameWindowMinimized: Boolean;
+begin
+  Result := false;
+  {$ifdef MSWINDOWS}
+  EnumThreadWindows(GetCurrentThreadId, @IconicWindowFound, PtrInt(@Result));
+  {$endif}
+end;
+
 procedure TViewPlay.CaptureScreenshot;
+
+  { The whole container rendered into a framebuffer object of the window's
+    size: works while the window is minimized. }
+  function SaveScreenOffscreen: TRGBImage;
+  var
+    RenderToTexture: TGLRenderToTexture;
+    R: TRectangle;
+  begin
+    R := Container.PixelsRect;
+    RenderToTexture := TGLRenderToTexture.Create(R.Width, R.Height);
+    try
+      RenderToTexture.Buffer := tbNone;
+      RenderToTexture.GLContextOpen;
+      RenderToTexture.RenderBegin;
+      Container.EventBeforeRender;
+      Container.EventRender;
+      Result := SaveScreen_NoFlush(TRGBImage, R, RenderToTexture.ColorBuffer) as TRGBImage;
+      RenderToTexture.RenderEnd;
+    finally
+      FreeAndNil(RenderToTexture);
+    end;
+  end;
+
 var
   Path, ShadowName: String;
   Img: TCastleImage;
@@ -3081,7 +3160,10 @@ begin
     Path := AutoTestPrefix + '_' + IntToStr(FShots) + '.png'
   else
     Path := FormatDateTime('"castle-doom3-"yyyymmdd-hhnnss', Now) + '.png';
-  Img := Container.SaveScreen;
+  if GameWindowMinimized then
+    Img := SaveScreenOffscreen
+  else
+    Img := Container.SaveScreen;
   try
     SaveImage(Img, Path);
   finally

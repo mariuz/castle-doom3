@@ -56,6 +56,9 @@ type
     FCheckCalls, FCheckCallsOld: Int64;
     procedure Flow(const Eye: TVector3; const Area: Integer;
       const Planes: TD3FlowPlanes; const Depth: Integer);
+    procedure FlowLight(const Origin: TVector3; const Area: Integer;
+      const Planes, BoxPlanes: TD3FlowPlanes; const Depth: Integer;
+      var Reached: TD3BoolArray; var Calls: Integer);
   public
     { Flow only through portals that face the eye (default). False: the
       older flow through every portal, to compare. }
@@ -91,6 +94,13 @@ type
       Radius to Center. }
     function AreasWithinRadius(const Center: TVector3; const Radius: Single;
       const StartArea: Integer): TD3IntArray;
+    { The areas a light flows into from Origin (in StartArea) through
+      portals, open or closed, within its box (Doom 3 coordinates), each
+      portal narrowing the volume to the planes through Origin and its
+      edges (idRenderWorldLocal::FlowLightThroughPortals: Doom 3's area
+      references of lights with a precomputed shadow volume). }
+    function LightFlowAreas(const Origin: TVector3; const StartArea: Integer;
+      const BoxMin, BoxMax: TVector3): TD3IntArray;
     { Portals whose polygon center is inside the box (for doors). }
     function PortalsInBox(const Box: TBox3D): TD3IntArray;
     { The first portal whose bounding box touches Box, -1 when none
@@ -397,6 +407,130 @@ begin
     end;
     Flow(Eye, Other, NewPlanes, Depth + 1);
   end;
+end;
+
+procedure TD3PortalVisibility.FlowLight(const Origin: TVector3; const Area: Integer;
+  const Planes, BoxPlanes: TD3FlowPlanes; const Depth: Integer;
+  var Reached: TD3BoolArray; var Calls: Integer);
+var
+  K, P, Other, J, N: Integer;
+  Poly, Clipped: TD3FlowPoly;
+  NewPlanes: TD3FlowPlanes;
+  Center, Normal, A, B: TVector3;
+  D: Single;
+begin
+  Inc(Calls);
+  Reached[Area] := True;
+  if (Depth >= MaxFlowDepth) or (Calls >= MaxFlowCalls) then
+    Exit;
+  for K := 0 to High(FAreaPortals[Area]) do
+  begin
+    P := FAreaPortals[Area][K];
+    if FAreas[P][0] = Area then
+      Other := FAreas[P][1]
+    else
+      Other := FAreas[P][0];
+    if (Other < 0) or (Other >= FAreaCount) or (Other = Area) then
+      Continue;
+    { only through portals facing away from the light, like Flow }
+    if (Depth > 0) and (FSides[P] <> 0) then
+    begin
+      D := PlaneDist(FPlanes[P], Origin) * FSides[P];
+      if FAreas[P][0] <> Area then
+        D := -D;
+      if D < -1 then
+        Continue;
+    end;
+
+    { the portal clipped by the volume so far and by the light's box }
+    Poly.Count := Min(Length(FPoints[P]), Length(Poly.P) div 2);
+    for J := 0 to Poly.Count - 1 do
+      Poly.P[J] := FPoints[P][J];
+    for J := 0 to Planes.Count - 1 do
+    begin
+      if Poly.Count < 3 then
+        Break;
+      ClipFlowPoly(Poly, Planes.P[J], Clipped);
+      Poly := Clipped;
+    end;
+    for J := 0 to BoxPlanes.Count - 1 do
+    begin
+      if Poly.Count < 3 then
+        Break;
+      ClipFlowPoly(Poly, BoxPlanes.P[J], Clipped);
+      Poly := Clipped;
+    end;
+    if Poly.Count < 3 then
+      Continue;
+
+    { the light is (almost) in the portal: it passes whole }
+    Center := TVector3.Zero;
+    for J := 0 to Poly.Count - 1 do
+      Center := Center + Poly.P[J];
+    Center := Center / Poly.Count;
+    Normal := TVector3.CrossProduct(Poly.P[1] - Poly.P[0], Poly.P[2] - Poly.P[0]);
+    if (Normal.Length < 1e-6) or
+       (Abs(TVector3.DotProduct(Normal.Normalize, Origin - Poly.P[0])) < 1) or
+       (Poly.Count > Length(NewPlanes.P)) then
+    begin
+      FlowLight(Origin, Other, Planes, BoxPlanes, Depth + 1, Reached, Calls);
+      Continue;
+    end;
+
+    { narrow the volume to the planes through the light and the edges }
+    N := Poly.Count;
+    NewPlanes.Count := N;
+    for J := 0 to N - 1 do
+    begin
+      A := Poly.P[J] - Origin;
+      B := Poly.P[(J + 1) mod N] - Origin;
+      Normal := TVector3.CrossProduct(A, B);
+      if Normal.Length < 1e-9 then
+        Normal := TVector3.Zero
+      else
+        Normal := Normal.Normalize;
+      if TVector3.DotProduct(Normal, Center - Origin) < 0 then
+        Normal := -Normal;
+      NewPlanes.P[J] := Vector4(Normal, -TVector3.DotProduct(Normal, Origin));
+    end;
+    FlowLight(Origin, Other, NewPlanes, BoxPlanes, Depth + 1, Reached, Calls);
+  end;
+end;
+
+function TD3PortalVisibility.LightFlowAreas(const Origin: TVector3; const StartArea: Integer;
+  const BoxMin, BoxMax: TVector3): TD3IntArray;
+var
+  BoxPlanes, NoPlanes: TD3FlowPlanes;
+  Reached: TD3BoolArray;
+  I, N, Calls: Integer;
+begin
+  Result := nil;
+  if (StartArea < 0) or (StartArea >= FAreaCount) then
+    Exit;
+  { inside: dist >= 0 }
+  BoxPlanes.Count := 6;
+  BoxPlanes.P[0] := Vector4( 1, 0, 0, -BoxMin.X);
+  BoxPlanes.P[1] := Vector4(-1, 0, 0,  BoxMax.X);
+  BoxPlanes.P[2] := Vector4(0,  1, 0, -BoxMin.Y);
+  BoxPlanes.P[3] := Vector4(0, -1, 0,  BoxMax.Y);
+  BoxPlanes.P[4] := Vector4(0, 0,  1, -BoxMin.Z);
+  BoxPlanes.P[5] := Vector4(0, 0, -1,  BoxMax.Z);
+  NoPlanes.Count := 0;
+  SetLength(Reached, FAreaCount);
+  Calls := 0;
+  FlowLight(Origin, StartArea, NoPlanes, BoxPlanes, 0, Reached, Calls);
+  N := 0;
+  for I := 0 to FAreaCount - 1 do
+    if Reached[I] then
+      Inc(N);
+  SetLength(Result, N);
+  N := 0;
+  for I := 0 to FAreaCount - 1 do
+    if Reached[I] then
+    begin
+      Result[N] := I;
+      Inc(N);
+    end;
 end;
 
 procedure TD3PortalVisibility.Compute(const Eye: TVector3; const StartArea: Integer;
