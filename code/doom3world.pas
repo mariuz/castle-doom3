@@ -6079,6 +6079,16 @@ type
   { SegmentCollision is protected }
   TTransformAccess = class(TCastleTransform);
 
+{ T's SegmentCollision. The cast to the access class is checked by object
+  checks (-CR, debug builds: the CI's unit tests) and fails, as T is not a
+  TTransformAccess: they are off here. }
+{$push}{$objectchecks off}
+function TransformSegmentCollision(const T: TCastleTransform; const A, B: TVector3): Boolean;
+begin
+  Result := TTransformAccess(T).SegmentCollision(A, B, nil, False);
+end;
+{$pop}
+
 procedure TD3Game.BroadphaseUpdate;
 var
   I: Integer;
@@ -6161,12 +6171,12 @@ begin
     { a scene went or came since the boxes were taken: the plain way }
     if C = nil then
       Exit(Root.WorldSegmentCollision(A, B));
-    if C.Exists and C.Collides and TTransformAccess(C).SegmentCollision(A, B, nil, False) then
+    if C.Exists and C.Collides and TransformSegmentCollision(C, A, B) then
       Exit(True);
   end;
   { what is beside the map }
   for I := 0 to Root.Count - 1 do
-    if (Root[I] <> FMap) and TTransformAccess(Root[I]).SegmentCollision(A, B, nil, False) then
+    if (Root[I] <> FMap) and TransformSegmentCollision(Root[I], A, B) then
       Exit(True);
   Result := False;
 end;

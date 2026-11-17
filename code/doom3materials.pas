@@ -994,7 +994,7 @@ begin
     Points.Count := Length(T.Positions);
     if Points.Count > 0 then
       TubePositions(T.Positions, T.Indexes, LocalView,
-        Slice(TVector3List.PTypeList(Points.L)^, Points.Count));
+        Slice(PVector3Array(Points.L)^, Points.Count));
     T.Coord.FdPoint.Changed;
   end;
 end;
