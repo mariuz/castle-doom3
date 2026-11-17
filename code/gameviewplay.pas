@@ -180,6 +180,9 @@ type
     function FightStep(const SecondsPassed: Single): Boolean;
     procedure LogMemory(const Title: String);
     procedure FightSummary;
+    { After preparing resources: wait until the driver has compiled the
+      shader programs it started (InternalParallelShaderCompile). }
+    procedure WaitForShaderPrograms;
     procedure SetupSky;
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
@@ -256,6 +259,7 @@ implementation
 uses
   Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
+  CastleInternalRenderer,
   CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils, CastleGLImages,
   CastleRenderContext,
   Doom3Sampler, CastleInternalGLShadowVolumes, CastleGLShaders,
@@ -767,6 +771,7 @@ begin
     MainViewport.PrepareResources(Map, [prRenderSelf, prBoundingBox]);
     Map.UpdateVisibility(MainViewport.Camera);
     LoadProfileStep('prepare');
+    WaitForShaderPrograms;
     { the decoded images are in the GPU's textures now: the copies in the
       texture nodes go (hundreds of MB in a big map; a texture needed
       again, by a scene made later, is read again) }
@@ -778,6 +783,30 @@ begin
   end;
   FProfileFrames := 1;
   FLastUpdateValid := False;
+end;
+
+procedure TViewPlay.WaitForShaderPrograms;
+const
+  { a driver that never says "done" doesn't block the game: the shapes
+    are drawn once it does }
+  MaxWait = 120;
+var
+  Compiling, NotReady: Integer;
+  WaitStart: TTimerResult;
+begin
+  Compiling := InternalShaderProgramsCompiling;
+  if Compiling = 0 then
+    Exit;
+  WaitStart := Timer;
+  repeat
+    NotReady := InternalShaderProgramsCompiling(True);
+    if NotReady = 0 then
+      Break;
+    Sleep(2);
+  until TimerSeconds(Timer, WaitStart) > MaxWait;
+  WritelnLog('Shaders: %d programs compiled by the driver in parallel, %.2f s waited for them (%d not done)',
+    [Compiling, TimerSeconds(Timer, WaitStart), NotReady]);
+  LoadProfileStep('shader programs');
 end;
 
 procedure TViewPlay.SetupSky;
