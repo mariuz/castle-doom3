@@ -302,6 +302,8 @@ The BFG edition ships no source assets. `base/*.resources` and `base/maps/*.reso
 
 ## Performance
 
+Shader programs: CGE builds one GLSL program per combination of a shape's material and its lights, and a new one costs the driver up to a second (about 20 ms a light). With CGE change AB (`InternalParallelShaderCompile`, set in `GameInitialize`) the renderer only starts the compilation (`TGLSLProgram.LinkStart`), skips the shape while `LinkReady` is false and finishes the program in a later frame (`TRendererCache.Program_Ready`); `TViewPlay.WaitForShaderPrograms` waits after the load's prepare step until the driver is done with the programs it started. Measure compile stalls cold (see CLAUDE.md: NVIDIA's disk cache makes repeat runs warm).
+
 How to measure:
 
 - Every map load logs `Profile: Map "...": <seconds> (<phase> <seconds>, ...; N file reads, N image programs)`: the build phases (`proc+map`, `world`, `collision`, `brushes`, `static models`, `md5 models`, `spawn`, `scripts`...) and the first five frames (`frame 2` is CGE preparing every scene: textures, shaders, VBOs). `Profile: Data` is the startup (PK4 indexes, decls).

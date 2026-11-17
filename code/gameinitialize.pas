@@ -211,6 +211,12 @@ initialization
     line, console "meminfo full" lists them) }
   if GetEnvironmentVariable('CD3_TEXMEM') <> '' then
     TextureMemoryProfiler.Enabled := True;
+  { the driver compiles the shader programs on its own threads
+    (GL_ARB_parallel_shader_compile): a shape is drawn once its program is
+    ready, instead of a stall (a new program took up to a second; on a
+    first play game/hell1's route compiled 207, 33 s);
+    CD3_PARALLEL_SHADERS=0 waits for each like before }
+  InternalParallelShaderCompile := GetEnvironmentVariable('CD3_PARALLEL_SHADERS') <> '0';
   Application.OnInitialize := @ApplicationInitialize;
 
   Window := TCastleWindow.Create(Application);
