@@ -147,6 +147,9 @@ type
     FMapName: String;
     FSpawnModels: Boolean;
     FLightScale: Single;
+    { the map lights' shared effect (BuildLights), for DynamicLightVolume;
+      the light nodes own it (cleared with them) }
+    FSharedLightEffects: TD3SharedLightEffects;
     FProc: TD3ProcFile;
     FMapFile: TD3MapFile;
     FLightScene, FWorldCollision: TCastleScene;
@@ -463,6 +466,22 @@ type
     property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
     property LightScale: Single read FLightScale write FLightScale {$ifdef FPC}default 1{$endif};
+    { The profile of a light shader's images, like BuildLights' (the
+      default point light's for ''). }
+    function PointLightProfile(const ShaderName: String): TD3LightProfile;
+    { Make a game light (an FX's, a script's, the muzzle flash) a light
+      volume with the code of the map lights' shared effect: a sphere of Radius around
+      OriginD3 (Doom 3 coordinates) shaped by the shader's images. Shapes it
+      reaches then use the programs of their number of light volumes,
+      mostly linked by the load's prepare step already; as a plain
+      attenuated light, every shape it reached linked a new program (a
+      stall: 446 programs in game/hell1's route, its teleport FX lights).
+      False (nothing changed) without shared light effects or map lights. }
+    function DynamicLightVolume(const ALight: TCastlePointLight; const OriginD3: TVector3;
+      const Radius: Single; const Profile: TD3LightProfile): Boolean;
+    { A new place or size for a light DynamicLightVolume made. }
+    procedure MoveDynamicLightVolume(const ALight: TCastlePointLight; const OriginD3: TVector3;
+      const Radius: Single);
     { Read-only information, visible in the editor's inspector. }
     property AreaCount: Integer read GetAreaCount;
     property EntityCount: Integer read GetEntityCount;
@@ -693,6 +712,7 @@ begin
   FBrushes.Clear;
   FBrushByName.Clear;
   FLights := nil;
+  FillChar(FSharedLightEffects, SizeOf(FSharedLightEffects), 0);
   FLightByName.Clear;
   for I := 0 to High(FAreaScenes) do
   begin
@@ -1254,13 +1274,12 @@ var
   LightMatrix: TMatrix4;
   ProjectionImage, FalloffImage: String;
   Profile: TD3LightProfile;
-  SharedEffects: TD3SharedLightEffects;
   Shape: TD3LightShape;
   SharedCount: Integer;
 begin
   N := 0;
   { the lights' shared effects (all lights are in LightScene) }
-  FillChar(SharedEffects, SizeOf(SharedEffects), 0);
+  FillChar(FSharedLightEffects, SizeOf(FSharedLightEffects), 0);
   for E in FMapFile.Entities do
   begin
     if not SameText(E.ClassName_, 'light') then
@@ -1336,7 +1355,7 @@ begin
         Point.Location := D3ToCge(LOrigin) + D3RotateCge(Rot, D3ToCge(LightCenter));
         Point.Radius := LightRadius.Length + LightCenter.Length + 1;
       end;
-      SetLightVolume(Point, SharedEffects, N, LightMatrix, Profile);
+      SetLightVolume(Point, FSharedLightEffects, N, LightMatrix, Profile);
       Node := Point;
     end else
     if Projected then
@@ -1420,13 +1439,72 @@ begin
   SharedCount := 0;
   for Shape := Low(Shape) to High(Shape) do
     for Projected := False to True do
-      if SharedEffects[Shape, Projected] <> nil then
+      if FSharedLightEffects[Shape, Projected] <> nil then
         Inc(SharedCount);
   if SharedCount > 0 then
     WritelnLog('Doom3Level', 'Light volumes: %d lights share %d effects (per-light uniforms)', [N, SharedCount])
   else
   if LightVolumes then
     WritelnLog('Doom3Level', 'Light volumes: %d lights, an effect each', [N]);
+end;
+
+function TDoom3Map.PointLightProfile(const ShaderName: String): TD3LightProfile;
+var
+  Shader: TD3Material;
+  ProjectionImage, FalloffImage: String;
+begin
+  Shader := nil;
+  if (ShaderName <> '') and Decls.HasDecl(dtMaterial, ShaderName) then
+    Shader := Decls.Material(ShaderName);
+  if (Shader = nil) and Decls.HasDecl(dtMaterial, 'lights/defaultpointlight') then
+    Shader := Decls.Material('lights/defaultpointlight');
+  ProjectionImage := '';
+  FalloffImage := '';
+  if Shader <> nil then
+  begin
+    ProjectionImage := Shader.StageImage;
+    FalloffImage := Shader.LightFalloffImage;
+  end;
+  if (FalloffImage = '') and Decls.HasDecl(dtMaterial, 'lights/defaultpointlight') then
+    FalloffImage := Decls.Material('lights/defaultpointlight').LightFalloffImage;
+  Result := LightProfile(ProjectionImage, FalloffImage, False);
+end;
+
+function TDoom3Map.DynamicLightVolume(const ALight: TCastlePointLight; const OriginD3: TVector3;
+  const Radius: Single; const Profile: TD3LightProfile): Boolean;
+var
+  R: Single;
+  OwnEffect: TD3SharedLightEffects;
+begin
+  Result := LightVolumes and SharedLightEffects and SharedLightEffectsAvailable and
+    (FSharedLightEffects[lsRound, False] <> nil);
+  if not Result then
+    Exit;
+  R := Max(1, Radius);
+  { like the map's light volumes: no attenuation, the radius (the box's
+    corner) only bounds which shapes get the light }
+  ALight.Attenuation := Vector3(1, 0, 0);
+  ALight.RadiusFalloff := False;
+  ALight.Radius := R * Sqrt(3) + 1;
+  { an Effect of its own with the same code (the light's node is in its own
+    scene, and an X3D node must not be in two): CGE shares the programs of
+    Effects with equal code and no interface declarations }
+  FillChar(OwnEffect, SizeOf(OwnEffect), 0);
+  SetLightVolume(ALight.InternalLightNode, OwnEffect, 0,
+    PointLightMatrix(OriginD3, TMatrix3.Identity, Vector3(R, R, R)), Profile);
+end;
+
+procedure TDoom3Map.MoveDynamicLightVolume(const ALight: TCastlePointLight; const OriginD3: TVector3;
+  const Radius: Single);
+var
+  R: Single;
+begin
+  if ALight.InternalLightNode.Field('d3_light_matrix_') = nil then
+    Exit;
+  R := Max(1, Radius);
+  ALight.Radius := R * Sqrt(3) + 1;
+  SetLightVolumeMatrix(ALight.InternalLightNode,
+    PointLightMatrix(OriginD3, TMatrix3.Identity, Vector3(R, R, R)));
 end;
 
 function TDoom3Map.LightShaderColor(const I: Integer): TVector3;
