@@ -1384,36 +1384,44 @@ begin
     Format('%s: expected %s, got %s', [What, Expected.ToString, Actual.ToString]));
 end;
 
-{ All lights share one Effect with per-light matrices and kinds when CGE
-  supports custom fields on lights; otherwise an effect each. }
+{ All lights share one Effect with per-light matrices and profiles when
+  CGE supports custom fields on lights; otherwise an effect each. }
 procedure TestSharedLightEffects;
 var
   Shared: TD3SharedLightEffects;
   A, B, C: TPointLightNode;
   M: TMatrix4;
   Field: TX3DField;
+  PointProfile, ProjectedProfile: TD3LightProfile;
 begin
   FillChar(Shared, SizeOf(Shared), 0);
   M := PointLightMatrix(Vector3(10, 20, 30), TMatrix3.Identity, Vector3(100, 200, 50));
+  PointProfile := LightProfile('lights/squarelight1.tga', 'makeintensity(lights/squarelight1a.tga)', False);
+  ProjectedProfile := LightProfile('lights/round.tga', 'lights/projfalloff.tga', True);
   A := TPointLightNode.Create;
   B := TPointLightNode.Create;
   C := TPointLightNode.Create;
   try
-    SetLightVolume(A, Shared, 0, M, '', False);
-    SetLightVolume(B, Shared, 1, M, '', False);
-    SetLightVolume(C, Shared, 2, M, '', True);
+    SetLightVolume(A, Shared, 0, M, PointProfile);
+    SetLightVolume(B, Shared, 1, M, PointProfile);
+    SetLightVolume(C, Shared, 2, M, ProjectedProfile);
     CheckEquals(1, A.FdEffects.Count, 'light A has one effect');
     CheckEquals(1, C.FdEffects.Count, 'light C has one effect');
     if SharedLightEffectsAvailable then
     begin
-      { the kind is a uniform: one program whatever the lights' kinds }
+      { the profile is in uniforms: one program whatever the lights' images }
       Check(A.FdEffects[0] = C.FdEffects[0], 'projected and point lights share their effect');
-      Field := A.Field('d3_light_kind_');
-      Check((Field is TSFVec2f) and TVector2.PerfectlyEquals(TSFVec2f(Field).Value, Vector2(0, 0)),
-        'light A kind: round, point');
-      Field := C.Field('d3_light_kind_');
-      Check((Field is TSFVec2f) and TVector2.PerfectlyEquals(TSFVec2f(Field).Value, Vector2(0, 1)),
-        'light C kind: round, projected');
+      Field := A.Field('d3_light_norm_');
+      Check((Field is TSFFloat) and (TSFFloat(Field).Value > 15), 'light A norm: square');
+      Field := C.Field('d3_light_norm_');
+      Check((Field is TSFFloat) and (TSFFloat(Field).Value < 3), 'light C norm: round');
+      Field := C.Field('d3_light_fall_');
+      Check(Field is TSFMatrix3f, 'light C has the d3_light_fall_ field');
+      if Field is TSFMatrix3f then
+        CheckNear(ProjectedProfile.Falloff[4], TSFMatrix3f(Field).Value.Data[1, 1],
+          'light C falloff sample 4 in the matrix');
+      Field := A.Field('d3_light_proj_');
+      Check(Field is TSFMatrix3f, 'light A has the d3_light_proj_ field');
       Check(A.FdEffects[0] = B.FdEffects[0], 'point lights share their effect');
       Field := A.Field('d3_light_matrix_');
       Check(Field is TSFMatrix4f, 'light A has the d3_light_matrix_ field');
@@ -1431,7 +1439,7 @@ begin
     { r_sharedLightEffects 0 }
     SharedLightEffects := False;
     try
-      SetLightVolume(B, Shared, 1, M, '', False);
+      SetLightVolume(B, Shared, 1, M, PointProfile);
       Check(A.FdEffects[0] <> B.FdEffects[0], 'r_sharedLightEffects 0: an effect each');
     finally
       SharedLightEffects := True;
@@ -1447,6 +1455,7 @@ procedure TestLightVolumes;
 var
   M: TMatrix4;
   Origin: TVector3;
+  Profile, Round_, Square: TD3LightProfile;
 begin
   { a point light box 100 x 200 x 50 around (10, 20, 30) }
   Origin := Vector3(10, 20, 30);
@@ -1475,9 +1484,31 @@ begin
   CheckNear(0.9, LightTexCoord(M, D3ToCge(Vector3(0, -150, 0))).Z, 'projected falloff from start to end');
   { light strength at a point (picks the shadow casting light) }
   M := PointLightMatrix(Vector3(0, 0, 0), TMatrix3.Identity, Vector3(100, 100, 100));
-  CheckNear(1, LightVolumeStrength(M, lsRound, False, D3ToCge(Vector3(0, 0, 0))), 'strength at the light center');
-  Check(LightVolumeStrength(M, lsRound, False, D3ToCge(Vector3(50, 0, 0))) < 1, 'strength fades');
-  CheckNear(0, LightVolumeStrength(M, lsRound, False, D3ToCge(Vector3(150, 0, 0))), 'no strength outside the box');
+  Profile := LightProfile('', '', False);
+  CheckNear(1, LightVolumeStrength(M, Profile, D3ToCge(Vector3(0, 0, 0))), 'strength at the light center');
+  Check(LightVolumeStrength(M, Profile, D3ToCge(Vector3(50, 0, 0))) < 1, 'strength fades');
+  CheckNear(0, LightVolumeStrength(M, Profile, D3ToCge(Vector3(150, 0, 0))), 'no strength outside the box');
+  { profiles measured from the test PK4's images (tools/make_test_pk4.py):
+    round.tga is 1 up to 0.75 of its radius, then fades to 0; squarelight1
+    fades in its outer quarter, squarely }
+  Round_ := LightProfile('lights/round.tga', '_noFalloff', True);
+  CheckNear(1, Round_.Projection[0], 'round: 1 at the center', 0.02);
+  CheckNear(1, Round_.Projection[5], 'round: 1 at 0.625', 0.02);
+  Check(Round_.Projection[8] < 0.1, 'round: dark at the edge');
+  Check((Round_.Norm >= 1.5) and (Round_.Norm <= 3), 'round: a round norm');
+  CheckNear(1, Round_.Falloff[0], 'noFalloff: 1 at the start');
+  CheckNear(1, Round_.Falloff[8], 'noFalloff: 1 at the end');
+  Square := LightProfile('lights/squarelight1.tga', 'makeintensity(lights/squarelight1a.tga)', False);
+  Check(Square.Norm > 6, 'squarelight1: a square norm');
+  CheckNear(1, Square.Projection[4], 'squarelight1: 1 at half its size', 0.02);
+  CheckNear(1, Square.Falloff[4], 'squarelight1a: 1 in the middle', 0.05);
+  Check(Square.Falloff[0] < 0.1, 'squarelight1a: dark at the start');
+  Check(Square.Falloff[8] < 0.1, 'squarelight1a: dark at the end');
+  CheckNear((Square.Falloff[2] + Square.Falloff[3]) / 2, ProfileAt(Square.Falloff, 2.5 / 8),
+    'ProfileAt interpolates between samples');
+  { a strength with a square profile is the same along the axis and the diagonal }
+  CheckNear(LightVolumeStrength(M, Square, D3ToCge(Vector3(40, 0, 0))),
+    LightVolumeStrength(M, Square, D3ToCge(Vector3(40, 40, 0))), 'square profile: corner like the axis', 0.02);
   { analytic projection shapes from image names }
   Check(ProjectionShape('lights/squarelight1.tga') = lsSquare, 'squarelight1 is a square');
   Check(ProjectionShape('makeintensity(lights/round.tga)') = lsRound, 'round is a disc');

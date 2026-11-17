@@ -105,7 +105,8 @@ type
     { The light volume (Doom3LightEffects), also when LightVolumes is off }
     Matrix: TMatrix4;
     Projected: Boolean;
-    Shape: TD3LightShape;
+    { its projection and falloff images, measured }
+    Profile: TD3LightProfile;
     { Area of the light's origin (-1 outside: lights often sit inside
       their fixture; then the first area of Areas) }
     OriginArea: Integer;
@@ -1251,7 +1252,8 @@ var
   N, I: Integer;
   Projected: Boolean;
   LightMatrix: TMatrix4;
-  ProjectionImage: String;
+  ProjectionImage, FalloffImage: String;
+  Profile: TD3LightProfile;
   SharedEffects: TD3SharedLightEffects;
   Shape: TD3LightShape;
   SharedCount: Integer;
@@ -1302,8 +1304,21 @@ begin
     else
       LightMatrix := PointLightMatrix(LOrigin, Rot, LightRadius);
     ProjectionImage := '';
+    FalloffImage := '';
     if Shader <> nil then
+    begin
       ProjectionImage := Shader.StageImage;
+      FalloffImage := Shader.LightFalloffImage;
+    end;
+    { R_DeriveLightData: without its own, the falloff of the default
+      shader of the light's kind }
+    if FalloffImage = '' then
+      if Projected and Decls.HasDecl(dtMaterial, 'lights/defaultprojectedlight') then
+        FalloffImage := Decls.Material('lights/defaultprojectedlight').LightFalloffImage
+      else
+      if (not Projected) and Decls.HasDecl(dtMaterial, 'lights/defaultpointlight') then
+        FalloffImage := Decls.Material('lights/defaultpointlight').LightFalloffImage;
+    Profile := LightProfile(ProjectionImage, FalloffImage, Projected);
 
     if LightVolumes then
     begin
@@ -1321,7 +1336,7 @@ begin
         Point.Location := D3ToCge(LOrigin) + D3RotateCge(Rot, D3ToCge(LightCenter));
         Point.Radius := LightRadius.Length + LightCenter.Length + 1;
       end;
-      SetLightVolume(Point, SharedEffects, N, LightMatrix, ProjectionImage, Projected);
+      SetLightVolume(Point, SharedEffects, N, LightMatrix, Profile);
       Node := Point;
     end else
     if Projected then
@@ -1394,7 +1409,7 @@ begin
     FLights[N].Shader := Shader;
     FLights[N].Matrix := LightMatrix;
     FLights[N].Projected := Projected;
-    FLights[N].Shape := ProjectionShape(ProjectionImage);
+    FLights[N].Profile := Profile;
     FLights[N].Tint := ProjectionTint(ProjectionImage);
     FLights[N].NoShadows := E.BoolValue('noshadows') or
       ((Shader <> nil) and Shader.NoShadows);
@@ -1459,6 +1474,20 @@ var
   Surf: TD3ProcSurface;
   Sprites, J: Integer;
   BspAreas: TD3AreaList;
+  Flowed: TD3IntArray;
+  FlowLights, FlowCut: Integer;
+  C0, C1: TVector3;
+
+  function InFlow(const A: Integer): Boolean;
+  var
+    K: Integer;
+  begin
+    for K := 0 to High(Flowed) do
+      if Flowed[K] = A then
+        Exit(True);
+    Result := False;
+  end;
+
 begin
   { one solid and one non-solid scene per area, so portal visibility can
     hide areas; shapes stay per material inside them }
@@ -1525,18 +1554,43 @@ begin
   FPortals := TD3PortalVisibility.Create(FProc);
   WritelnLog('Doom3Level', 'Portals: %d between %d areas, the sides of %d known',
     [FPortals.PortalCount, FPortals.AreaCount, FPortals.KnownSideCount]);
+  FlowLights := 0;
+  FlowCut := 0;
   for I := 0 to High(FLights) do
   begin
     { like Doom 3, a light belongs to all areas its volume touches (its
       origin is often inside the fixture, outside any area) }
     BspAreas := FProc.BoxAreas(FLights[I].VolumeMin, FLights[I].VolumeMax);
-    SetLength(FLights[I].Areas, Length(BspAreas));
-    for J := 0 to High(BspAreas) do
-      FLights[I].Areas[J] := BspAreas[J];
     FLights[I].OriginArea := AreaAt(FLights[I].Location);
+    { R_CreateLightRefs: a light with a precomputed shadow volume reaches
+      only the areas it flows into through portals from its center
+      (FlowLightThroughPortals); its shadow darkens the rest in Doom 3,
+      and here only one light casts shadows. Env CD3_LIGHT_PORTAL_FLOW=0:
+      every light gets all the areas its volume touches. }
+    Flowed := nil;
+    if (FLights[I].OriginArea >= 0) and (GetEnvironmentVariable('CD3_LIGHT_PORTAL_FLOW') <> '0') and
+       (FProc.FindShadowModel('_prelight_' + FLights[I].Entity.Name) <> nil) then
+    begin
+      C0 := D3ToCge(FLights[I].VolumeMin);
+      C1 := D3ToCge(FLights[I].VolumeMax);
+      Flowed := FPortals.LightFlowAreas(FLights[I].Location, FLights[I].OriginArea,
+        Vector3(Min(C0.X, C1.X), Min(C0.Y, C1.Y), Min(C0.Z, C1.Z)),
+        Vector3(Max(C0.X, C1.X), Max(C0.Y, C1.Y), Max(C0.Z, C1.Z)));
+      Inc(FlowLights);
+    end;
+    FLights[I].Areas := nil;
+    for J := 0 to High(BspAreas) do
+      if (Flowed = nil) or InFlow(BspAreas[J]) then
+      begin
+        SetLength(FLights[I].Areas, Length(FLights[I].Areas) + 1);
+        FLights[I].Areas[High(FLights[I].Areas)] := BspAreas[J];
+      end else
+        Inc(FlowCut);
     if (FLights[I].OriginArea < 0) and (Length(FLights[I].Areas) > 0) then
       FLights[I].OriginArea := FLights[I].Areas[0];
   end;
+  WritelnLog('Doom3Level', 'Light areas: %d lights with a precomputed shadow flow through portals, %d light areas fewer',
+    [FlowLights, FlowCut]);
 end;
 
 function TDoom3Map.SkyboxUrls(out Urls: TCastleStringArray6): Boolean;
@@ -1809,7 +1863,7 @@ var
 begin
   C := FLights[I].Color;
   Result := Max(C.X, Max(C.Y, C.Z)) *
-    LightVolumeStrength(FLights[I].Matrix, FLights[I].Shape, FLights[I].Projected, P);
+    LightVolumeStrength(FLights[I].Matrix, FLights[I].Profile, P);
 end;
 
 procedure TDoom3Map.SetShadowLight(const I: Integer);

@@ -75,3 +75,28 @@ What still differs most, by view:
 - Sealed item closets: dhewm3 draws them black, here the sky shows through (`alphalabs2`, `delta5`, `site3`).
 - Doors open here and stay shut in dhewm3: the tour flies with noclip, and Doom 3 doesn't touch triggers in noclip (this port does, for the routes).
 - The global ambient gray and the lights' soft outer parts (analytic shapes, roadmap item 10), as before.
+
+## Measured light images (2026-11-17)
+
+The 27 maps toured again (minimized and muted, `tour_output9`) after the lights took their projection and falloff images' measured profiles instead of analytic shapes, Doom 3's 512 sample window for sound driven lights and the portal flow of lights with a precomputed shadow (see the changelog), against the same dhewm3 views:
+
+| | Before (`tour_output7`) | After (`tour_output9`) |
+|---|---|---|
+| Views with an image difference under 5 | 201 | 213 |
+| Views within 15% of dhewm3's luma | 32 | 40 |
+| Median image difference | 3.9 | 3.9 |
+
+The five maps without the global ambient light (`CD3_GLOBAL_AMBIENT=0`, before the portal flow):
+
+| Map | Views | Luma here | Luma dhewm3 | Median luma difference | Views within 15% | Median image difference | Views under 5 |
+|---|---|---|---|---|---|---|---|
+| admin | 10 | 8.5 | 12.8 | 36% | 1 | 3.8 | 8 |
+| alphalabs1 | 10 | 2.8 | 3.5 | 7% | 6 | 0.8 | 10 |
+| delta1 | 10 | 7.9 | 9.8 | 22% | 3 | 1.6 | 9 |
+| hell1 | 10 | 6.4 | 8.2 | 15% | 5 | 1.1 | 10 |
+| mars_city2 | 10 | 18.2 | 21.0 | 27% | 3 | 2.5 | 7 |
+| **all** | 50 | | | 27% (39% before) | 18 (11) | 1.9 (2.9) | 44 (41) |
+
+- Lit places are now near dhewm3's brightness (`mars_city2`'s median luma 8.9 -> 18.2, dhewm3 21.0; `delta3`'s first corridor 25.4 -> 45.5, dhewm3 57.4): the soft outer parts of the lights were what the analytic shapes missed.
+- With the default global ambient the median luma difference grows (63% -> 75%): places dhewm3 draws black still get the gray, and lights now reach further into them.
+- Where it is brighter than dhewm3 now: big lights that Doom 3's shadows keep out of rooms behind walls (`game/comm1`'s airlock is lit by the outdoor light `light_outdoor_area2_1`, whose image `lights/asstemp2a` is an even noise, not a disc): here only one light casts shadows. Flickering lights make some views differ from run to run (`mc_underground` view 4: luma 35.6, 18.3, 31.5 in three tours).

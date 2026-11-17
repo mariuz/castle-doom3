@@ -1067,9 +1067,10 @@ type
     procedure UpdateShakes;
     { A sound file's amplitude every 1/60 s (like Doom 3 BFG's
       idSoundSample amplitude data): the range (highest minus lowest, 0..2
-      of full scale) * 127 of the 64 samples (at 44.1 kHz) from that time,
-      idSoundWorldLocal::FindAmplitude's window; cached, empty if the file
-      doesn't decode. }
+      of full scale) * 127 of the 512 samples (at 44.1 kHz; 256 of a
+      22 kHz file) from that time, idSoundWorldLocal::FindAmplitude's
+      window (AMPLITUDE_SAMPLES, MIXBUFFER_SAMPLES / 8); cached, empty if
+      the file doesn't decode. }
     function SoundEnvelope(const Url: String): TBytes;
     { lights whose shader follows their sound ("sound"): their amplitude now }
     procedure UpdateLightSounds;
@@ -2449,7 +2450,7 @@ begin
       Channels := Max(1, F.Channels);
       Frames := F.DataSize div (2 * Channels);
       Block := Max(1, Round(F.Frequency / 60));
-      Window := Max(1, Round(64 * F.Frequency / 44100));
+      Window := Max(1, Round(512 * F.Frequency / 44100));
       Blocks := (Frames + Block - 1) div Block;
       SetLength(Result, Blocks);
       Samples := F.Data;

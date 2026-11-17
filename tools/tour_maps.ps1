@@ -36,7 +36,10 @@ param(
   # quiet and loads the save when the player dies)
   [switch] $Fight,
   [int] $Speed = 500,
-  [int] $ShotEvery = 1500
+  [int] $ShotEvery = 1500,
+  # -Visible: a normal window with sound; by default the game runs minimized
+  # (screenshots render offscreen) and muted (--mute)
+  [switch] $Visible
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,7 +86,11 @@ foreach ($Map in $Maps) {
   $Name = $Map -replace '[/\\]', '_'
   $Arguments = "--autotest $Map `"$OutDir\$Name`" --demo `"$Demo`" -basepath `"$BasePath`""
   if ($Game -ne "") { $Arguments += " -game $Game" }
-  $Process = Start-Process $Exe -ArgumentList $Arguments -PassThru
+  if ($Visible) {
+    $Process = Start-Process $Exe -ArgumentList $Arguments -PassThru
+  } else {
+    $Process = Start-Process $Exe -ArgumentList "--mute $Arguments" -WindowStyle Minimized -PassThru
+  }
   if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
     Stop-Process $Process -Force
     $Status = "timeout"

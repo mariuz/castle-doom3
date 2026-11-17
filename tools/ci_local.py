@@ -7,7 +7,8 @@ its log to stdout).
     python tools/ci_local.py [name ...]
 
 With names, only those run_test calls run (and the checks after them).
-Set CD3_LIMIT_FPS=3 for CI's software rendering speed.
+Set CD3_LIMIT_FPS=3 for CI's software rendering speed. The game runs minimized
+and muted (--minimized --mute); CD3_CI_VISIBLE=1 shows its window.
 """
 import os
 import re
@@ -49,8 +50,11 @@ def main():
         if skipping and not l.lstrip().startswith('run_test() {'):
             continue
         if 'xvfb-run' in l:
-            l = ('            timeout 600 ./castle-doom3.exe --autotest "$map" "test_output/$name" --demo "$demo" || status=$?\n'
-                 '            cp "%s" "test_output/$name.log"' % log)
+            # minimized and muted (screenshots render offscreen), unless
+            # CD3_CI_VISIBLE=1
+            flags = '' if os.environ.get('CD3_CI_VISIBLE') == '1' else '--mute --minimized '
+            l = ('            timeout 600 ./castle-doom3.exe %s--autotest "$map" "test_output/$name" --demo "$demo" || status=$?\n'
+                 '            cp "%s" "test_output/$name.log"' % (flags, log))
         out.append(l)
     script = '\n'.join(out) + '\necho "CI autotests passed"\n'
     path = os.path.join(ROOT, 'test_output', 'ci_local.sh')
