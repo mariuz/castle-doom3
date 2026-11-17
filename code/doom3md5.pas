@@ -1529,8 +1529,8 @@ begin
       if (Points.Count > 0) and (UVs.Count = Points.Count) then
       begin
         EyeballTexCoords(FEyeballs[I].Islands,
-          Slice(TVector3List.PTypeList(Points.L)^, Points.Count),
-          Slice(TVector2List.PTypeList(UVs.L)^, UVs.Count));
+          Slice(PVector3Array(Points.L)^, Points.Count),
+          Slice(PVector2Array(UVs.L)^, UVs.Count));
         FEyeballs[I].TexCoord.FdPoint.Changed;
       end;
     end;
