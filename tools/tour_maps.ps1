@@ -113,8 +113,11 @@ foreach ($Map in $Maps) {
   # GLSL programs linked (screenshot lines): by the first screenshot and during the tour
   $Programs = @($Lines | Select-String 'Screenshot .*programs (\d+)' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value })
   if ($Programs.Count -gt 0) { $Text += "Shader programs: $($Programs[0]) at the first screenshot, $($Programs[-1] - $Programs[0]) more during the tour" }
-  $Stalls = @($Long | Where-Object { $_ -gt 0.3 })
-  $Text += "Stalls over 0.3 s: $($Stalls.Count), $([Math]::Round(($Stalls | Measure-Object -Sum).Sum, 1)) s"
+  # a stall is a long frame without its demo part (a screenshot's capture renders the frame again)
+  $NoDemo = @($Lines | Select-String 'Profile: Long frame: (\d+\.\d+) .*demo (\d+\.\d+)' | ForEach-Object { [double]$_.Matches[0].Groups[1].Value - [double]$_.Matches[0].Groups[2].Value })
+  $Stalls = @($NoDemo | Where-Object { $_ -gt 0.3 })
+  $Shots = @($Long | Where-Object { $_ -gt 0.3 }).Count - $Stalls.Count
+  $Text += "Stalls over 0.3 s: $($Stalls.Count), $([Math]::Round(($Stalls | Measure-Object -Sum).Sum, 1)) s (not counting screenshots' capture: $Shots more with it)"
   $Tours = $Lines | Select-String 'Tour \d+/|Route to|Route: done|Route: the map|Route: skipping|Loading map|Fight: (summary|died|gave up|no save)|doesn''t die' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
   $Text += $Tours
   foreach ($Kind in @(

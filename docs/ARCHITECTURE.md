@@ -302,6 +302,8 @@ The BFG edition ships no source assets. `base/*.resources` and `base/maps/*.reso
 
 ## Performance
 
+Loads during play: a texture is read again when the scene that held it was freed (weapon view models, particle quads, debris) and a new one needs it; `Doom3Images` keeps the results of image programs over 5 ms evaluated during play (`ImageCacheGet` / `ImageCachePut`, 64 MB), so a normal map built from a height map is built once. The long frame log line's `loaded:` part and the `Image during play` lines say what a frame read.
+
 Shader programs: CGE builds one GLSL program per combination of a shape's material and its lights, and a new one costs the driver up to a second (about 20 ms a light). With CGE change AB (`InternalParallelShaderCompile`, set in `GameInitialize`) the renderer only starts the compilation (`TGLSLProgram.LinkStart`), skips the shape while `LinkReady` is false and finishes the program in a later frame (`TRendererCache.Program_Ready`); `TViewPlay.WaitForShaderPrograms` waits after the load's prepare step until the driver is done with the programs it started. Measure compile stalls cold (see CLAUDE.md: NVIDIA's disk cache makes repeat runs warm).
 
 How to measure:

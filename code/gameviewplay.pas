@@ -157,6 +157,11 @@ type
       when new areas come into view: textures, shaders) }
     FLastUpdate: TTimerResult;
     FLastUpdateValid: Boolean;
+    { the counters at the last Update: what a long frame loaded (file reads,
+      image programs, shader programs) }
+    FLastReads, FLastImages: Integer;
+    FLastReadSeconds, FLastImageSeconds: Double;
+    FLastPrograms: Cardinal;
     { seconds of the last Update's parts, for the long frame log line }
     FPartGame, FPartVisibility, FPartHud, FPartDemo, FPartUpdate: Single;
     FPartGameParts: String;
@@ -692,19 +697,25 @@ begin
     mean something is loaded again and again }
   S := S + Format(', %d file reads (%.2f s) and %d image programs (%.2f s) since the load',
     [ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds]);
+  if ProfileImageCacheHits > 0 then
+    S := S + Format(' (%d from the cache of slow image programs)', [ProfileImageCacheHits]);
   if TextureMemoryProfiler.Enabled then
     S := S + ', ' + Copy(TextureMemoryProfiler.Summary, 1, Pos(#10, TextureMemoryProfiler.Summary + #10) - 1);
   WritelnLog('Memory', S);
 end;
 
-procedure FreeTextureData(const T: TCastleTransform);
+{ Keep (nil: none) and its children keep their decoded images: CGE's image
+  cache serves a URL again only while a node holds it. }
+procedure FreeTextureData(const T, Keep: TCastleTransform);
 var
   I: Integer;
 begin
+  if T = Keep then
+    Exit;
   if T is TCastleSceneCore then
     TCastleSceneCore(T).FreeResources([frTextureDataInNodes]);
   for I := 0 to T.Count - 1 do
-    FreeTextureData(T[I]);
+    FreeTextureData(T[I], Keep);
 end;
 
 procedure TViewPlay.LoadLevel(const AMapName: String);
@@ -712,6 +723,7 @@ begin
   WritelnLog('GameViewPlay', 'Loading map "%s"', [AMapName]);
   Inc(FMapLoads);
   FProgramsAtLoad := InternalProgramsLinked;
+  ProfileLogReads := False;
   LoadProfileStart;
   if SamplerWanted then
     SamplerStart;
@@ -767,6 +779,7 @@ begin
     { env CD3_PREPARE_LIGHTS=0: prepare without the map's lights (CGE's
       old way, to compare) }
     InternalPrepareGlobalLights := GetEnvironmentVariable('CD3_PREPARE_LIGHTS') <> '0';
+    FGame.PrepareWeaponViews;
     Map.AllLightsOn;
     MainViewport.PrepareResources(Map, [prRenderSelf, prBoundingBox]);
     Map.UpdateVisibility(MainViewport.Camera);
@@ -777,7 +790,7 @@ begin
       again, by a scene made later, is read again) }
     if GetEnvironmentVariable('CD3_FREE_TEXTURE_DATA') <> '0' then
     begin
-      FreeTextureData(Map);
+      FreeTextureData(Map, FGame.PreparedViewsHolder);
       LoadProfileStep('texture data freed');
     end;
   end;
@@ -3856,10 +3869,28 @@ begin
     { the parts are of the frame's own Update (the one before this); the
       rest is the rendering, the map's Update (animations, GUIs) and the
       buffer swap }
-    WritelnLog('Profile', 'Long frame: %.2f s (eye %s, yaw %.0f, area %d, visible areas %d; update %.2f: game %.2f, visibility %.2f, hud %.2f, demo %.2f; game:%s)',
+    WritelnLog('Profile', 'Long frame: %.2f s (eye %s, yaw %.0f, area %d, visible areas %d; update %.2f: game %.2f, visibility %.2f, hud %.2f, demo %.2f; game:%s; loaded: %d file reads %.2f s, %d image programs %.2f s, %d shader programs)',
       [TimerSeconds(Timer, FLastUpdate), CgeToD3(Camera.Translation).ToString, CameraYaw,
        Map.AreaAt(Camera.Translation), Map.VisibleAreaCount,
-       FPartUpdate, FPartGame, FPartVisibility, FPartHud, FPartDemo, FPartGameParts]);
+       FPartUpdate, FPartGame, FPartVisibility, FPartHud, FPartDemo, FPartGameParts,
+       ProfileReadCount - FLastReads, ProfileReadSeconds - FLastReadSeconds,
+       ProfileImageCount - FLastImages, ProfileImageSeconds - FLastImageSeconds,
+       InternalProgramsLinked - FLastPrograms]);
+  { env CD3_CGE_PROFILE: CGE's profile of a long frame (octrees, shadow
+    volume edges, scene loads...); every frame starts a new one }
+  if (FProfileFrames = 0) and Profiler.Enabled then
+  begin
+    if FLastUpdateValid and (TimerSeconds(Timer, FLastUpdate) > LongFrameSeconds) then
+      WritelnLogMultiline('Time Profile', Profiler.Summary);
+    {$warnings off} // Clear is deprecated: fine between frames, nothing is started
+    Profiler.Clear;
+    {$warnings on}
+  end;
+  FLastReads := ProfileReadCount;
+  FLastReadSeconds := ProfileReadSeconds;
+  FLastImages := ProfileImageCount;
+  FLastImageSeconds := ProfileImageSeconds;
+  FLastPrograms := InternalProgramsLinked;
   FLastUpdate := Timer;
   FLastUpdateValid := True;
   if FProfileFrames > 0 then
@@ -3871,6 +3902,11 @@ begin
     begin
       FProfileFrames := 0;
       LoadProfileLog(Format('Map "%s"', [MapName]));
+      FLastReads := 0;
+      FLastReadSeconds := 0;
+      FLastImages := 0;
+      FLastImageSeconds := 0;
+      ProfileLogReads := True;
       LogMemory(Format('Map "%s" (load %d)', [MapName, FMapLoads]));
       if Profiler.Enabled then
         WritelnLogMultiline('Time Profile', Profiler.Summary);

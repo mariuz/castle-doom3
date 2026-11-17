@@ -660,6 +660,71 @@ type
 var
   Handler: THandler;
 
+{ Results of slow image programs (a normal map from a height map takes 10 to
+  60 ms), kept as the TGA they were served as: a texture freed with its
+  scene (a weapon's view model, a particle's quad) and needed again isn't
+  evaluated again. Only during play (the load reads each once); the oldest
+  go first over ImageCacheMaxBytes. }
+const
+  ImageCacheMinSeconds = 0.005;
+  ImageCacheMaxBytes = 64 * 1024 * 1024;
+var
+  ImageCacheKeys: TStringList;
+  ImageCacheData: array of TBytes;
+  ImageCacheBytes: Int64;
+
+function ImageCacheGet(const Path: String): TStream;
+var
+  I: Integer;
+begin
+  Result := nil;
+  if ImageCacheKeys = nil then
+    Exit;
+  I := ImageCacheKeys.IndexOf(Path);
+  if I < 0 then
+    Exit;
+  Result := TBytesStream.Create(Copy(ImageCacheData[PtrInt(ImageCacheKeys.Objects[I])]));
+end;
+
+procedure ImageCachePut(const Path: String; const S: TMemoryStream);
+var
+  Slot: Integer;
+begin
+  if S.Size > ImageCacheMaxBytes div 4 then
+    Exit;
+  if ImageCacheKeys = nil then
+    ImageCacheKeys := TStringList.Create;
+  while (ImageCacheKeys.Count > 0) and (ImageCacheBytes + S.Size > ImageCacheMaxBytes) do
+  begin
+    Slot := PtrInt(ImageCacheKeys.Objects[0]);
+    ImageCacheBytes := ImageCacheBytes - Length(ImageCacheData[Slot]);
+    ImageCacheData[Slot] := nil;
+    ImageCacheKeys.Delete(0);
+  end;
+  { a free slot, or a new one }
+  Slot := 0;
+  while (Slot < Length(ImageCacheData)) and (ImageCacheData[Slot] <> nil) do
+    Inc(Slot);
+  if Slot = Length(ImageCacheData) then
+    SetLength(ImageCacheData, Slot + 1);
+  SetLength(ImageCacheData[Slot], S.Size);
+  Move(S.Memory^, ImageCacheData[Slot][0], S.Size);
+  ImageCacheBytes := ImageCacheBytes + S.Size;
+  ImageCacheKeys.AddObject(Path, TObject(PtrInt(Slot)));
+end;
+
+{ Counts an image read for the load profile; during play (ProfileLogReads)
+  logs it: images loaded while playing stall the frame. }
+procedure ImageRead(const Path: String; const Start: TTimerResult);
+var
+  Seconds: Double;
+begin
+  Seconds := TimerSeconds(Timer, Start);
+  ProfileImageSeconds := ProfileImageSeconds + Seconds;
+  if ProfileLogReads then
+    WritelnLog('Doom3Images', 'Image during play: %s (%.3f s)', [Path, Seconds]);
+end;
+
 function THandler.Read(const Url: String; out MimeType: String): TStream;
 var
   Path, Prog: String;
@@ -675,7 +740,7 @@ begin
   if Copy(Path, 1, 4) = 'dds/' then
   begin
     Result := ReadDds(StripExt(Copy(Path, 5, MaxInt)), MimeType);
-    ProfileImageSeconds := ProfileImageSeconds + TimerSeconds(Timer, Start);
+    ImageRead(Path, Start);
     Exit;
   end;
   if Copy(Path, 1, 7) = 'normal/' then
@@ -687,6 +752,14 @@ begin
     Kind := ikColor;
     Prog := Copy(Path, Pos('/', Path) + 1, MaxInt);
   end;
+  MimeType := 'image/x-tga';
+  Result := ImageCacheGet(Path);
+  if Result <> nil then
+  begin
+    Inc(ProfileImageCacheHits);
+    ImageRead(Path + ' (cached)', Start);
+    Exit;
+  end;
   Img := EvaluateImageProgram(Prog, Kind);
   if Img = nil then
     raise EFOpenError.Create('Cannot evaluate Doom 3 image program: ' + Prog);
@@ -697,8 +770,9 @@ begin
   finally
     Img.Free;
   end;
-  MimeType := 'image/x-tga';
-  ProfileImageSeconds := ProfileImageSeconds + TimerSeconds(Timer, Start);
+  if ProfileLogReads and (TimerSeconds(Timer, Start) >= ImageCacheMinSeconds) then
+    ImageCachePut(Path, TMemoryStream(Result));
+  ImageRead(Path, Start);
 end;
 
 procedure RegisterImageProtocol;
@@ -715,6 +789,7 @@ initialization
   BfgConvertHook := @BfgConvert;
 finalization
   FreeAndNil(MissingImages);
+  FreeAndNil(ImageCacheKeys);
   if ProtocolRegistered then
     UnregisterUrlProtocol('d3img');
   FreeAndNil(Handler);
