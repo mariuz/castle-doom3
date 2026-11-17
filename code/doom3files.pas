@@ -141,6 +141,10 @@ var
   { Doom3Images' d3img:/dds/ images served compressed, and as their TGA
     (the dds/ copy isn't DXT) }
   ProfileDdsCount, ProfileDdsFallbackCount: Integer;
+  { set by the game once a map is loaded: images read now are logged }
+  ProfileLogReads: Boolean;
+  { image programs served from Doom3Images' cache of slow ones }
+  ProfileImageCacheHits: Integer;
 
 implementation
 

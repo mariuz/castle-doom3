@@ -886,6 +886,10 @@ type
     { the last clearance of a target_givesecurity }
     FSecurity: String;
     FItems: specialize TObjectList<TD3Item>;
+    { PrepareWeaponViews' view models (hidden, under FPreparedViewsHolder):
+      their textures stay loaded for the weapons' own view models }
+    FPreparedViews: specialize TObjectList<TD3Md5Instance>;
+    FPreparedViewsHolder: TCastleTransform;
     { the player's inventory (idInventory): weapons by slot (def_weaponN of
       the player def), ammo by ammo class, each weapon's clip (-1: full
       when first used) }
@@ -1409,6 +1413,16 @@ type
     { Create movers, monsters, speakers for the loaded map. }
     procedure Spawn;
     procedure Clear;
+    { After Spawn (and a restored game), before the load prepares the map:
+      a hidden view model of each weapon the player has or the map's items
+      give, kept until Clear, so the load prepares their textures (a
+      weapon's first raise evaluated the arms' and its normal maps, up to
+      0.3 s; Doom 3 precaches them too). }
+    procedure PrepareWeaponViews;
+    { their parent (nil before PrepareWeaponViews or without them): the
+      load keeps their decoded images, so a weapon's own view model finds
+      them in CGE's image cache instead of reading them again }
+    property PreparedViewsHolder: TCastleTransform read FPreparedViewsHolder;
     { Per frame. PlayerEye is the camera position. }
     procedure Update(const SecondsPassed: Single; const PlayerEye: TVector3);
     { Fire the pistol. True if a shot was fired. }
@@ -2196,6 +2210,7 @@ begin
   FAirTics := AirTicsMax;
   FGrabDistance := 192;
   FItems := specialize TObjectList<TD3Item>.Create(True);
+  FPreparedViews := specialize TObjectList<TD3Md5Instance>.Create(True);
   FAmmo := specialize TDictionary<String, Integer>.Create;
   FCarried := TStringList.Create;
   FSoundSources := specialize TDictionary<Integer, TCastleSoundSource>.Create;
@@ -2273,6 +2288,8 @@ begin
   FMisc.Free;
   FSpawnArgs.Free;
   FItems.Free;
+  FreeAndNil(FPreparedViews);
+  FreeAndNil(FPreparedViewsHolder);
   FAmmo.Free;
   FCarried.Free;
   FScriptSounds.Free;
@@ -2290,6 +2307,8 @@ end;
 
 procedure TD3Game.Clear;
 begin
+  FPreparedViews.Clear;
+  FreeAndNil(FPreparedViewsHolder);
   FSoundDistValid := False;
   FAreaPortals := nil;
   FreeAndNil(FAas);
@@ -4081,6 +4100,67 @@ begin
   else
     D := CgeToD3(PlayerViewDir);
   Result := AnglesMatrix(Vector3(D3DirPitch(D), D3DirYaw(D), 0));
+end;
+
+procedure TD3Game.PrepareWeaponViews;
+var
+  Names: TStringList;
+  Item: TD3Item;
+  I: Integer;
+  S, Done: String;
+  Def: TStringList;
+  Decl: TD3ModelDecl;
+  Md5: TD3Md5Model;
+  Inst: TD3Md5Instance;
+begin
+  FPreparedViews.Clear;
+  FreeAndNil(FPreparedViewsHolder);
+  Names := TStringList.Create;
+  try
+    Names.Sorted := True;
+    Names.Duplicates := dupIgnore;
+    for I := 0 to High(WeaponDefs) do
+      if HasWeapon(I) then
+        Names.Add(LowerCase(WeaponDefs[I]));
+    for Item in FItems do
+      for S in Item.Entity.Value('inv_weapon').Split([',']) do
+        if Trim(S) <> '' then
+          Names.Add(LowerCase(Trim(S)));
+    Done := '';
+    for S in Names do
+    begin
+      Def := Decls.EntityDef(S);
+      if Def = nil then
+        Continue;
+      Decl := Decls.ModelDecl(Def.Values['model_view']);
+      if Decl = nil then
+        Continue;
+      Md5 := Md5Cache.Model(Decl.Mesh);
+      if Md5 = nil then
+        Continue;
+      if FPreparedViewsHolder = nil then
+      begin
+        FPreparedViewsHolder := TCastleTransform.Create(nil);
+        FPreparedViewsHolder.SetTransient;
+        FPreparedViewsHolder.Name := 'PreparedWeaponViews';
+        FPreparedViewsHolder.Collides := False;
+        FPreparedViewsHolder.Pickable := False;
+        FPreparedViewsHolder.Exists := False;
+        FMap.Add(FPreparedViewsHolder);
+      end;
+      Inst := TD3Md5Instance.Create(Md5, Decl.Anims, Decl.Skin);
+      Inst.Scene.Collides := False;
+      Inst.Scene.Pickable := False;
+      Inst.Scene.CastShadows := False;
+      FPreparedViewsHolder.Add(Inst.Scene);
+      FPreparedViews.Add(Inst);
+      Done := Done + ' ' + S;
+    end;
+    if Done <> '' then
+      WritelnLog('Doom3World', 'Weapon view models prepared:%s', [Done]);
+  finally
+    Names.Free;
+  end;
 end;
 
 function TD3Game.SpawnWeapon(const Slot: Integer): TD3Weapon;
