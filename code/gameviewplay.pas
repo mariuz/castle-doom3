@@ -9,7 +9,7 @@ interface
 uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
-  CastleCameras, CastleTransform, CastleScene, CastleSceneCore, X3DNodes, X3DFields, CastleTimeUtils,
+  CastleCameras, CastleTransform, CastleScene, CastleSceneCore, X3DNodes, X3DFields, CastleTimeUtils, CastleGLImages,
   Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui, Doom3RenderDoc;
 
 type
@@ -139,6 +139,8 @@ type
     { Doom 3's HUD (guis/hud.gui) when the data has it and console
       g_hudGui is 1 (the default); else our own HUD panels }
     FHudGui: TD3HudGui;
+    { FHudImage's drawable (FHudImage owns it) }
+    FHudDrawable: TDrawableImage;
     FHudImage: TCastleImageControl;
     FHudTimeMs: Double;
     FHudRedraw: Single;
@@ -275,7 +277,7 @@ uses
   Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
   CastleInternalRenderer,
-  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils, CastleGLImages,
+  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
   CastleRenderContext,
   Doom3Sampler, CastleInternalGLShadowVolumes, CastleGLShaders,
   CastleShapes, CastleBoxes,
@@ -1305,6 +1307,7 @@ begin
   FreeAndNil(FHudGui);
   if FHudImage <> nil then
     FreeAndNil(FHudImage);
+  FHudDrawable := nil;
   FHudGuiTried := False;
   Hud.GuiHud := False;
 end;
@@ -1342,6 +1345,14 @@ begin
         FHudImage.Stretch := True;
         FHudImage.FullSize := True;
         FHudImage.Color := Vector4(1, 1, 1, 1);
+        { the painter's premultiplied colors as they are (no pass over
+          every pixel to divide them by the alpha) }
+        FHudDrawable := TDrawableImage.Create(nil, True, True);
+        FHudDrawable.BlendingSourceFactor := bsOne;
+        FHudDrawable.BlendingDestinationFactor := bdOneMinusSrcAlpha;
+        FHudImage.DrawableImage := FHudDrawable;
+        FHudImage.OwnsDrawableImage := True;
+        FHudImage.AlphaChannel := acBlending;
         HudParent := Hud.Parent;
         if HudParent <> nil then
           HudParent.InsertControl(HudParent.IndexOfControl(Hud), FHudImage)
@@ -1360,7 +1371,7 @@ begin
   { dead or in a cinematic: no HUD (idPlayer::DrawHUD) }
   FHudImage.Exists := not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
   FHudRedraw := FHudRedraw + SecondsPassed;
-  if FHudImage.Exists and ((FHudImage.Image = nil) or (FHudRedraw >= 1 / IdleRate) or
+  if FHudImage.Exists and ((FHudDrawable.Image = nil) or (FHudRedraw >= 1 / IdleRate) or
      (FHudGui.Gui.Dirty and (FHudRedraw >= 1 / RedrawRate))) then
   begin
     { near the screen's size, so the text is sharp (512 x 512 stretched
@@ -1368,9 +1379,8 @@ begin
       painter's time grows with them (1600 x 900: 14 ms a redraw, at
       1333 x 750 about 10) }
     HudScale := Min(1, Sqrt(HudGuiMaxPixels / Max(1, Container.PixelsWidth * Container.PixelsHeight)));
-    FHudImage.Image := FHudGui.Render(Max(64, Round(Container.PixelsWidth * HudScale)),
-      Max(48, Round(Container.PixelsHeight * HudScale)));
-    FHudImage.OwnsImage := True;
+    FHudDrawable.Load(FHudGui.Render(Max(64, Round(Container.PixelsWidth * HudScale)),
+      Max(48, Round(Container.PixelsHeight * HudScale)), True));
     FHudRedraw := 0;
   end;
 end;
@@ -2887,13 +2897,13 @@ begin
         GuiSum := 0;
         GuiRuns := Max(1, StrToIntDef(GetEnvironmentVariable('CD3_GUIDUMP_RUNS'), 10));
         { env CD3_GUIDUMP_SIZE=<w>x<h>: the transparent render at that size
-          (the HUD at the screen's size) }
+          (the HUD at the screen's size, premultiplied like the game's) }
         S := GetEnvironmentVariable('CD3_GUIDUMP_SIZE');
         for I := 1 to GuiRuns do
         begin
           if Pos('x', S) > 0 then
             GuiImage := RenderGuiTransparent(Gui, StrToIntDef(Copy(S, 1, Pos('x', S) - 1), 0),
-              StrToIntDef(Copy(S, Pos('x', S) + 1, MaxInt), 0))
+              StrToIntDef(Copy(S, Pos('x', S) + 1, MaxInt), 0), True)
           else
             GuiImage := RenderGui(Gui, nil);
           if I = GuiRuns then
