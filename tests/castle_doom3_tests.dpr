@@ -6478,7 +6478,7 @@ var
   Game: TD3Game;
   Eye: TVector3;
   RemoveMe: TRemoveType;
-  I, Found, Before: Integer;
+  I, Found, Before, NodesBefore: Integer;
   Shape: TShapeNode;
   Tex: TRenderedTextureNode;
   Geometry: TIndexedTriangleSetNode;
@@ -6836,8 +6836,12 @@ begin
     B := Map.FindBrush('crate_1');
     Check(B <> nil, 'crate_1');
     Before := 0;
+    NodesBefore := 0;
     if B <> nil then
-      Before := B.Scene.RootNode.FdChildren.Count;
+    begin
+      Before := B.Scene.Count;
+      NodesBefore := B.Scene.RootNode.FdChildren.Count;
+    end;
     Game.AddDecal('textures/test/decal_hole', Vector3(128, -160, 64), Vector3(0, 0, 1), 8);
     CheckEquals(1, Game.Decals.Decals.Count, 'a decal on the crate');
     if Game.Decals.Decals.Count = 1 then
@@ -6858,7 +6862,11 @@ begin
     end;
     Step(0.1);
     if B <> nil then
-      CheckEquals(Before + 1, B.Scene.RootNode.FdChildren.Count, 'the crate''s scene got a group of decal shapes');
+    begin
+      CheckEquals(Before + 1, B.Scene.Count, 'the crate''s scene got a child scene of decal shapes');
+      { its own nodes untouched: a change there is a ChangedAll of the crate }
+      CheckEquals(NodesBefore, B.Scene.RootNode.FdChildren.Count, 'the crate''s own nodes are unchanged');
+    end;
     Game.AddDecal('textures/test/decal_hole', Vector3(-200, -256, 4), Vector3(0, 1, 0), 16);
     CheckEquals(2, Game.Decals.Decals.Count, 'a decal on the south wall near the floor');
     if Game.Decals.Decals.Count = 2 then
