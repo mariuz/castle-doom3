@@ -65,6 +65,9 @@ type
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
     { noOverlays: no decals on it (idMaterial::AllowOverlays) }
     NoOverlays: Boolean;
+    { noDamage (SURF_NODAMAGE, textures/common/cushion): no falling damage
+      landing on it (idPlayer::CrashLand) }
+    NoDamage: Boolean;
     { A surface parameter that clears the solid contents (water, trigger,
       monsterclip, ikclip, aassolid... like Doom 3's clearSolid parms). }
     ClearsSolid: Boolean;
@@ -1378,6 +1381,9 @@ begin
       else
       if L = 'nooverlays' then
         Result.NoOverlays := True
+      else
+      if L = 'nodamage' then
+        Result.NoDamage := True
       else
       if L = 'playerclip' then
       begin

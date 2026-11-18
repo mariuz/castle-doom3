@@ -51,6 +51,9 @@ type
     function BuildCollisionNode(const ForMonsters: Boolean = False): TX3DRootNode;
     { Brushes that block light (contents with "solid" or "opaque"). }
     function BrushCastsShadows(const I: Integer): Boolean;
+    { Whether feet at P (Doom 3 coordinates) stand on a polygon whose material
+      has noDamage (textures/common/cushion): no falling damage there. }
+    function NoDamageAt(const P: TVector3): Boolean;
   end;
 
 { Whether triangles (Indexes into Positions, 3 per triangle) form closed
@@ -313,6 +316,43 @@ begin
   { old .cm files write contents as a number: treat them as solid }
   Result := (Pos('solid', C) > 0) or (Pos('opaque', C) > 0) or
     ((C <> '') and (C[1] in ['0'..'9']));
+end;
+
+function TD3CollisionModel.NoDamageAt(const P: TVector3): Boolean;
+var
+  I, J, N: Integer;
+  A, B: TVector3;
+  Cross: Single;
+  Pos, Neg: Boolean;
+begin
+  Result := False;
+  for I := 0 to High(Polygons) do
+  begin
+    if (Polygons[I].Normal.Z < 0.5) or (Length(Polygons[I].Verts) < 3) then
+      Continue;
+    { feet within a few units of the plane (the player's box rests on it) }
+    if Abs(TVector3.DotProduct(Polygons[I].Normal, P) - Polygons[I].Dist) > 6 then
+      Continue;
+    if not Decls.Material(Polygons[I].Material).NoDamage then
+      Continue;
+    { inside the convex polygon seen from above }
+    N := Length(Polygons[I].Verts);
+    Pos := False;
+    Neg := False;
+    for J := 0 to N - 1 do
+    begin
+      A := Vertices[Polygons[I].Verts[J]];
+      B := Vertices[Polygons[I].Verts[(J + 1) mod N]];
+      Cross := (B.X - A.X) * (P.Y - A.Y) - (B.Y - A.Y) * (P.X - A.X);
+      if Cross > 0.01 then
+        Pos := True
+      else
+      if Cross < -0.01 then
+        Neg := True;
+    end;
+    if not (Pos and Neg) then
+      Exit(True);
+  end;
 end;
 
 function TD3CollisionModel.BuildCollisionNode(const ForMonsters: Boolean): TX3DRootNode;

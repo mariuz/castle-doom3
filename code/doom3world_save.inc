@@ -107,7 +107,7 @@ end;
 { The fighting playthrough ---------------------------------------------------- }
 
 function TD3Game.FightTarget(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
-  out Target: TVector3; out TargetName: String): Boolean;
+  out Target: TVector3; out TargetName: String; const Hunted: String): Boolean;
 var
   Mon: TD3Monster;
   Best, Dist: Single;
@@ -120,13 +120,16 @@ begin
   for Mon in FMonsters do
   begin
     if (Mon.State = msDead) or (Mon.Health <= 0) or (Mon.Model = nil) or Mon.Model.Hidden or
-       not Mon.Model.Holder.Exists or Mon.Dormant or Mon.Model.Dormant then
+       not Mon.Model.Holder.Exists or Mon.Model.Dormant then
       Continue;
     if Mon.Actor <> nil then
       Awake := Mon.Actor.HasEnemy
     else
       Awake := Mon.State in [msChase, msAttack];
-    if not Awake then
+    { the hunt shoots its monster asleep too }
+    if not Awake and ((Hunted = '') or not SameText(Hunted, Mon.Model.Entity.Name)) then
+      Continue;
+    if Mon.Dormant and not SameText(Hunted, Mon.Model.Entity.Name) then
       Continue;
     if Pos(',' + Mon.Model.Entity.Name + ',', ',' + Ignore + ',') > 0 then
       Continue;
@@ -139,6 +142,158 @@ begin
       Result := True;
     end;
   end;
+end;
+
+function TD3Game.MonsterHuntable(const Mon: TD3Monster): Boolean;
+begin
+  Result := (Mon.Model <> nil) and (Mon.State <> msDead) and (Mon.Health > 0) and
+    not Mon.Model.Hidden and Mon.Model.Holder.Exists;
+end;
+
+procedure TD3Game.TrackMonsters(const SecondsPassed: Single);
+const
+  FloorCheckEvery = 1;
+  FloorRayUp = 16;
+var
+  Mon: TD3Monster;
+  P, SpawnPoint, N: TVector3;
+  D, Gap: Single;
+  Was: Boolean;
+begin
+  for Mon in FMonsters do
+  begin
+    if (Mon.Model = nil) or Mon.Model.Hidden or not Mon.Model.Holder.Exists then
+      Continue;
+    P := Mon.Position;
+    if not Mon.Appeared then
+    begin
+      Mon.Appeared := True;
+      Mon.TrackPos := P;
+      Mon.FloorGapMin := MaxSingle;
+      Mon.FloorGapMax := -MaxSingle;
+    end;
+    D := PointsDistance(P, Mon.TrackPos);
+    { a teleport (idAI's teleport, a script's setOrigin) isn't a walk }
+    if D < 100 then
+      Mon.Travelled := Mon.Travelled + D;
+    Mon.TrackPos := P;
+    SpawnPoint := D3ToCge(Mon.Model.Entity.Origin);
+    Mon.Farthest := Max(Mon.Farthest, Sqrt(Sqr(P.X - SpawnPoint.X) + Sqr(P.Z - SpawnPoint.Z)));
+    if Mon.State = msDead then
+      Continue;
+    if ((Mon.Actor <> nil) and Mon.Actor.HasEnemy) or (Mon.State in [msChase, msAttack]) then
+    begin
+      Mon.Woke := True;
+      if Mon.Health > 0 then
+        Mon.AwakeSeconds := Mon.AwakeSeconds + SecondsPassed;
+    end;
+    { on its feet: not flying, falling or a ragdoll; flying kinds ("fly_speed":
+      lost souls, cacodemons) hover before their script sets MOVETYPE_FLY }
+    if (Mon.Health <= 0) or (Mon.Ragdoll <> nil) or Mon.Falling or Mon.Model.Dormant or
+       ((Mon.Model.EntityDef <> nil) and (Mon.Model.EntityDef.Values['fly_speed'] <> '')) or
+       ((Mon.Actor <> nil) and (Mon.Actor.MoveType in [MoveTypeFly, MoveTypeDead])) then
+      Continue;
+    Mon.FloorCheckTime := Mon.FloorCheckTime - SecondsPassed;
+    if Mon.FloorCheckTime > 0 then
+      Continue;
+    Mon.FloorCheckTime := FloorCheckEvery;
+    { not its own triangles }
+    Was := Mon.Model.Holder.Pickable;
+    Mon.Model.Holder.Pickable := False;
+    try
+      if WorldHit(P + Vector3(0, FloorRayUp, 0), Vector3(0, -1, 0), 1024, D, N) then
+      begin
+        Gap := D - FloorRayUp;
+        Mon.FloorGapMin := Min(Mon.FloorGapMin, Gap);
+        Mon.FloorGapMax := Max(Mon.FloorGapMax, Gap);
+        Inc(Mon.FloorChecks);
+      end;
+    finally
+      Mon.Model.Holder.Pickable := Was;
+    end;
+  end;
+end;
+
+procedure TD3Game.MonsterReport;
+const
+  { a foot over the floor or in it is a suspect (stairs and slopes give a
+    few units) }
+  FloorTolerance = 12;
+var
+  Mon: TD3Monster;
+  Total, Appeared, Woke, Dead, Alive, Never, Floating, Sunk, Still: Integer;
+  S, Flags, Gaps: String;
+begin
+  Total := 0; Appeared := 0; Woke := 0; Dead := 0; Alive := 0; Never := 0;
+  Floating := 0; Sunk := 0; Still := 0;
+  for Mon in FMonsters do
+  begin
+    if Mon.Model = nil then
+      Continue;
+    Inc(Total);
+    if not Mon.Appeared then
+    begin
+      Inc(Never);
+      Continue;
+    end;
+    Inc(Appeared);
+    if Mon.Woke then
+      Inc(Woke);
+    if (Mon.State = msDead) or (Mon.Health <= 0) then
+      Inc(Dead)
+    else
+      Inc(Alive);
+  end;
+  WritelnLog('Monsters', 'Monsters: %d in the map, %d appeared (%d never shown), %d woke, %d dead, %d alive',
+    [Total, Appeared, Never, Woke, Dead, Alive]);
+  for Mon in FMonsters do
+  begin
+    if (Mon.Model = nil) or not Mon.Appeared then
+      Continue;
+    Flags := '';
+    if Mon.FloorChecks > 0 then
+    begin
+      Gaps := Format('feet over the floor %.1f .. %.1f (%d checks)', [Mon.FloorGapMin, Mon.FloorGapMax, Mon.FloorChecks]);
+      if Mon.FloorGapMin > FloorTolerance then
+      begin
+        Flags := Flags + ' FLOATING';
+        Inc(Floating);
+      end;
+      if Mon.FloorGapMax < -FloorTolerance then
+      begin
+        Flags := Flags + ' SUNK';
+        Inc(Sunk);
+      end;
+    end else
+      Gaps := 'no floor checks';
+    { killed as it woke: no time to move }
+    if (Mon.AwakeSeconds >= 5) and (Mon.Travelled < 8) and ((Mon.Actor = nil) or (Mon.Actor.MoveType <> MoveTypeStatic)) then
+    begin
+      Flags := Flags + ' NEVER MOVED';
+      Inc(Still);
+    end;
+    if (Mon.State = msDead) or (Mon.Health <= 0) then
+      S := Format('dead (awake %.0f s)', [Mon.AwakeSeconds])
+    else
+    begin
+      S := Format('alive (health %d', [Mon.Health]);
+      if Mon.Woke then
+        S := S + Format(', awake %.0f s)', [Mon.AwakeSeconds])
+      else
+        S := S + ', asleep)';
+    end;
+    WritelnLog('Monsters', '%s (%s): spawn %s, at %s, %s, travelled %.0f, farthest %.0f from its spawn, %s%s',
+      [Mon.Model.Entity.Name, Mon.Model.Entity.ClassName_, Mon.Model.Entity.Origin.ToString,
+       CgeToD3(Mon.Position).ToString, S, Mon.Travelled, Mon.Farthest, Gaps, Flags]);
+  end;
+  WritelnLog('Monsters', 'Monster suspects: %d floating, %d sunk, %d never moved after waking',
+    [Floating, Sunk, Still]);
+  S := '';
+  for Mon in FMonsters do
+    if (Mon.Model <> nil) and not Mon.Appeared then
+      S := S + ' ' + Mon.Model.Entity.Name;
+  if S <> '' then
+    WritelnLog('Monsters', 'Monsters never shown:%s', [S]);
 end;
 
 function TD3Game.BestFightSlot: Integer;
@@ -200,6 +355,7 @@ var
   D: TVector3;
   Yaw: Single;
   Pair: specialize TPair<String, Integer>;
+  RelayPair: specialize TPair<String, Single>;
   V: TD3Value;
   B: TD3BrushEntity;
   ME: TD3ModelEntity;
@@ -291,6 +447,8 @@ begin
     end;
     for Pair in FCounts do
       Add(['count', SaveText(Pair.Key), IntToStr(Pair.Value)]);
+    for RelayPair in FRelayNext do
+      Add(['relay', SaveText(RelayPair.Key), SaveFloat(RelayPair.Value)]);
 
     { the script's threads (the weapon's is made again when it is raised)
       and the actors' objects and states }
@@ -392,6 +550,12 @@ begin
         Add(['monster', Mon.Model.Entity.Name, IntToStr(Mon.Health), IntToStr(Ord(Mon.State = msDead)),
           SaveVec(CgeToD3(Mon.Model.Holder.Translation)), SaveFloat(Mon.Yaw), IntToStr(Ord(Mon.Dormant)),
           IntToStr(Ord(Mon.State))]);
+    { the monster review's numbers (TrackMonsters) go on after a load }
+    for Mon in FMonsters do
+      if (Mon.Model <> nil) and Mon.Appeared then
+        Add(['mreview', Mon.Model.Entity.Name, IntToStr(Ord(Mon.Woke)), SaveFloat(Mon.Travelled),
+          SaveFloat(Mon.Farthest), SaveFloat(Mon.AwakeSeconds), SaveFloat(IfThen(Mon.FloorChecks > 0, Mon.FloorGapMin, 0)),
+          SaveFloat(IfThen(Mon.FloorChecks > 0, Mon.FloorGapMax, 0)), IntToStr(Mon.FloorChecks)]);
     for Item in FItems do
       if Item.PickedUp then
         Add(['picked', Item.Entity.Name]);
@@ -814,6 +978,7 @@ begin
             FScript.SetGlobalAt(N, V);
           end;
         'count': FCounts.AddOrSetValue(LoadText(Name), FieldInt(2));
+        'relay': FRelayNext.AddOrSetValue(LoadText(Name), LoadFloat(Field(2)));
         'light':
           begin
             I := FMap.FindLight(Name);
@@ -832,6 +997,25 @@ begin
               ME.Holder.Exists := False;
             end;
           end;
+        'mreview':
+          for Mon in FMonsters do
+            if (Mon.Model <> nil) and (Mon.Model.Entity.Name = Name) then
+            begin
+              Mon.Appeared := True;
+              Mon.TrackPos := Mon.Position;
+              Mon.Woke := FieldInt(2) <> 0;
+              Mon.Travelled := LoadFloat(Field(3));
+              Mon.Farthest := LoadFloat(Field(4));
+              Mon.AwakeSeconds := LoadFloat(Field(5));
+              Mon.FloorGapMin := LoadFloat(Field(6));
+              Mon.FloorGapMax := LoadFloat(Field(7));
+              Mon.FloorChecks := FieldInt(8);
+              if Mon.FloorChecks = 0 then
+              begin
+                Mon.FloorGapMin := MaxSingle;
+                Mon.FloorGapMax := -MaxSingle;
+              end;
+            end;
         'monster':
           for Mon in FMonsters do
             if (Mon.Model <> nil) and (Mon.Model.Entity.Name = Name) then
