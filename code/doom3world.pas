@@ -1182,6 +1182,7 @@ type
     function CreateRagdoll(const Instance: TD3Md5Instance; const RagdollName: String): TD3Ragdoll;
     { idAI::Killed: StartRagdoll with the monster's "ragdoll" }
     procedure MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
+    function MonsterDeathModel(const Mon: TD3Monster): Boolean;
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
     function PlayerBodyAnim(const Base: String; const Prefixed: Boolean): String;
@@ -4652,6 +4653,14 @@ begin
   FLandTime := FTime;
   if DamageName = '' then
     Exit;
+  { no falling damage on a noDamage surface (textures/common/cushion:
+    hellhole's start drops the player 577 units onto one) }
+  if (FMap.Collision <> nil) and (FMap.Collision.World <> nil) and
+    FMap.Collision.World.NoDamageAt(CgeToD3(PlayerFeet)) then
+  begin
+    WritelnLog('Doom3World', 'Fall of %.0f units onto a noDamage surface: no damage', [FallHeight]);
+    Exit;
+  end;
   { the game's damage defs, else Doom 3's values }
   Amount := Fallback;
   Def := Decls.EntityDef(DamageName);
@@ -5369,7 +5378,8 @@ begin
       MonsterSound(Mon, 'snd_death');
       if Mon.Actor = nil then
         Mon.Model.Instance.PlayAnim('idle', False);
-      MonsterRagdoll(Mon, Direction);
+      if not MonsterDeathModel(Mon) then
+        MonsterRagdoll(Mon, Direction);
     end;
     Inc(Kills);
     Message('Killed ' + Mon.Model.Entity.Name);
@@ -6660,7 +6670,8 @@ begin
   A.Monster.State := msDead;
   A.Monster.StateTime := 0;
   MonsterSound(A.Monster, 'snd_death');
-  MonsterRagdoll(A.Monster, TVector3.Zero);
+  if not MonsterDeathModel(A.Monster) then
+    MonsterRagdoll(A.Monster, TVector3.Zero);
   ActorDamaged(A, True, True);
 end;
 
@@ -8122,6 +8133,35 @@ begin
   if (Instance = nil) or (RagdollName = '') or not RagdollEnabled then
     Exit;
   Result := TD3Ragdoll.Create(Instance, ArticulatedFigure(RagdollName), @WorldHit);
+end;
+
+function TD3Game.MonsterDeathModel(const Mon: TD3Monster): Boolean;
+var
+  Value: String;
+  Def: TStringList;
+begin
+  { idAI::Killed: "model_death" (the lost soul's lostsoul_pop.prt) replaces
+    the model, which stays where it died: no ragdoll, no fall }
+  Result := False;
+  if (Mon.Model = nil) or not Mon.Model.Holder.Exists then
+    Exit;
+  Value := Mon.Model.Entity.Value('model_death');
+  if Value = '' then
+  begin
+    Def := Decls.EntityDef(Mon.Model.Entity.ClassName_);
+    if Def <> nil then
+      Value := Def.Values['model_death'];
+  end;
+  if Value = '' then
+    Exit;
+  Result := True;
+  Mon.Falling := False;
+  if SameText(ExtractFileExt(Value), '.prt') then
+    EmitSmoke(ChangeFileExt(Value, ''), Mon.Model.Entity.Name + ' model_death',
+      Mon.Position + Vector3(0, Mon.Height / 2, 0), AxisFromDirection(Vector3(0, 0, 1)));
+  Mon.Model.Holder.Pickable := False;
+  Mon.Model.Holder.Exists := False;
+  WritelnLog('Doom3World', '%s dies into %s', [Mon.Model.Entity.Name, Value]);
 end;
 
 procedure TD3Game.MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
@@ -12540,7 +12580,8 @@ begin
     A.ChaseEnemy := False;
     A.MoveDirect := False;
     { idAI::Killed: MOVETYPE_DEAD; one that flew falls }
-    if (A.MoveType = MoveTypeFly) and (A.Monster <> nil) then
+    if (A.MoveType = MoveTypeFly) and (A.Monster <> nil) and
+      A.Monster.Model.Holder.Exists then
     begin
       A.Monster.Falling := True;
       A.Monster.FallSpeed := 0;

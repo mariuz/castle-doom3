@@ -187,8 +187,10 @@ begin
       if Mon.Health > 0 then
         Mon.AwakeSeconds := Mon.AwakeSeconds + SecondsPassed;
     end;
-    { on its feet: not flying, falling or a ragdoll }
+    { on its feet: not flying, falling or a ragdoll; flying kinds ("fly_speed":
+      lost souls, cacodemons) hover before their script sets MOVETYPE_FLY }
     if (Mon.Health <= 0) or (Mon.Ragdoll <> nil) or Mon.Falling or Mon.Model.Dormant or
+       ((Mon.Model.EntityDef <> nil) and (Mon.Model.EntityDef.Values['fly_speed'] <> '')) or
        ((Mon.Actor <> nil) and (Mon.Actor.MoveType in [MoveTypeFly, MoveTypeDead])) then
       Continue;
     Mon.FloorCheckTime := Mon.FloorCheckTime - SecondsPassed;

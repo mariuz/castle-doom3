@@ -745,6 +745,14 @@ begin
     Console.Print('No map ' + AMapName + ' (type "maps" for the list)');
     Exit;
   end;
+  { the level's end cut the fight's route short: its summary and monster
+    review before the map goes }
+  if FFight and (FRoute <> nil) and (FPendingRestore = '') and (Map.MapName <> '') and
+    not SameText(Map.MapName, AMapName) then
+  begin
+    WritelnLog('GameViewPlay', 'Fight: the level ends before the route does (%.0f units walked)', [FRouteWalked]);
+    FightSummary;
+  end;
   FGame.Clear;
   if FInCinematic then
   begin
@@ -3397,7 +3405,7 @@ const
   HuntMaxSeconds = 900;
 var
   Mon, Best: TD3Monster;
-  Feet, P: TVector3;
+  Feet, P, Away: TVector3;
   D, BestD, Gap: Single;
   Hop: TD3PointArray;
   Areas: Integer;
@@ -3460,9 +3468,23 @@ begin
   { wake it, as a trigger would: it comes for the player }
   FGame.Activate(Best.Model.Entity);
   P := CgeToD3(Best.Position);
-  FGame.PlayerRoute(Feet, P, Hop, Gap, Areas);
-  if Length(Hop) < 2 then
-    Hop := [Feet, P];
+  if BestD < 96 then
+  begin
+    { arrived on top of it, and the fight didn't take aim (too close: the
+      routes of tries 2 and 3 were empty, the hunt gave up on a monster
+      clawing the player): back off 160 units so it is in front }
+    Away := Feet - P;
+    Away.Z := 0;
+    if Away.Length < 1 then
+      Away := Vector3(1, 0, 0);
+    Hop := [Feet, Feet + Away.Normalize * 160];
+    WritelnLog('GameViewPlay', 'Fight: hunt: backing off from %s', [Best.Model.Entity.Name]);
+  end else
+  begin
+    FGame.PlayerRoute(Feet, P, Hop, Gap, Areas);
+    if Length(Hop) < 2 then
+      Hop := [Feet, P];
+  end;
   FRoute := Hop;
   FRouteSeg := 0;
   FRouteAlong := 0;
