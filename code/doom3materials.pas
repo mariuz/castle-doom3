@@ -386,11 +386,34 @@ procedure ApplyStageColor(const ColorExpr: TColorExprs; const Unlit: TUnlitMater
   const Blend: TD3BlendMode; const Ctx: TD3ExprContext);
 var
   C: TVector4;
+  E: TVector3;
+  T: Single;
 begin
   C := EvalColor(ColorExpr, Ctx);
-  Unlit.EmissiveColor := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z));
+  E := Vector3(Max(0, C.X), Max(0, C.Y), Max(0, C.Z));
+  if not TVector3.PerfectlyEquals(E, Unlit.EmissiveColor) then
+    Unlit.EmissiveColor := E;
   if Blend = bmBlend then
-    Unlit.Transparency := 1 - Min(1, Max(0, C.W));
+  begin
+    T := 1 - Min(1, Max(0, C.W));
+    if T <> Unlit.Transparency then
+      Unlit.Transparency := T;
+  end;
+end;
+
+{ Whether the scene of Node is drawn (portal visibility hides area scenes
+  with Visible; a node of no scene counts as shown). }
+function SceneShown(const Node: TX3DNode): Boolean;
+var
+  S: TCastleTransform;
+begin
+  S := Node.Scene;
+  Result := (S = nil) or (S.Visible and S.Exists);
+end;
+
+function FieldShown(const Field: TX3DField): Boolean;
+begin
+  Result := not (Field.ParentNode is TX3DNode) or SceneShown(TX3DNode(Field.ParentNode));
 end;
 
 function EvalScroll(const Scroll: array of TD3Expr; const Ctx: TD3ExprContext): TVector2;
@@ -412,6 +435,7 @@ var
   T: TTurbulentSurface;
   Ctx, ECtx: TD3ExprContext;
   Visible: Boolean;
+  M: TMatrix4;
 begin
   Ctx := SurfaceContext(Time);
   for I := 0 to AnimatedSurfaces.Count - 1 do
@@ -421,15 +445,27 @@ begin
       ECtx := ContextFor(S.Parms, Time)
     else
       ECtx := Ctx;
+    { only what is drawn, and only changes: a field sent makes CGE look
+      through every shape of the node's scene for its users (alphalabs1:
+      37% of the frame, most of it areas hidden by portal visibility); a
+      hidden one takes its value when it shows again }
     if S.Transform <> nil then
-      S.Transform.Matrix := TD3Material.TexMatrix(S.Ops, ECtx);
-    if S.Unlit <> nil then
+    begin
+      if SceneShown(S.Transform) then
+      begin
+        M := TD3Material.TexMatrix(S.Ops, ECtx);
+        if not TMatrix4.PerfectlyEquals(M, S.Transform.Matrix) then
+          S.Transform.Matrix := M;
+      end;
+    end;
+    if (S.Unlit <> nil) and SceneShown(S.Unlit) then
       ApplyStageColor(S.ColorExpr, S.Unlit, S.Blend, ECtx);
   end;
   for I := 0 to HazeScrolls.Count - 1 do
   begin
     H := HazeScrolls[I];
-    H.Field.Send(EvalScroll(H.Scroll, Ctx));
+    if FieldShown(H.Field) then
+      H.Field.Send(EvalScroll(H.Scroll, Ctx));
   end;
   { stage "if" conditions: shown while they hold }
   for I := 0 to ConditionalShapes.Count - 1 do
@@ -450,6 +486,8 @@ begin
   for I := 0 to TurbulentSurfaces.Count - 1 do
   begin
     T := TurbulentSurfaces[I];
+    if not FieldShown(T.Fields[0]) then
+      Continue;
     ECtx := ContextFor(T.Parms, Time);
     for K := 0 to 2 do
       if (T.Exprs[K] <> nil) and not T.Exprs[K].IsConstant then
@@ -457,12 +495,14 @@ begin
   end;
   { deform expand / move: the amount }
   for I := 0 to VertexDeformSurfaces.Count - 1 do
-    VertexDeformSurfaces[I].Field.Send(VertexDeformSurfaces[I].Expr.Eval(
-      ContextFor(VertexDeformSurfaces[I].Parms, Time)));
+    if FieldShown(VertexDeformSurfaces[I].Field) then
+      VertexDeformSurfaces[I].Field.Send(VertexDeformSurfaces[I].Expr.Eval(
+        ContextFor(VertexDeformSurfaces[I].Parms, Time)));
   { bumpy reflections: the stage color }
   for I := 0 to ReflectColors.Count - 1 do
-    ReflectColors[I].Field.Send(EvalColor(ReflectColors[I].ColorExpr,
-      ContextFor(ReflectColors[I].Parms, Time)));
+    if FieldShown(ReflectColors[I].Field) then
+      ReflectColors[I].Field.Send(EvalColor(ReflectColors[I].ColorExpr,
+        ContextFor(ReflectColors[I].Parms, Time)));
 end;
 
 function ConditionalShapeNode(const Shape: TShapeNode; const Condition: TD3Expr;

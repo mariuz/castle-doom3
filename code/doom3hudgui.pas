@@ -42,8 +42,9 @@ type
       itemPickupN; up to 5 cycle). }
     procedure Pickup(const Text: String);
     { The HUD at Width x Height pixels (the screen's, so its text is sharp;
-      0: the GUIs' 512 x 512). }
-    function Render(const Width: Integer = 0; const Height: Integer = 0): TRGBAlphaImage;
+      0: the GUIs' 512 x 512; Premultiplied: see RenderGuiTransparent). }
+    function Render(const Width: Integer = 0; const Height: Integer = 0;
+      const Premultiplied: Boolean = False): TRGBAlphaImage;
     property Gui: TD3Gui read FGui;
     { every named event sent, oldest first (logged, read by tests) }
     property Events: TStringList read FEvents;
@@ -258,12 +259,13 @@ begin
   end;
 end;
 
-function TD3HudGui.Render(const Width: Integer = 0; const Height: Integer = 0): TRGBAlphaImage;
+function TD3HudGui.Render(const Width: Integer = 0; const Height: Integer = 0;
+  const Premultiplied: Boolean = False): TRGBAlphaImage;
 var
   Start: TTimerResult;
 begin
   Start := Timer;
-  Result := RenderGuiTransparent(FGui, Width, Height);
+  Result := RenderGuiTransparent(FGui, Width, Height, Premultiplied);
   FGui.Dirty := False;
   FRenderSeconds := FRenderSeconds + TimerSeconds(Timer, Start);
   Inc(FRenders);

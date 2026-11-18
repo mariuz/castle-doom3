@@ -317,9 +317,12 @@ function RenderGui(const Gui: TD3Gui; const State: TStrings): TRGBAlphaImage; ov
 function RenderGui(const Gui: TD3Gui; const State: TStrings; const Width, Height: Integer): TRGBAlphaImage; overload;
 { The same over a transparent background (the HUD over the view): not
   premultiplied, additive stages get the alpha of their brightness. At
-  Width x Height (0: GuiImageWidth x GuiImageHeight). }
+  Width x Height (0: GuiImageWidth x GuiImageHeight). Premultiplied: the
+  painter's own colors, premultiplied by the alpha (additive stages add
+  color without alpha), to draw with blending One, OneMinusSrcAlpha; it
+  skips the pass over every pixel. }
 function RenderGuiTransparent(const Gui: TD3Gui; const Width: Integer = 0;
-  const Height: Integer = 0): TRGBAlphaImage;
+  const Height: Integer = 0; const Premultiplied: Boolean = False): TRGBAlphaImage;
 
 { The texture URL of a GUI drawn with some state, '' when the GUI file is
   missing. Rendered once per (path, state) and cached; static (no events). }
@@ -3349,6 +3352,8 @@ var
   X, Y, PX, PY, K, BX0, BY0, BX1, BY1: Integer;
   SaveX0, SaveY0, SaveX1, SaveY1: Integer;
   RX0, RY0, RX1, RY1, Row, ScratchW, ScratchH: Integer;
+  A, Inv, T: Integer;
+  FX, FY, StepX, StepY: Int64;
   P, D, ScratchPixels: PVector4Byte;
   OuterInTransform: TD3GuiWindow;
 begin
@@ -3490,33 +3495,55 @@ begin
       FColumnsX[X - BX0] := I00 * DX;
       FColumnsY[X - BX0] := I10 * DX;
     end;
+    { the source point steps by (StepX, StepY) a pixel along the row, in
+      16.16 fixed point (a float point and its floor per pixel were most of
+      a HUD redraw); the scratch image was drawn onto a clear one, so its
+      colors are premultiplied: blended "over" with no divisions }
+    StepX := Round(I00 * 65536);
+    StepY := Round(I10 * ScaleY / ScaleX * 65536);
     for Y := BY0 to BY1 - 1 do
     begin
       DY := (Y + 0.5 - CY) / ScaleY;
       RowX := I01 * DY;
       RowY := I11 * DY;
       D := Image.PixelPtr(BX0, Image.Height - 1 - Y);
+      FX := Round((CX + (FColumnsX[0] + RowX) * ScaleX) * 65536);
+      FY := Round((CY + (FColumnsY[0] + RowY) * ScaleY) * 65536);
       for X := 0 to BX1 - BX0 - 1 do
       begin
-        SX := CX + (FColumnsX[X] + RowX) * ScaleX;
-        SY := CY + (FColumnsY[X] + RowY) * ScaleY;
-        { Floor (Math.Floor's call was a third of a HUD redraw) }
-        PX := Trunc(SX);
-        if SX < PX then
-          Dec(PX);
-        PY := Trunc(SY);
-        if SY < PY then
-          Dec(PY);
+        { the floor of a 16.16 value, negative too }
+        PX := SarInt64(FX, 16);
+        PY := SarInt64(FY, 16);
         { only the part drawn and cleared this time }
         if (PX >= RX0) and (PY >= RY0) and (PX < RX1) and (PY < RY1) then
         begin
           P := ScratchPixels + ((ScratchH - 1 - PY) * ScratchW + PX);
-          { blended onto a clear image its colors are times its alpha }
-          if P^.W > 0 then
-            BlendInto(D, Min(255, P^.X * 255 div P^.W), Min(255, P^.Y * 255 div P^.W),
-              Min(255, P^.Z * 255 div P^.W), P^.W);
+          A := P^.W;
+          if A >= 255 then
+            D^ := P^
+          else
+          if A > 0 then
+          begin
+            Inv := 255 - A;
+            T := D^.X * Inv + 128;
+            T := P^.X + (T + (T shr 8)) shr 8;
+            if T > 255 then T := 255;
+            D^.X := T;
+            T := D^.Y * Inv + 128;
+            T := P^.Y + (T + (T shr 8)) shr 8;
+            if T > 255 then T := 255;
+            D^.Y := T;
+            T := D^.Z * Inv + 128;
+            T := P^.Z + (T + (T shr 8)) shr 8;
+            if T > 255 then T := 255;
+            D^.Z := T;
+            T := D^.W * Inv + 128;
+            D^.W := A + (T + (T shr 8)) shr 8;
+          end;
         end;
         Inc(D);
+        Inc(FX, StepX);
+        Inc(FY, StepY);
       end;
     end;
     ClipX0 := SaveX0;
@@ -3861,7 +3888,7 @@ var
   UnpremultiplyTable: array of array [Byte] of Byte;
 
 function RenderGuiTransparent(const Gui: TD3Gui; const Width: Integer = 0;
-  const Height: Integer = 0): TRGBAlphaImage;
+  const Height: Integer = 0; const Premultiplied: Boolean = False): TRGBAlphaImage;
 var
   Painter: TGuiPainter;
   P: PVector4Byte;
@@ -3904,6 +3931,8 @@ begin
     Painter.Free;
   end;
   Gui.Dirty := False;
+  if Premultiplied then
+    Exit;
   { the painter blends over black: the colors are premultiplied; added
     light over nothing has no alpha yet (its brightness is). Most of the
     HUD is empty: those pixels are skipped; the divisions are a table. }
