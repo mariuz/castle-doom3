@@ -87,10 +87,15 @@ type
         Colors: TColorRGBANode;
       end;
       { A scene decals are projected onto: the world (the system's own
-        scene, Scene = nil) or an entity's scene, which gets a group of
-        the decal shapes. }
+        scene, Scene = nil) or an entity's scene, which gets a child scene
+        of the decal shapes (Child, its root Group). Not in the entity's
+        own nodes: a change there is a ChangedAll of the whole entity,
+        which built its octrees again and read its textures again (the load
+        frees their decoded images), up to 0.3 s when an explosion's burn
+        decal first hit a big static model. }
       TTarget = record
         Scene: TCastleScene;
+        Child: TCastleScene;
         Group: TGroupNode;
         Shapes: array of TMaterialShape;
         Dirty: Boolean;
@@ -257,6 +262,7 @@ begin
           if FDecals[I].Target = T then
             FDecals.Delete(I);
         FTargets[T].Scene := nil;
+        FTargets[T].Child := nil;
         FTargets[T].Group := nil;
         FTargets[T].Shapes := nil;
         FTargets[T].Dirty := False;
@@ -266,6 +272,8 @@ end;
 function TD3DecalSystem.TargetIndex(const Scene: TCastleScene): Integer;
 var
   I: Integer;
+  Root: TX3DRootNode;
+  Child: TCastleScene;
 begin
   if Scene = nil then
     Exit(0);
@@ -285,11 +293,23 @@ begin
     Result := Length(FTargets);
     SetLength(FTargets, Result + 1);
   end;
+  Root := TX3DRootNode.Create;
+  AddLightLibrary(Root);
+  { owned by the entity's scene: freed with it }
+  Child := TCastleScene.Create(Scene);
+  Child.SetTransient;
+  Child.Collides := False;
+  Child.Pickable := False;
+  Child.CastShadows := False;
+  Child.Load(Root, True);
+  { the lights of its entity (r_lightAreas), not every light }
+  Child.InternalGlobalLightsMask := Copy(Scene.InternalGlobalLightsMask);
+  Scene.Add(Child);
   FTargets[Result].Scene := Scene;
-  FTargets[Result].Group := TGroupNode.Create;
+  FTargets[Result].Child := Child;
+  FTargets[Result].Group := Root;
   FTargets[Result].Shapes := nil;
   FTargets[Result].Dirty := False;
-  Scene.RootNode.AddChildren(FTargets[Result].Group);
   Scene.FreeNotification(Self);
 end;
 
@@ -678,6 +698,8 @@ begin
         Cols[S].Add(Color * D.Vertexes[K].Fade);
       end;
     end;
+    if FTargets[T].Child <> nil then
+      FTargets[T].Child.InternalGlobalLightsMask := Copy(FTargets[T].Scene.InternalGlobalLightsMask);
     for S := 0 to High(FTargets[T].Shapes) do
     begin
       FTargets[T].Shapes[S].Coord.SetPoint(Coords[S]);
@@ -764,8 +786,7 @@ begin
     if FTargets[T].Scene <> nil then
     begin
       FTargets[T].Scene.RemoveFreeNotification(Self);
-      if (FTargets[T].Scene.RootNode <> nil) and (FTargets[T].Group <> nil) then
-        FTargets[T].Scene.RootNode.RemoveChildren(FTargets[T].Group);
+      FreeAndNil(FTargets[T].Child);
       FTargets[T].Scene := nil;
       FTargets[T].Group := nil;
       FTargets[T].Shapes := nil;
