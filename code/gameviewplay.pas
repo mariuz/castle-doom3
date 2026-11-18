@@ -69,6 +69,8 @@ type
     FDemoCrouch: Boolean;
     { GO:... crouch holds it while moving }
     FDemoGoCrouch: Boolean;
+    { N: past the last monster or at a hidden one: the next S takes no shot }
+    FDemoSkipShot: Boolean;
     { the console "route" (Doom 3 feet points) and the demo's R: walk
       along it: the segment, the distance along it, the distance since the
       last screenshot, the map it was made for, the time in a cinematic }
@@ -105,6 +107,12 @@ type
       the fight began, turning back at walls }
     FFightAnchor: TVector3;
     FFightSide: Single;
+    { fight 2: after the route, the hunt walks to every monster alive and
+      shown (the nearest first) and kills it (HuntNext) }
+    FHunt: Boolean;
+    FHuntTarget, FHuntDone: String;
+    FHuntTries, FHuntRoutes: Integer;
+    FHuntTime: Single;
     FRouteGaps: Single;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
@@ -183,6 +191,8 @@ type
     { R: returns True when the walk is over }
     function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
     function FightStep(const SecondsPassed: Single): Boolean;
+    { the hunt's next monster: FRoute to it; False when none is left }
+    function HuntNext: Boolean;
     procedure LogMemory(const Title: String);
     procedure FightSummary;
     { After preparing resources: wait until the driver has compiled the
@@ -2257,6 +2267,12 @@ begin
   if Cmd = 'fight' then
   begin
     FFight := StrToIntDef(Trim(Args), Ord(not FFight)) <> 0;
+    FHunt := StrToIntDef(Trim(Args), 0) = 2;
+    FHuntTarget := '';
+    FHuntDone := '';
+    FHuntTries := 0;
+    FHuntRoutes := 0;
+    FHuntTime := 0;
     FFightKills := 0;
     FFightDeaths := 0;
     FFightSaves := 0;
@@ -2273,7 +2289,15 @@ begin
     { the first save at once }
     FFightSinceSave := 1000;
     Console.Print('fight ' + BoolToStr(FFight, 'ON', 'OFF'));
-    WritelnLog('GameViewPlay', 'Fight: %s', [BoolToStr(FFight, 'on', 'off')]);
+    if FHunt then
+      WritelnLog('GameViewPlay', 'Fight: %s, then the hunt for every monster left', [BoolToStr(FFight, 'on', 'off')])
+    else
+      WritelnLog('GameViewPlay', 'Fight: %s', [BoolToStr(FFight, 'on', 'off')]);
+  end else
+  if Cmd = 'monsters' then
+  begin
+    FGame.MonsterReport;
+    Console.Print('monsters: see the log');
   end else
   if Cmd = 'call' then
     FGame.RunScriptFunction(Trim(Args))
@@ -3364,6 +3388,92 @@ procedure TViewPlay.FightSummary;
 begin
   WritelnLog('GameViewPlay', 'Fight: summary: %d kills, %d deaths, %d saves, %d places given up (god mode), health %d, armor %d, %.0f s',
     [FFightKills, FFightDeaths, FFightSaves, FFightGaveUp, FGame.Health, FGame.Armor, FFightTime]);
+  FGame.MonsterReport;
+end;
+
+function TViewPlay.HuntNext: Boolean;
+const
+  HuntTries = 3;
+  HuntMaxSeconds = 900;
+var
+  Mon, Best: TD3Monster;
+  Feet, P: TVector3;
+  D, BestD, Gap: Single;
+  Hop: TD3PointArray;
+  Areas: Integer;
+  MonName, AliveList: String;
+
+  function Listed(const List, AName: String): Boolean;
+  begin
+    Result := Pos(',' + LowerCase(AName) + ',', ',' + LowerCase(List) + ',') > 0;
+  end;
+
+begin
+  Result := False;
+  Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+  repeat
+    Best := nil;
+    BestD := MaxSingle;
+    for Mon in FGame.Monsters do
+      if FGame.MonsterHuntable(Mon) and not Listed(FHuntDone, Mon.Model.Entity.Name) and
+         not Listed(FFightIgnore, Mon.Model.Entity.Name) then
+      begin
+        D := PointsDistance(Feet, CgeToD3(Mon.Position));
+        if D < BestD then
+        begin
+          BestD := D;
+          Best := Mon;
+        end;
+      end;
+    if (Best = nil) or (FHuntTime > HuntMaxSeconds) then
+    begin
+      AliveList := '';
+      for Mon in FGame.Monsters do
+        if FGame.MonsterHuntable(Mon) then
+          AliveList := AliveList + ' ' + Mon.Model.Entity.Name;
+      if FHuntTime > HuntMaxSeconds then
+        WritelnLog('GameViewPlay', 'Fight: hunt: out of time (%.0f s)', [FHuntTime]);
+      if AliveList = '' then
+        AliveList := ' none';
+      WritelnLog('GameViewPlay', 'Fight: hunt done after %d routes, %.0f s; alive and shown:%s',
+        [FHuntRoutes, FHuntTime, AliveList]);
+      FHuntTarget := '';
+      Exit;
+    end;
+    MonName := Best.Model.Entity.Name;
+    if SameText(MonName, FHuntTarget) then
+      Inc(FHuntTries)
+    else
+    begin
+      FHuntTarget := MonName;
+      FHuntTries := 0;
+    end;
+    if FHuntTries >= HuntTries then
+    begin
+      WritelnLog('GameViewPlay', 'Fight: hunt: gave up on %s at %s (health %d)',
+        [MonName, CgeToD3(Best.Position).ToString, Best.Health]);
+      FHuntDone := FHuntDone + ',' + MonName;
+      Continue;
+    end;
+    Break;
+  until False;
+  { wake it, as a trigger would: it comes for the player }
+  FGame.Activate(Best.Model.Entity);
+  P := CgeToD3(Best.Position);
+  FGame.PlayerRoute(Feet, P, Hop, Gap, Areas);
+  if Length(Hop) < 2 then
+    Hop := [Feet, P];
+  FRoute := Hop;
+  FRouteSeg := 0;
+  FRouteAlong := 0;
+  FRouteMarks := nil;
+  FRouteMarkNames := nil;
+  FRouteNextMark := 0;
+  FRouteLastEye := Camera.Translation;
+  Inc(FHuntRoutes);
+  WritelnLog('GameViewPlay', 'Fight: hunting %s (%s) at %s, %.0f away (try %d)',
+    [MonName, Best.Model.Entity.ClassName_, P.ToString, BestD, FHuntTries + 1]);
+  Result := True;
 end;
 
 { One step of the fighting playthrough; True while the walk waits (a
@@ -3390,6 +3500,8 @@ var
   Target, Dir, Side, NewEye: TVector3;
   TargetName: String;
   Slot: Integer;
+  Mon: TD3Monster;
+  HuntAlive: Boolean;
 begin
   Result := False;
   { the fire button is held only while there is a target }
@@ -3402,6 +3514,21 @@ begin
     FFightOnTarget := 0;
   end;
   FFightLastKills := FGame.Kills;
+
+  if FHuntTarget <> '' then
+  begin
+    FHuntTime := FHuntTime + SecondsPassed;
+    { the hunted one died (or went away) on the way: the next one }
+    HuntAlive := False;
+    for Mon in FGame.Monsters do
+      if FGame.MonsterHuntable(Mon) and SameText(Mon.Model.Entity.Name, FHuntTarget) then
+        HuntAlive := True;
+    if not HuntAlive and (FRouteHold <= 0) and (Length(FRoute) >= 2) then
+    begin
+      FRouteSeg := High(FRoute);
+      FRouteAlong := 0;
+    end;
+  end;
 
   if FGame.PlayerDead then
   begin
@@ -3445,7 +3572,7 @@ begin
     Exit(True);
   end;
 
-  if FGame.FightTarget(Camera.Translation, 1200, FFightIgnore, Target, TargetName) and
+  if FGame.FightTarget(Camera.Translation, 1200, FFightIgnore, Target, TargetName, FHuntTarget) and
      (FFightTime >= FFightSkipUntil) then
   begin
     if FFightTarget = '' then
@@ -3623,6 +3750,8 @@ begin
   begin
     P := FRoute[High(FRoute)];
     PlaceCamera(D3ToCge(P), CameraYaw);
+    if FFight and FHunt and HuntNext then
+      Exit(False);
     WritelnLog('GameViewPlay', 'Route: done, %.0f units', [FRouteWalked]);
     if FFight then
       FightSummary;
@@ -3758,8 +3887,12 @@ begin
       Exit;
   end else
   if Action = 'S' then
-    CaptureScreenshot
-  else
+  begin
+    if FDemoSkipShot then
+      FDemoSkipShot := False
+    else
+      CaptureScreenshot;
+  end else
   if Action = 'T' then
     Camera.Direction := RotatePointAroundAxisDeg(StrToFloatDef(Param, 0), Camera.Direction,
       Vector3(0, 1, 0))
@@ -3792,9 +3925,13 @@ begin
   if Action = 'N' then
   begin
     I := StrToIntDef(Param, 0);
-    if (I >= 0) and (I < FGame.Monsters.Count) then
+    FDemoSkipShot := (I < 0) or (I >= FGame.Monsters.Count) or (FGame.Monsters[I].Model = nil) or
+      FGame.Monsters[I].Model.Hidden or not FGame.Monsters[I].Model.Holder.Exists;
+    if not FDemoSkipShot then
     begin
       Mon := FGame.Monsters[I];
+      WritelnLog('GameViewPlay', 'Monster view %d: %s (%s) at %s, yaw %.0f', [I, Mon.Model.Entity.Name,
+        Mon.Model.Entity.ClassName_, CgeToD3(Mon.Position).ToString, Mon.Yaw]);
       { 150 units from the monster, the first free direction from where it looks }
       for P := 0 to 7 do
       begin

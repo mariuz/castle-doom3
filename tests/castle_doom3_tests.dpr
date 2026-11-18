@@ -5795,6 +5795,7 @@ var
   Lock: TD3MapEntity;
   Far: TVector3;
   Box: TBox3D;
+  Activations: Integer;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -5841,11 +5842,37 @@ begin
     { activating door_1 opens its team }
     Far := D3ToCge(Vector3(-200, -200, 0)) + Vector3(0, PlayerEyeHeight, 0);
     LightStart := DoorLight.Scene.Translation;
+    { a door fires its targets when it is fully open (idMover_Binary at
+      position 2; mc_underground's invasion starts so) }
+    Door1.Brush.Entity.SetValue('target', 'light_trig');
     Game.Activate(Door1.Brush.Entity);
+    Activations := Game.ActivationCount;
     Check(Door2.State in [dsOpening, dsOpen], 'activating door_1 opens door_2 (team)');
-    for I := 1 to 10 do
+    Game.Update(0.1, Far);
+    CheckEquals(Activations, Game.ActivationCount, 'no targets fired while the door opens');
+    for I := 2 to 10 do
       Game.Update(0.1, Far);
     Check(Door1.State = dsOpen, 'door_1 open after 1 s');
+    CheckEquals(Activations + 1, Game.ActivationCount, 'door_1 fired its target once, open');
+    Door1.Brush.Entity.SetValue('target', '');
+
+    { a trigger_relay with "wait" -1 fires once (idTrigger_Multi removes it) }
+    Lock := TD3MapEntity.Create;
+    try
+      Lock.SetValue('classname', 'trigger_relay');
+      Lock.SetValue('name', 'relay_once_test');
+      Lock.SetValue('target', 'light_trig');
+      Lock.SetValue('wait', '-1');
+      Activations := Game.ActivationCount;
+      Game.Activate(Lock);
+      Game.Update(0.1, Far);
+      Game.Activate(Lock);
+      Game.Update(0.1, Far);
+      { the relay twice, its target once }
+      CheckEquals(Activations + 3, Game.ActivationCount, 'a wait -1 relay fires its targets once');
+    finally
+      Lock.Free;
+    end;
     { the bound panel rides up with door_1 }
     CheckNear(LightStart.Y + Door1.Distance, DoorLight.Scene.Translation.Y,
       'door_light_1 follows door_1 (bind)');

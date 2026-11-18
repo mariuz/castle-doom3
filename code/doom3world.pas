@@ -164,6 +164,9 @@ type
       inv_name ("removeItem": which it then takes, idGameLocal::RequirementMet) }
     Requires: String;
     RemoveItem: Boolean;
+    { Update set it: the door got fully open this frame, the game fires its
+      targets (idMover_Binary::Event_Reached_BinaryMover at position 2) }
+    JustOpened: Boolean;
     procedure Update(const SecondsPassed: Single);
     procedure Open;
     procedure Close;
@@ -244,6 +247,18 @@ type
     FallSpeed: Single;
     { its corpse's ragdoll (its "ragdoll" key), nil without one }
     Ragdoll: TD3Ragdoll;
+    { the monster review (TrackMonsters, MonsterReport): it was shown, it
+      was after the player; how far it went (TrackPos: where it was last
+      frame) and its farthest from its spawn point (on the floor plan);
+      its feet's height over the floor below, checked once a second while
+      it lives on its feet (FloorGapMin / Max over FloorChecks) }
+    Appeared, Woke: Boolean;
+    TrackPos: TVector3;
+    Travelled, Farthest, FloorCheckTime: Single;
+    { seconds alive and after the player }
+    AwakeSeconds: Single;
+    FloorGapMin, FloorGapMax: Single;
+    FloorChecks: Integer;
     destructor Destroy; override;
     function Position: TVector3;
     function Center: TVector3;
@@ -995,6 +1010,10 @@ type
     FScriptSounds: specialize TObjectDictionary<String, TCastlePlayingSoundSource>;
     { trigger_count activations so far, by lowercase name }
     FCounts: specialize TDictionary<String, Integer>;
+    { idTrigger_Multi without a volume (trigger_relay...): the game time
+      before which an activation does nothing ("wait"; 1E30: "wait" -1,
+      fired once and removed), by lowercase name; -1: "triggerFirst" used up }
+    FRelayNext: specialize TDictionary<String, Single>;
     { classes whose activation is not supported yet (logged once) }
     FUnsupported: TStringList;
     { particle systems: all emitters (owned), the emitter entities, the
@@ -1576,6 +1595,13 @@ type
     procedure ActivateTargets(const E: TD3MapEntity; const Delay: Single = 0);
     { Activate one entity (its Event_Activate), as if a trigger targeted it. }
     procedure Activate(const E: TD3MapEntity);
+    { idTrigger_Multi::Event_Trigger for a trigger without a volume (a
+      trigger_relay; DefaultWait: its class's "wait"): the first activation
+      of a "triggerFirst" one only arms it; no firing before its "wait"
+      (+- "random") is over; "wait" -1 fires once (Doom 3 removes it).
+      mc_underground's invasion door opens again and again, its relay
+      (wait -1) started the invasion cameras each time. }
+    procedure RelayActivated(const E: TD3MapEntity; const DefaultWait: Single);
     { The map entity with this name, nil if none. }
     function FindEntity(const AName: String): TD3MapEntity;
     { The light a script spawned with this name, nil when none. }
@@ -1732,7 +1758,16 @@ type
       MaxDist; its center and name. Names in Ignore (comma separated) are
       left out. }
     function FightTarget(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
-      out Target: TVector3; out TargetName: String): Boolean;
+      out Target: TVector3; out TargetName: String; const Hunted: String = ''): Boolean;
+    { Per frame: the monster review's numbers (TD3Monster.Appeared...). }
+    procedure TrackMonsters(const SecondsPassed: Single);
+    { The monster review in the log (console "monsters", the fight's
+      summary): the counts, then a line per monster: its spawn point and
+      where it is, alive or dead, how far it went, its feet over the
+      floor; FLOATING / SUNK / NEVER MOVED mark suspects. }
+    procedure MonsterReport;
+    { a monster the hunt (fight 2) can go for: alive and shown }
+    function MonsterHuntable(const Mon: TD3Monster): Boolean;
     { The slot of the strongest weapon the player has ammo for (the fists
       when there is none), -1 without weapons. }
     function BestFightSlot: Integer;
@@ -2060,6 +2095,7 @@ begin
               begin
                 State := dsOpen;
                 Timer := 0;
+                JustOpened := True;
               end;
             end;
           dsOpen:
@@ -2217,6 +2253,7 @@ begin
   FSoundTransforms := specialize TObjectList<TCastleTransform>.Create(True);
   FScriptSounds := specialize TObjectDictionary<String, TCastlePlayingSoundSource>.Create([doOwnsValues]);
   FCounts := specialize TDictionary<String, Integer>.Create;
+  FRelayNext := specialize TDictionary<String, Single>.Create;
   FUnsupported := TStringList.Create;
   FUnsupported.Sorted := True;
   FEmitters := specialize TObjectList<TD3ParticleEmitter>.Create(True);
@@ -2263,6 +2300,7 @@ begin
   FPending.Free;
   FBindings.Free;
   FCounts.Free;
+  FRelayNext.Free;
   FUnsupported.Free;
   FFx.Free;
   FEmitterEntities.Free;
@@ -2339,6 +2377,7 @@ begin
   FBindings.Clear;
   FLightBindings := nil;
   FCounts.Clear;
+  FRelayNext.Clear;
   FUnsupported.Clear;
   FActors.Clear;
   { before the VM (it owns the weapon's thread) and the map }
@@ -6917,6 +6956,34 @@ begin
     end;
 end;
 
+procedure TD3Game.RelayActivated(const E: TD3MapEntity; const DefaultWait: Single);
+var
+  Key: String;
+  Next, Wait: Single;
+begin
+  Key := LowerCase(E.Name);
+  if not FRelayNext.TryGetValue(Key, Next) then
+    Next := 0;
+  if E.BoolValue('triggerFirst', False) and (Next = 0) then
+  begin
+    { armed: the next activation fires }
+    FRelayNext.AddOrSetValue(Key, -1);
+    Exit;
+  end;
+  if FTime < Next then
+    Exit;
+  Wait := E.FloatValue('wait', DefaultWait);
+  if Wait >= 0 then
+    Next := FTime + Max(0, Wait + E.FloatValue('random', 0) * (2 * Random - 1))
+  else
+    Next := 1E30;
+  { a "wait" of 0 must not look like "never fired" to triggerFirst }
+  if Next = 0 then
+    Next := 1E-6;
+  FRelayNext.AddOrSetValue(Key, Next);
+  ActivateTargets(E, E.FloatValue('delay', 0));
+end;
+
 procedure TD3Game.Activate(const E: TD3MapEntity);
 var
   Cls: String;
@@ -7036,7 +7103,7 @@ begin
 
   if Cls = 'trigger_relay' then
   begin
-    ActivateTargets(E, E.FloatValue('delay', 0));
+    RelayActivated(E, 0);
     Exit;
   end;
 
@@ -7070,7 +7137,7 @@ begin
         Exit;
       end;
     { a trigger without a volume still relays }
-    ActivateTargets(E, E.FloatValue('delay', 0));
+    RelayActivated(E, -1);
     Exit;
   end;
 
@@ -7487,6 +7554,16 @@ begin
           Break;
         end;
     Mover.Update(SecondsPassed * WorldTimeScale);
+    if Mover.JustOpened then
+    begin
+      { idDoor fires its targets each time it is fully open (mc_underground's
+        func_door_74 starts the invasion) }
+      Mover.JustOpened := False;
+      if Mover.Brush.Entity.Value('target') + Mover.Brush.Entity.Value('target0') +
+         Mover.Brush.Entity.Value('target1') <> '' then
+        WritelnLog('Doom3World', 'Door %s open: fires its targets', [Mover.Brush.Entity.Name]);
+      ActivateTargets(Mover.Brush.Entity);
+    end;
     { a shut door closes its area portal (like idDoor) }
     if FMap.Portals <> nil then
       for P in Mover.Portals do
@@ -7534,6 +7611,7 @@ begin
   Part(9);
   if (FScript <> nil) and not ScriptsPaused then
     UpdateActors(SecondsPassed * WorldTimeScale);
+  TrackMonsters(SecondsPassed);
   Part(10);
   UpdateGuiFocus;
   UpdateTalkFocus;
