@@ -1183,6 +1183,7 @@ type
     { idAI::Killed: StartRagdoll with the monster's "ragdoll" }
     procedure MonsterRagdoll(const Mon: TD3Monster; const Direction: TVector3);
     function MonsterDeathModel(const Mon: TD3Monster): Boolean;
+    procedure MonsterKilledTargets(const Mon: TD3Monster);
     procedure UpdateWorldWeapon;
     procedure UpdatePlayerModel(const SecondsPassed: Single);
     function PlayerBodyAnim(const Base: String; const Prefixed: Boolean): String;
@@ -5383,6 +5384,7 @@ begin
     end;
     Inc(Kills);
     Message('Killed ' + Mon.Model.Entity.Name);
+    MonsterKilledTargets(Mon);
   end else
     Pain := MonsterPain(Mon, Damage);
   if Mon.Actor <> nil then
@@ -6672,6 +6674,7 @@ begin
   MonsterSound(A.Monster, 'snd_death');
   if not MonsterDeathModel(A.Monster) then
     MonsterRagdoll(A.Monster, TVector3.Zero);
+  MonsterKilledTargets(A.Monster);
   ActorDamaged(A, True, True);
 end;
 
@@ -8133,6 +8136,26 @@ begin
   if (Instance = nil) or (RagdollName = '') or not RagdollEnabled then
     Exit;
   Result := TD3Ragdoll.Create(Instance, ArticulatedFigure(RagdollName), @WorldHit);
+end;
+
+procedure TD3Game.MonsterKilledTargets(const Mon: TD3Monster);
+var
+  K: Integer;
+  Has: Boolean;
+begin
+  { idAI::Killed: ActivateTargets( attacker ). Maps chain their spawns so:
+    alphalabs2's maggot_11 -> trigger_relay_119 -> two zombies, delta5's
+    ticks each bring the next one; none came before }
+  if (Mon.Model = nil) or (Mon.Model.Entity = nil) then
+    Exit;
+  Has := False;
+  for K := 0 to Mon.Model.Entity.Pairs.Count - 1 do
+    if Copy(LowerCase(Mon.Model.Entity.Pairs.Names[K]), 1, 6) = 'target' then
+      Has := True;
+  if not Has then
+    Exit;
+  WritelnLog('Doom3World', '%s died: fires its targets', [Mon.Model.Entity.Name]);
+  ActivateTargets(Mon.Model.Entity);
 end;
 
 function TD3Game.MonsterDeathModel(const Mon: TD3Monster): Boolean;

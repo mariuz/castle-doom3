@@ -3838,6 +3838,23 @@ begin
     Game.AttackOnce;
     Step(1);
     CheckEquals(Shots0, Game.Weapon.Shots, 'no ammo: no shot');
+
+    { a monster fires its targets when it dies (idAI::Killed; alphalabs2's
+      and delta5's spawns chain so) }
+    Blob := nil;
+    for M in Game.Monsters do
+      if (Blob = nil) and (M.State <> msDead) and M.Model.Holder.Exists then
+        Blob := M;
+    Check(Blob <> nil, 'a living monster');
+    if Blob <> nil then
+    begin
+      Blob.Model.Entity.SetValue('target', 'light_trig');
+      I := Game.ActivationCount;
+      Game.DamageMonster(Blob, 1000, 'damage_test_hurt', TVector3.Zero);
+      Step(0.1);
+      CheckEquals(I + 1, Game.ActivationCount, Blob.Model.Entity.Name + ' fired its target when killed');
+      Blob.Model.Entity.SetValue('target', '');
+    end;
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
