@@ -368,8 +368,12 @@ begin
     Doom 3's compressed dds/ copies (console image_usePrecompressedTextures) }
   if GetEnvironmentVariable('CD3_PRECOMPRESSED') = '0' then
     UsePrecompressedImages := False;
-  { env CD3_GLOBAL_AMBIENT=0: black where no light reaches, like Doom 3
-    (console r_globalAmbient; CGE's default is 0.2) }
+  { black where no light reaches, like Doom 3: no global ambient light
+    (CGE's default is 0.2: a flat gray of 10 in unlit places; against
+    dhewm3's views the median image difference was 3.9 with it, 2.1
+    without). Env CD3_GLOBAL_AMBIENT=0.2 (console r_globalAmbient) for
+    the gray. }
+  RenderContext.GlobalAmbient := TVector3.Zero;
   if GetEnvironmentVariable('CD3_GLOBAL_AMBIENT') <> '' then
     RenderContext.GlobalAmbient := Vector3(1, 1, 1) *
       SysUtils.StrToFloatDef(GetEnvironmentVariable('CD3_GLOBAL_AMBIENT'), 0, DefaultFormatSettings);
