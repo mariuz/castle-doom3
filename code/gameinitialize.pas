@@ -13,7 +13,7 @@ uses
   SysUtils, Classes,
   CastleWindow, CastleLog, CastleUIControls, CastleApplicationProperties, CastleParameters,
   CastleUtils, CastleFilesUtils, CastleUriUtils, CastleSoundEngine, CastleTimeUtils, CastleGLShaders, CastleGLImages, CastleInternalRenderer,
-  Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level, Doom3LightEffects
+  Doom3Files, Doom3Images, Doom3Decls, Doom3Gui, Doom3Level, Doom3LightEffects, Doom3Installs
   {$region 'Castle Initialization Uses'}
   // The content here may be automatically updated by CGE editor.
   , GameViewMenu
@@ -27,8 +27,9 @@ procedure ApplicationInitialize;
 var
   I: Integer;
   AutoTestMap, AutoTestPrefix, AutoTestDemo, CmdMap, BasePath, GameDir: String;
+  SavedBasePath, SavedGameDir: String;
   Pk4s: TStringList;
-  LoadedGame, Mute: Boolean;
+  LoadedGame, Mute, UseDataConfig: Boolean;
 begin
   { OpenGLES: highp fragment shaders. With mediump (16-bit floats on Mesa
     and many mobile GPUs) light distances overflow past 256 units, so
@@ -44,6 +45,7 @@ begin
   CmdMap := '';
   BasePath := '';
   GameDir := '';
+  UseDataConfig := False;
   Pk4s := TStringList.Create;
   try
     I := 1;
@@ -90,6 +92,11 @@ begin
       if Parameters[I] = '--mute' then
         Mute := true
       else
+      { --data-config: autotests use the data chosen in the menu too
+        (without it they use only -basepath ..., to stay reproducible) }
+      if Parameters[I] = '--data-config' then
+        UseDataConfig := true
+      else
       { --minimized: the window starts minimized (for runs started by
         another program, like RenderDoc's renderdoccmd); screenshots then
         render offscreen }
@@ -126,6 +133,24 @@ begin
     if UriFileExists(DefaultTestPk4) then
       D3Fs.AddPk4(DefaultTestPk4);
     LoadedGame := False;
+    { the data chosen in the title menu (data.cfg), unless the command line
+      or a base/ or demo/ next to the exe gives data (they win), or it's an
+      autotest without --data-config }
+    DataFromCommandLine := (BasePath <> '') or (Pk4s.Count > 0) or
+      DirectoryExists('base') or DirectoryExists('demo');
+    DataChoiceSaved := LoadDataChoice(SavedBasePath, SavedGameDir);
+    if DataChoiceSaved and not DataFromCommandLine and
+       ((AutoTestMap = '') or UseDataConfig) then
+    begin
+      WritelnLog('GameInitialize', 'Data chosen in the menu (%s): basepath "%s", game "%s"',
+        [DataConfigFileName, SavedBasePath, SavedGameDir]);
+      if SavedBasePath <> '' then
+      begin
+        BasePath := SavedBasePath;
+        if GameDir = '' then
+          GameDir := SavedGameDir;
+      end;
+    end;
     if BasePath = '' then
     begin
       { a Doom 3 "base" directory next to the executable,
@@ -147,9 +172,14 @@ begin
     for I := 0 to Pk4s.Count - 1 do
       if D3Fs.AddPk4(Pk4s[I]) then
         LoadedGame := True;
+    if LoadedGame and (BasePath <> '') then
+    begin
+      DataBasePathInUse := BasePath;
+      DataGameDirInUse := GameDir;
+    end;
     if not LoadedGame then
       WritelnLog('GameInitialize', 'No Doom 3 data found, using the bundled test level. ' +
-        'Pass -basepath "<Doom 3 dir>" (with base/pak000.pk4 ...) to play Doom 3 maps.');
+        'Choose Doom 3 data in the title menu (Doom 3 data...), or pass -basepath "<Doom 3 dir>" (with base/pak000.pk4 ...).');
     LoadProfileStep('pk4s');
     Decls.LoadAll;
     LoadProfileStep('decls');

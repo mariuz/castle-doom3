@@ -110,6 +110,12 @@ Sources are added in this order (later ones override earlier ones, like Doom 3's
 2. A `base/` directory next to the executable: its `*.pk4` files sorted by name (`pak000.pk4` ... `pak004.pk4`), then its loose files. Without `base/`, a `demo/` directory (the Doom 3 demo).
 3. `-basepath <Doom 3 dir>` (loads `<dir>/base`, or `<dir>/demo` for the demo), `-game <mod dir>` and `-pk4 <file>`.
 
+#### Choosing the data in the menu
+
+The title menu's **Doom 3 data...** button (bottom right, or F2) lists the Doom 3 data found on this computer: GOG (Galaxy's registry keys and default folders), Steam (every library in `libraryfolders.vdf`), Doom 3 BFG Edition, Resurrection of Evil (`d3xp` next to Doom 3) and the Doom 3 demo, plus the bundled test level alone. Pick one and the game starts again with it; the choice is kept in `%LOCALAPPDATA%\castle-doom3\data.cfg` (`basepath=` and `game=` lines; delete the file to choose again at the next start). The command line (`-basepath`, `-pk4`) and a `base/` or `demo/` next to the executable win over it, and autotests ignore it unless given `--data-config`. On the first start without any Doom 3 data or choice the panel opens by itself.
+
+**Download the free Doom 3 demo** (in the same panel, asked first) downloads the Linux demo below (463 MB) from the ftp.gwdg.de mirror of id Software's FTP, shows the progress, keeps only `demo/demo00.pk4` (checked against its size and MD5) in `%LOCALAPPDATA%\castle-doom3\demo\demo\` and deletes the rest; the demo is then listed. Env `CD3_DEMO_URL` points it at another mirror.
+
 #### The free Doom 3 demo
 
 The Doom 3 demo (2004) has three maps of the full game, shortened: `game/demo_mars_city1`, `game/demo_mc_underground` and `game/demo_mars_city2`. [dhewm3's install page](https://dhewm3.org/#how-to-install) links its downloads; the Linux one, `doom3-linux-1.1.1286-demo.x86.run` (485 MB), works on every system, as only its `demo/demo00.pk4` (483,535,485 bytes, MD5 `70c2c63ef1190158f1ebd6c255b22d8e`) is needed. The `.run` file is a shell script followed by a `.tar.gz`: on Linux `sh doom3-linux-1.1.1286-demo.x86.run --tar xf demo/` extracts it; elsewhere skip the script's first 373 lines and untar the rest. Then:
@@ -131,6 +137,7 @@ Doom 3 BFG Edition's data works too: `-basepath "<DOOM 3 BFG folder>"` (the fold
 .\castle-doom3.exe --autotest testmap test_output\shot --demo "W:2,S,G:200 0 0,A:0,W:2,S,F,N:0,W:0.5,X,S,Q"
 .\castle-doom3.exe --autotest MENU test_output\shot      # title screen screenshot
 .\castle-doom3.exe --autotest MENU test_output\shot --demo "W:1,S,C:320 240,Q"   # drive the menu GUI
+.\castle-doom3.exe --autotest MENU test_output\shot --demo "W:1,D:open,W:0.5,S,Q"  # the Doom 3 data panel
 ```
 
 Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds [run\|crouch]` hold movement keys (and the run key or crouch), `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command (`O:menu` opens the in-game menu, `O:menu x y` clicks it, `O:menu esc`), `L:map` load map, `Q` quit. With `--autotest MENU` the script drives the title menu GUI: `W:sec`, `S`, `C:x y` click at GUI coordinates, `K:esc`, `P:start` / `P:stop` a sampling profile, `Q`. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area, number of visible areas and the shadow casting light, and every shot (`Shot:`).

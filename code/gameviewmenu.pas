@@ -6,6 +6,13 @@
   PK4s; its components are designed in
   data/gameviewmenu.castle-user-interface .
 
+  The "Doom 3 data..." button (bottom right, or F2) opens the data panel:
+  the Doom 3 installs found on this computer (GOG, Steam, BFG, the demo;
+  Doom3Installs), the test level alone, and a download of the free Doom 3
+  demo (Doom3DemoDownload, asked first, with its progress). A choice is
+  saved in data.cfg and the game starts again with it. It opens by itself
+  on the first start without any Doom 3 data or choice.
+
   Escape in the game pushes this view over it (the game pauses):
   "close" pops it again, like Doom 3's in-game menu. }
 unit GameViewMenu;
@@ -17,7 +24,7 @@ interface
 uses
   Classes, Generics.Collections,
   CastleUIControls, CastleControls, CastleKeysMouse, CastleSoundEngine,
-  Doom3Gui;
+  Doom3Gui, Doom3Installs, Doom3DemoDownload;
 
 type
   TViewMenu = class(TCastleView)
@@ -47,6 +54,33 @@ type
     FShots: Integer;
     FRenders: Integer;
     FRenderSeconds: Double;
+    { the data panel (see the unit's comment) }
+    FDataButton: TCastleButton;
+    FDataPanel: TCastleRectangleControl;
+    FDataGroup: TCastleVerticalGroup;
+    FDataStatus: TCastleLabel;
+    FProgressBack, FProgressBar: TCastleRectangleControl;
+    FInstalls: TD3InstallList;
+    FDownload: TD3DemoDownload;
+    FDataConfirm: Boolean;
+    FDataShownOnce: Boolean;
+    FDownloadDoneShown: Boolean;
+    procedure CreateDataControls;
+    procedure ShowDataPanel(const Value: Boolean);
+    procedure RebuildDataPanel;
+    function DataLabel(const Text: String; const Size: Single; const Gray: Single = 0.75): TCastleLabel;
+    function DataButton(const Caption: String; const ATag: Integer; const Event: TNotifyEvent): TCastleButton;
+    procedure ClickData(Sender: TObject);
+    procedure ClickInstall(Sender: TObject);
+    procedure ClickTestOnly(Sender: TObject);
+    procedure ClickDownload(Sender: TObject);
+    procedure ClickDownloadYes(Sender: TObject);
+    procedure ClickDownloadCancel(Sender: TObject);
+    procedure ClickDataBack(Sender: TObject);
+    procedure StartDownload;
+    procedure UpdateDownload;
+    function DownloadRunning: Boolean;
+    procedure UseData(const BasePath, GameDir: String);
     procedure ClickMap(Sender: TObject);
     procedure ClickQuit(Sender: TObject);
     procedure SetGuiShown(const Value: Boolean);
@@ -80,6 +114,8 @@ type
     { a click at GUI coordinates, Escape (demo scripts, console "menu") }
     procedure GuiClick(const X, Y: Single);
     procedure GuiEscape;
+    { the data panel is open }
+    function DataPanelShown: Boolean;
   end;
 
 var
@@ -93,7 +129,7 @@ function ListMaps: TStringList;
 implementation
 
 uses
-  SysUtils, Math,
+  SysUtils, Math, Process,
   CastleWindow, CastleImages, CastleLog, CastleVectors, CastleRectangles, CastleUtils, CastleTimeUtils,
   Doom3Files, Doom3Decls, Doom3Sampler, GameViewPlay;
 
@@ -141,6 +177,13 @@ end;
 
 destructor TViewMenu.Destroy;
 begin
+  if FDownload <> nil then
+  begin
+    FDownload.Cancel;
+    FDownload.WaitFor;
+    FreeAndNil(FDownload);
+  end;
+  FInstalls.Free;
   FreeAndNil(FGui);
   FMaps.Free;
   FSounds.Free;
@@ -181,6 +224,11 @@ begin
   FDemoWait := 0;
   FShots := 0;
   SetGuiShown(UseMenuGui and D3Fs.FileExists(MenuGuiPath));
+  CreateDataControls;
+  { the first start without Doom 3 data or a choice: the data panel }
+  if (AutoTestPrefix = '') and (not InGame) and (not FDataShownOnce) and
+     (DataBasePathInUse = '') and (not DataChoiceSaved) and (not DataFromCommandLine) then
+    ShowDataPanel(True);
 end;
 
 procedure TViewMenu.Stop;
@@ -188,6 +236,13 @@ begin
   { freed with FreeAtStop }
   FGuiImage := nil;
   FGuiBack := nil;
+  { freed with FreeAtStop too (FDataGroup is owned by the panel) }
+  FDataButton := nil;
+  FDataPanel := nil;
+  FDataGroup := nil;
+  FDataStatus := nil;
+  FProgressBack := nil;
+  FProgressBar := nil;
   FreeAndNil(FGui);
   InGame := False;
   if FMusic <> nil then
@@ -229,6 +284,14 @@ begin
       FGui.Activate(0);
       FGui.NamedEvent('NoIntro');
       FGuiRedraw := 0;
+      { the data button and panel stay in front }
+      if FDataButton <> nil then
+      begin
+        RemoveControl(FDataButton);
+        InsertFront(FDataButton);
+        RemoveControl(FDataPanel);
+        InsertFront(FDataPanel);
+      end;
       WritelnLog('GameViewMenu', 'Menu GUI "%s" (%d windows%s)',
         [MenuGuiPath, FGui.WindowCount, Iff(InGame, ', in game', '')]);
     end;
@@ -371,6 +434,12 @@ begin
           QuitGame;
           Exit;
         end;
+      'datamenu':
+        begin
+          { ours: the data panel }
+          ShowDataPanel(True);
+          Exit;
+        end;
       'maplist':
         begin
           { ours (the test menu's MAP LIST): the map list }
@@ -412,9 +481,10 @@ begin
   { the mouse on the 640 x 480 GUI (CGE's y goes up); a demo script sets
     the cursor itself }
   R := FGuiImage.RenderRect;
-  if (FDemo.Count = 0) and (R.Width > 0) and (R.Height > 0) then
+  P := Container.MousePosition;
+  if (FDemo.Count = 0) and (R.Width > 0) and (R.Height > 0) and (not DataPanelShown) and
+     not ((FDataButton <> nil) and FDataButton.RenderRect.Contains(P)) then
   begin
-    P := Container.MousePosition;
     FGui.SetCursor(EnsureRange((P.X - R.Left) / R.Width * GuiWidth, 0, GuiWidth),
       EnsureRange((1 - (P.Y - R.Bottom) / R.Height) * GuiHeight, 0, GuiHeight));
     Down := buttonLeft in Container.MousePressed;
@@ -492,6 +562,7 @@ procedure TViewMenu.RunDemo(const SecondsPassed: Single);
 var
   C, Arg: String;
   Words: TStringArray;
+  I: Integer;
 begin
   if FDemoWait > 0 then
   begin
@@ -521,6 +592,44 @@ begin
       'K':
         if SameText(Arg, 'esc') then
           GuiEscape;
+      'D':
+        begin
+          { the data panel: D:open, D:close, D:pick <n> (1 is the first
+            install listed, 0 the test level), D:download (asks), D:yes,
+            D:cancel, D:wait (until the download is over) }
+          Words := Arg.Split([' '], TStringSplitOptions.ExcludeEmpty);
+          if Length(Words) = 0 then
+            Continue;
+          case LowerCase(Words[0]) of
+            'open': ShowDataPanel(True);
+            'close': ShowDataPanel(False);
+            'download': ClickDownload(nil);
+            'yes': ClickDownloadYes(nil);
+            'cancel': ClickDownloadCancel(nil);
+            'wait':
+              if DownloadRunning then
+              begin
+                Dec(FDemoIndex);
+                Exit;
+              end;
+            'pick':
+              if Length(Words) > 1 then
+              begin
+                if not DataPanelShown then
+                  ShowDataPanel(True);
+                I := StrToIntDef(Words[1], -1);
+                if I = 0 then
+                  ClickTestOnly(nil)
+                else
+                if (I >= 1) and (I <= FInstalls.Count) then
+                  UseData(FInstalls[I - 1].BasePath, FInstalls[I - 1].GameDir)
+                else
+                  WritelnWarning('GameViewMenu', 'D:pick %s: no such install', [Words[1]]);
+                if Application.Terminated then
+                  Exit;
+              end;
+          end;
+        end;
       'P':
         { a sampling profile (an -Xm build): P:start, P:stop }
         if SameText(Arg, 'start') then
@@ -540,6 +649,7 @@ procedure TViewMenu.Update(const SecondsPassed: Single; var HandleInput: Boolean
 begin
   inherited Update(SecondsPassed, HandleInput);
   UpdateGui(SecondsPassed);
+  UpdateDownload;
   if AutoTestPrefix = '' then
     Exit;
   if FDemo.Count > 0 then
@@ -573,6 +683,24 @@ begin
   Result := inherited Press(Event);
   if Result then
     Exit;
+  { F2: the data panel }
+  if Event.IsKey(keyF2) then
+  begin
+    ShowDataPanel(not DataPanelShown);
+    Exit(True);
+  end;
+  if DataPanelShown then
+  begin
+    if Event.IsKey(keyEscape) then
+    begin
+      if FDataConfirm then
+        ClickDownloadCancel(nil)
+      else
+      if not DownloadRunning then
+        ShowDataPanel(False);
+    end;
+    Exit(Event.EventType = itKey);
+  end;
   { Tab: Doom 3's menu or our map list }
   if Event.IsKey(keyTab) and ((FGui <> nil) or (UseMenuGui and D3Fs.FileExists(MenuGuiPath))) then
   begin
@@ -600,6 +728,348 @@ begin
       Application.Terminate;
     Exit(True);
   end;
+end;
+
+{ The data panel ------------------------------------------------------------ }
+
+function MegaBytes(const Bytes: Int64): String;
+begin
+  Result := Format('%d MB', [Round(Bytes / (1024 * 1024))]);
+end;
+
+{ the demo download's URL (env CD3_DEMO_URL for another mirror) }
+function DemoDownloadUrl: String;
+begin
+  Result := GetEnvironmentVariable('CD3_DEMO_URL');
+  if Result = '' then
+    Result := DemoUrl;
+end;
+
+procedure TViewMenu.CreateDataControls;
+begin
+  FDataButton := TCastleButton.Create(FreeAtStop);
+  FDataButton.Caption := 'Doom 3 data...';
+  FDataButton.FontSize := 20;
+  FDataButton.Anchor(hpRight, -20);
+  FDataButton.Anchor(vpBottom, 20);
+  FDataButton.OnClick := @ClickData;
+  InsertFront(FDataButton);
+
+  FDataPanel := TCastleRectangleControl.Create(FreeAtStop);
+  FDataPanel.FullSize := True;
+  FDataPanel.Color := Vector4(0.03, 0.03, 0.05, 1);
+  FDataPanel.Exists := False;
+  InsertFront(FDataPanel);
+end;
+
+function TViewMenu.DataPanelShown: Boolean;
+begin
+  Result := (FDataPanel <> nil) and FDataPanel.Exists;
+end;
+
+procedure TViewMenu.ShowDataPanel(const Value: Boolean);
+var
+  I: Integer;
+begin
+  if FDataPanel = nil then
+    Exit;
+  if Value then
+  begin
+    FDataShownOnce := True;
+    FDataConfirm := False;
+    FreeAndNil(FInstalls);
+    FInstalls := DetectInstalls;
+    WritelnLog('GameViewMenu', 'Data: %d Doom 3 installs found%s', [FInstalls.Count,
+      Iff(DataBasePathInUse <> '', Format(', in use "%s" %s', [DataBasePathInUse, DataGameDirInUse]), ', the test level in use')]);
+    for I := 0 to FInstalls.Count - 1 do
+      WritelnLog('GameViewMenu', 'Data %d: %s "%s"%s', [I + 1, FInstalls[I].Title, FInstalls[I].BasePath,
+        Iff(FInstalls[I].GameDir <> '', ' -game ' + FInstalls[I].GameDir, '')]);
+    RebuildDataPanel;
+  end;
+  FDataPanel.Exists := Value;
+  FDataButton.Exists := not Value;
+end;
+
+function TViewMenu.DataLabel(const Text: String; const Size: Single; const Gray: Single): TCastleLabel;
+begin
+  Result := TCastleLabel.Create(FDataGroup);
+  Result.Caption := Text;
+  Result.FontSize := Size;
+  Result.Color := Vector4(Gray, Gray, Gray, 1);
+  Result.MaxWidth := 1100;
+  FDataGroup.InsertFront(Result);
+end;
+
+function TViewMenu.DataButton(const Caption: String; const ATag: Integer; const Event: TNotifyEvent): TCastleButton;
+begin
+  Result := TCastleButton.Create(FDataGroup);
+  Result.Caption := Caption;
+  Result.Tag := ATag;
+  Result.FontSize := 22;
+  Result.AutoSizeWidth := False;
+  Result.Width := 1100;
+  Result.OnClick := Event;
+  FDataGroup.InsertFront(Result);
+end;
+
+procedure TViewMenu.RebuildDataPanel;
+var
+  I: Integer;
+  Inst: TD3Install;
+  InUse, DemoFound: Boolean;
+  Caption, Note: String;
+begin
+  FreeAndNil(FDataGroup);
+  FDataStatus := nil;
+  FProgressBack := nil;
+  FProgressBar := nil;
+  FDataGroup := TCastleVerticalGroup.Create(FDataPanel);
+  FDataGroup.Anchor(hpMiddle);
+  FDataGroup.Anchor(vpTop, -40);
+  FDataGroup.Alignment := hpMiddle;
+  FDataGroup.Spacing := 10;
+  FDataPanel.InsertFront(FDataGroup);
+
+  DataLabel('DOOM 3 DATA', 48, 0.9).Color := Vector4(0.85, 0.15, 0.1, 1);
+  if DataBasePathInUse <> '' then
+    Note := 'In use: ' + DataBasePathInUse + Iff(DataGameDirInUse <> '', ' (' + DataGameDirInUse + ')', '')
+  else
+  if D3Fs.SourceCount > 1 then
+    Note := 'In use: Doom 3 data next to the program'
+  else
+    Note := 'In use: the bundled test level only';
+  DataLabel(Note, 20);
+  if DataFromCommandLine then
+    DataLabel('The command line (-basepath, -pk4) or a base/ or demo/ folder next to the program gives the data: ' +
+      'a choice here applies when the game starts without them.', 18, 0.6);
+
+  if FDataConfirm then
+  begin
+    DataLabel('', 10);
+    DataLabel(Format('Download the free Doom 3 demo (id Software, 2004: three maps of Mars City) from %s?',
+      ['ftp.gwdg.de, a mirror of id Software''s FTP']), 22, 0.9);
+    DataLabel(Format('It downloads %s (the Linux demo, which has the data for every system), keeps only its ' +
+      'demo00.pk4 (%s) in "%s" and checks its MD5.',
+      [MegaBytes(DemoRunSize), MegaBytes(DemoPk4Size), DownloadedDemoBasePath]), 18);
+    DataButton('Download (' + MegaBytes(DemoRunSize) + ')', 0, @ClickDownloadYes);
+    DataButton('Cancel', 0, @ClickDownloadCancel);
+    Exit;
+  end;
+
+  if DownloadRunning then
+  begin
+    DataLabel('', 10);
+    FDataStatus := DataLabel('Downloading the Doom 3 demo...', 22, 0.9);
+    FProgressBack := TCastleRectangleControl.Create(FDataGroup);
+    FProgressBack.Width := 800;
+    FProgressBack.Height := 24;
+    FProgressBack.Color := Vector4(0.15, 0.15, 0.18, 1);
+    FDataGroup.InsertFront(FProgressBack);
+    FProgressBar := TCastleRectangleControl.Create(FProgressBack);
+    FProgressBar.Height := 24;
+    FProgressBar.Width := 0;
+    FProgressBar.Color := Vector4(0.8, 0.2, 0.1, 1);
+    FProgressBack.InsertFront(FProgressBar);
+    DataButton('Cancel the download', 0, @ClickDownloadCancel);
+    UpdateDownload;
+    Exit;
+  end;
+
+  DataLabel('', 6);
+  if FInstalls.Count = 0 then
+    DataLabel('No Doom 3 found (GOG, Steam, the BFG edition or the demo). Download the free demo below, ' +
+      'or start the game with -basepath "<Doom 3 folder>".', 18, 0.6)
+  else
+    DataLabel('Found on this computer (the game starts again with your choice):', 18, 0.6);
+  DemoFound := False;
+  for I := 0 to FInstalls.Count - 1 do
+  begin
+    Inst := FInstalls[I];
+    if Inst.Kind = ikDemo then
+      DemoFound := True;
+    InUse := SamePath(Inst.BasePath, DataBasePathInUse) and SameText(Inst.GameDir, DataGameDirInUse);
+    Caption := Format('%d. %s   %s', [I + 1, Inst.Title, Inst.BasePath]);
+    if InUse then
+      Caption := Caption + '   [in use]';
+    DataButton(Caption, I, @ClickInstall);
+  end;
+  DataButton('0. The bundled test level only' + Iff((DataBasePathInUse = '') and (D3Fs.SourceCount <= 1), '   [in use]', ''),
+    0, @ClickTestOnly);
+  if not DemoFound then
+    DataButton('Download the free Doom 3 demo (' + MegaBytes(DemoRunSize) + ')...', 0, @ClickDownload);
+  if FDownload <> nil then
+  begin
+    { the last download's result }
+    if FDownloadDoneShown then
+      DataLabel('The Doom 3 demo is downloaded: choose it above.', 20, 0.9)
+    else
+      FDataStatus := DataLabel('', 20, 0.9);
+  end;
+  DataButton('Back', 0, @ClickDataBack);
+end;
+
+procedure TViewMenu.ClickData(Sender: TObject);
+begin
+  ShowDataPanel(True);
+end;
+
+procedure TViewMenu.ClickInstall(Sender: TObject);
+var
+  I: Integer;
+begin
+  I := TCastleButton(Sender).Tag;
+  if (FInstalls <> nil) and (I >= 0) and (I < FInstalls.Count) then
+    UseData(FInstalls[I].BasePath, FInstalls[I].GameDir);
+end;
+
+procedure TViewMenu.ClickTestOnly(Sender: TObject);
+begin
+  UseData('', '');
+end;
+
+procedure TViewMenu.ClickDownload(Sender: TObject);
+begin
+  if DownloadRunning then
+    Exit;
+  if not DataPanelShown then
+    ShowDataPanel(True);
+  FDataConfirm := True;
+  WritelnLog('GameViewMenu', 'Data: asking before the demo download (%s)', [MegaBytes(DemoRunSize)]);
+  RebuildDataPanel;
+end;
+
+procedure TViewMenu.ClickDownloadYes(Sender: TObject);
+begin
+  if not FDataConfirm then
+    Exit;
+  FDataConfirm := False;
+  StartDownload;
+end;
+
+procedure TViewMenu.ClickDownloadCancel(Sender: TObject);
+begin
+  if FDataConfirm then
+  begin
+    FDataConfirm := False;
+    RebuildDataPanel;
+  end else
+  if DownloadRunning then
+  begin
+    WritelnLog('GameViewMenu', 'Data: cancelling the demo download');
+    FDownload.Cancel;
+  end;
+end;
+
+procedure TViewMenu.ClickDataBack(Sender: TObject);
+begin
+  ShowDataPanel(False);
+end;
+
+function TViewMenu.DownloadRunning: Boolean;
+var
+  State: TD3DemoDownloadState;
+  Done, Total: Int64;
+  Error: String;
+begin
+  Result := False;
+  if FDownload = nil then
+    Exit;
+  FDownload.GetProgress(State, Done, Total, Error);
+  Result := State in [ddsDownloading, ddsExtracting];
+end;
+
+procedure TViewMenu.StartDownload;
+begin
+  if DownloadRunning then
+    Exit;
+  if FDownload <> nil then
+  begin
+    FDownload.WaitFor;
+    FreeAndNil(FDownload);
+  end;
+  FDownloadDoneShown := False;
+  WritelnLog('GameViewMenu', 'Data: downloading the Doom 3 demo from %s', [DemoDownloadUrl]);
+  FDownload := TD3DemoDownload.Create(DemoDownloadUrl, DownloadedDemoBasePath);
+  RebuildDataPanel;
+end;
+
+procedure TViewMenu.UpdateDownload;
+var
+  State: TD3DemoDownloadState;
+  Done, Total: Int64;
+  Error: String;
+  Fraction: Single;
+begin
+  if FDownload = nil then
+    Exit;
+  FDownload.GetProgress(State, Done, Total, Error);
+  if Total > 0 then
+    Fraction := EnsureRange(Done / Total, 0, 1)
+  else
+    Fraction := 0;
+  if (FProgressBar <> nil) and (State in [ddsDownloading, ddsExtracting]) then
+    FProgressBar.Width := 800 * Fraction;
+  if FDataStatus <> nil then
+    case State of
+      ddsDownloading: FDataStatus.Caption := Format('Downloading the Doom 3 demo: %s of %s (%d%%)',
+        [MegaBytes(Done), MegaBytes(Total), Round(Fraction * 100)]);
+      ddsExtracting: FDataStatus.Caption := Format('Extracting demo/demo00.pk4: %d%%', [Round(Fraction * 100)]);
+      ddsFailed: FDataStatus.Caption := 'The download failed: ' + Error;
+      ddsCancelled: FDataStatus.Caption := 'The download was cancelled.';
+    end;
+  { over: the list again, with the demo when it's there }
+  if (not (State in [ddsDownloading, ddsExtracting])) and (FProgressBar <> nil) then
+  begin
+    FDownloadDoneShown := State = ddsDone;
+    if State = ddsDone then
+      WritelnLog('GameViewMenu', 'Data: the Doom 3 demo is downloaded');
+    if DataPanelShown then
+      ShowDataPanel(True)
+    else
+      RebuildDataPanel;
+    { the failure's message (ShowDataPanel made a new status label) }
+    UpdateDownload;
+  end;
+end;
+
+procedure TViewMenu.UseData(const BasePath, GameDir: String);
+var
+  P: TProcess;
+  I: Integer;
+begin
+  SaveDataChoice(BasePath, GameDir);
+  WritelnLog('GameViewMenu', 'Data chosen: basepath "%s", game "%s"', [BasePath, GameDir]);
+  { env CD3_DATA_RESTART=1: an autotest starts the game again too (to
+    test that; the new game is a plain one, not an autotest) }
+  if (AutoTestPrefix <> '') and (GetEnvironmentVariable('CD3_DATA_RESTART') <> '1') then
+  begin
+    { an autotest ends here (the next run with --data-config loads it) }
+    WritelnLog('GameViewMenu', 'Data: autotest, not starting again');
+    SaveShot;
+    Application.Terminate;
+    Exit;
+  end;
+  { the data is mounted at the start: start the game again (with the same
+    sound and window options) }
+  WritelnLog('GameViewMenu', 'Data: starting the game again');
+  P := TProcess.Create(nil);
+  try
+    P.Executable := ParamStr(0);
+    for I := 1 to ParamCount do
+      if (ParamStr(I) = '--mute') or (ParamStr(I) = '--minimized') then
+        P.Parameters.Add(ParamStr(I));
+    P.CurrentDirectory := GetCurrentDir;
+    P.InheritHandles := False;
+    try
+      P.Execute;
+    except
+      on E: Exception do
+        WritelnWarning('GameViewMenu', 'Cannot start the game again (%s): start it yourself', [E.Message]);
+    end;
+  finally
+    P.Free;
+  end;
+  Application.Terminate;
 end;
 
 end.
