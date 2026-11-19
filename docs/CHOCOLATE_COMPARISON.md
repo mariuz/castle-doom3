@@ -61,6 +61,63 @@ All 47 maps load and play to their end with no exception and no shader error; ev
 | site3 | 15 | 14.7 | 21.0 | 42% | 3 | 8.3 | 6 | 1 |
 | **all** | 731 | | | 41% | 131 | 6.0 | 292 | 96 |
 
+## Fresh loads, the Doom 3 BFG look (2026-11-20)
+
+`tools/chocolate_refs.ps1 -Logs playthrough_bfg -Fresh -OutDir chocolate_fresh`: both engines load each map and go to the same views at once (the route's views of the table above are mid-game: doors open, lights switched), both with Doom 3 BFG's look (lights x1.5, `g_fov` 80 across 16:9) and this port's fog lights. Against the route comparison above: views under an image difference of 5 292 of 731 -> 414 of 701, median image difference 6.0 -> 4.3, median luma of the maps 14.2 against Chocolate DOOM-3-BFG's 16.9 -> 18.5 against 17.6 (this port is now darker on 21 maps of 47, was 46).
+
+| Map | Views | Luma here | Luma chocolate | Median luma difference | Views within 15% | Median image difference | Views under 5 | Left out (outside areas) |
+|---|---|---|---|---|---|---|---|---|
+| admin | 14 | 27.4 | 23.8 | 44% | 3 | 8.1 | 5 | 0 |
+| alphalabs1 | 15 | 12.8 | 13.9 | 29% | 4 | 3.7 | 10 | 3 |
+| alphalabs2 | 12 | 13.4 | 11.2 | 35% | 3 | 4.3 | 7 | 3 |
+| alphalabs3 | 8 | 18.9 | 18.6 | 27% | 3 | 4.7 | 4 | 3 |
+| alphalabs4 | 21 | 21.1 | 22.6 | 33% | 3 | 4.4 | 12 | 1 |
+| caverns1 | 19 | 12.2 | 21.0 | 39% | 2 | 4.5 | 12 | 4 |
+| caverns2 | 8 | 5.0 | 14.5 | 69% | 1 | 3.0 | 5 | 2 |
+| comm1 | 19 | 12.9 | 17.2 | 32% | 5 | 3.6 | 12 | 1 |
+| commoutside | 26 | 17.0 | 17.0 | 30% | 8 | 3.9 | 16 | 4 |
+| cpu | 13 | 13.1 | 10.9 | 47% | 2 | 3.7 | 8 | 2 |
+| cpuboss | 13 | 26.7 | 24.6 | 25% | 4 | 7.6 | 5 | 3 |
+| delta1 | 26 | 20.3 | 17.9 | 33% | 5 | 4.7 | 15 | 2 |
+| delta2a | 14 | 17.2 | 20.4 | 30% | 4 | 4.0 | 9 | 2 |
+| delta2b | 17 | 12.5 | 15.1 | 27% | 4 | 3.0 | 11 | 3 |
+| delta3 | 16 | 23.1 | 26.0 | 21% | 6 | 5.8 | 7 | 1 |
+| delta4 | 2 | 10.5 | 15.6 | 17% | 1 | 2.4 | 2 | 1 |
+| delta5 | 4 | 18.1 | 14.3 | 31% | 1 | 3.1 | 3 | 3 |
+| deltax | 3 | 16.4 | 14.9 | 10% | 2 | 3.9 | 3 | 4 |
+| enpro | 17 | 24.2 | 19.7 | 21% | 8 | 4.2 | 14 | 1 |
+| erebus1 | 6 | 10.7 | 4.7 | 33% | 2 | 1.9 | 6 | 4 |
+| erebus2 | 13 | 4.6 | 6.6 | 32% | 5 | 1.7 | 12 | 0 |
+| erebus3 | 12 | 21.4 | 25.1 | 25% | 4 | 3.9 | 8 | 4 |
+| erebus4 | 10 | 22.9 | 30.6 | 37% | 1 | 7.0 | 3 | 1 |
+| erebus5 | 18 | 47.0 | 23.5 | 73% | 2 | 11.2 | 4 | 1 |
+| erebus6 | 11 | 23.3 | 11.4 | 81% | 0 | 4.2 | 6 | 3 |
+| hell1 | 21 | 11.9 | 11.3 | 46% | 6 | 3.6 | 14 | 14 |
+| hell | 11 | 14.9 | 13.2 | 19% | 2 | 4.0 | 9 | 10 |
+| hellhole | 10 | 20.6 | 15.4 | 51% | 3 | 6.2 | 3 | 1 |
+| le_enpro1 | 22 | 30.6 | 18.3 | 39% | 5 | 5.1 | 10 | 0 |
+| le_enpro2 | 18 | 12.1 | 12.5 | 32% | 4 | 3.2 | 11 | 0 |
+| le_exis1 | 11 | 29.2 | 32.7 | 24% | 3 | 6.5 | 3 | 0 |
+| le_exis2 | 12 | 23.3 | 27.7 | 22% | 4 | 5.0 | 6 | 1 |
+| le_hell | 24 | 13.9 | 17.6 | 29% | 4 | 3.7 | 17 | 7 |
+| le_hell_post | 13 | 19.4 | 22.6 | 30% | 4 | 7.6 | 5 | 11 |
+| le_underground2 | 19 | 18.5 | 16.9 | 33% | 2 | 4.1 | 13 | 0 |
+| le_underground | 10 | 19.9 | 15.9 | 29% | 1 | 4.4 | 5 | 1 |
+| mars_city1 | 5 | 30.0 | 27.1 | 62% | 1 | 7.4 | 2 | 2 |
+| mars_city2 | 14 | 29.8 | 33.0 | 28% | 2 | 6.7 | 3 | 2 |
+| mc_underground | 22 | 18.5 | 18.8 | 29% | 7 | 4.7 | 12 | 1 |
+| monorail | 26 | 12.9 | 18.0 | 48% | 4 | 3.7 | 15 | 9 |
+| phobos1 | 22 | 12.2 | 15.3 | 25% | 4 | 3.2 | 17 | 1 |
+| phobos2 | 19 | 22.8 | 27.1 | 25% | 4 | 5.1 | 9 | 2 |
+| phobos3 | 21 | 22.1 | 15.4 | 22% | 7 | 4.2 | 13 | 2 |
+| phobos4 | 11 | 5.6 | 3.6 | 33% | 3 | 1.3 | 11 | 0 |
+| recycling1 | 20 | 22.8 | 18.9 | 46% | 2 | 4.6 | 12 | 3 |
+| recycling2 | 18 | 14.1 | 13.1 | 25% | 5 | 2.4 | 16 | 2 |
+| site3 | 15 | 21.1 | 23.3 | 19% | 7 | 3.7 | 9 | 1 |
+| **all** | 701 | | | 32% | 167 | 4.3 | 414 | 126 |
+
+The worst maps are mostly views from inside walls: Chocolate DOOM-3-BFG pushes the player out of a wall after `setviewpos`, this port's noclip stays there (erebus5's views 12 to 16 look at a wall from up close here, at a room there). erebus5's 2 fog lights cover less than half of every area's box, so no area there is fogged yet.
+
 ## What differs
 
 - **The view's state**: our route takes its screenshots mid-game (doors it opened, lights a trigger switched, a damage tint, monsters), Chocolate DOOM-3-BFG a fresh load seconds after the map starts. Most of the image differences over 5 are views where something else is open, on or alive. Comparing fresh loads (our port at Chocolate DOOM-3-BFG's views, `setviewpos`, eye height minus 68) removes most of it.
