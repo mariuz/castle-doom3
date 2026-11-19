@@ -21,7 +21,7 @@ type
     Camera: TCastleCamera;
     WalkNavigation: TCastleWalkNavigation;
     Map: TDoom3Map;
-    Flashlight: TCastleSpotLight;
+    Flashlight: TCastlePointLight;
     MuzzleFlash: TCastlePointLight;
     Hud: TDoom3Hud;
     LabelFps: TCastleLabel;
@@ -184,6 +184,8 @@ type
     FGpuQueryUsed: array [0..3] of Boolean;
     FGpuQueryIndex: Integer;
     FGpuQueryActive: Boolean;
+    { the flashlight's projection image ('-' none, '' not looked for) }
+    FFlashlightProfileName: String;
     FPerfGpu: Double;
     FPerfGpuFrames: Integer;
     FPartGameParts: String;
@@ -235,6 +237,7 @@ type
     { the weapon's muzzle flash light (its def's flashColor, flashRadius,
       flashTime), else the built-in pistol's }
     procedure UpdateMuzzleFlash;
+    procedure UpdateFlashlight;
     { the HUD's tunnel vision and blood blobs from the game's damage }
     procedure UpdateDamageView;
     procedure UpdateRemoteViews(const SecondsPassed: Single);
@@ -2030,6 +2033,49 @@ begin
     if MuzzleFlash.Exists then
       Map.MoveDynamicLightVolume(MuzzleFlash, CgeToD3(MuzzleFlash.WorldTranslation), 400);
   end;
+end;
+
+{ The flashlight is a projected light volume (a pyramid from the light
+  along the view, Doom 3's flashlight is a projected light): as a spot
+  light, a light kind of its own, every shape it reached linked a new
+  shader program, stalls of up to 1.7 s on a first play (erebus5). }
+procedure TViewPlay.UpdateFlashlight;
+const
+  Range = 1200;
+  HalfAngle = 0.4;
+var
+  P, Dir, Up, Right, CamPos, CamDir, CamUp: TVector3;
+  W: Single;
+  M: TMatrix4;
+begin
+  if not Flashlight.Exists then
+    Exit;
+  P := CgeToD3(Flashlight.WorldTranslation);
+  MainViewport.Camera.GetWorldView(CamPos, CamDir, CamUp);
+  Dir := CgeToD3(CamDir).Normalize;
+  Up := CgeToD3(CamUp).Normalize;
+  Right := TVector3.CrossProduct(Dir, Up);
+  W := Range * Tan(HalfAngle);
+  M := ProjectedLightMatrix(P, TMatrix3.Identity, Dir * Range, Up * W, Right * W,
+    TVector3.Zero, TVector3.Zero, False);
+  if Flashlight.InternalLightNode.Field('d3_light_matrix_') = nil then
+  begin
+    if FFlashlightProfileName = '' then
+    begin
+      { Doom 3's flashlight image when the data has it }
+      if D3Fs.FileExists('lights/flashlight5.tga') then
+        FFlashlightProfileName := 'lights/flashlight5'
+      else
+        FFlashlightProfileName := '-';
+    end;
+    if FFlashlightProfileName = '-' then
+      Map.DynamicLightVolumeMatrix(Flashlight, M, Sqrt(Sqr(Range) + 2 * Sqr(W)),
+        LightProfile('', '', True))
+    else
+      Map.DynamicLightVolumeMatrix(Flashlight, M, Sqrt(Sqr(Range) + 2 * Sqr(W)),
+        LightProfile(FFlashlightProfileName, '', True));
+  end else
+    Map.MoveDynamicLightVolumeMatrix(Flashlight, M, Sqrt(Sqr(Range) + 2 * Sqr(W)));
 end;
 
 procedure TViewPlay.Fire(const Once: Boolean);
@@ -4279,6 +4325,7 @@ begin
   FPartVisibility := TimerSeconds(Timer, PartTimer);
   UpdateReverb;
   UpdateMuzzleFlash;
+  UpdateFlashlight;
 
   Hud.Health := FGame.Health;
   Hud.Armor := FGame.Armor;

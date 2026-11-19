@@ -482,6 +482,13 @@ type
     { A new place or size for a light DynamicLightVolume made. }
     procedure MoveDynamicLightVolume(const ALight: TCastlePointLight; const OriginD3: TVector3;
       const Radius: Single);
+    { DynamicLightVolume with a volume of its own, M (ProjectedLightMatrix:
+      the flashlight's pyramid); Radius bounds the shapes it reaches. }
+    function DynamicLightVolumeMatrix(const ALight: TCastlePointLight; const M: TMatrix4;
+      const Radius: Single; const Profile: TD3LightProfile): Boolean;
+    { A new volume for a light DynamicLightVolumeMatrix made. }
+    procedure MoveDynamicLightVolumeMatrix(const ALight: TCastlePointLight; const M: TMatrix4;
+      const Radius: Single);
     { Read-only information, visible in the editor's inspector. }
     property AreaCount: Integer read GetAreaCount;
     property EntityCount: Integer read GetEntityCount;
@@ -1497,6 +1504,31 @@ begin
   FillChar(OwnEffect, SizeOf(OwnEffect), 0);
   SetLightVolume(ALight.InternalLightNode, OwnEffect, 0,
     PointLightMatrix(OriginD3, TMatrix3.Identity, Vector3(R, R, R)), Profile);
+end;
+
+function TDoom3Map.DynamicLightVolumeMatrix(const ALight: TCastlePointLight; const M: TMatrix4;
+  const Radius: Single; const Profile: TD3LightProfile): Boolean;
+var
+  OwnEffect: TD3SharedLightEffects;
+begin
+  Result := LightVolumes and SharedLightEffects and SharedLightEffectsAvailable and
+    (FSharedLightEffects[lsRound, False] <> nil);
+  if not Result then
+    Exit;
+  ALight.Attenuation := Vector3(1, 0, 0);
+  ALight.RadiusFalloff := False;
+  ALight.Radius := Max(1, Radius);
+  FillChar(OwnEffect, SizeOf(OwnEffect), 0);
+  SetLightVolume(ALight.InternalLightNode, OwnEffect, 0, M, Profile);
+end;
+
+procedure TDoom3Map.MoveDynamicLightVolumeMatrix(const ALight: TCastlePointLight; const M: TMatrix4;
+  const Radius: Single);
+begin
+  if ALight.InternalLightNode.Field('d3_light_matrix_') = nil then
+    Exit;
+  ALight.Radius := Max(1, Radius);
+  SetLightVolumeMatrix(ALight.InternalLightNode, M);
 end;
 
 procedure TDoom3Map.MoveDynamicLightVolume(const ALight: TCastlePointLight; const OriginD3: TVector3;
