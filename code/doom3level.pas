@@ -492,6 +492,13 @@ type
     property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
     property LightScale: Single read FLightScale write FLightScale {$ifdef FPC}default 1{$endif};
+    { LightScale times the data's: Doom 3 BFG's renderer multiplies every
+      light by 3 (r_lightScale), the 2004 one by 2, so on BFG data lights
+      are 1.5 times as strong (env CD3_BFG_LIGHTSCALE=1 for the 2004
+      scale). }
+    function EffectiveLightScale: Single;
+    { The data's part of it: 1.5 on BFG data, else 1. }
+    class function DataLightScale: Single;
     { The profile of a light shader's images, like BuildLights' (the
       default point light's for ''). }
     function PointLightProfile(const ShaderName: String): TD3LightProfile;
@@ -1442,10 +1449,10 @@ begin
     if (Shader <> nil) and Shader.IsAmbientLight then
     begin
       Node.Intensity := 0;
-      Node.AmbientIntensity := 1;
+      Node.AmbientIntensity := DataLightScale;
     end else
     begin
-      Node.Intensity := 1.5 * FLightScale;
+      Node.Intensity := 1.5 * EffectiveLightScale;
       Node.AmbientIntensity := 0;
     end;
     Node.IsOn := not E.BoolValue('start_off');
@@ -1502,6 +1509,26 @@ begin
   else
   if LightVolumes then
     WritelnLog('Doom3Level', 'Light volumes: %d lights, an effect each', [N]);
+end;
+
+var
+  { env CD3_BFG_LIGHTSCALE: the BFG data's light scale, -1 until read }
+  BfgLightScale: Single = -1;
+
+class function TDoom3Map.DataLightScale: Single;
+begin
+  Result := 1;
+  if (D3Fs <> nil) and D3Fs.IsBfg then
+  begin
+    if BfgLightScale < 0 then
+      BfgLightScale := StrToFloatDef(GetEnvironmentVariable('CD3_BFG_LIGHTSCALE'), 1.5);
+    Result := BfgLightScale;
+  end;
+end;
+
+function TDoom3Map.EffectiveLightScale: Single;
+begin
+  Result := FLightScale * DataLightScale;
 end;
 
 function TDoom3Map.PointLightProfile(const ShaderName: String): TD3LightProfile;
@@ -1616,10 +1643,10 @@ begin
   if (FLights[I].Shader <> nil) and FLights[I].Shader.IsAmbientLight then
   begin
     Node.Intensity := 0;
-    Node.AmbientIntensity := M;
+    Node.AmbientIntensity := M * DataLightScale;
   end else
   begin
-    Base := 1.5 * FLightScale;
+    Base := 1.5 * EffectiveLightScale;
     Node.Intensity := Base * M;
     Node.AmbientIntensity := 0;
   end;
