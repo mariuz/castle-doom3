@@ -19,6 +19,9 @@
       outside every area (Doom 3 draws all areas there, this port almost
       nothing): the last column counts them.
 
+  python tools/dhewm3_compare.py ours <reference cfg>
+      prints a --demo script for this port that takes the cfg's views
+      (on a fresh load, like the reference engine's).
   python tools/dhewm3_compare.py same <screenshot dir>
       prints how many of the screenshots look the same as the one before
       (a reference engine whose view froze).
@@ -170,6 +173,23 @@ def compare(args):
     print('%s: %d pairs' % (out, n))
 
 
+def ours_demo(args):
+    # a demo script for this port with the reference views of a cfg: our
+    # setviewpos takes the feet (the eye is 68 higher)
+    cfg, = args
+    views = []
+    with open(cfg, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            w = line.split()
+            if len(w) == 5 and w[0] == 'setviewpos':
+                views.append((float(w[1]), float(w[2]), float(w[3]) - 68, float(w[4])))
+    steps = ['W:3', 'O:skipcinematic', 'W:2', 'O:god', 'O:notarget', 'O:noclip']
+    for x, y, z, yaw in views:
+        steps += ['O:setviewpos %.1f %.1f %.1f %.0f' % (x, y, z, yaw), 'W:1.5', 'S']
+    steps.append('Q')
+    print(','.join(steps))
+
+
 def same(args):
     from PIL import Image
     folder, = args
@@ -184,7 +204,7 @@ def same(args):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2 or sys.argv[1] not in ('cfg', 'compare', 'table', 'same'):
+    if len(sys.argv) < 2 or sys.argv[1] not in ('cfg', 'compare', 'table', 'same', 'ours'):
         print(__doc__)
         sys.exit(1)
-    {'cfg': write_cfg, 'compare': compare, 'table': table, 'same': same}[sys.argv[1]](sys.argv[2:])
+    {'cfg': write_cfg, 'compare': compare, 'table': table, 'same': same, 'ours': ours_demo}[sys.argv[1]](sys.argv[2:])

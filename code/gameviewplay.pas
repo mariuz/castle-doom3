@@ -210,6 +210,8 @@ type
     procedure UpdateCinematic;
     procedure RunSkippedCinematic;
     procedure LoadLevel(const AMapName: String);
+    { The camera's fov: g_fov's default for the look (D3DefaultFov). }
+    procedure ApplyDefaultFov;
     { route all: FRoute through every touch trigger and item, nearest
       first, ending at Goal (Doom 3 feet); FRouteGaps sums the hops }
     procedure BuildCoverageRoute(const Goal: TVector3; const GoalName: String);
@@ -378,9 +380,36 @@ end;
 { idGameLocal::CalcFov: Doom 3's fov (degrees) is the horizontal one of a
   4:3 view; wider screens keep its vertical fov and see more on the sides
   (like dhewm3 and Doom 3 with r_aspectRatio). Radians. }
+{ A Doom 3 fov (g_fov, target_setfov, a camera's) as CGE's vertical fov:
+  the 2004 game means it across a 4:3 screen, Doom 3 BFG across a 16:9 one
+  (idGameLocal::CalcFov), so BFG's default 80 is 50.6 degrees high, the
+  2004 game's 90 is 73.7 }
 function D3VerticalFov(const FovX: Single): Single;
 begin
-  Result := 2 * ArcTan(Tan(DegToRad(EnsureRange(FovX, 1, 170)) / 2) * 3 / 4);
+  if D3BfgLook then
+    Result := 2 * ArcTan(Tan(DegToRad(EnsureRange(FovX, 1, 170)) / 2) * 9 / 16)
+  else
+    Result := 2 * ArcTan(Tan(DegToRad(EnsureRange(FovX, 1, 170)) / 2) * 3 / 4);
+end;
+
+{ g_fov's default: 80 in Doom 3 BFG, 90 in the 2004 game }
+function D3DefaultFov: Single;
+begin
+  if D3BfgLook then
+    Result := 80
+  else
+    Result := 90;
+end;
+
+procedure TViewPlay.ApplyDefaultFov;
+begin
+  Camera.Perspective.FieldOfViewAxis := faVertical;
+  Camera.Perspective.FieldOfView := D3VerticalFov(D3DefaultFov);
+  FDefaultFov := Camera.Perspective.FieldOfView;
+  FDefaultFovAxis := Camera.Perspective.FieldOfViewAxis;
+  WritelnLog('GameViewPlay', 'Look: %s (lights x%s, g_fov %s, %.1f degrees high)',
+    [Iff(D3BfgLook, 'Doom 3 BFG', 'Doom 3 2004'), FloatToStrDot(TDoom3Map.DataLightScale),
+     FloatToStrDot(D3DefaultFov), RadToDeg(FDefaultFov)]);
 end;
 
 const
@@ -442,11 +471,8 @@ begin
   FGame.OnMessage := @HandleMessage;
   FGame.OnFlashlight := @HandleFlashlight;
   FGame.OnEndLevel := @HandleEndLevel;
-  { g_fov 90 (the design's horizontal fov) the way Doom 3 means it }
-  Camera.Perspective.FieldOfView := D3VerticalFov(RadToDeg(Camera.Perspective.FieldOfView));
-  Camera.Perspective.FieldOfViewAxis := faVertical;
-  FDefaultFov := Camera.Perspective.FieldOfView;
-  FDefaultFovAxis := Camera.Perspective.FieldOfViewAxis;
+  { g_fov's default (90, or 80 with the BFG look) the way Doom 3 means it }
+  ApplyDefaultFov;
   { the PDA screen }
   FPdaPanel := TCastleRectangleControl.Create(FreeAtStop);
   FPdaPanel.Color := Vector4(0.02, 0.08, 0.12, 0.94);
@@ -3388,6 +3414,31 @@ begin
   if Cmd = 'fps' then
     LabelFps.Exists := not LabelFps.Exists
   else
+  if Cmd = 'r_skipfoglights' then
+  begin
+    { r_skipFogLights [0|1]: Doom 3's cvar, fog lights off }
+    if Args <> '' then
+      Map.FogLightsOn := StrToIntDef(Args, 0) = 0
+    else
+      Map.FogLightsOn := not Map.FogLightsOn;
+    Console.Print('r_skipFogLights ' + BoolToStr(not Map.FogLightsOn, '1', '0'));
+  end else
+  if Cmd = 'classic' then
+  begin
+    { classic [0|1]: the 2004 game's light scale and field of view on BFG
+      data (D3ClassicMode); reloads the map for the lights }
+    if Args <> '' then
+      D3ClassicMode := StrToIntDef(Args, 1) <> 0;
+    Console.Print(Format('classic %s (%s look)', [BoolToStr(D3ClassicMode, '1', '0'),
+      Iff(D3BfgLook, 'Doom 3 BFG', 'Doom 3 2004')]));
+    WritelnLog('GameViewPlay', 'Classic mode %s: %s look', [BoolToStr(D3ClassicMode, 'on', 'off'),
+      Iff(D3BfgLook, 'Doom 3 BFG', 'Doom 3 2004')]);
+    if Args <> '' then
+    begin
+      ApplyDefaultFov;
+      LoadLevel(MapName);
+    end;
+  end else
   if Cmd = 'lightscale' then
   begin
     Map.LightScale := StrToFloatDef(Args, 1);

@@ -206,6 +206,15 @@ type
     FStaticGroupFlags: array of Integer;
     FMergedParms: specialize TObjectList<TD3EntityParms>;
     FMergedStaticCount: Integer;
+    { fog lights (CollectFogLights): their boxes (CGE space), colors and
+      distances; each area's fog (-1: none) and the LocalFog nodes made }
+    FFogBoxes: array of TBox3D;
+    FFogColors: array of TVector3;
+    FFogDistances: array of Single;
+    FFogNames: array of String;
+    FAreaFogs: array of Integer;
+    FFogNodes: array of TLocalFogNode;
+    FFogLightsOn: Boolean;
     { the names other entities' keys or the map's script name: those
       entities stay scenes of their own }
     FReferencedNames: specialize TDictionary<String, Boolean>;
@@ -267,6 +276,12 @@ type
       const LocalMinD3, LocalMaxD3: TVector3; const GCollides, GPickable, GCastShadows: Boolean;
       const Parms: TD3EntityParms): Boolean;
     procedure BuildStaticGroups;
+    procedure CollectFogLights;
+    { the fog light covering most of a box, at least half of it (-1: none) }
+    function BoxFog(const Box: TBox3D): Integer;
+    { a LocalFog node for fog light F, added to Root }
+    procedure AddFog(const Root: TAbstractGroupingNode; const F: Integer);
+    procedure SetFogLightsOn(const Value: Boolean);
     procedure UpdateShadowMapCasting;
     { Each light lights only the area scenes and brushes of the areas it
       touches (like Doom 3's light references per area), through CGE's
@@ -492,12 +507,15 @@ type
     property PortalCulling: Boolean read FPortalCulling write FPortalCulling default True;
     { Multiplies all light intensities. }
     property LightScale: Single read FLightScale write FLightScale {$ifdef FPC}default 1{$endif};
+    { Doom 3's fog lights (console r_skipFogLights): the areas a fog light
+      covers mostly get its fog (CGE's LocalFog). }
+    property FogLightsOn: Boolean read FFogLightsOn write SetFogLightsOn default True;
     { LightScale times the data's: Doom 3 BFG's renderer multiplies every
       light by 3 (r_lightScale), the 2004 one by 2, so on BFG data lights
       are 1.5 times as strong (env CD3_BFG_LIGHTSCALE=1 for the 2004
       scale). }
     function EffectiveLightScale: Single;
-    { The data's part of it: 1.5 on BFG data, else 1. }
+    { The data's part of it: 1.5 on BFG data (D3BfgLook), else 1. }
     class function DataLightScale: Single;
     { The profile of a light shader's images, like BuildLights' (the
       default point light's for ''). }
@@ -550,6 +568,19 @@ var
   HazeCount, ReflectionCount: Integer;
 
 procedure SetD3Rotation(const T: TCastleTransform; const M: TMatrix3);
+
+var
+  { Classic mode (command line --classic, env CD3_CLASSIC=1, console
+    classic, the title menu's button, data.cfg's classic=1): Doom 3 BFG's
+    data with the 2004 game's look (dhewm3's): its light scale and its
+    field of view (g_fov 90 on a 4:3 screen). Off, BFG data looks like
+    Doom 3 BFG (Chocolate DOOM-3-BFG's): lights 1.5 times as strong
+    (r_lightScale 3 against 2) and g_fov 80 on a 16:9 screen. The 2004
+    data always has the classic look. }
+  D3ClassicMode: Boolean = False;
+
+{ The data is Doom 3 BFG's and classic mode is off. }
+function D3BfgLook: Boolean;
 
 implementation
 
@@ -692,6 +723,7 @@ begin
   FShadowLightsMax := 1;
   FShadowMapSize := 512;
   FLightScale := 1;
+  FFogLightsOn := True;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
   FMergedParms := specialize TObjectList<TD3EntityParms>.Create(True);
   FReferencedNames := specialize TDictionary<String, Boolean>.Create;
@@ -743,6 +775,12 @@ var
 begin
   FTime := 0;
   FSkyMaterial := '';
+  SetLength(FFogBoxes, 0);
+  SetLength(FFogColors, 0);
+  SetLength(FFogDistances, 0);
+  SetLength(FFogNames, 0);
+  SetLength(FAreaFogs, 0);
+  SetLength(FFogNodes, 0);
   ClearAnimatedSurfaces;
   FShadowLight := -1;
   FShadowLights := nil;
@@ -1515,10 +1553,144 @@ var
   { env CD3_BFG_LIGHTSCALE: the BFG data's light scale, -1 until read }
   BfgLightScale: Single = -1;
 
+{ Fog lights ------------------------------------------------------------------- }
+
+var
+  { env CD3_FOG_LIGHTS=0: no fog lights }
+  FogLightsState: Integer = -1;
+
+procedure TDoom3Map.CollectFogLights;
+var
+  E: TD3MapEntity;
+  Shader: TD3Material;
+  Rot: TMatrix3;
+  R, O, Corner: TVector3;
+  Box: TBox3D;
+  X, Y, Z, N: Integer;
+  Distance: Single;
+begin
+  if FogLightsState < 0 then
+    FogLightsState := Ord(GetEnvironmentVariable('CD3_FOG_LIGHTS') <> '0');
+  if FogLightsState = 0 then
+    Exit;
+  for E in FMapFile.Entities do
+  begin
+    if not SameText(E.ClassName_, 'light') or (E.Value('texture') = '') then
+      Continue;
+    Shader := Decls.Material(E.Value('texture'));
+    if (Shader = nil) or not Shader.IsFogLight or E.HasKey('light_target') then
+      Continue;
+    { the light's box, turned by its rotation }
+    R := E.VectorValue('light_radius', Vector3(300, 300, 300));
+    O := E.LightOrigin;
+    Rot := E.LightRotation;
+    Box := TBox3D.Empty;
+    for X := -1 to 1 do
+      for Y := -1 to 1 do
+        for Z := -1 to 1 do
+          if (X <> 0) and (Y <> 0) and (Z <> 0) then
+          begin
+            Corner := RotateD3(Rot, Vector3(X * R.X, Y * R.Y, Z * R.Z));
+            Box.Include(D3ToCge(O + Corner));
+          end;
+    { idRenderBackend's RB_FogPass: the stage's alpha (shaderParm3, 1 by
+      default) is the fog distance, 500 when it is 1 or less }
+    Distance := E.FloatValue('shaderParm3', 1);
+    if Distance <= 1 then
+      Distance := 500;
+    N := Length(FFogBoxes);
+    SetLength(FFogBoxes, N + 1);
+    SetLength(FFogColors, N + 1);
+    SetLength(FFogDistances, N + 1);
+    SetLength(FFogNames, N + 1);
+    FFogBoxes[N] := Box;
+    FFogColors[N] := E.VectorValue('_color', Vector3(1, 1, 1));
+    FFogDistances[N] := Distance;
+    FFogNames[N] := E.Name;
+  end;
+end;
+
+function TDoom3Map.BoxFog(const Box: TBox3D): Integer;
+
+  function Volume(const B: TBox3D): Single;
+  begin
+    Result := (B.Data[1].X - B.Data[0].X) * (B.Data[1].Y - B.Data[0].Y) * (B.Data[1].Z - B.Data[0].Z);
+  end;
+
+  { the volume both boxes cover }
+  function CommonVolume(const A, B: TBox3D): Single;
+  var
+    K: Integer;
+    Lo, Hi: Single;
+  begin
+    Result := 1;
+    for K := 0 to 2 do
+    begin
+      Lo := Max(A.Data[0][K], B.Data[0][K]);
+      Hi := Min(A.Data[1][K], B.Data[1][K]);
+      if Hi <= Lo then
+        Exit(0);
+      Result := Result * (Hi - Lo);
+    end;
+  end;
+
+var
+  I: Integer;
+  Inside, Best, Whole: Single;
+begin
+  Result := -1;
+  if Box.IsEmpty then
+    Exit;
+  Whole := Max(Volume(Box), 1);
+  Best := 0.5;
+  for I := 0 to High(FFogBoxes) do
+  begin
+    Inside := CommonVolume(Box, FFogBoxes[I]) / Whole;
+    if Inside >= Best then
+    begin
+      Best := Inside;
+      Result := I;
+    end;
+  end;
+end;
+
+procedure TDoom3Map.AddFog(const Root: TAbstractGroupingNode; const F: Integer);
+var
+  Fog: TLocalFogNode;
+begin
+  { Doom 3 mixes a fogged surface with the fog's color by
+    1 - 0.982 ^ (255 * depth / distance) (the _fog image), about
+    1 - exp(-4.63 * depth / distance): CGE's linear fog over 0.4 of the
+    distance stays within 0.1 of it (0.5 at 0.15 of the distance,
+    0.25 at 0.3, then all fog at 0.4 where Doom 3 has 0.84) }
+  Fog := TLocalFogNode.Create;
+  Fog.Color := FFogColors[F];
+  Fog.FogType := ftLinear;
+  Fog.VisibilityRange := 0.4 * FFogDistances[F];
+  Fog.Enabled := FFogLightsOn;
+  Root.AddChildren(Fog);
+  SetLength(FFogNodes, Length(FFogNodes) + 1);
+  FFogNodes[High(FFogNodes)] := Fog;
+end;
+
+procedure TDoom3Map.SetFogLightsOn(const Value: Boolean);
+var
+  Fog: TLocalFogNode;
+begin
+  FFogLightsOn := Value;
+  for Fog in FFogNodes do
+    Fog.Enabled := Value;
+end;
+
+function D3BfgLook: Boolean;
+begin
+  Result := (D3Fs <> nil) and D3Fs.IsBfg and not D3ClassicMode;
+end;
+
 class function TDoom3Map.DataLightScale: Single;
 begin
   Result := 1;
-  if (D3Fs <> nil) and D3Fs.IsBfg then
+  if D3BfgLook then
   begin
     if BfgLightScale < 0 then
       BfgLightScale := StrToFloatDef(GetEnvironmentVariable('CD3_BFG_LIGHTSCALE'), 1.5);
@@ -1663,6 +1835,7 @@ var
   Flowed: TD3IntArray;
   FlowLights, FlowCut: Integer;
   C0, C1: TVector3;
+  AreaBox: TBox3D;
 
   function InFlow(const A: Integer): Boolean;
   var
@@ -1679,6 +1852,10 @@ begin
     hide areas; shapes stay per material inside them }
   SetLength(FAreaScenes, FProc.NumAreas);
   SetLength(FAreaNonSolid, FProc.NumAreas);
+  CollectFogLights;
+  SetLength(FAreaFogs, FProc.NumAreas);
+  for I := 0 to High(FAreaFogs) do
+    FAreaFogs[I] := -1;
   for I := 0 to FProc.ModelCount - 1 do
   begin
     M := FProc.Model(I);
@@ -1698,6 +1875,20 @@ begin
         end;
     AddLightLibrary(Root);
     AddLightLibrary(RootNonSolid);
+    { the fog light covering most of the area }
+    if Length(FFogBoxes) > 0 then
+    begin
+      AreaBox := TBox3D.Empty;
+      for Surf in M.Surfaces do
+        for J := 0 to High(Surf.Vertexes) do
+          AreaBox.Include(D3ToCge(Surf.Vertexes[J].Position));
+      FAreaFogs[Area] := BoxFog(AreaBox);
+      if FAreaFogs[Area] >= 0 then
+      begin
+        AddFog(Root, FAreaFogs[Area]);
+        AddFog(RootNonSolid, FAreaFogs[Area]);
+      end;
+    end;
 
     FAreaScenes[Area] := TD3Scene.Create(nil);
     FAreaScenes[Area].SetTransient;
@@ -2885,6 +3076,8 @@ begin
     AddLightLibrary(FStaticGroupRoots[G]);
     FStaticGroupAreas[G] := Areas[0];
     FStaticGroupFlags[G] := Flags;
+    if (Areas[0] < Length(FAreaFogs)) and (FAreaFogs[Areas[0]] >= 0) then
+      AddFog(FStaticGroupRoots[G], FAreaFogs[Areas[0]]);
   end;
   MT := TMatrixTransformNode.Create;
   MT.Matrix := M;
@@ -3253,6 +3446,7 @@ var
   E: TD3MapEntity;
   B: TD3BrushEntity;
   Overlays, Conditionals, Sprites, Glass, Haze, Reflections, MirrorsBefore, Tubes, Eyeballs: Integer;
+  FogI, FogAreas: Integer;
 begin
   ClearMap;
   if FMapName = '' then
@@ -3336,6 +3530,15 @@ begin
   WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models (%d with heads)',
     [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count - FStaticModelCount,
      FStaticModelCount, FModels.Count, FHeadCount]);
+  if Length(FFogBoxes) > 0 then
+  begin
+    FogAreas := 0;
+    for FogI := 0 to High(FAreaFogs) do
+      if FAreaFogs[FogI] >= 0 then
+        Inc(FogAreas);
+    WritelnLog('Doom3Level', 'Fog lights: %d (%s), %d areas fogged (%d fog nodes)',
+      [Length(FFogBoxes), String.Join(' ', FFogNames), FogAreas, Length(FFogNodes)]);
+  end;
   if FMergedStaticCount > 0 then
     WritelnLog('Doom3Level', 'Static entities: %d merged into %d scenes (env CD3_MERGE_STATIC=0: a scene each)',
       [FMergedStaticCount, Length(FStaticGroupScenes)]);

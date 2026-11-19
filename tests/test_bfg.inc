@@ -843,6 +843,14 @@ begin
     D3Fs := Fs;
     Check(Fs.AddGameDirectory(Dir), 'mount the .resources container');
     Check(Fs.IsBfg, 'the file system has Doom 3 BFG data');
+    { the BFG look, and classic mode's 2004 look on the same data }
+    D3ClassicMode := False;
+    Check(D3BfgLook, 'BFG data: the BFG look');
+    Check(SameValue(TDoom3Map.DataLightScale, 1.5), 'BFG look: lights 1.5 times as strong');
+    D3ClassicMode := True;
+    Check(not D3BfgLook, 'classic mode: the 2004 look on BFG data');
+    Check(SameValue(TDoom3Map.DataLightScale, 1), 'classic mode: the 2004 light scale');
+    D3ClassicMode := False;
     Check(Fs.FileExists('maps/bfgmap.map'), 'a plain file of the container');
     Check(Fs.FileExists('maps/bfgmap.proc') and not Fs.FileExists('maps/other.proc'),
       'a .proc exists as its .bproc');
