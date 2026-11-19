@@ -196,6 +196,20 @@ type
     FClipModelBrushes: Integer;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
+    { Static entities (func_static brush models and static models that
+      nothing refers to, in one area) merged into one scene per area and
+      kind (MergeStaticEntity): CGE walks every scene every frame, and a map
+      had hundreds of them. }
+    FStaticGroupRoots: array of TX3DRootNode;
+    FStaticGroupScenes: array of TD3Scene;
+    FStaticGroupAreas: array of Integer;
+    FStaticGroupFlags: array of Integer;
+    FMergedParms: specialize TObjectList<TD3EntityParms>;
+    FMergedStaticCount: Integer;
+    { the names other entities' keys or the map's script name: those
+      entities stay scenes of their own }
+    FReferencedNames: specialize TDictionary<String, Boolean>;
+    FMapScriptText: String;
     FModels: specialize TObjectList<TD3ModelEntity>;
     { FindBrush / FindModelEntity: the first of each lowercase name
       (elevators and the player's info look them up every frame) }
@@ -247,6 +261,12 @@ type
     function BuildModelEntity(const E: TD3MapEntity): TD3ModelEntity;
     procedure BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
     procedure BuildStaticModelEntities;
+    procedure CollectReferencedNames;
+    function MergeableStatic(const E: TD3MapEntity; const Materials: array of String): Boolean;
+    function MergeStaticEntity(const E: TD3MapEntity; const Root: TX3DRootNode;
+      const LocalMinD3, LocalMaxD3: TVector3; const GCollides, GPickable, GCastShadows: Boolean;
+      const Parms: TD3EntityParms): Boolean;
+    procedure BuildStaticGroups;
     procedure UpdateShadowMapCasting;
     { Each light lights only the area scenes and brushes of the areas it
       touches (like Doom 3's light references per area), through CGE's
@@ -350,6 +370,12 @@ type
     property WorldCollision: TCastleScene read FWorldCollision;
     property MonsterCollision: TCastleScene read FMonsterCollision;
     property Brushes: specialize TObjectList<TD3BrushEntity> read FBrushes;
+    { The scenes of merged static entities (static world geometry, like
+      the areas: decals project onto them). }
+    function StaticGroupCount: Integer;
+    function StaticGroupScene(const I: Integer): TCastleScene;
+    { Logs the map's children by class (console meminfo too). }
+    procedure LogChildCounts;
     { The live GUIs of the level's surfaces (brush entities, static models,
       world surfaces), with their entity names. }
     property GuiSurfaces: specialize TObjectList<TD3GuiSurface> read FGuiSurfaces;
@@ -660,6 +686,8 @@ begin
   FShadowMapSize := 512;
   FLightScale := 1;
   FBrushes := specialize TObjectList<TD3BrushEntity>.Create(True);
+  FMergedParms := specialize TObjectList<TD3EntityParms>.Create(True);
+  FReferencedNames := specialize TDictionary<String, Boolean>.Create;
   FGuiSurfaces := specialize TObjectList<TD3GuiSurface>.Create(True);
   FRemoteViews := specialize TObjectList<TD3RemoteView>.Create(True);
   FModels := specialize TObjectList<TD3ModelEntity>.Create(True);
@@ -672,6 +700,7 @@ destructor TDoom3Map.Destroy;
 begin
   ClearMap;
   FreeAndNil(FBrushes);
+  FreeAndNil(FReferencedNames);
   FreeAndNil(FGuiSurfaces);
   FreeAndNil(FRemoteViews);
   FreeAndNil(FModels);
@@ -718,6 +747,21 @@ begin
   FGuiRenders := 0;
   FBrushes.Clear;
   FBrushByName.Clear;
+  { a group's scene owns its root; a root without a scene (the load
+    stopped before BuildStaticGroups) is freed by itself }
+  for I := 0 to High(FStaticGroupRoots) do
+    if (I <= High(FStaticGroupScenes)) and (FStaticGroupScenes[I] <> nil) then
+      FreeAndNil(FStaticGroupScenes[I])
+    else
+      FreeAndNil(FStaticGroupRoots[I]);
+  FStaticGroupScenes := nil;
+  FStaticGroupRoots := nil;
+  FStaticGroupAreas := nil;
+  FStaticGroupFlags := nil;
+  FMergedParms.Clear;
+  FMergedStaticCount := 0;
+  FReferencedNames.Clear;
+  FMapScriptText := '';
   FLights := nil;
   FillChar(FSharedLightEffects, SizeOf(FSharedLightEffects), 0);
   FLightByName.Clear;
@@ -1862,6 +1906,10 @@ begin
   end;
   for B in FBrushes do
     B.Scene.Visible := AnyAreaVisible(FPortals, B.Areas);
+  for I := 0 to High(FStaticGroupScenes) do
+    if FStaticGroupScenes[I] <> nil then
+      FStaticGroupScenes[I].Visible := (FStaticGroupAreas[I] > High(FPortals.AreaVisible)) or
+        FPortals.AreaVisible[FStaticGroupAreas[I]];
   for ME in FModels do
   begin
     Area := AreaAt(ME.Holder.Translation + Vector3(0, 32, 0));
@@ -2097,6 +2145,9 @@ begin
     end;
     for B in FBrushes do
       B.Scene.InternalGlobalLightsMask := nil;
+    for I := 0 to High(FStaticGroupScenes) do
+      if FStaticGroupScenes[I] <> nil then
+        FStaticGroupScenes[I].InternalGlobalLightsMask := nil;
     Exit;
   end;
   { a light touching no area, or riding with a mover (its areas change),
@@ -2129,6 +2180,12 @@ begin
     begin
       MaskOfAreas(B.Areas);
       B.Scene.InternalGlobalLightsMask := Mask;
+    end;
+  for I := 0 to High(FStaticGroupScenes) do
+    if FStaticGroupScenes[I] <> nil then
+    begin
+      MaskOfAreas([FStaticGroupAreas[I]]);
+      FStaticGroupScenes[I].InternalGlobalLightsMask := Mask;
     end;
   WritelnLog('Doom3Level', 'Light masks: %d of %d lights light only their areas'' scenes', [Masked, Length(FLights)]);
 end;
@@ -2167,6 +2224,8 @@ begin
     end;
   for B in FBrushes do
     SetCastWhenHidden(B.Scene);
+  for I := 0 to High(FStaticGroupScenes) do
+    SetCastWhenHidden(FStaticGroupScenes[I]);
   for ME in FModels do
     SetCastWhenHidden(ME.Holder);
 end;
@@ -2536,8 +2595,10 @@ var
   CmRoot: TX3DRootNode;
   CollisionNode: TCollisionNode;
   ClipOnly: Boolean;
+  Materials: array of String;
 begin
   FClipModelBrushes := 0;
+  CollectReferencedNames;
   for E in FMapFile.Entities do
   begin
     if EntityInhibited(E) then
@@ -2611,11 +2672,6 @@ begin
         FreeAndNil(CmRoot);
     end;
     AddLightLibrary(Root);
-    B.Scene := TD3Scene.Create(nil);
-    B.Scene.SetTransient;
-    B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
-    B.Scene.Load(Root, True);
-    B.Scene.ProcessEvents := SpriteCount <> Sprites;
     Closed := False;
     for Surf in Model.Surfaces do
     begin
@@ -2627,6 +2683,22 @@ begin
         Closed := TrianglesClosed(Positions, Surf.Indexes);
       end;
     end;
+    SetLength(Materials, Model.Surfaces.Count);
+    for I := 0 to Model.Surfaces.Count - 1 do
+      Materials[I] := Model.Surfaces[I].Material;
+    if (SpriteCount = Sprites) and MergeableStatic(E, Materials) and
+       MergeStaticEntity(E, Root, B.LocalMin, B.LocalMax, E.BoolValue('solid', True) and Solid,
+         E.BoolValue('solid', True) and Solid and not ClipOnly, Closed, B.Parms) then
+    begin
+      B.Parms := nil;
+      FreeAndNil(B);
+      Continue;
+    end;
+    B.Scene := TD3Scene.Create(nil);
+    B.Scene.SetTransient;
+    B.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
+    B.Scene.Load(Root, True);
+    B.Scene.ProcessEvents := SpriteCount <> Sprites;
     B.Scene.PreciseCollisions := E.BoolValue('solid', True) and Solid;
     B.Scene.CastShadows := Closed;
     B.Scene.Collides := B.Scene.PreciseCollisions;
@@ -2661,6 +2733,215 @@ begin
   end;
 end;
 
+{ Merged static entities ------------------------------------------------------- }
+
+var
+  { env CD3_MERGE_STATIC=0: every static entity a scene of its own }
+  MergeStaticState: Integer = -1;
+
+procedure TDoom3Map.CollectReferencedNames;
+var
+  E: TD3MapEntity;
+  I: Integer;
+  K, V, Own, ScriptPath: String;
+begin
+  FReferencedNames.Clear;
+  for E in FMapFile.Entities do
+  begin
+    Own := LowerCase(E.Name);
+    for I := 0 to E.Pairs.Count - 1 do
+    begin
+      K := LowerCase(E.Pairs.Names[I]);
+      if (K = 'name') or (K = 'classname') or (K = 'origin') or (K = 'rotation') or (K = 'angle') then
+        Continue;
+      V := LowerCase(Trim(E.Pairs.ValueFromIndex[I]));
+      if (V <> '') and (V <> Own) then
+        FReferencedNames.AddOrSetValue(V, True);
+    end;
+  end;
+  FMapScriptText := '';
+  ScriptPath := MapBasePath(FMapName) + '.script';
+  if D3Fs.FileExists(ScriptPath) then
+    FMapScriptText := LowerCase(D3Fs.ReadText(ScriptPath));
+end;
+
+function TDoom3Map.MergeableStatic(const E: TD3MapEntity; const Materials: array of String): Boolean;
+var
+  EName, M: String;
+  Mat: TD3Material;
+  I: Integer;
+begin
+  Result := False;
+  if MergeStaticState < 0 then
+    MergeStaticState := Ord(GetEnvironmentVariable('CD3_MERGE_STATIC') <> '0');
+  if MergeStaticState = 0 then
+    Exit;
+  { never moved, hidden, shown, reskinned or given shader parameters:
+    nothing names it }
+  if not SameText(E.ClassName_, 'func_static') then
+    Exit;
+  if (E.IntValue('hide', 0) <> 0) or (E.Value('bind') <> '') or (E.Value('skin') <> '') then
+    Exit;
+  for I := 0 to E.Pairs.Count - 1 do
+    if SameText(Copy(E.Pairs.Names[I], 1, 3), 'gui') then
+      Exit;
+  EName := LowerCase(E.Name);
+  if EName <> '' then
+  begin
+    if FReferencedNames.ContainsKey(EName) then
+      Exit;
+    if (Pos('$' + EName, FMapScriptText) > 0) or (Pos('"' + EName + '"', FMapScriptText) > 0) then
+      Exit;
+  end;
+  { surfaces that need their own scene's place or events: GUIs, deforms
+    (sprites, tubes, eyeballs, particles), heat haze, reflections,
+    mirrors, remote views, videos, skies }
+  for M in Materials do
+  begin
+    Mat := Decls.Material(M);
+    if (Mat.GuiSurf <> '') or (Mat.Deform <> '') or (Mat.HazeNormalMap <> '') or
+       (Mat.ReflectCubeMap <> '') or (Mat.MirrorWidth > 0) or (Mat.RemoteWidth > 0) or
+       (Mat.VideoMap <> '') or (Mat.SkyCubeMap <> '') then
+      Exit;
+  end;
+  Result := True;
+end;
+
+function TDoom3Map.MergeStaticEntity(const E: TD3MapEntity; const Root: TX3DRootNode;
+  const LocalMinD3, LocalMaxD3: TVector3; const GCollides, GPickable, GCastShadows: Boolean;
+  const Parms: TD3EntityParms): Boolean;
+var
+  Rot: TMatrix3;
+  GDir, GUp, Side: TVector3;
+  M: TMatrix4;
+  LocalBox: TBox3D;
+  Areas: TD3IntArray;
+  Flags, G, I: Integer;
+  MT: TMatrixTransformNode;
+  Child: TX3DNode;
+begin
+  Result := False;
+  if (Root = nil) or (LocalMinD3.X > LocalMaxD3.X) then
+    Exit;
+  { the transform SetD3Rotation and Translation give an entity's scene }
+  Rot := E.Rotation;
+  GDir := D3RotateCge(Rot, Vector3(0, 0, 1));
+  GUp := D3RotateCge(Rot, Vector3(0, 1, 0));
+  Side := TVector3.CrossProduct(GUp, GDir);
+  M := TMatrix4.Identity;
+  M.Columns[0] := Vector4(Side, 0);
+  M.Columns[1] := Vector4(GUp, 0);
+  M.Columns[2] := Vector4(GDir, 0);
+  M.Columns[3] := Vector4(D3ToCge(E.Origin), 1);
+  LocalBox := TBox3D.Empty;
+  LocalBox.Include(D3ToCge(LocalMinD3));
+  LocalBox.Include(D3ToCge(LocalMaxD3));
+  { in one area: the group shows with it }
+  Areas := BoxAreas(Self, LocalBox.Transform(M));
+  if Length(Areas) <> 1 then
+    Exit;
+  Flags := Ord(GCollides) + 2 * Ord(GPickable) + 4 * Ord(GCastShadows);
+  G := -1;
+  for I := 0 to High(FStaticGroupRoots) do
+    if (FStaticGroupAreas[I] = Areas[0]) and (FStaticGroupFlags[I] = Flags) then
+    begin
+      G := I;
+      Break;
+    end;
+  if G < 0 then
+  begin
+    G := Length(FStaticGroupRoots);
+    SetLength(FStaticGroupRoots, G + 1);
+    SetLength(FStaticGroupAreas, G + 1);
+    SetLength(FStaticGroupFlags, G + 1);
+    FStaticGroupRoots[G] := TX3DRootNode.Create;
+    AddLightLibrary(FStaticGroupRoots[G]);
+    FStaticGroupAreas[G] := Areas[0];
+    FStaticGroupFlags[G] := Flags;
+  end;
+  MT := TMatrixTransformNode.Create;
+  MT.Matrix := M;
+  for I := 0 to Root.FdChildren.Count - 1 do
+  begin
+    Child := Root.FdChildren[I];
+    { the light library is the group's (once) }
+    if Child is TEffectNode then
+      Continue;
+    MT.AddChildren(Child as TAbstractChildNode);
+  end;
+  Root.FdChildren.Clear;
+  Root.Free;
+  FStaticGroupRoots[G].AddChildren(MT);
+  FMergedParms.Add(Parms);
+  Inc(FMergedStaticCount);
+  Result := True;
+end;
+
+{ The map's children by class: CGE walks each of them every frame
+  (update, camera changes, rendering). }
+procedure TDoom3Map.LogChildCounts;
+var
+  Counts: specialize TDictionary<String, Integer>;
+  I, N: Integer;
+  K, S: String;
+begin
+  Counts := specialize TDictionary<String, Integer>.Create;
+  try
+    for I := 0 to Count - 1 do
+    begin
+      { the kind of child: its class and its name's start (Brush_, Static_,
+        Area...) }
+      K := Items[I].Name;
+      N := 1;
+      while (N <= Length(K)) and not (K[N] in ['_', '0'..'9']) do
+        Inc(N);
+      K := Items[I].ClassName + ':' + Copy(K, 1, N - 1);
+      if not Items[I].Exists then
+        K := K + '(off)';
+      if not Counts.TryGetValue(K, N) then
+        N := 0;
+      Counts.AddOrSetValue(K, N + 1);
+    end;
+    S := '';
+    for K in Counts.Keys do
+      S := S + Format(' %s %d', [K, Counts[K]]);
+    WritelnLog('Doom3Level', 'Scenes: %d children of the map:%s', [Count, S]);
+  finally
+    Counts.Free;
+  end;
+end;
+
+procedure TDoom3Map.BuildStaticGroups;
+var
+  G: Integer;
+  S: TD3Scene;
+begin
+  SetLength(FStaticGroupScenes, Length(FStaticGroupRoots));
+  for G := 0 to High(FStaticGroupRoots) do
+  begin
+    S := TD3Scene.Create(nil);
+    S.SetTransient;
+    S.Name := Format('StaticGroup%d_%d', [FStaticGroupAreas[G], FStaticGroupFlags[G]]);
+    S.Load(FStaticGroupRoots[G], True);
+    S.PreciseCollisions := (FStaticGroupFlags[G] and 1) <> 0;
+    S.Collides := S.PreciseCollisions;
+    S.Pickable := (FStaticGroupFlags[G] and 2) <> 0;
+    S.CastShadows := (FStaticGroupFlags[G] and 4) <> 0;
+    Add(S);
+    FStaticGroupScenes[G] := S;
+  end;
+end;
+
+function TDoom3Map.StaticGroupCount: Integer;
+begin
+  Result := Length(FStaticGroupScenes);
+end;
+
+function TDoom3Map.StaticGroupScene(const I: Integer): TCastleScene;
+begin
+  Result := FStaticGroupScenes[I];
+end;
+
 procedure TDoom3Map.BuildStaticModelEntities;
 var
   E: TD3MapEntity;
@@ -2670,6 +2951,9 @@ var
   Model: TD3StaticModel;
   B: TD3BrushEntity;
   Rot: TMatrix3;
+  Materials: array of String;
+  I: Integer;
+  StaticRoot: TX3DRootNode;
 begin
   for E in FMapFile.Entities do
   begin
@@ -2694,16 +2978,38 @@ begin
     B.Entity := E;
     B.LocalMin := Model.BoundsMin;
     B.LocalMax := Model.BoundsMax;
-    B.Scene := TD3Scene.Create(nil);
-    B.Scene.SetTransient;
-    B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     B.Parms := TD3EntityParms.Create;
     B.Parms.FromKeys(E.Pairs);
-    B.Scene.Load(Model.BuildNode(SkinName, E.Pairs, B.Parms), True);
+    Cls := LowerCase(E.ClassName_);
+    SetLength(Materials, Model.Surfaces.Count);
+    for I := 0 to Model.Surfaces.Count - 1 do
+      Materials[I] := Model.Surfaces[I].Material;
+    if (SkinName = '') and MergeableStatic(E, Materials) then
+    begin
+      StaticRoot := Model.BuildNode(SkinName, E.Pairs, B.Parms);
+      if MergeStaticEntity(E, StaticRoot, Model.BoundsMin, Model.BoundsMax,
+        not E.BoolValue('noclipmodel') and E.BoolValue('solid', True),
+        not E.BoolValue('noclipmodel') and E.BoolValue('solid', True),
+        Model.HasClosedSurface, B.Parms) then
+      begin
+        AddStaticParticleDeforms(Model, SkinName, E);
+        B.Parms := nil;
+        FreeAndNil(B);
+        Inc(FStaticModelCount);
+        Continue;
+      end;
+      B.Scene := TD3Scene.Create(nil);
+      B.Scene.Load(StaticRoot, True);
+    end else
+    begin
+      B.Scene := TD3Scene.Create(nil);
+      B.Scene.Load(Model.BuildNode(SkinName, E.Pairs, B.Parms), True);
+    end;
+    B.Scene.SetTransient;
+    B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
     AddStaticParticleDeforms(Model, SkinName, E);
     { map geometry (func_static, doors...) collides, unless "noclipmodel";
       lights' fixtures, items and other props don't }
-    Cls := LowerCase(E.ClassName_);
     B.Scene.PreciseCollisions := (Copy(Cls, 1, 5) = 'func_') and
       not E.BoolValue('noclipmodel') and E.BoolValue('solid', True);
     { open models never cast (CGE skips open shapes), and finding their
@@ -2982,6 +3288,7 @@ begin
     [ConditionalShapeCount - Conditionals]);
   WritelnLog('Doom3Level', 'Deforms: %d tube shapes, %d eyeball surfaces',
     [TubeSurfaceCount - Tubes, EyeballSurfaceCount - Eyeballs]);
+  BuildStaticGroups;
   for B in FBrushes do
     B.Areas := BoxAreas(Self, B.Scene.BoundingBox);
   ApplyLightMasks;
@@ -3002,6 +3309,10 @@ begin
   WritelnLog('Doom3Level', 'Map "%s": %d areas, %d triangles, %d lights, %d brush entities, %d static models, %d md5 models (%d with heads)',
     [Base, FProc.NumAreas, TriangleCount, Length(FLights), FBrushes.Count - FStaticModelCount,
      FStaticModelCount, FModels.Count, FHeadCount]);
+  if FMergedStaticCount > 0 then
+    WritelnLog('Doom3Level', 'Static entities: %d merged into %d scenes (env CD3_MERGE_STATIC=0: a scene each)',
+      [FMergedStaticCount, Length(FStaticGroupScenes)]);
+  LogChildCounts;
 end;
 
 function TDoom3Map.LoadMap(const AMapName: String): Boolean;
