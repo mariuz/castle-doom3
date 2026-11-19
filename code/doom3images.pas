@@ -58,9 +58,127 @@ procedure SaveTga(const Image: TCastleImage; const Stream: TStream);
 implementation
 
 uses
-  Math,
+  Math, MD5,
   CastleDownload, CastleLog, CastleUriUtils, CastleTimeUtils,
   Doom3Files, Doom3Bfg, Doom3Lexer, Doom3Decls;
+
+{ Disk cache ----------------------------------------------------------------- }
+
+{ Images that took long to make (image programs: a normal map from a height
+  map, BFG's YCoCg diffuse maps encoded again) are kept on disk, in
+  %LOCALAPPDATA%\castle-doom3\cache\images, under a hash of their d3img:
+  path, the mounted data (each archive's name, size and date) and the
+  exe's date (a new build may make them differently). Env
+  CD3_IMAGE_DISK_CACHE=0 turns it off. }
+const
+  DiskCacheMinSeconds = 0.005;
+  DiskCacheMaxBytes = Int64(2) * 1024 * 1024 * 1024;
+var
+  DiskCacheChecked: Boolean;
+  DiskCacheDir: String;
+  DiskCacheBytes: Int64;
+  DiskCacheFs: TDoom3FileSystem;
+  DiskCacheFsSources: Integer;
+  DiskCacheSignature: String;
+
+{ The cache directory, '' when the cache is off. }
+function DiskCacheDirectory: String;
+var
+  Base: String;
+  Info: TSearchRec;
+begin
+  if not DiskCacheChecked then
+  begin
+    DiskCacheChecked := True;
+    DiskCacheDir := '';
+    if GetEnvironmentVariable('CD3_IMAGE_DISK_CACHE') = '0' then
+      Exit('');
+    Base := GetEnvironmentVariable('LOCALAPPDATA');
+    if Base = '' then
+      Base := GetTempDir(False);
+    DiskCacheDir := IncludeTrailingPathDelimiter(Base) + 'castle-doom3' + PathDelim + 'cache' +
+      PathDelim + 'images' + PathDelim;
+    if not ForceDirectories(DiskCacheDir) then
+    begin
+      DiskCacheDir := '';
+      Exit('');
+    end;
+    DiskCacheBytes := 0;
+    if FindFirst(DiskCacheDir + '*', faAnyFile, Info) = 0 then
+    begin
+      repeat
+        DiskCacheBytes := DiskCacheBytes + Info.Size;
+      until FindNext(Info) <> 0;
+      FindClose(Info);
+    end;
+  end;
+  Result := DiskCacheDir;
+end;
+
+function DiskCacheFileName(const Path: String): String;
+begin
+  Result := DiskCacheDirectory;
+  if (Result = '') or (D3Fs = nil) then
+    Exit('');
+  if (DiskCacheFs <> D3Fs) or (DiskCacheFsSources <> D3Fs.SourceCount) then
+  begin
+    DiskCacheFs := D3Fs;
+    DiskCacheFsSources := D3Fs.SourceCount;
+    DiskCacheSignature := D3Fs.Signature + ParamStr(0) + ' ' + IntToStr(FileAge(ParamStr(0)));
+  end;
+  Result := Result + MD5Print(MD5String(DiskCacheSignature + #10 + Path));
+  { what the handler serves: a DDS of BFG's images, else a TGA }
+  if Copy(Path, 1, 7) = 'bfgdds/' then
+    Result := Result + '.dds'
+  else
+    Result := Result + '.tga';
+end;
+
+{ The cached file of Path, nil when there is none. }
+function DiskCacheGet(const Path: String): TStream;
+var
+  FileName: String;
+begin
+  Result := nil;
+  FileName := DiskCacheFileName(Path);
+  if (FileName = '') or not FileExists(FileName) then
+    Exit;
+  try
+    Result := TMemoryStream.Create;
+    TMemoryStream(Result).LoadFromFile(FileName);
+    Inc(ProfileDiskCacheReads);
+  except
+    FreeAndNil(Result);
+  end;
+end;
+
+{ Keeps S (its whole content) for Path when it took Seconds or more to
+  make. Written to another name first: two games may run at once. }
+procedure DiskCachePut(const Path: String; const S: TMemoryStream; const Seconds: Double);
+var
+  FileName, Temp: String;
+begin
+  if Seconds < DiskCacheMinSeconds then
+    Exit;
+  FileName := DiskCacheFileName(Path);
+  if (FileName = '') or (DiskCacheBytes + S.Size > DiskCacheMaxBytes) then
+    Exit;
+  Temp := FileName + '.' + IntToStr(GetProcessID) + '.tmp';
+  try
+    S.SaveToFile(Temp);
+    if not RenameFile(Temp, FileName) then
+      DeleteFile(Temp)
+    else
+    begin
+      DiskCacheBytes := DiskCacheBytes + S.Size;
+      Inc(ProfileDiskCacheWrites);
+    end;
+  except
+    on E: Exception do
+      DeleteFile(Temp);
+  end;
+  S.Position := 0;
+end;
 
 var
   ProtocolRegistered: Boolean;
@@ -798,7 +916,14 @@ begin
   end;
   if Copy(Path, 1, 7) = 'bfgdds/' then
   begin
-    Result := ReadBfgDds(StripExt(Copy(Path, 8, MaxInt)), MimeType);
+    MimeType := 'image/x-dds';
+    Result := DiskCacheGet(Path);
+    if Result = nil then
+    begin
+      Result := ReadBfgDds(StripExt(Copy(Path, 8, MaxInt)), MimeType);
+      if Result is TMemoryStream then
+        DiskCachePut(Path, TMemoryStream(Result), TimerSeconds(Timer, Start));
+    end;
     ImageRead(Path, Start);
     Exit;
   end;
@@ -819,6 +944,12 @@ begin
     ImageRead(Path + ' (cached)', Start);
     Exit;
   end;
+  Result := DiskCacheGet(Path);
+  if Result <> nil then
+  begin
+    ImageRead(Path + ' (disk cache)', Start);
+    Exit;
+  end;
   Img := EvaluateImageProgram(Prog, Kind);
   if Img = nil then
     raise EFOpenError.Create('Cannot evaluate Doom 3 image program: ' + Prog);
@@ -829,6 +960,7 @@ begin
   finally
     Img.Free;
   end;
+  DiskCachePut(Path, TMemoryStream(Result), TimerSeconds(Timer, Start));
   if ProfileLogReads and (TimerSeconds(Timer, Start) >= ImageCacheMinSeconds) then
     ImageCachePut(Path, TMemoryStream(Result));
   ImageRead(Path, Start);

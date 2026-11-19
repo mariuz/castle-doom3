@@ -81,6 +81,9 @@ type
     function AddGameDirectory(const Dir: String): Boolean;
 
     function HasSource(const Name: String): Boolean;
+    { The mounted archives and directories, with each file's size and
+      date: what Doom3Images' disk cache of image programs is valid for. }
+    function Signature: String;
     { A file, or (Doom 3 BFG data) one that the generated binary of BfgGenerated
       stands for. }
     function FileExists(const APath: String): Boolean;
@@ -145,6 +148,8 @@ var
   ProfileLogReads: Boolean;
   { image programs served from Doom3Images' cache of slow ones }
   ProfileImageCacheHits: Integer;
+  { slow images read from, and written to, Doom3Images' disk cache }
+  ProfileDiskCacheReads, ProfileDiskCacheWrites: Integer;
 
 implementation
 
@@ -228,10 +233,10 @@ end;
 
 procedure LoadProfileLog(const Title: String);
 begin
-  WritelnLog('Profile', '%s: %.2f s (%s; %d file reads %.2f s, %d image programs %.2f s, %d compressed images, %d without a DXT copy)',
+  WritelnLog('Profile', '%s: %.2f s (%s; %d file reads %.2f s, %d image programs %.2f s, %d compressed images, %d without a DXT copy; disk cache: %d read, %d written)',
     [Title, TimerSeconds(Timer, LoadProfileStartTime), LoadProfile,
      ProfileReadCount, ProfileReadSeconds, ProfileImageCount, ProfileImageSeconds,
-     ProfileDdsCount, ProfileDdsFallbackCount]);
+     ProfileDdsCount, ProfileDdsFallbackCount, ProfileDiskCacheReads, ProfileDiskCacheWrites]);
   { where the Pascal heap went: MB added by each step }
   WritelnLog('Profile', '%s: Pascal heap by step, MB (%s)', [Title, LoadProfileHeapSteps]);
   ProfileReadSeconds := 0;
@@ -240,6 +245,8 @@ begin
   ProfileImageCount := 0;
   ProfileDdsCount := 0;
   ProfileDdsFallbackCount := 0;
+  ProfileDiskCacheReads := 0;
+  ProfileDiskCacheWrites := 0;
 end;
 
 function NormalizeD3Path(const S: String): String;
@@ -936,6 +943,28 @@ begin
     if S.Name = Name then
       Exit(True);
   Result := False;
+end;
+
+function TDoom3FileSystem.Signature: String;
+var
+  S: TDoom3Source;
+  FileName: String;
+  Info: TSearchRec;
+begin
+  Result := '';
+  for S in FSources do
+  begin
+    Result := Result + S.Name;
+    FileName := S.Name;
+    if Pos('://', FileName) > 0 then
+      FileName := UriToFilenameSafe(ResolveCastleDataUrl(FileName));
+    if (not S.IsDirectory) and (FileName <> '') and (FindFirst(FileName, faAnyFile, Info) = 0) then
+    begin
+      Result := Result + Format(' %d %d', [Info.Size, Info.Time]);
+      SysUtils.FindClose(Info);
+    end;
+    Result := Result + #10;
+  end;
 end;
 
 function TDoom3FileSystem.FileExists(const APath: String): Boolean;
