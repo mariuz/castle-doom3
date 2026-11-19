@@ -561,6 +561,98 @@ begin
   W.WriteBuffer(Data[0], Length(Data));
 end;
 
+{ A .bimage of two levels, a 4 x 4 block and a 2 x 2 one. }
+procedure WriteBfgImage2(const W: TBfgWriter; const Format, ColorFormat: Integer;
+  const Level0, Level1: array of Byte);
+begin
+  W.BigInt64(0);
+  W.BigInt($0A4D4942);
+  W.BigInt(1);
+  W.BigInt(Format);
+  W.BigInt(ColorFormat);
+  W.BigInt(4);
+  W.BigInt(4);
+  W.BigInt(2);
+  W.BigInt(0);
+  W.BigInt(0);
+  W.BigInt(4);
+  W.BigInt(4);
+  W.BigInt(Length(Level0));
+  W.WriteBuffer(Level0[0], Length(Level0));
+  W.BigInt(1);
+  W.BigInt(0);
+  W.BigInt(2);
+  W.BigInt(2);
+  W.BigInt(Length(Level1));
+  W.WriteBuffer(Level1[0], Length(Level1));
+end;
+
+{ BfgCompressedDds: a DXT1 image as it is, a YCoCg one encoded again, a
+  single level not at all. }
+procedure TestBfgCompressedDds;
+const
+  Dxt1: array [0..7] of Byte = ($00, $F8, $1F, $00, $E4, $E4, $1B, $1B);
+  { Y 128 everywhere (alpha), the left half Co 127 (orange), the right
+    half Co 0 (gray): color 0 red 255, color 1 red 128 }
+  YCoCg: array [0..15] of Byte = (128, 128, 0, 0, 0, 0, 0, 0,
+    $00, $FC, $00, $84, $50, $50, $50, $50);
+var
+  W: TBfgWriter;
+  Dds: TMemoryStream;
+  B: PByte;
+  C0, C1: Word;
+  R0, B0, R1, B1: Integer;
+begin
+  W := TBfgWriter.Create;
+  Dds := nil;
+  try
+    WriteBfgImage2(W, 7, 0, Dxt1, Dxt1);
+    W.Position := 0;
+    Dds := BfgCompressedDds(W);
+    Check(Dds <> nil, 'a DXT1 .bimage with mipmaps is a compressed DDS');
+    if Dds <> nil then
+    begin
+      CheckEquals(128 + 16, Dds.Size, 'the DDS has the header and both levels');
+      B := Dds.Memory;
+      Check((B[84] = Ord('D')) and (B[86] = Ord('T')) and (B[87] = Ord('1')), 'its FourCC is DXT1');
+      CheckEquals(2, B[28], 'its mipmap count');
+      Check(CompareMem(B + 128, @Dxt1[0], 8), 'the blocks are copied as they are');
+    end;
+    FreeAndNil(Dds);
+
+    W.Clear;
+    WriteBfgImage2(W, 8, 2, YCoCg, YCoCg);
+    W.Position := 0;
+    Dds := BfgCompressedDds(W);
+    Check(Dds <> nil, 'a YCoCg .bimage is encoded again');
+    if Dds <> nil then
+    begin
+      B := Dds.Memory;
+      Check(B[87] = Ord('1'), 'without an alpha test version it is DXT1');
+      C0 := B[128] or (Word(B[129]) shl 8);
+      C1 := B[130] or (Word(B[131]) shl 8);
+      R0 := ((C0 shr 11) and 31) * 255 div 31;
+      B0 := (C0 and 31) * 255 div 31;
+      R1 := ((C1 shr 11) and 31) * 255 div 31;
+      B1 := (C1 and 31) * 255 div 31;
+      { the end points are the block's orange and gray, not the mixes at
+        the other corners of their box }
+      Check((R0 > 200) and (B0 < 60), 'the first end point is orange');
+      Check((R1 < 170) and (B1 > 90), 'the second end point is gray');
+    end;
+    FreeAndNil(Dds);
+
+    W.Clear;
+    WriteBfgImage(W, 7, 0, 4, 4, Dxt1);
+    W.Position := 0;
+    Dds := BfgCompressedDds(W);
+    Check(Dds = nil, 'a single level is not a compressed DDS (GL can''t make its mipmaps)');
+  finally
+    Dds.Free;
+    W.Free;
+  end;
+end;
+
 { An .idwav of Microsoft ADPCM blocks (mono, 4 nibble bytes a block). }
 procedure WriteBfgSound(const W: TBfgWriter; const Blocks: array of Byte; const NumSamples: Integer);
 const

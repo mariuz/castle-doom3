@@ -8348,6 +8348,7 @@ begin
   TestSaveLoad;
   TestReloadMemory;
   TestBfg;
+  TestBfgCompressedDds;
   TestPowerups;
   TestStaminaSkinsKnockback;
   TestCrouchAndDeath;

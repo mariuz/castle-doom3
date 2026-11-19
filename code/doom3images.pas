@@ -160,6 +160,10 @@ begin
         mipmaps }
       Result := 'd3img:/dds/' + StripExt(F) + '.dds'
     else
+    { Doom 3 BFG: its compressed .bimage as a DDS (ReadBfgDds) }
+    if UsePrecompressedImages and D3Fs.IsBfg and (Copy(F, Length(F) - 3, 4) = '.tga') then
+      Result := 'd3img:/bfgdds/' + StripExt(F) + '.dds'
+    else
     if F <> '' then
       Result := D3FsUrl(F)
     else
@@ -652,6 +656,55 @@ begin
   MimeType := 'image/x-dds';
 end;
 
+{ Doom 3 BFG: a plain image's .bimage as a compressed DDS with its mipmaps
+  when it is DXT (BfgCompressedDds), else its pixels as an uncompressed
+  DDS. }
+function ReadBfgDds(const Base: String; out MimeType: String): TStream;
+var
+  GenPath, CoveragePath: String;
+  Face: Integer;
+  Camera: Boolean;
+  Data, Coverage: TStream;
+  Img: TCastleImage;
+begin
+  MimeType := 'image/x-dds';
+  if D3Fs.BfgImage(Base, GenPath, CoveragePath, Face, Camera) and (Face = 0) and not Camera then
+  begin
+    Data := D3Fs.OpenFile(GenPath);
+    Coverage := nil;
+    try
+      if CoveragePath <> '' then
+        Coverage := D3Fs.OpenFile(CoveragePath);
+      if Data <> nil then
+      begin
+        Result := BfgCompressedDds(Data, Coverage);
+        if Result <> nil then
+        begin
+          Inc(ProfileDdsCount);
+          Exit;
+        end;
+      end;
+    finally
+      Data.Free;
+      Coverage.Free;
+    end;
+  end;
+  Inc(ProfileDdsFallbackCount);
+  Img := LoadBfgImage(Base);
+  if Img = nil then
+    { a loose file, not a .bimage }
+    Img := LoadPlain(Base);
+  if Img = nil then
+    raise EFOpenError.Create('Cannot read Doom 3 BFG image: ' + Base);
+  try
+    Result := TMemoryStream.Create;
+    SaveImage(Img, 'image/x-dds', Result);
+    Result.Position := 0;
+  finally
+    Img.Free;
+  end;
+end;
+
 type
   THandler = class
     function Read(const Url: String; out MimeType: String): TStream;
@@ -740,6 +793,12 @@ begin
   if Copy(Path, 1, 4) = 'dds/' then
   begin
     Result := ReadDds(StripExt(Copy(Path, 5, MaxInt)), MimeType);
+    ImageRead(Path, Start);
+    Exit;
+  end;
+  if Copy(Path, 1, 7) = 'bfgdds/' then
+  begin
+    Result := ReadBfgDds(StripExt(Copy(Path, 8, MaxInt)), MimeType);
     ImageRead(Path, Start);
     Exit;
   end;
