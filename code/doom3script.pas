@@ -184,6 +184,10 @@ type
     FCode: array of TD3Instr;
     FCodeCount: Integer;
     FThreads: specialize TObjectList<TD3ScriptThread>;
+    { counts the threads freed: Update checks a snapshot's thread still
+      exists only after one was (a search per thread, every frame, was 4%
+      of game/caverns1's time with its hundreds of threads) }
+    FThreadRemovals: Cardinal;
     FNextThread: Integer;
     FHost: TD3ScriptHost;
     FTime: Single;
@@ -2772,6 +2776,7 @@ var
 begin
   FRestoring := nil;
   FCurrent := nil;
+  Inc(FThreadRemovals);
   for I := FThreads.Count - 1 downto 0 do
     if not FThreads[I].Persistent then
       FThreads.Delete(I);
@@ -2880,6 +2885,7 @@ end;
 
 procedure TD3ScriptVM.KillThreads;
 begin
+  Inc(FThreadRemovals);
   FThreads.Clear;
 end;
 
@@ -2923,6 +2929,7 @@ begin
   Execute(Result);
   if Result.State = tsDone then
   begin
+    Inc(FThreadRemovals);
     FThreads.Remove(Result);
     Result := nil;
   end;
@@ -2972,6 +2979,7 @@ end;
 
 procedure TD3ScriptVM.FreeThread(const T: TD3ScriptThread);
 begin
+  Inc(FThreadRemovals);
   FThreads.Remove(T);
 end;
 
@@ -2991,12 +2999,16 @@ var
   I: Integer;
   Snapshot: array of TD3ScriptThread;
   T: TD3ScriptThread;
+  Removals: Cardinal;
 begin
   FTime := ATime;
   { threads started during this update run at once (StartThread) }
   Snapshot := FThreads.ToArray;
+  Removals := FThreadRemovals;
   for T in Snapshot do
-    if (FThreads.IndexOf(T) >= 0) and (T.State <> tsDone) and Ready(T) then
+    { a thread an earlier one freed is gone (only searched for then) }
+    if ((Removals = FThreadRemovals) or (FThreads.IndexOf(T) >= 0)) and
+       (T.State <> tsDone) and Ready(T) then
     begin
       T.State := tsRunning;
       Execute(T);

@@ -172,7 +172,9 @@ type
     entity ("set cmd", runScript). }
   TD3Gui = class
   private
-    FState: TStringList;
+    { gui:: variables by lowercase name (a TStringList's Values were a
+      linear search: 2% of the CPU with a HUD and a hundred live GUIs) }
+    FState: specialize TDictionary<String, String>;
     FTransitions: specialize TList<TD3GuiTransition>;
     { windows by lowercase name (FindWindow: expressions name windows at
       every redraw) }
@@ -214,7 +216,7 @@ type
     function FindWindow(const AName: String): TD3GuiWindow;
 
     { gui:: variables: the entity's keys (gui_parm...) and what scripts set }
-    property State: TStringList read FState;
+    procedure ClearState;
     procedure SetState(const Key, Value: String);
     function StateValue(const Key: String): String;
     { Copy the gui_* keys (and noninteractive) of an entity. }
@@ -1072,7 +1074,7 @@ end;
 constructor TD3Gui.Create;
 begin
   inherited Create;
-  FState := TStringList.Create;
+  FState := specialize TDictionary<String, String>.Create;
   FTransitions := specialize TList<TD3GuiTransition>.Create;
   FWindowsByName := specialize TDictionary<String, TD3GuiWindow>.Create;
 end;
@@ -1169,19 +1171,34 @@ begin
   FWindowsByName.Add(Key, Result);
 end;
 
-procedure TD3Gui.SetState(const Key, Value: String);
+procedure TD3Gui.ClearState;
 begin
-  if FState.Values[LowerCase(Key)] = Value then
+  FState.Clear;
+end;
+
+procedure TD3Gui.SetState(const Key, Value: String);
+var
+  K, Old: String;
+begin
+  K := LowerCase(Key);
+  if not FState.TryGetValue(K, Old) then
+    Old := '';
+  if Old = Value then
     Exit;
-  FState.Values[LowerCase(Key)] := Value;
-  if LowerCase(Key) = 'noninteractive' then
+  { like TStrings.Values: an empty value is no entry }
+  if Value = '' then
+    FState.Remove(K)
+  else
+    FState.AddOrSetValue(K, Value);
+  if K = 'noninteractive' then
     FInteractive := (Desktop <> nil) and Desktop.Interactive and (Value <> '1');
   Dirty := True;
 end;
 
 function TD3Gui.StateValue(const Key: String): String;
 begin
-  Result := FState.Values[LowerCase(Key)];
+  if not FState.TryGetValue(LowerCase(Key), Result) then
+    Result := '';
 end;
 
 procedure TD3Gui.StateFromKeys(const Keys: TStrings);
@@ -3859,7 +3876,7 @@ begin
     Exit;
   if State <> nil then
   begin
-    Gui.State.Clear;
+    Gui.ClearState;
     for I := 0 to State.Count - 1 do
       Gui.SetState(State.Names[I], State.ValueFromIndex[I]);
   end;

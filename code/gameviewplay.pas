@@ -174,12 +174,25 @@ type
     FLastPrograms: Cardinal;
     { seconds of the last Update's parts, for the long frame log line }
     FPartGame, FPartVisibility, FPartHud, FPartDemo, FPartUpdate: Single;
+    { console "perf <seconds>": sums of the frames' times and parts }
+    FPerfLeft, FPerfFrame, FPerfWorst, FPerfUpdate, FPerfGame, FPerfVisibility, FPerfHud: Double;
+    FPerfFrames: Integer;
+    FPerfParts: array [0..UpdatePartCount - 1] of Double;
+    { GPU time of the frames' 3D view (from Render to RenderOverChildren)
+      by GL timer queries, read 4 frames later (console "perf") }
+    FGpuQueries: array [0..3] of Cardinal;
+    FGpuQueryUsed: array [0..3] of Boolean;
+    FGpuQueryIndex: Integer;
+    FGpuQueryActive: Boolean;
+    FPerfGpu: Double;
+    FPerfGpuFrames: Integer;
     FPartGameParts: String;
     { the map's efxs/<map>.efx (nil when missing), the effect in
       SoundEngine.Reverb (nil = reverb off), console s_useEAXReverb }
     FEfx: TD3EfxFile;
     FReverbEffect: TD3ReverbEffect;
     FUseReverb: Boolean;
+    procedure PerfFrame(const SecondsPassed: Single);
     procedure LoadReverb;
     procedure UpdateReverb;
     procedure SetReverbEffect(const Effect: TD3ReverbEffect; const Why: String);
@@ -277,7 +290,7 @@ uses
   Math, TypInfo,
   CastleWindow, CastleLog, CastleImages, CastleUtils, CastleStringUtils, CastleRenderOptions,
   CastleInternalRenderer,
-  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils,
+  CastleSoundEngine, CastleInternalOpenAL, CastleInternalEFX, CastleGLUtils, CastleGL,
   CastleRenderContext,
   Doom3Sampler, CastleInternalGLShadowVolumes, CastleGLShaders,
   CastleShapes, CastleBoxes,
@@ -379,6 +392,16 @@ begin
   if GetEnvironmentVariable('CD3_GLOBAL_AMBIENT') <> '' then
     RenderContext.GlobalAmbient := Vector3(1, 1, 1) *
       SysUtils.StrToFloatDef(GetEnvironmentVariable('CD3_GLOBAL_AMBIENT'), 0, DefaultFormatSettings);
+  { opaque shapes front to back: the GPU's early depth test skips the
+    pixels behind (game/caverns1's start view: 2.5 M pixel shader runs in
+    the first pass, 1.8 M sorted; console r_occlusionSort) }
+  MainViewport.OcclusionSort := sort3D;
+  { the shadow light's lit pass adds only its light to the shapes it
+    reaches, in its screen rectangle (CGE change AC), like Doom 3's
+    interactions: the other way every shape is drawn again with all its
+    lights (caverns1: 8 to 11 ms of GPU time for the view, 4.5 to 5 this
+    way); env CD3_SHADOW_ADDITIVE=0 or console r_shadowAdditive 0 }
+  InternalShadowVolumesAdditive := GetEnvironmentVariable('CD3_SHADOW_ADDITIVE') <> '0';
   FGame := TD3Game.Create(Map);
   FGame.OnMessage := @HandleMessage;
   FGame.OnFlashlight := @HandleFlashlight;
@@ -1682,14 +1705,42 @@ begin
 end;
 
 procedure TViewPlay.Render;
+var
+  Slot: Integer;
+  Nanoseconds: UInt64;
 begin
   inherited Render;
   { before the children: the viewport renders with the bob }
   ApplyViewBob;
+  { console "perf": the GPU time of the view (GL_TIME_ELAPSED, OpenGL 3.3) }
+  FGpuQueryActive := False;
+  if (FPerfLeft > 0) and Assigned(glGenQueries) and Assigned(glGetQueryObjectui64v) then
+  begin
+    if FGpuQueries[0] = 0 then
+      glGenQueries(Length(FGpuQueries), @FGpuQueries[0]);
+    Slot := FGpuQueryIndex mod Length(FGpuQueries);
+    if FGpuQueryUsed[Slot] then
+    begin
+      { 4 frames old: done by now (waits if not) }
+      glGetQueryObjectui64v(FGpuQueries[Slot], GL_QUERY_RESULT, @Nanoseconds);
+      FPerfGpu := FPerfGpu + Nanoseconds / 1e9;
+      Inc(FPerfGpuFrames);
+      FGpuQueryUsed[Slot] := False;
+    end;
+    glBeginQuery(GL_TIME_ELAPSED, FGpuQueries[Slot]);
+    FGpuQueryActive := True;
+  end;
 end;
 
 procedure TViewPlay.RenderOverChildren;
 begin
+  if FGpuQueryActive then
+  begin
+    glEndQuery(GL_TIME_ELAPSED);
+    FGpuQueryUsed[FGpuQueryIndex mod Length(FGpuQueries)] := True;
+    Inc(FGpuQueryIndex);
+    FGpuQueryActive := False;
+  end;
   RemoveViewBob;
   inherited RenderOverChildren;
 end;
@@ -2772,6 +2823,17 @@ begin
       InternalShadowVolumesZeroLights := not InternalShadowVolumesZeroLights;
     Console.Print('r_shadowZeroLights ' + BoolToStr(InternalShadowVolumesZeroLights, '1', '0'));
   end else
+  if Cmd = 'r_shadowadditive' then
+  begin
+    { one shadow light like several: its lit pass adds only its own light,
+      in its screen rectangle, to the shapes it reaches (1), or draws every
+      shape again with all its lights (0) (CGE change AC) }
+    if Args <> '' then
+      InternalShadowVolumesAdditive := StrToIntDef(Args, 1) <> 0
+    else
+      InternalShadowVolumesAdditive := not InternalShadowVolumesAdditive;
+    Console.Print('r_shadowAdditive ' + BoolToStr(InternalShadowVolumesAdditive, '1', '0'));
+  end else
   if Cmd = 'r_usescissor' then
   begin
     { limit each shadow light's passes to its screen rectangle, like
@@ -3089,6 +3151,37 @@ begin
     Console.Print(S);
     WritelnLog('AAS', S);
   end else
+  if Cmd = 'r_occlusionsort' then
+  begin
+    { opaque shapes front to back (1), so the GPU's early depth test skips
+      the pixels of the ones behind, or in the scenes' order (0) }
+    if Trim(Args) <> '' then
+    begin
+      if StrToIntDef(Trim(Args), 1) <> 0 then
+        MainViewport.OcclusionSort := sort3D
+      else
+        MainViewport.OcclusionSort := sortNone;
+    end;
+    Console.Print('r_occlusionSort ' + IntToStr(Ord(MainViewport.OcclusionSort = sort3D)));
+  end else
+  if Cmd = 'perf' then
+  begin
+    { the average frame and its parts over N seconds (PerfFrame) }
+    FPerfLeft := StrToFloatDef(Trim(Args), 5);
+    FPerfFrames := 0;
+    FPerfFrame := 0;
+    FPerfWorst := 0;
+    FPerfUpdate := 0;
+    FPerfGame := 0;
+    FPerfVisibility := 0;
+    FPerfHud := 0;
+    FillChar(FPerfParts, SizeOf(FPerfParts), 0);
+    FPerfGpu := 0;
+    FPerfGpuFrames := 0;
+    { queries of earlier frames measured the settings before }
+    FillChar(FGpuQueryUsed, SizeOf(FGpuQueryUsed), 0);
+    Console.Print(Format('Measuring %.1f s', [FPerfLeft]));
+  end else
   if Cmd = 'sample' then
   begin
     { the sampling profiler (Doom3Sampler): "sample start", "sample stop"
@@ -3322,9 +3415,11 @@ begin
   end;
   if ShadowName = '' then
     ShadowName := 'none';
-  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, programs %d, dormant %d, capture %.2f s, waited %.2f s, shadows %s%s)',
+  WritelnLog('GameViewPlay', 'Screenshot "%s" (%.1f FPS, eye %s, yaw %.0f, area %d, visible areas %d, shapes %d of %d, programs %d, dormant %d, capture %.2f s, waited %.2f s, shadows %s%s)',
     [Path, Container.Fps.RealFps, CgeToD3(Camera.Translation).ToString, CameraYaw,
-     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount, InternalProgramsLinked, FGame.DormantCount,
+     Map.AreaAt(Camera.Translation), Map.VisibleAreaCount,
+     MainViewport.Statistics.ShapesRendered, MainViewport.Statistics.ShapesVisible,
+     InternalProgramsLinked, FGame.DormantCount,
      CaptureTime, SaveTime, ShadowName,
      Iff(FGame.CinematicName <> '', ', cinematic ' + FGame.CinematicName, '')]);
 end;
@@ -4000,6 +4095,47 @@ begin
   Inc(FDemoIndex);
 end;
 
+{ Console "perf": adds the frame that just ended (from the last Update to
+  this one; its parts were measured by that Update) and logs the averages
+  when the time is up. The rest of a frame (frame minus update) is the
+  rendering, the map's own Update (animations, GUIs) and the swap. }
+procedure TViewPlay.PerfFrame(const SecondsPassed: Single);
+var
+  Frame: Double;
+  I: Integer;
+  Parts: String;
+begin
+  if not FLastUpdateValid then
+    Exit;
+  Frame := TimerSeconds(Timer, FLastUpdate);
+  Inc(FPerfFrames);
+  FPerfFrame := FPerfFrame + Frame;
+  if Frame > FPerfWorst then
+    FPerfWorst := Frame;
+  FPerfUpdate := FPerfUpdate + FPartUpdate;
+  FPerfGame := FPerfGame + FPartGame;
+  FPerfVisibility := FPerfVisibility + FPartVisibility;
+  FPerfHud := FPerfHud + FPartHud;
+  for I := 0 to UpdatePartCount - 1 do
+    FPerfParts[I] := FPerfParts[I] + FGame.UpdatePartTime(I);
+  FPerfLeft := FPerfLeft - SecondsPassed;
+  if FPerfLeft > 0 then
+    Exit;
+  Parts := '';
+  for I := 0 to UpdatePartCount - 1 do
+    if FPerfParts[I] / FPerfFrames >= 0.0001 then
+      Parts := Parts + Format(' %s %.1f', [UpdatePartName[I], FPerfParts[I] / FPerfFrames * 1000]);
+  WritelnLog('Perf', 'Perf: %d frames, %.2f ms a frame (%.1f FPS, worst %.1f ms); update %.2f ms (game %.2f, visibility %.2f, hud %.2f), rest %.2f ms; GPU %.2f ms (the view, %d frames); game parts, ms:%s (eye %s, yaw %.0f, area %d, visible areas %d, shapes %d of %d)',
+    [FPerfFrames, FPerfFrame / FPerfFrames * 1000, FPerfFrames / FPerfFrame, FPerfWorst * 1000,
+     FPerfUpdate / FPerfFrames * 1000, FPerfGame / FPerfFrames * 1000,
+     FPerfVisibility / FPerfFrames * 1000, FPerfHud / FPerfFrames * 1000,
+     (FPerfFrame - FPerfUpdate) / FPerfFrames * 1000,
+     FPerfGpu / Max(1, FPerfGpuFrames) * 1000, FPerfGpuFrames, Parts,
+     CgeToD3(Camera.Translation).ToString, CameraYaw, Map.AreaAt(Camera.Translation),
+     Map.VisibleAreaCount, MainViewport.Statistics.ShapesRendered, MainViewport.Statistics.ShapesVisible]);
+  Console.Print(Format('%.2f ms a frame', [FPerfFrame / FPerfFrames * 1000]));
+end;
+
 procedure TViewPlay.Update(const SecondsPassed: Single; var HandleInput: Boolean);
 var
   Firing: Boolean;
@@ -4037,6 +4173,8 @@ begin
     end;
   end;
   UpdatePdaGui(SecondsPassed);
+  if FPerfLeft > 0 then
+    PerfFrame(SecondsPassed);
   if (FProfileFrames = 0) and FLastUpdateValid and
      (TimerSeconds(Timer, FLastUpdate) > LongFrameSeconds) then
     { the parts are of the frame's own Update (the one before this); the

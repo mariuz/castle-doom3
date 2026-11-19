@@ -57,6 +57,13 @@ uses
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
   Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals;
 
+const
+  { the timed parts of TD3Game.Update }
+  UpdatePartCount = 15;
+  UpdatePartName: array [0..UpdatePartCount - 1] of String = ('movers', 'bindings', 'moveables',
+    'misc', 'projectiles', 'brass', 'particles', 'pvs', 'monsters', 'triggers', 'actors', 'focus',
+    'weapon', 'scripts', 'views');
+
 type
   { A monster's route through the AAS (the path between the areas it was
     computed for). }
@@ -867,6 +874,9 @@ type
     FLightFades: specialize TList<TD3LightFade>;
     FAnimated: specialize TObjectList<TD3Animated>;
     FActors: specialize TObjectList<TD3Actor>;
+    { FActors by script handle (FindActor: scripts ask it for every event
+      on an entity; the list has hundreds) }
+    FActorByHandle: specialize TDictionary<Integer, TD3Actor>;
     FProjectiles: specialize TObjectList<TD3Projectile>;
     { the map's AAS for monsters of the player's size (maps/<map>.aas48),
       nil when the map has none: then monsters walk straight }
@@ -1341,7 +1351,7 @@ type
     FBroadBoxes: array of TBox3D;
     FBroadCount, FBroadMapCount: Integer;
     FBroadTime: Single;
-    FUpdateParts: array [0..14] of Single;
+    FUpdateParts: array [0..UpdatePartCount - 1] of Single;
     procedure BroadphaseUpdate;
     { The map's child of candidate K, nil when the map's children changed
       since the boxes were taken. }
@@ -1352,6 +1362,9 @@ type
     { The parts of the last Update that took 5 ms or more: " actors 0.12
       scripts 0.03" (the long frame log line). }
     function UpdateParts: String;
+    { The seconds of part I (0..UpdatePartCount - 1) of the last Update,
+      named by UpdatePartName (console "perf"). }
+    function UpdatePartTime(const I: Integer): Single;
     { Like the world's WorldSegmentCollision, but only the map's scenes
       whose bounding box the segment reaches are asked (a map has a
       thousand, and monsters ask several times each every frame). }
@@ -2240,6 +2253,7 @@ begin
   FLightFades := specialize TList<TD3LightFade>.Create;
   FAnimated := specialize TObjectList<TD3Animated>.Create(True);
   FActors := specialize TObjectList<TD3Actor>.Create(True);
+  FActorByHandle := specialize TDictionary<Integer, TD3Actor>.Create;
   FProjectiles := specialize TObjectList<TD3Projectile>.Create(True);
   FCombatNodes := specialize TObjectList<TD3CombatNode>.Create(True);
   FMoveables := specialize TObjectList<TD3Moveable>.Create(True);
@@ -2322,6 +2336,7 @@ begin
   FLightFades.Free;
   FAnimated.Free;
   FActors.Free;
+  FActorByHandle.Free;
   FProjectiles.Free;
   FCombatNodes.Free;
   FMoveables.Free;
@@ -2382,6 +2397,7 @@ begin
   FRelayNext.Clear;
   FUnsupported.Clear;
   FActors.Clear;
+  FActorByHandle.Clear;
   { before the VM (it owns the weapon's thread) and the map }
   FreeAndNil(FWeapon);
   if (FPlayerModel <> nil) and (FPlayerHolder <> nil) then
@@ -2406,6 +2422,7 @@ begin
   FAnimated.Clear;
   { before the VM goes (it owns the actors' threads) }
   FActors.Clear;
+  FActorByHandle.Clear;
   FProjectiles.Clear;
   FBroadCount := 0;
   FBroadMapCount := -1;
@@ -7656,16 +7673,18 @@ begin
 end;
 
 function TD3Game.UpdateParts: String;
-const
-  Names: array [0..14] of String = ('movers', 'bindings', 'moveables', 'misc', 'projectiles', 'brass',
-    'particles', 'pvs', 'monsters', 'triggers', 'actors', 'focus', 'weapon', 'scripts', 'views');
 var
   I: Integer;
 begin
   Result := '';
-  for I := 0 to High(Names) do
+  for I := 0 to UpdatePartCount - 1 do
     if FUpdateParts[I] >= 0.005 then
-      Result := Result + Format(' %s %.2f', [Names[I], FUpdateParts[I]]);
+      Result := Result + Format(' %s %.2f', [UpdatePartName[I], FUpdateParts[I]]);
+end;
+
+function TD3Game.UpdatePartTime(const I: Integer): Single;
+begin
+  Result := FUpdateParts[I];
 end;
 
 procedure TD3Game.SpawnPlayerModel;
@@ -8518,6 +8537,14 @@ begin
     Obj.Fields[I] := D3FloatValue(Value);
 end;
 
+{ Is a "key=value" line of an entity's Pairs one of its targets (key
+  "target..."), without making the key's string (TStrings.Names): the
+  AI scripts look through a monster's keys for combat nodes every frame. }
+function IsTargetPair(const Line: String): Boolean;
+begin
+  Result := (Length(Line) >= 6) and (StrLIComp(PChar(Line), 'target', 6) = 0);
+end;
+
 function TD3Game.ScriptEntityObject(const Handle: Integer): TD3ScriptObject;
 var
   A: TD3Actor;
@@ -8541,10 +8568,8 @@ function TD3Game.FindActor(const Handle: Integer): TD3Actor;
 begin
   if Handle <= 0 then
     Exit(nil);
-  for Result in FActors do
-    if Result.Handle = Handle then
-      Exit;
-  Result := nil;
+  if not FActorByHandle.TryGetValue(Handle, Result) then
+    Result := nil;
 end;
 
 function TD3Game.SpawnActor(const ME: TD3ModelEntity): TD3Actor;
@@ -8650,6 +8675,9 @@ begin
   { idActor::ConstructScriptObject: the object's init in the main thread }
   FScript.RestartThread(A.Main, T.FindMethodToRun('init'), A.Handle);
   FActors.Add(A);
+  { the first actor of a handle, like the list's search }
+  if not FActorByHandle.ContainsKey(A.Handle) then
+    FActorByHandle.Add(A.Handle, A);
   Result := A;
 end;
 
@@ -8955,7 +8983,7 @@ begin
           Pos := CgeToD3(A.Model.Holder.Translation);
           D := (Pos - CgeToD3(PlayerFeet)).Length;
           for I := 0 to A.Model.Entity.Pairs.Count - 1 do
-            if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
+            if IsTargetPair(A.Model.Entity.Pairs[I]) then
             begin
               Node := CombatNodeOf(FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]));
               if (Node <> nil) and not Node.Disabled and
@@ -8973,7 +9001,7 @@ begin
         EventResult := D3EntityValue(0);
         if not NoTarget and not PlayerDead then
           for I := 0 to A.Model.Entity.Pairs.Count - 1 do
-            if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
+            if IsTargetPair(A.Model.Entity.Pairs[I]) then
             begin
               Node := CombatNodeOf(FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]));
               if (Node <> nil) and not Node.Disabled and
@@ -9309,7 +9337,7 @@ begin
         { one of its targets of that class, at random }
         Targets := nil;
         for I := 0 to A.Model.Entity.Pairs.Count - 1 do
-          if SameText(Copy(A.Model.Entity.Pairs.Names[I], 1, 6), 'target') then
+          if IsTargetPair(A.Model.Entity.Pairs[I]) then
           begin
             Other := FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]);
             if (Other <> nil) and SameText(Other.ClassName_, D3ValueToString(Args[0])) then
