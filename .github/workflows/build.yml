@@ -126,6 +126,11 @@ jobs:
           run_test datamenu MENU "W:1,D:open,W:0.5,S,D:download,W:0.3,S,D:cancel,W:0.3,Q"
           grep -q 'Doom 3 installs found' test_output/datamenu.log || { echo "::error::the data panel should list the Doom 3 installs found"; exit 1; }
           grep -q 'Data: asking before the demo download' test_output/datamenu.log || { echo "::error::the demo download should ask first"; exit 1; }
+          run_test classic MENU "W:1,D:classic 1,W:0.3,S,C:320 240,W:1,Q"
+          grep -q 'GameViewMenu: Classic mode on' test_output/classic.log || { echo "::error::D:classic 1 should turn classic mode on"; exit 1; }
+          run_test classicgame testmap "W:1,O:classic 1,W:2,S,Q"
+          grep -q 'Classic mode on: Doom 3 2004 look' test_output/classicgame.log || { echo "::error::console classic 1 should turn classic mode on"; exit 1; }
+          grep -q 'Look: Doom 3 2004 (lights x1, g_fov 90' test_output/classicgame.log || { echo "::error::the test level should have the 2004 look (lights x1, g_fov 90)"; exit 1; }
           run_test ingamemenu testmap "W:1,O:menu,W:0.5,S,O:menu esc,W:0.5,S,Q"
           grep -q 'Menu GUI "guis/mainmenu.gui" (6 windows, in game)' test_output/ingamemenu.log || { echo "::error::console menu should open the menu over the game"; exit 1; }
           grep -q 'Menu GUI: "close"' test_output/ingamemenu.log || { echo "::error::escape in the menu should close it"; exit 1; }

@@ -6,6 +6,7 @@
 procedure TestInstallsAndDemoExtract;
 var
   Dir, D3, Bfg, Demo, Cfg, BasePath, GameDir, RunFile, OutFile: String;
+  Classic: Boolean;
   List: TD3InstallList;
   Libs: TStringList;
   I: Integer;
@@ -115,6 +116,16 @@ begin
   CheckEquals('d3xp', GameDir, 'data.cfg: game');
   SaveDataChoiceTo(Cfg, '', '');
   Check(LoadDataChoiceFrom(Cfg, BasePath, GameDir) and (BasePath = ''), 'data.cfg: the test level alone is a choice too');
+  { classic mode's choice, kept by the data choice and keeping it }
+  Check(not LoadClassicChoiceFrom(Cfg, Classic), 'data.cfg: no classic choice before saving one');
+  SaveClassicChoiceTo(Cfg, True);
+  Check(LoadClassicChoiceFrom(Cfg, Classic) and Classic, 'data.cfg: classic=1');
+  Check(LoadDataChoiceFrom(Cfg, BasePath, GameDir) and (BasePath = ''), 'data.cfg: the classic choice keeps the data choice');
+  SaveDataChoiceTo(Cfg, D3, '');
+  Check(LoadClassicChoiceFrom(Cfg, Classic) and Classic, 'data.cfg: the data choice keeps classic=1');
+  SaveClassicChoiceTo(Cfg, False);
+  Check(LoadClassicChoiceFrom(Cfg, Classic) and not Classic, 'data.cfg: classic=0');
+  Check(LoadDataChoiceFrom(Cfg, BasePath, GameDir) and (BasePath = D3), 'data.cfg: basepath kept by classic=0');
 
   { a .run like the demo's: a 373 line script, then a gzipped tar }
   Payload := '';

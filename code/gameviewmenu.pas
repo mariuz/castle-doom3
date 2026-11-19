@@ -56,6 +56,8 @@ type
     FRenderSeconds: Double;
     { the data panel (see the unit's comment) }
     FDataButton: TCastleButton;
+    { classic mode (D3ClassicMode), above the data button }
+    FClassicButton: TCastleButton;
     FDataPanel: TCastleRectangleControl;
     FDataGroup: TCastleVerticalGroup;
     FDataStatus: TCastleLabel;
@@ -71,6 +73,8 @@ type
     function DataLabel(const Text: String; const Size: Single; const Gray: Single = 0.75): TCastleLabel;
     function DataButton(const Caption: String; const ATag: Integer; const Event: TNotifyEvent): TCastleButton;
     procedure ClickData(Sender: TObject);
+    procedure ClickClassic(Sender: TObject);
+    procedure SetClassic(const Value: Boolean);
     procedure ClickInstall(Sender: TObject);
     procedure ClickTestOnly(Sender: TObject);
     procedure ClickDownload(Sender: TObject);
@@ -131,7 +135,7 @@ implementation
 uses
   SysUtils, Math, Process,
   CastleWindow, CastleImages, CastleLog, CastleVectors, CastleRectangles, CastleUtils, CastleTimeUtils,
-  Doom3Files, Doom3Decls, Doom3Sampler, GameViewPlay;
+  Doom3Files, Doom3Decls, Doom3Sampler, Doom3Level, GameViewPlay;
 
 const
   { software rendered (about ten full screen layers): at most this many
@@ -238,6 +242,7 @@ begin
   FGuiBack := nil;
   { freed with FreeAtStop too (FDataGroup is owned by the panel) }
   FDataButton := nil;
+  FClassicButton := nil;
   FDataPanel := nil;
   FDataGroup := nil;
   FDataStatus := nil;
@@ -289,6 +294,8 @@ begin
       begin
         RemoveControl(FDataButton);
         InsertFront(FDataButton);
+        RemoveControl(FClassicButton);
+        InsertFront(FClassicButton);
         RemoveControl(FDataPanel);
         InsertFront(FDataPanel);
       end;
@@ -483,7 +490,8 @@ begin
   R := FGuiImage.RenderRect;
   P := Container.MousePosition;
   if (FDemo.Count = 0) and (R.Width > 0) and (R.Height > 0) and (not DataPanelShown) and
-     not ((FDataButton <> nil) and FDataButton.RenderRect.Contains(P)) then
+     not ((FDataButton <> nil) and FDataButton.RenderRect.Contains(P)) and
+     not ((FClassicButton <> nil) and FClassicButton.RenderRect.Contains(P)) then
   begin
     FGui.SetCursor(EnsureRange((P.X - R.Left) / R.Width * GuiWidth, 0, GuiWidth),
       EnsureRange((1 - (P.Y - R.Bottom) / R.Height) * GuiHeight, 0, GuiHeight));
@@ -596,12 +604,14 @@ begin
         begin
           { the data panel: D:open, D:close, D:pick <n> (1 is the first
             install listed, 0 the test level), D:download (asks), D:yes,
-            D:cancel, D:wait (until the download is over) }
+            D:cancel, D:wait (until the download is over); D:classic 0|1
+            sets classic mode for this run (the button also saves it) }
           Words := Arg.Split([' '], TStringSplitOptions.ExcludeEmpty);
           if Length(Words) = 0 then
             Continue;
           case LowerCase(Words[0]) of
             'open': ShowDataPanel(True);
+            'classic': SetClassic((Length(Words) < 2) or (Words[1] <> '0'));
             'close': ShowDataPanel(False);
             'download': ClickDownload(nil);
             'yes': ClickDownloadYes(nil);
@@ -755,6 +765,14 @@ begin
   FDataButton.OnClick := @ClickData;
   InsertFront(FDataButton);
 
+  FClassicButton := TCastleButton.Create(FreeAtStop);
+  FClassicButton.FontSize := 20;
+  FClassicButton.Anchor(hpRight, -20);
+  FClassicButton.Anchor(vpBottom, 70);
+  FClassicButton.OnClick := @ClickClassic;
+  InsertFront(FClassicButton);
+  SetClassic(D3ClassicMode);
+
   FDataPanel := TCastleRectangleControl.Create(FreeAtStop);
   FDataPanel.FullSize := True;
   FDataPanel.Color := Vector4(0.03, 0.03, 0.05, 1);
@@ -788,6 +806,21 @@ begin
   end;
   FDataPanel.Exists := Value;
   FDataButton.Exists := not Value;
+  FClassicButton.Exists := not Value;
+end;
+
+procedure TViewMenu.SetClassic(const Value: Boolean);
+begin
+  D3ClassicMode := Value;
+  { the 2004 game's look on BFG data, or Doom 3 BFG's }
+  FClassicButton.Caption := Iff(Value, 'Classic look: on (Doom 3 2004)', 'Classic look: off (Doom 3 BFG)');
+  WritelnLog('GameViewMenu', 'Classic mode %s', [BoolToStr(Value, 'on', 'off')]);
+end;
+
+procedure TViewMenu.ClickClassic(Sender: TObject);
+begin
+  SetClassic(not D3ClassicMode);
+  SaveClassicChoice(D3ClassicMode);
 end;
 
 function TViewMenu.DataLabel(const Text: String; const Size: Single; const Gray: Single): TCastleLabel;

@@ -129,18 +129,21 @@ Like the full game, the demo data is id Software's: never commit it.
 
 Doom 3 BFG Edition's data works too: `-basepath "<DOOM 3 BFG folder>"` (the folder with `base\_common.resources`). Its maps, models, images, sounds and fonts are read from the `.resources` containers' binary files; its Flash menus, HUD and PDA and its Bink videos are not (the port's own HUD and menu show). Resurrection of Evil's and the Lost Mission's maps are in the same `base` (`game/erebus1`, `game/le_enpro1`...).
 
+On BFG data the game looks like Doom 3 BFG by default (like Chocolate DOOM-3-BFG): lights 1.5 times as strong as in the 2004 game (its `r_lightScale` 3 against 2) and its field of view (`g_fov` 80 across a 16:9 screen, 50.6 degrees high). **Classic mode** gives the 2004 game's look (dhewm3's) to the same data: its light scale and field of view (`g_fov` 90 across 4:3, 73.7 degrees high). Turn it on with `--classic` on the command line (`--no-classic` turns it off), env `CD3_CLASSIC=1`, the title menu's **Classic look** button (above "Doom 3 data...", kept in `data.cfg` as `classic=1`; autotests use that only with `--data-config`) or the console's `classic 1` (reloads the map). The 2004 data always has the classic look. The log says which look a map has (`Look: Doom 3 BFG (lights x1.5, g_fov 80, 50.5 degrees high)`).
+
 ### Command line
 
 ```powershell
 .\castle-doom3.exe +map testmap
 .\castle-doom3.exe -basepath "C:\Games\Doom 3" +map game/mars_city1
+.\castle-doom3.exe -basepath "C:\Games\DOOM 3 BFG" --classic +map game/mars_city1   # the 2004 look on BFG data
 .\castle-doom3.exe --autotest testmap test_output\shot --demo "W:2,S,G:200 0 0,A:0,W:2,S,F,N:0,W:0.5,X,S,Q"
 .\castle-doom3.exe --autotest MENU test_output\shot      # title screen screenshot
 .\castle-doom3.exe --autotest MENU test_output\shot --demo "W:1,S,C:320 240,Q"   # drive the menu GUI
 .\castle-doom3.exe --autotest MENU test_output\shot --demo "W:1,D:open,W:0.5,S,Q"  # the Doom 3 data panel
 ```
 
-Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds [run\|crouch]` hold movement keys (and the run key or crouch), `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command (`O:menu` opens the in-game menu, `O:menu x y` clicks it, `O:menu esc`), `L:map` load map, `Q` quit. With `--autotest MENU` the script drives the title menu GUI: `W:sec`, `S`, `C:x y` click at GUI coordinates, `K:esc`, `P:start` / `P:stop` a sampling profile, `Q`. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area, number of visible areas and the shadow casting light, and every shot (`Shot:`).
+Demo script actions (comma separated): `W:sec` wait, `S` screenshot, `T:deg` turn left, `A:deg` absolute Doom 3 yaw, `P:deg` pitch up, `G:x y z` go to Doom 3 coordinates (feet), `GO:forward side seconds [run\|crouch]` hold movement keys (and the run key or crouch), `F` flashlight, `X` fire, `U` use, `Y` god mode, `N:i` stand in front of monster i facing it, `O:command` console command (`O:menu` opens the in-game menu, `O:menu x y` clicks it, `O:menu esc`), `L:map` load map, `Q` quit. With `--autotest MENU` the script drives the title menu GUI: `W:sec`, `S`, `C:x y` click at GUI coordinates, `K:esc`, `D:classic 0|1` classic mode (the data panel's `D:` commands too), `P:start` / `P:stop` a sampling profile, `Q`. The log (`%LOCALAPPDATA%\castle-doom3\castle-doom3.log`) records every screenshot with the FPS, eye position, yaw, area, number of visible areas and the shadow casting light, and every shot (`Shot:`).
 
 ### Tests
 

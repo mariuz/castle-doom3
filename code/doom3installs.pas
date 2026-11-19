@@ -64,6 +64,13 @@ procedure SaveDataChoice(const BasePath, GameDir: String);
 { the same with another file (tests) }
 function LoadDataChoiceFrom(const FileName: String; out BasePath, GameDir: String): Boolean;
 procedure SaveDataChoiceTo(const FileName, BasePath, GameDir: String);
+{ data.cfg's classic=0|1 (classic mode, the title menu's button): False
+  when it has none. Saving keeps the data choice, and the data choice
+  keeps it. }
+function LoadClassicChoice(out Classic: Boolean): Boolean;
+procedure SaveClassicChoice(const Classic: Boolean);
+function LoadClassicChoiceFrom(const FileName: String; out Classic: Boolean): Boolean;
+procedure SaveClassicChoiceTo(const FileName: String; const Classic: Boolean);
 
 var
   { set by GameInitialize: the -basepath / -game loaded (empty: the
@@ -355,6 +362,57 @@ begin
   Result := IncludeTrailingPathDelimiter(GetAppConfigDir(False));
 end;
 
+function LoadClassicChoice(out Classic: Boolean): Boolean;
+begin
+  Result := LoadClassicChoiceFrom(DataConfigFileName, Classic);
+end;
+
+procedure SaveClassicChoice(const Classic: Boolean);
+begin
+  SaveClassicChoiceTo(DataConfigFileName, Classic);
+end;
+
+function LoadClassicChoiceFrom(const FileName: String; out Classic: Boolean): Boolean;
+var
+  S: TStringList;
+begin
+  Classic := False;
+  Result := False;
+  if not FileExists(FileName) then
+    Exit;
+  S := TStringList.Create;
+  try
+    try
+      S.LoadFromFile(FileName);
+    except
+      Exit;
+    end;
+    if S.IndexOfName('classic') < 0 then
+      Exit;
+    Classic := Trim(S.Values['classic']) = '1';
+    Result := True;
+  finally
+    S.Free;
+  end;
+end;
+
+procedure SaveClassicChoiceTo(const FileName: String; const Classic: Boolean);
+var
+  S: TStringList;
+begin
+  ForceDirectories(ExtractFileDir(FileName));
+  S := TStringList.Create;
+  try
+    if FileExists(FileName) then
+      S.LoadFromFile(FileName);
+    S.Values['classic'] := BoolToStr(Classic, '1', '0');
+    S.SaveToFile(FileName);
+  finally
+    S.Free;
+  end;
+  WritelnLog('Doom3Installs', 'Classic mode %s saved in "%s"', [BoolToStr(Classic, 'on', 'off'), FileName]);
+end;
+
 function DataConfigFileName: String;
 begin
   Result := ConfigDir + 'data.cfg';
@@ -408,13 +466,18 @@ end;
 procedure SaveDataChoiceTo(const FileName, BasePath, GameDir: String);
 var
   S: TStringList;
+  Classic: Boolean;
+  HasClassic: Boolean;
 begin
+  HasClassic := LoadClassicChoiceFrom(FileName, Classic);
   ForceDirectories(ExtractFileDir(FileName));
   S := TStringList.Create;
   try
     S.Add('# Castle Doom 3''s data: the folder with base/ (or demo/), and the mod (d3xp). Empty: the test level.');
     S.Add('basepath=' + BasePath);
     S.Add('game=' + GameDir);
+    if HasClassic then
+      S.Add('classic=' + BoolToStr(Classic, '1', '0'));
     S.SaveToFile(FileName);
   finally
     S.Free;

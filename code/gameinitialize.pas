@@ -29,7 +29,7 @@ var
   AutoTestMap, AutoTestPrefix, AutoTestDemo, CmdMap, BasePath, GameDir: String;
   SavedBasePath, SavedGameDir: String;
   Pk4s: TStringList;
-  LoadedGame, Mute, UseDataConfig: Boolean;
+  LoadedGame, Mute, UseDataConfig, ClassicFromCommandLine, SavedClassic: Boolean;
 begin
   { OpenGLES: highp fragment shaders. With mediump (16-bit floats on Mesa
     and many mobile GPUs) light distances overflow past 256 units, so
@@ -46,6 +46,7 @@ begin
   BasePath := '';
   GameDir := '';
   UseDataConfig := False;
+  ClassicFromCommandLine := False;
   Pk4s := TStringList.Create;
   try
     I := 1;
@@ -97,6 +98,15 @@ begin
       if Parameters[I] = '--data-config' then
         UseDataConfig := true
       else
+      { --classic / --no-classic: classic mode on or off (Doom 3 BFG's data
+        with the 2004 game's light scale and field of view; D3ClassicMode),
+        over data.cfg's choice }
+      if (Parameters[I] = '--classic') or (Parameters[I] = '-classic') or
+         (Parameters[I] = '--no-classic') then
+      begin
+        D3ClassicMode := Parameters[I] <> '--no-classic';
+        ClassicFromCommandLine := true;
+      end else
       { --minimized: the window starts minimized (for runs started by
         another program, like RenderDoc's renderdoccmd); screenshots then
         render offscreen }
@@ -151,6 +161,17 @@ begin
           GameDir := SavedGameDir;
       end;
     end;
+    { classic mode: the command line, else env CD3_CLASSIC, else the
+      menu's choice (data.cfg; autotests only with --data-config) }
+    if not ClassicFromCommandLine then
+    begin
+      if GetEnvironmentVariable('CD3_CLASSIC') <> '' then
+        D3ClassicMode := GetEnvironmentVariable('CD3_CLASSIC') = '1'
+      else
+      if ((AutoTestMap = '') or UseDataConfig) and LoadClassicChoice(SavedClassic) then
+        D3ClassicMode := SavedClassic;
+    end;
+    WritelnLog('GameInitialize', 'Classic mode %s', [BoolToStr(D3ClassicMode, 'on', 'off')]);
     if BasePath = '' then
     begin
       { a Doom 3 "base" directory next to the executable,
