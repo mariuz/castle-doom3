@@ -105,6 +105,9 @@ type
     procedure FramePose(const Frame: Integer; var Pose: TD3JointArray);
     { The first joint's position in a frame (what FramePose gives for it). }
     function RootPosition(const Frame: Integer): TVector3;
+    { The root joint's position at a time, interpolated like PoseAt (the
+      root has no parent). }
+    function RootAt(const Time: Single; const Loop: Boolean): TVector3;
     { Interpolated pose at a time (seconds), looping or clamped. }
     procedure PoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
     { The joints relative to their parents (not composed), interpolated. }
@@ -174,6 +177,10 @@ type
     { the animation's pose, and the one shown (FPose with the joint mods
       and copied joints) }
     FPose, FFinalPose: TD3JointArray;
+    { out of sight, Update moves only the root (the origin's motion): the
+      joints are sampled when something asks for them (EnsurePose), like
+      Doom 3's idAnimator that builds a frame only when needed }
+    FPoseStale: Boolean;
     { JOINTMOD_WORLD rotations (model space) by joint, FHasMod when set }
     FJointMods: array of TQuaternion;
     FHasMod: array of Boolean;
@@ -214,6 +221,11 @@ type
       material only hides the shape, keeping its appearance) }
     FAppearanceMaterials: array of String;
     procedure SetShown(const Value: Boolean);
+    { the animation's joints at the current times into FPose (with
+      LockOrigin) }
+    procedure SamplePose;
+    { a stale pose sampled, finished (FFinalPose) }
+    procedure EnsurePose;
     procedure ApplyPose;
     function PoseUnchanged: Boolean;
     procedure UpdateNormalsAndTangents(const I: Integer);
@@ -839,6 +851,33 @@ begin
   if (Hierarchy[0].Flags and 4) <> 0 then Result.Z := Frames[F][K];
 end;
 
+function TD3Md5Anim.RootAt(const Time: Single; const Loop: Boolean): TVector3;
+var
+  FrameF, T: Single;
+  F0, F1: Integer;
+begin
+  if NumFrames <= 0 then
+    Exit(RootPosition(0));
+  FrameF := Time * FrameRate;
+  if Loop and (NumFrames > 1) then
+    FrameF := FrameF - Floor(FrameF / NumFrames) * NumFrames
+  else
+    FrameF := Min(FrameF, NumFrames - 1);
+  F0 := Trunc(FrameF);
+  T := FrameF - F0;
+  F1 := F0 + 1;
+  if F1 >= NumFrames then
+  begin
+    if Loop then
+      F1 := 0
+    else
+      F1 := NumFrames - 1;
+  end;
+  Result := RootPosition(F0);
+  if (T >= 0.001) and (F1 <> F0) then
+    Result := Lerp(T, Result, RootPosition(F1));
+end;
+
 procedure TD3Md5Anim.LocalFramePose(const Frame: Integer; var Pose: TD3JointArray);
 var
   I, K, F: Integer;
@@ -921,6 +960,9 @@ var
   { env CD3_MD5_COMPOSED_LERP=1: PoseAt interpolates the composed joints
     of the two frames (before 2026-11-19); -1 until read }
   ComposedLerp: Integer = -1;
+  { env CD3_LAZY_POSES=0: hidden models sample all their joints every
+    frame (before 2026-11-19); -1 until read }
+  LazyPoses: Integer = -1;
 
 procedure TD3Md5Anim.PoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
 var
@@ -1513,6 +1555,16 @@ var
   Points: TVector3List;
   UVs: TVector2List;
 begin
+  if FPoseStale then
+  begin
+    FPoseStale := False;
+    if FAnim <> nil then
+    begin
+      SamplePose;
+      if LockOrigin then
+        LockPoseOrigin;
+    end;
+  end;
   FinishPose;
   { out of sight: skin it when it shows again }
   if not FShown then
@@ -1780,6 +1832,7 @@ begin
   begin
     { the source's local rotation (relative to its parent), set as this
       joint's local rotation }
+    FCopyJoints[I].Source.EnsurePose;
     Src := FCopyJoints[I].Source.FFinalPose;
     if Length(Src) = 0 then
       Src := FCopyJoints[I].Source.FPose;
@@ -1817,6 +1870,7 @@ begin
     Exit;
   Paused := True;
   FPose := Copy(APose);
+  FPoseStale := False;
   ApplyPose;
 end;
 
@@ -1827,6 +1881,7 @@ end;
 
 function TD3Md5Instance.Pose: TD3JointArray;
 begin
+  EnsurePose;
   if Length(FFinalPose) = Length(FPose) then
     Result := FFinalPose
   else
@@ -2300,6 +2355,7 @@ begin
   if (not Result) or PoseLocked then
     Exit;
   FAnim.FramePose(Max(0, Frame - 1), FPose);
+  FPoseStale := False;
   ApplyPose;
   Paused := True;
 end;
@@ -2425,8 +2481,10 @@ end;
 procedure TD3Md5Instance.Update(const SecondsPassed: Single);
 var
   OldTime: Single;
-  I: Integer;
+  Root: TVector3;
 begin
+  if LazyPoses < 0 then
+    LazyPoses := Ord(GetEnvironmentVariable('CD3_LAZY_POSES') <> '0');
   if Length(FReplacedAppearances) > 0 then
   begin
     Inc(FReplacedAge);
@@ -2452,11 +2510,60 @@ begin
     LastOriginDelta := TVector3.Zero;
     Exit;
   end;
+  if FTorsoAnimData <> nil then
+    FTorsoTime := FTorsoTime + SecondsPassed;
+  if FShown or (LazyPoses = 0) then
+  begin
+    SamplePose;
+    if Length(FPose) > 0 then
+      Root := FPose[0].Position
+    else
+      Root := TVector3.Zero;
+    FPoseStale := False;
+  end else
+  begin
+    { out of sight: only the root, the joints when asked (EnsurePose) }
+    Root := FAnim.RootAt(FAnimTime, FLoop);
+    FPoseStale := True;
+  end;
+  { the origin's move since the last update (across a cycle's wrap: to
+    the last frame, then from the first) }
+  LastOriginDelta := TVector3.Zero;
+  if FHasPrevOrigin and (Length(FModel.Joints) > 0) then
+  begin
+    if FLoop and (FAnim.Duration > 0) and
+       (Floor(FAnimTime / FAnim.Duration) <> Floor(OldTime / FAnim.Duration)) then
+    begin
+      LastOriginDelta := (FAnim.RootPosition(FAnim.NumFrames - 1) - FPrevOrigin) +
+        (Root - FAnim.RootPosition(0));
+    end else
+      LastOriginDelta := Root - FPrevOrigin;
+    LastOriginDelta.Z := 0;
+  end;
+  if Length(FModel.Joints) > 0 then
+  begin
+    FPrevOrigin := Root;
+    FHasPrevOrigin := True;
+  end;
+  if FPoseStale then
+  begin
+    { skinned when it shows (SetShown -> ApplyPose) }
+    FSkinPending := True;
+    Exit;
+  end;
+  if LockOrigin then
+    LockPoseOrigin;
+  ApplyPose;
+end;
+
+procedure TD3Md5Instance.SamplePose;
+var
+  I: Integer;
+begin
   if (FTorsoAnimData <> nil) and (Length(FTorsoMask) = Length(FModel.Joints)) then
   begin
     { the torso channel's joints from its own anim, the rest from the
       body's, joined relative to their parents }
-    FTorsoTime := FTorsoTime + SecondsPassed;
     FAnim.LocalPoseAt(FAnimTime, FLoop, FPose);
     FTorsoAnimData.LocalPoseAt(FTorsoTime, FTorsoLoop, FTorsoPose);
     for I := 0 to Min(High(FPose), High(FTorsoPose)) do
@@ -2468,28 +2575,19 @@ begin
     ComposePose(FPose);
   end else
     FAnim.PoseAt(FAnimTime, FLoop, FPose);
-  { the origin's move since the last update (across a cycle's wrap: to
-    the last frame, then from the first) }
-  LastOriginDelta := TVector3.Zero;
-  if FHasPrevOrigin and (Length(FPose) > 0) then
-  begin
-    if FLoop and (FAnim.Duration > 0) and
-       (Floor(FAnimTime / FAnim.Duration) <> Floor(OldTime / FAnim.Duration)) then
-    begin
-      LastOriginDelta := (FAnim.RootPosition(FAnim.NumFrames - 1) - FPrevOrigin) +
-        (FPose[0].Position - FAnim.RootPosition(0));
-    end else
-      LastOriginDelta := FPose[0].Position - FPrevOrigin;
-    LastOriginDelta.Z := 0;
-  end;
-  if Length(FPose) > 0 then
-  begin
-    FPrevOrigin := FPose[0].Position;
-    FHasPrevOrigin := True;
-  end;
+end;
+
+procedure TD3Md5Instance.EnsurePose;
+begin
+  if not FPoseStale then
+    Exit;
+  FPoseStale := False;
+  if FAnim = nil then
+    Exit;
+  SamplePose;
   if LockOrigin then
     LockPoseOrigin;
-  ApplyPose;
+  FinishPose;
 end;
 
 initialization
