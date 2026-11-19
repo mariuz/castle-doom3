@@ -182,8 +182,8 @@ Steps: load its maps like the retail maps (item 1), implement the entities above
 
 | Chocolate DOOM-3-BFG | Here |
 |---|---|
-| **Vanilla BFG play**: the BFG engine's behavior, rendering in the classic look | The BFG data loads (item 8): its maps, Resurrection of Evil's and the Lost Mission's. Next: play them through, compare with Chocolate DOOM-3-BFG's renders and logs like dhewm3's for the 2004 data (`tools/dhewm3_refs.ps1`). |
-| **The BFG edition's gameplay bugs fixed** | Go through its fixes (its commit history) and check each one here: the same bug, or Doom 3's 2004 behavior already. |
+| **Vanilla BFG play**: the BFG engine's behavior, rendering in the classic look | The BFG data loads (item 8): its maps, Resurrection of Evil's and the Lost Mission's. Built (MinGW-w64 in WSL) and scripted: `tools/chocolate_refs.ps1` shoots it at a BFG route playthrough's views (pilot: alphalabs1, le_enpro1). Next: all maps. |
+| **The BFG edition's gameplay bugs fixed** | Started 2026-11-19: its one gameplay fix since the fork (`0426c9d`, the AI alert counted in frames) is in (`heardSound`; the port had no alert at all). Its other commits are build and renderer fixes. |
 | **Backported fixes** from RBDOOM-3-BFG and CstDoom3-BFG (skippable cinematics, the classic flashlight...) | Cinematics are skippable (`skipcinematic`, Escape); the flashlight exists. The BFG armor mounted flashlight is item 5 of "After the playthroughs". |
 | **Lower system requirements, performance without changing the look** | The same aim as "Performance" here: 60 FPS on the slowest maps (item 19 of "After the playthroughs"). |
 | BFG videos (Bink), Flash (`.bswf`) HUD, menus and PDA | Item 8: the port's own HUD, menu and PDA show; videos are not read. |

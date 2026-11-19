@@ -417,6 +417,8 @@ type
 
   { An idAI entity running its script object (TD3Game.SpawnActors). }
   TD3Actor = class
+    { heardSound found the player once (logged) }
+    HeardLogged: Boolean;
     Model: TD3ModelEntity;
     Handle: Integer;
     Obj: TD3ScriptObject;
@@ -886,6 +888,19 @@ type
     { the areas seen from the player's eye in every direction (closed doors
       block), every PvsInterval s, and when it was computed }
     FPvs: Doom3Portals.TD3BoolArray;
+    { idGameLocal::AlertAI: the actor that made a noise (a shot, an impact)
+      and the frame until which the AI hears it (scripts' heardSound). By
+      frame, like Doom 3 and Chocolate DOOM-3-BFG: the BFG edition counted
+      game milliseconds, so the alert was gone before the AI looked. }
+    FFrameNum: Int64;
+    FAlertFrame: Int64;
+    FAlertHandle: Integer;
+    procedure AlertAI(const Handle: Integer);
+    function AlertEntity: Integer;
+    { idGameLocal::InPlayerPVS for a CGE point: its area is in the view
+      set of the player's eye (true while the set isn't known) }
+    function InPlayerPvs(const Pos: TVector3): Boolean;
+  private
     { the map's box (CGE coordinates, empty until a moveable needs it):
       moveables leaving it stop (idPhysics_RigidBody's world bounds) }
     FWorldBox: TBox3D;
@@ -5738,6 +5753,9 @@ begin
     P.Fuse := P.Fuse - FuseOffset;
   end;
   FPlayerFired := True;
+  { wake up nearby monsters (idWeapon::Event_LaunchProjectiles) }
+  if (W.Def = nil) or (W.Def.Values['silent_fire'] = '') or (W.Def.Values['silent_fire'] = '0') then
+    AlertAI(PlayerHandle);
   WritelnLog('Doom3World', 'Weapon %s fires %d (clip %d, ammo %d)',
     [W.DefName, Max(1, Count), Clip[W.Slot], AmmoCount(W.AmmoType)]);
 end;
@@ -7568,6 +7586,7 @@ var
 
 begin
   PartTimer := Timer;
+  Inc(FFrameNum);
   FFireCooldown := Max(0, FFireCooldown - SecondsPassed);
   SinceFire := SinceFire + SecondsPassed;
   FTime := FTime + SecondsPassed;
@@ -8768,6 +8787,7 @@ end;
 function TD3Game.ActorEvent(const A: TD3Actor; const Thread: TD3ScriptThread; const N: String;
   const Args: TD3ValueArray; var EventResult: TD3Value): Boolean;
 var
+  Hearer: Integer;
   C: TD3ActorChannel;
   F: TD3ScriptFunction;
   Other: TD3MapEntity;
@@ -9070,7 +9090,27 @@ begin
         A.SetFlag('AI_TALK', Ord(A.TalkTarget <> 0));
       end;
     'getTalkTarget': EventResult := D3EntityValue(A.TalkTarget);
-    'heardSound', 'getObstacle', 'closestEnemyToPoint':
+    'heardSound':
+      { idAI::Event_HeardSound: the actor that made a noise in the last
+        frame, within hearing range (2048), when this actor is in the
+        player's view set; with ignore_team only an enemy (the player, for
+        monsters) }
+      begin
+        EventResult := D3EntityValue(0);
+        Hearer := AlertEntity;
+        if (Hearer = PlayerHandle) and ((ArgF(0) = 0) or (A.Monster <> nil)) and
+           InPlayerPvs(A.Model.Holder.Translation) and
+           (PointsDistanceSqr(A.Model.Holder.Translation, FPlayerEye) < Sqr(2048)) then
+        begin
+          EventResult := D3EntityValue(Hearer);
+          if not A.HeardLogged then
+          begin
+            A.HeardLogged := True;
+            WritelnLog('Doom3World', '%s hears the player', [A.Model.Entity.Name]);
+          end;
+        end;
+      end;
+    'getObstacle', 'closestEnemyToPoint':
       EventResult := D3EntityValue(0);
     'canBecomeSolid': EventResult := D3FloatValue(1);
     'getTurnDelta': EventResult := D3FloatValue(NormalizeYaw(A.IdealYaw - A.Yaw));
@@ -10259,10 +10299,37 @@ begin
     P.Trail.Axis := AxisFromDirection(CgeToD3(P.Velocity));
 end;
 
+procedure TD3Game.AlertAI(const Handle: Integer);
+begin
+  FAlertFrame := FFrameNum + 1;
+  FAlertHandle := Handle;
+end;
+
+function TD3Game.InPlayerPvs(const Pos: TVector3): Boolean;
+var
+  Area: Integer;
+begin
+  if not FPvsValid then
+    Exit(True);
+  Area := FMap.AreaAt(Pos + Vector3(0, 16, 0));
+  Result := (Area < 0) or (Area > High(FPvs)) or FPvs[Area];
+end;
+
+function TD3Game.AlertEntity: Integer;
+begin
+  if (FAlertHandle <> 0) and (FAlertFrame >= FFrameNum) then
+    Result := FAlertHandle
+  else
+    Result := 0;
+end;
+
 procedure TD3Game.ExplodeParticles(const P: TD3Projectile; const HitWorld: Boolean; const Normal: TVector3);
 var
   Axis: TD3Axis;
 begin
+  { idProjectile::Explode alerts the AI (the owner made the noise) }
+  if P.FromPlayer then
+    AlertAI(PlayerHandle);
   { idProjectile::Explode: the particles face the surface hit, else back
     along the flight }
   if HitWorld and not Normal.IsZero then
