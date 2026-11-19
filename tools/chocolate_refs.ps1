@@ -9,14 +9,20 @@
 # <OutDir>\summary.md is the table of all maps compared so far.
 # Chocolate DOOM-3-BFG (github.com/klaussilveira/chocolate-doom3-bfg) is
 # built with MinGW-w64 (F:\work\chocolate-doom3-bfg\BUILD_NOTES.md); its
-# save path must be the exe's folder (base\renderprogs, the cfg).
+# save path must be the exe's folder (base\renderprogs, the cfg). It runs
+# with g_fov 90 like Doom 3 and this port (Doom 3 BFG's default is 80).
 param(
   [string[]] $Maps = @(),
   [string] $Logs = "playthrough_bfg",
   [string] $OutDir = "chocolate_ref",
   [string] $Exe = "F:\work\chocolate-doom3-bfg\build-mingw\Doom3BFG.exe",
   [string] $BasePath = "F:\GogGalaxyGames\DOOM 3 BFG",
-  [int] $Every = 3
+  [int] $Every = 3,
+  # frames before the first view; maps that start with a cinematic
+  # (Chocolate DOOM-3-BFG has no console skip) get $CinematicWait
+  [int] $Wait = 900,
+  [int] $CinematicWait = 3000,
+  [string[]] $CinematicMaps = @("delta2a", "monorail", "recycling1")
 )
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -27,16 +33,24 @@ if ($Maps.Count -eq 0) {
 }
 foreach ($Map in $Maps) {
   $Log = Join-Path $Logs "game_$Map.log"
-  python tools/dhewm3_compare.py cfg $Log (Join-Path $SavePath "base\ref_$Map.cfg") --every $Every --wait 900
-  if (Test-Path $Shots) { Remove-Item (Join-Path $Shots "*") -Force }
-  $Arguments = "+set fs_basepath `"$BasePath`" +set fs_savepath `"$SavePath`" +set r_fullscreen 0 +set r_windowWidth 1600 +set r_windowHeight 900 +set r_windowX 40 +set r_windowY 40 +set s_volume_dB -40 +map game/$Map +exec ref_$Map.cfg"
-  $P = Start-Process $Exe -ArgumentList $Arguments -WorkingDirectory $SavePath -PassThru
-  if (-not $P.WaitForExit(600 * 1000)) { Stop-Process $P -Force; Write-Host "$Map : Chocolate DOOM-3-BFG timeout" }
+  python tools/dhewm3_compare.py cfg $Log (Join-Path $SavePath "base\ref_$Map.cfg") --every $Every --wait $(if ($CinematicMaps -contains $Map) { $CinematicWait } else { $Wait })
   $Dest = Join-Path $OutDir $Map
   New-Item -ItemType Directory -Force $Dest | Out-Null
-  Remove-Item (Join-Path $Dest "*") -Force -ErrorAction SilentlyContinue
-  if (Test-Path $Shots) { Get-ChildItem $Shots -Filter "shot*" | Move-Item -Destination $Dest }
-  python tools/dhewm3_compare.py compare $Log $Dest (Join-Path $OutDir "${Map}_compare.jpg") --every $Every | Set-Content -Encoding utf8 (Join-Path $OutDir "${Map}_compare.txt")
+  # now and then (about one map in twenty) every view after the first shows
+  # the same picture: the view froze; then the map is shot once more
+  for ($Try = 1; $Try -le 2; $Try++) {
+    if (Test-Path $Shots) { Remove-Item (Join-Path $Shots "*") -Force }
+    $Arguments = "+set fs_basepath `"$BasePath`" +set fs_savepath `"$SavePath`" +set g_fov 90 +set r_fullscreen 0 +set r_windowWidth 1600 +set r_windowHeight 900 +set r_windowX 40 +set r_windowY 40 +set s_volume_dB -40 +map game/$Map +exec ref_$Map.cfg"
+    $P = Start-Process $Exe -ArgumentList $Arguments -WorkingDirectory $SavePath -PassThru
+    if (-not $P.WaitForExit(600 * 1000)) { Stop-Process $P -Force; Write-Host "$Map : Chocolate DOOM-3-BFG timeout" }
+    Remove-Item (Join-Path $Dest "*") -Force -ErrorAction SilentlyContinue
+    if (Test-Path $Shots) { Get-ChildItem $Shots -Filter "shot*" | Move-Item -Destination $Dest }
+    $Same = [int](python tools/dhewm3_compare.py same $Dest)
+    $Count = (Get-ChildItem $Dest).Count
+    if ($Same * 2 -le $Count) { break }
+    Write-Host "$Map : $Same of $Count views the same as the one before (frozen), try $Try"
+  }
+  python tools/dhewm3_compare.py compare $Log $Dest (Join-Path $OutDir "${Map}_compare.jpg") --every $Every --ref chocolate | Set-Content -Encoding utf8 (Join-Path $OutDir "${Map}_compare.txt")
   Write-Host "$Map : $((Get-ChildItem $Dest).Count) shots"
 }
 python tools/dhewm3_compare.py table $OutDir (Join-Path $OutDir "summary.md")

@@ -2681,7 +2681,7 @@ procedure TD3Game.ApplyScriptLight(const SL: TD3ScriptLight);
 begin
   SL.Light.Exists := SL.On and (SL.Fade > 0.001);
   SL.Light.Color := Vector3(SL.Color.X * SL.Tint.X, SL.Color.Y * SL.Tint.Y, SL.Color.Z * SL.Tint.Z);
-  SL.Light.Intensity := 1.5 * FMap.LightScale * SL.Fade;
+  SL.Light.Intensity := 1.5 * FMap.EffectiveLightScale * SL.Fade;
 end;
 
 procedure TD3Game.SetScriptLightShader(const SL: TD3ScriptLight; const ShaderName: String);
