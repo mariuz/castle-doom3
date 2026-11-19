@@ -186,6 +186,14 @@ type
     FGpuQueryActive: Boolean;
     { the flashlight's projection image ('-' none, '' not looked for) }
     FFlashlightProfileName: String;
+    { perf: the main thread's CPU time at its start }
+    FPerfCpuStart: Double;
+    { perf: from the end of Update to the view's rendering (CGE updating
+      the viewport's transforms), and the 3D view's rendering on the CPU
+      (between Render and RenderOverChildren, without the swap) }
+    FPerfPreRender, FPerfRenderCpu: Double;
+    FPerfRenderFrames: Integer;
+    FPerfRenderStart: TTimerResult;
     FPerfGpu: Double;
     FPerfGpuFrames: Integer;
     FPartGameParts: String;
@@ -299,6 +307,31 @@ uses
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
   Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq;
+
+{$ifdef MSWINDOWS}
+function D3GetThreadTimes(Thread: PtrUInt; out CreationTime, ExitTime, KernelTime, UserTime: Int64): LongBool;
+  stdcall; external 'kernel32' name 'GetThreadTimes';
+function D3GetCurrentThread: PtrUInt; stdcall; external 'kernel32' name 'GetCurrentThread';
+{$endif}
+
+{ The main thread's CPU time (user and kernel), seconds; 0 where unknown.
+  Unlike frame times it doesn't include waiting for vertical sync. }
+function MainThreadCpuSeconds: Double;
+{$ifdef MSWINDOWS}
+var
+  Creation, ExitTime, Kernel, User: Int64;
+begin
+  if D3GetThreadTimes(D3GetCurrentThread, Creation, ExitTime, Kernel, User) then
+    Result := (Kernel + User) / 1e7
+  else
+    Result := 0;
+end;
+{$else}
+begin
+  Result := 0;
+end;
+{$endif}
+
 
 type
   { Saves a screenshot in its own thread: without libpng (no DLL next to
@@ -1713,6 +1746,11 @@ var
   Nanoseconds: UInt64;
 begin
   inherited Render;
+  if (FPerfLeft > 0) and FLastUpdateValid then
+  begin
+    FPerfRenderStart := Timer;
+    FPerfPreRender := FPerfPreRender + Max(0, TimerSeconds(FPerfRenderStart, FLastUpdate) - FPartUpdate);
+  end;
   { before the children: the viewport renders with the bob }
   ApplyViewBob;
   { console "perf": the GPU time of the view (GL_TIME_ELAPSED, OpenGL 3.3) }
@@ -1737,6 +1775,11 @@ end;
 
 procedure TViewPlay.RenderOverChildren;
 begin
+  if (FPerfLeft > 0) and FLastUpdateValid then
+  begin
+    FPerfRenderCpu := FPerfRenderCpu + TimerSeconds(Timer, FPerfRenderStart);
+    Inc(FPerfRenderFrames);
+  end;
   if FGpuQueryActive then
   begin
     glEndQuery(GL_TIME_ELAPSED);
@@ -3224,6 +3267,10 @@ begin
     FillChar(FPerfParts, SizeOf(FPerfParts), 0);
     FPerfGpu := 0;
     FPerfGpuFrames := 0;
+    FPerfCpuStart := MainThreadCpuSeconds;
+    FPerfPreRender := 0;
+    FPerfRenderCpu := 0;
+    FPerfRenderFrames := 0;
     { queries of earlier frames measured the settings before }
     FillChar(FGpuQueryUsed, SizeOf(FGpuQueryUsed), 0);
     Console.Print(Format('Measuring %.1f s', [FPerfLeft]));
@@ -3263,6 +3310,7 @@ begin
   begin
     LogMemory('Now');
     Console.Print(ProcessMemoryText);
+    Map.LogChildCounts;
     if TextureMemoryProfiler.Enabled and (Trim(Args) = 'full') then
       WritelnLogMultiline('Memory', TextureMemoryProfiler.Summary);
   end else
@@ -4171,6 +4219,9 @@ begin
   for I := 0 to UpdatePartCount - 1 do
     if FPerfParts[I] / FPerfFrames >= 0.0001 then
       Parts := Parts + Format(' %s %.1f', [UpdatePartName[I], FPerfParts[I] / FPerfFrames * 1000]);
+  WritelnLog('Perf', 'Perf: CPU a frame: update %.2f ms, then CGE before rendering %.2f ms, the view''s rendering %.2f ms (main thread CPU %.2f ms, with the driver''s waits)',
+    [FPerfUpdate / FPerfFrames * 1000, FPerfPreRender / Max(1, FPerfRenderFrames) * 1000,
+     FPerfRenderCpu / Max(1, FPerfRenderFrames) * 1000, (MainThreadCpuSeconds - FPerfCpuStart) / FPerfFrames * 1000]);
   WritelnLog('Perf', 'Perf: %d frames, %.2f ms a frame (%.1f FPS, worst %.1f ms); update %.2f ms (game %.2f, visibility %.2f, hud %.2f), rest %.2f ms; GPU %.2f ms (the view, %d frames); game parts, ms:%s (eye %s, yaw %.0f, area %d, visible areas %d, shapes %d of %d)',
     [FPerfFrames, FPerfFrame / FPerfFrames * 1000, FPerfFrames / FPerfFrame, FPerfWorst * 1000,
      FPerfUpdate / FPerfFrames * 1000, FPerfGame / FPerfFrames * 1000,

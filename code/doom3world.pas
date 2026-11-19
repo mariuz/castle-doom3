@@ -275,6 +275,8 @@ type
     Entity: TD3MapEntity;
     Transform: TCastleTransform;
     Source: TCastleSoundSource;
+    { replaced by its demonic sound (SetSpeakerDemonic): it doesn't exist }
+    DemonicOff: Boolean;
     Sound: TCastleSound;
     Looping: Boolean;
     { a looping speaker is on (triggers toggle it); it plays only while it
@@ -2999,6 +3001,10 @@ begin
       else
       if S.Source.Sound = nil then
         S.Source.Sound := S.Sound;
+      { a silent one doesn't exist meanwhile: CGE walks every existing
+        transform every frame (hundreds of speakers) }
+      if (S.Transform <> nil) and not S.DemonicOff then
+        S.Transform.Exists := S.Source.Sound <> nil;
     end;
   end;
   for M in FMovers do
@@ -11478,10 +11484,16 @@ begin
   if Demonic then
   begin
     if not S.Entity.BoolValue('overlaydemonic') then
+    begin
+      S.DemonicOff := True;
       S.Transform.Exists := False;
+    end;
     PlaySoundAt(S.Entity.Value('snd_demonic'), S.Transform.WorldTranslation);
   end else
+  begin
+    S.DemonicOff := False;
     S.Transform.Exists := True;
+  end;
 end;
 
 procedure TD3Game.SetGuisDemonic(const AName: String; const Demonic: Boolean);
@@ -11885,6 +11897,10 @@ begin
   for I := 0 to FMap.AreaCount - 1 do
     if FMap.AreaScene(I) <> nil then
       WorldScenes := Concat(WorldScenes, [FMap.AreaScene(I)]);
+  { merged static entities are world geometry too }
+  for I := 0 to FMap.StaticGroupCount - 1 do
+    if FMap.StaticGroupScene(I) <> nil then
+      WorldScenes := Concat(WorldScenes, [FMap.StaticGroupScene(I)]);
   EntityScenes := nil;
   for B in FMap.Brushes do
     if (B.Scene <> nil) and B.Scene.Exists then
