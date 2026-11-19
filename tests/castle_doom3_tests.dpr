@@ -14,7 +14,7 @@ uses
   Doom3Files, Doom3Bfg, Doom3Lexer, Doom3Decls, Doom3Images, Doom3Proc, Doom3MapFile, Doom3Md5,
   Doom3StaticModels, Doom3Level, Doom3Collision, Doom3Portals, Doom3Aas, Doom3Expressions, Doom3LightEffects, Doom3Gui,
   Doom3Materials, X3DNodes, X3DFields, Doom3World, CastleScene, Doom3Script, Doom3Camera, Doom3Efx, Doom3AF, Doom3Ragdoll, Doom3EnvProbes,
-  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq, Doom3HudGui,
+  Doom3Particles, Doom3Decals, Doom3Pda, Doom3Roq, Doom3HudGui, Doom3Installs, Doom3DemoDownload, ZStream, CastleFilesUtils,
   CastleTransform, CastleUtils, CastleBoxes, CastleRenderOptions, CastleShapes;
 
 var
@@ -8264,6 +8264,7 @@ begin
 end;
 
 {$I test_bfg.inc}
+{$I test_installs.inc}
 
 begin
   if GetEnvironmentVariable('CD3_ROQ_DUMP') <> '' then
@@ -8348,6 +8349,7 @@ begin
   TestSaveLoad;
   TestReloadMemory;
   TestBfg;
+  TestInstallsAndDemoExtract;
   TestPowerups;
   TestStaminaSkinsKnockback;
   TestCrouchAndDeath;

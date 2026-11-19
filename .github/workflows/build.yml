@@ -123,6 +123,9 @@ jobs:
           grep -q 'Menu GUI: "maplist"' test_output/menu.log || { echo "::error::MAP LIST should switch to the map list"; exit 1; }
           run_test menunew MENU "W:1,C:320 240,W:0.5,Q"
           grep -q 'Start map "testmap"' test_output/menunew.log || { echo "::error::NEW GAME should start the test map"; exit 1; }
+          run_test datamenu MENU "W:1,D:open,W:0.5,S,D:download,W:0.3,S,D:cancel,W:0.3,Q"
+          grep -q 'Doom 3 installs found' test_output/datamenu.log || { echo "::error::the data panel should list the Doom 3 installs found"; exit 1; }
+          grep -q 'Data: asking before the demo download' test_output/datamenu.log || { echo "::error::the demo download should ask first"; exit 1; }
           run_test ingamemenu testmap "W:1,O:menu,W:0.5,S,O:menu esc,W:0.5,S,Q"
           grep -q 'Menu GUI "guis/mainmenu.gui" (6 windows, in game)' test_output/ingamemenu.log || { echo "::error::console menu should open the menu over the game"; exit 1; }
           grep -q 'Menu GUI: "close"' test_output/ingamemenu.log || { echo "::error::escape in the menu should close it"; exit 1; }

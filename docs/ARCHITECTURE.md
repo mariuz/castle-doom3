@@ -23,6 +23,8 @@ Castle Doom 3 reads Doom 3 (id Tech 4) data at runtime and turns it into Castle 
 
 | Unit | Role |
 |---|---|
+| `Doom3Installs` | Finds Doom 3 data on this computer for the title menu (GOG registry keys and folders, Steam's `libraryfolders.vdf` libraries, BFG, `d3xp`, the demo) and keeps the choice in `<config dir>/data.cfg`, which `GameInitialize` reads when the command line gives no data. |
+| `Doom3DemoDownload` | The menu's download of the free Doom 3 demo: a thread downloads id Software's Linux `.run` (WinINet on Windows, `fphttpclient` elsewhere), `ExtractDemoPk4` reads past its shell script, inflates the gzipped tar and writes only `demo/demo00.pk4`, checking its size and MD5. |
 | `Doom3Files` | Virtual file system. Reads each PK4's ZIP central directory once, indexes paths (lowercase, `/`), memory maps the PK4 files and inflates entries on demand straight from the mapping (the C zlib CGE loads on Windows, FPC's inflate elsewhere), so 300 MB+ paks are never read whole. Loose directories override PK4s. Registers `d3fs:`. Also the load profiler (`LoadProfileStart` / `LoadProfileStep` / `LoadProfileLog`). |
 | `Doom3Bfg` | Doom 3 BFG Edition's binary formats, the shared pieces: `TBfgReader` (a file in memory, big and little endian reads), `BfgReadModel` (a render model: surfaces of idDrawVerts), `BfgDecodeImage` (`.bimage`), `BfgDecodeSound` (`.idwav`). See "Doom 3 BFG data". |
 | `Doom3Lexer` | idLexer subset shared by all text formats: quoted strings, punctuation, `//` and `/* */` comments, paths as single tokens, locale-independent numbers, `SkipBracedSection`. |
