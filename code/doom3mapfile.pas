@@ -9,7 +9,7 @@ interface
 
 uses
   SysUtils, Classes, Generics.Collections,
-  CastleVectors;
+  CastleVectors, CastleBoxes;
 
 type
   TD3MapEntity = class
@@ -69,6 +69,8 @@ type
 { Doom 3 (X forward, Y left, Z up) -> CGE (Y up): X = X, Y = Z, Z = -Y. }
 function D3ToCge(const V: TVector3): TVector3; inline;
 function CgeToD3(const V: TVector3): TVector3; inline;
+{ The CGE box of a Doom 3 box (its min and max corners). }
+function D3BoxToCge(const D3Min, D3Max: TVector3): TBox3D;
 { Parse "x y z". }
 function ParseVector3(const S: String; const Default: TVector3): TVector3;
 { Direction of a Doom 3 yaw (degrees, 0 = +X, 90 = +Y) in CGE coordinates. }
@@ -96,6 +98,14 @@ end;
 function CgeToD3(const V: TVector3): TVector3;
 begin
   Result := Vector3(V.X, -V.Z, V.Y);
+end;
+
+function D3BoxToCge(const D3Min, D3Max: TVector3): TBox3D;
+begin
+  { D3ToCge negates Doom 3's Y: it becomes the box's Z range the other way }
+  Result := Box3D(
+    Vector3(D3Min.X, D3Min.Z, -D3Max.Y),
+    Vector3(D3Max.X, D3Max.Z, -D3Min.Y));
 end;
 
 function ParseVector3(const S: String; const Default: TVector3): TVector3;

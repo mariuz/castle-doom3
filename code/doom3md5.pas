@@ -917,11 +917,27 @@ begin
   end;
 end;
 
+var
+  { env CD3_MD5_COMPOSED_LERP=1: PoseAt interpolates the composed joints
+    of the two frames (before 2026-11-19); -1 until read }
+  ComposedLerp: Integer = -1;
+
 procedure TD3Md5Anim.PoseAt(const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
 var
   FrameF, T: Single;
   F0, F1, I: Integer;
 begin
+  { like idAnimBlend: the parent-relative joints interpolated, then
+    composed once (composing both frames first was a third more work,
+    5% of the CPU in delta2b) }
+  if ComposedLerp < 0 then
+    ComposedLerp := Ord(GetEnvironmentVariable('CD3_MD5_COMPOSED_LERP') = '1');
+  if ComposedLerp = 0 then
+  begin
+    LocalPoseAt(Time, Loop, Pose);
+    ComposePose(Pose);
+    Exit;
+  end;
   FrameF := Time * FrameRate;
   if Loop and (NumFrames > 1) then
     FrameF := FrameF - Floor(FrameF / NumFrames) * NumFrames

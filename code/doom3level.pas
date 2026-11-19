@@ -1413,6 +1413,11 @@ begin
     FLights[N].Areas := nil;
     LightVolumeBox(LOrigin, Rot, Projected, LightCenter, LightRadius, TargetVec, UpVec, RightVec,
       FLights[N].VolumeMin, FLights[N].VolumeMax);
+    { a light volume lights nothing outside its box: shapes the box misses
+      don't get the light (CGE change AC), the radius's sphere reaches far
+      past a flat or long box (caverns1: shapes had up to 64 lights) }
+    if LightVolumes and (Node is TAbstractPositionalLightNode) then
+      TAbstractPositionalLightNode(Node).InternalVolumeBox := D3BoxToCge(FLights[N].VolumeMin, FLights[N].VolumeMax);
     { shader parameters: _color, shaderParm0..11 }
     FLights[N].Parms := DefaultExprContext;
     FLights[N].Fade := 1;
@@ -3399,6 +3404,9 @@ begin
     Exit;
   FLights[I].Location := Location;
   FLights[I].Matrix := Matrix;
+  { moved: only its radius bounds which shapes it reaches }
+  if FLights[I].Node is TAbstractPositionalLightNode then
+    TAbstractPositionalLightNode(FLights[I].Node).InternalVolumeBox := TBox3D.Empty;
   if FLights[I].Node is TPointLightNode then
     TPointLightNode(FLights[I].Node).Location := Location
   else

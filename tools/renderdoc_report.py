@@ -47,6 +47,11 @@ def main(out):
         out.write('No GPU duration counter on this replay\n')
         return
     durations = {r.eventId: r.value.d for r in ctrl.FetchCounters([rd.GPUCounter.EventGPUDuration])}
+    # pixel shader invocations: unlike the times (the GPU's clocks change
+    # from run to run), they compare captures exactly
+    invocations = {}
+    if rd.GPUCounter.PSInvocations in counters:
+        invocations = {r.eventId: r.value.u64 for r in ctrl.FetchCounters([rd.GPUCounter.PSInvocations])}
 
     draws = []
 
@@ -60,11 +65,12 @@ def main(out):
     walk(ctrl.GetRootActions())
     total = sum(durations.get(a.eventId, 0) for a in draws)
     out.write('Capture %s\n' % CAPTURE)
-    out.write('%d actions, GPU time %.2f ms\n\n' % (len(draws), total * 1000))
+    out.write('%d actions, GPU time %.2f ms, %.2f M pixel shader invocations\n\n' % (
+        len(draws), total * 1000, sum(invocations.values()) / 1e6))
 
     # the render state of each draw: blending, depth function and writes,
     # stencil, color writes (one replay step per draw)
-    groups = collections.defaultdict(lambda: [0, 0.0, 0])
+    groups = collections.defaultdict(lambda: [0, 0.0, 0, 0])
     programs = collections.defaultdict(lambda: [0, 0.0])
     top = []
     for a in draws:
@@ -89,29 +95,47 @@ def main(out):
         g[0] += 1
         g[1] += d
         g[2] += a.numIndices
+        g[3] += invocations.get(a.eventId, 0)
         p = programs[str(gl.vertexShader.programResourceId)]
         p[0] += 1
         p[1] += d
-        top.append((d, a.eventId, name, a.numIndices, key))
+        top.append((d, a.eventId, name, a.numIndices, key, invocations.get(a.eventId, 0)))
 
-    out.write('By render state (draws, GPU ms, indices):\n')
-    for key, (n, d, idx) in sorted(groups.items(), key=lambda kv: -kv[1][1]):
-        out.write('%8.2f ms %6d draws %9d indices  %s\n' % (d * 1000, n, idx, key))
+    out.write('By render state (draws, GPU ms, indices, M pixel shader invocations):\n')
+    for key, (n, d, idx, inv) in sorted(groups.items(), key=lambda kv: -kv[1][1]):
+        out.write('%8.2f ms %6d draws %9d indices %7.2f M  %s\n' % (d * 1000, n, idx, inv / 1e6, key))
     out.write('\nBy shader program (draws, GPU ms), top 15:\n')
     for key, (n, d) in sorted(programs.items(), key=lambda kv: -kv[1][1])[:15]:
         out.write('%8.2f ms %6d draws  program %s\n' % (d * 1000, n, key))
     out.write('\nSlowest draws:\n')
-    for d, eid, name, idx, key in sorted(top, reverse=True)[:25]:
-        out.write('%8.3f ms  event %6d  %8d indices  %s  [%s]\n' % (d * 1000, eid, idx, name, key))
+    for d, eid, name, idx, key, inv in sorted(top, reverse=True)[:25]:
+        out.write('%8.3f ms  event %6d  %8d indices %8d pixels  %s  [%s]\n' % (d * 1000, eid, idx, inv, name, key))
+    # the calls before the slowest draws that draw nothing (a texture
+    # upload or another stall shows there)
+    by_id = {a.eventId: a for a in draws}
+    for d, eid, name, idx, key, inv in sorted(top, reverse=True)[:8]:
+        if inv != 0 or not invocations:
+            continue
+        calls = collections.Counter(sfile.chunks[e.chunkIndex].name for e in by_id[eid].events)
+        out.write('Calls up to event %d (%.3f ms, no pixels): %s\n' % (
+            eid, d * 1000, ', '.join('%s x%d' % kv for kv in calls.most_common(12))))
     # RDC_DUMP_DIR: the fragment shader source of the 3 slowest draws
     # (<dir>/event<id>.frag), to see what makes them slow (how many lights)
     dump_dir = os.environ.get('RDC_DUMP_DIR', '')
     if dump_dir:
         os.makedirs(dump_dir, exist_ok=True)
-        for d, eid, name, idx, key in sorted(top, reverse=True)[:3]:
-            ctrl.SetFrameEvent(eid, False)
-            refl = ctrl.GetGLPipelineState().fragmentShader.reflection
+        for d, eid, name, idx, key, inv in sorted(top, reverse=True)[:3]:
+            ctrl.SetFrameEvent(eid, True)
+            state = ctrl.GetPipelineState()
+            refl = state.GetShaderReflection(rd.ShaderStage.Fragment)
             if refl is None:
+                # OpenGL: ask the shader object of the program
+                shader = state.GetShader(rd.ShaderStage.Fragment)
+                entries = ctrl.GetShaderEntryPoints(shader)
+                if entries:
+                    refl = ctrl.GetShader(state.GetGraphicsPipelineObject(), shader, entries[0])
+            if refl is None:
+                out.write('No fragment shader reflection at event %d\n' % eid)
                 continue
             path = os.path.join(dump_dir, 'event%d.frag' % eid)
             with open(path, 'wb') as f:
