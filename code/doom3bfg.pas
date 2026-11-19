@@ -101,6 +101,13 @@ function BfgHalfToFloat(const H: Word): Single;
   result's alpha; nil for none. }
 function BfgDecodeImage(const Data: TStream; const Face: Integer = 0;
   const CameraCube: Boolean = False; const Coverage: TStream = nil): TCastleImage;
+{ A .bimage of a 2D image as a DDS file in memory with all its mipmaps,
+  compressed, for CGE to upload as it is (caller frees): DXT1 and DXT5 as
+  they are, YCoCg diffuse maps decoded and encoded again as DXT1 (DXT5 with
+  the alpha of Coverage, the alpha test version of the image). nil for
+  other formats (normal maps, plain pixels), cube maps, single levels and
+  sizes that aren't powers of two. }
+function BfgCompressedDds(const Data: TStream; const Coverage: TStream = nil): TMemoryStream;
 { An .idwav as a 16 bit PCM WAV file in memory (caller frees), nil when it
   can't be read. }
 function BfgDecodeSound(const Data: TStream): TMemoryStream;
@@ -777,6 +784,329 @@ begin
         Inc(S);
       end;
     end;
+  end;
+end;
+
+{ Compressed DDS --------------------------------------------------------------- }
+
+type
+  TRgbaBlock = array [0..15] of TRgba;
+
+{ YCoCg pixels (CoCg in red and green, their scale in blue, Y in alpha) to
+  RGB with alpha 255. }
+procedure YCoCgToRgb(var Pixels: TRgbaArray);
+var
+  I, Co, Cg, Y, Scale: Integer;
+  P: PRgba;
+begin
+  for I := 0 to High(Pixels) do
+  begin
+    P := @Pixels[I];
+    Scale := (P^[2] shr 3) + 1;
+    Co := (P^[0] - 128) div Scale;
+    Cg := (P^[1] - 128) div Scale;
+    Y := P^[3];
+    P^[0] := ClampByte(Y + Co - Cg);
+    P^[1] := ClampByte(Y + Cg);
+    P^[2] := ClampByte(Y - Co - Cg);
+    P^[3] := 255;
+  end;
+end;
+
+function To565(const R, G, B: Integer): Word;
+begin
+  Result := (Word((R * 31 + 127) div 255) shl 11) or
+    (Word((G * 63 + 127) div 255) shl 5) or Word((B * 31 + 127) div 255);
+end;
+
+{ A DXT1 color block (4 colors) for 16 pixels: the box of their colors,
+  inset a little, its corners the end points. }
+procedure EncodeColorBlock(const Px: TRgbaBlock; const Dest: PByte);
+var
+  Lo, Hi: array [0..2] of Integer;
+  I, J, Inset, Best, BestD, D, E, Widest: Integer;
+  Mean: array [0..2] of Integer;
+  Cov: Int64;
+  C0, C1, T: Word;
+  Pal: array [0..3] of TRgba;
+  Bits: UInt32;
+begin
+  for J := 0 to 2 do
+  begin
+    Lo[J] := 255;
+    Hi[J] := 0;
+  end;
+  for I := 0 to 15 do
+    for J := 0 to 2 do
+    begin
+      if Px[I][J] < Lo[J] then
+        Lo[J] := Px[I][J];
+      if Px[I][J] > Hi[J] then
+        Hi[J] := Px[I][J];
+    end;
+  for J := 0 to 2 do
+  begin
+    Inset := (Hi[J] - Lo[J]) div 16;
+    Inc(Lo[J], Inset);
+    Dec(Hi[J], Inset);
+  end;
+  { the box's diagonal that follows the colors: a channel that falls while
+    the widest one rises (orange against gray) swaps its ends }
+  Widest := 0;
+  for J := 1 to 2 do
+    if Hi[J] - Lo[J] > Hi[Widest] - Lo[Widest] then
+      Widest := J;
+  for J := 0 to 2 do
+    Mean[J] := 0;
+  for I := 0 to 15 do
+    for J := 0 to 2 do
+      Inc(Mean[J], Px[I][J]);
+  for J := 0 to 2 do
+    if J <> Widest then
+    begin
+      Cov := 0;
+      for I := 0 to 15 do
+        Inc(Cov, (Px[I][Widest] * 16 - Mean[Widest]) * (Px[I][J] * 16 - Mean[J]));
+      if Cov < 0 then
+      begin
+        Inset := Lo[J];
+        Lo[J] := Hi[J];
+        Hi[J] := Inset;
+      end;
+    end;
+  C0 := To565(Hi[0], Hi[1], Hi[2]);
+  C1 := To565(Lo[0], Lo[1], Lo[2]);
+  if C0 < C1 then
+  begin
+    T := C0;
+    C0 := C1;
+    C1 := T;
+  end;
+  Bits := 0;
+  if C0 <> C1 then
+  begin
+    Color565(C0, Pal[0]);
+    Color565(C1, Pal[1]);
+    for J := 0 to 2 do
+    begin
+      Pal[2][J] := (2 * Pal[0][J] + Pal[1][J]) div 3;
+      Pal[3][J] := (Pal[0][J] + 2 * Pal[1][J]) div 3;
+    end;
+    for I := 0 to 15 do
+    begin
+      Best := 0;
+      BestD := MaxInt;
+      for E := 0 to 3 do
+      begin
+        D := Sqr(Px[I][0] - Pal[E][0]) + Sqr(Px[I][1] - Pal[E][1]) + Sqr(Px[I][2] - Pal[E][2]);
+        if D < BestD then
+        begin
+          BestD := D;
+          Best := E;
+        end;
+      end;
+      Bits := Bits or (UInt32(Best) shl (2 * I));
+    end;
+  end;
+  Dest[0] := C0 and $FF;
+  Dest[1] := C0 shr 8;
+  Dest[2] := C1 and $FF;
+  Dest[3] := C1 shr 8;
+  Dest[4] := Bits and $FF;
+  Dest[5] := (Bits shr 8) and $FF;
+  Dest[6] := (Bits shr 16) and $FF;
+  Dest[7] := Bits shr 24;
+end;
+
+{ A DXT5 alpha block (8 values between the lowest and highest alpha). }
+procedure EncodeAlphaBlock(const Px: TRgbaBlock; const Dest: PByte);
+var
+  Lo, Hi, I, E, Best, BestD, D: Integer;
+  A: array [0..7] of Integer;
+  Bits: UInt64;
+begin
+  Lo := 255;
+  Hi := 0;
+  for I := 0 to 15 do
+  begin
+    if Px[I][3] < Lo then
+      Lo := Px[I][3];
+    if Px[I][3] > Hi then
+      Hi := Px[I][3];
+  end;
+  Bits := 0;
+  if Hi > Lo then
+  begin
+    A[0] := Hi;
+    A[1] := Lo;
+    for I := 1 to 6 do
+      A[I + 1] := ((7 - I) * Hi + I * Lo) div 7;
+    for I := 0 to 15 do
+    begin
+      Best := 0;
+      BestD := MaxInt;
+      for E := 0 to 7 do
+      begin
+        D := Abs(Px[I][3] - A[E]);
+        if D < BestD then
+        begin
+          BestD := D;
+          Best := E;
+        end;
+      end;
+      Bits := Bits or (UInt64(Best) shl (3 * I));
+    end;
+  end;
+  Dest[0] := Hi;
+  Dest[1] := Lo;
+  for I := 0 to 5 do
+    Dest[2 + I] := (Bits shr (8 * I)) and $FF;
+end;
+
+{ Top-down RGBA pixels as DXT1 (or DXT5 when WithAlpha) blocks. }
+procedure EncodeDxt(const Pixels: TRgbaArray; const W, H: Integer; const WithAlpha: Boolean;
+  const Dest: TStream);
+var
+  BX, BY, I, J, X, Y: Integer;
+  Block: TRgbaBlock;
+  Buf: array [0..15] of Byte;
+begin
+  for BY := 0 to (H + 3) div 4 - 1 do
+    for BX := 0 to (W + 3) div 4 - 1 do
+    begin
+      { pixels past the edge repeat the last row and column }
+      for J := 0 to 3 do
+        for I := 0 to 3 do
+        begin
+          X := BX * 4 + I;
+          if X >= W then
+            X := W - 1;
+          Y := BY * 4 + J;
+          if Y >= H then
+            Y := H - 1;
+          Block[J * 4 + I] := Pixels[Y * W + X];
+        end;
+      if WithAlpha then
+      begin
+        EncodeAlphaBlock(Block, @Buf[0]);
+        EncodeColorBlock(Block, @Buf[8]);
+        Dest.WriteBuffer(Buf, 16);
+      end else
+      begin
+        EncodeColorBlock(Block, @Buf[0]);
+        Dest.WriteBuffer(Buf, 8);
+      end;
+    end;
+end;
+
+procedure WriteDdsHeader(const Dest: TStream; const W, H, Levels, LinearSize: Integer;
+  const FourCC: String);
+var
+  Header: array [0..31] of UInt32;
+begin
+  FillChar(Header, SizeOf(Header), 0);
+  Move(PChar('DDS ')^, Header[0], 4);
+  Header[1] := 124;
+  { caps, height, width, pixel format, mipmap count, linear size }
+  Header[2] := $1 or $2 or $4 or $1000 or $20000 or $80000;
+  Header[3] := H;
+  Header[4] := W;
+  Header[5] := LinearSize;
+  Header[7] := Levels;
+  { the pixel format at byte 76: its size, DDPF_FOURCC, the FourCC }
+  Header[19] := 32;
+  Header[20] := 4;
+  Move(PChar(FourCC)^, Header[21], 4);
+  { texture, complex, mipmaps }
+  Header[27] := $1000 or $8 or $400000;
+  Dest.WriteBuffer(Header, SizeOf(Header));
+end;
+
+function BfgCompressedDds(const Data: TStream; const Coverage: TStream): TMemoryStream;
+const
+  BimageMagic = $0A4D4942;
+var
+  R: TBfgReader;
+  TextureType, Format, ColorFormat, NumLevels, I, W, H, DataSize, X, Y: Integer;
+  Pixels: TRgbaArray;
+  Cov: TBimage;
+  HasCov: Boolean;
+begin
+  Result := nil;
+  HasCov := False;
+  if Coverage <> nil then
+  begin
+    HasCov := ReadBimage(Coverage, 0, Cov) and (Cov.W > 0) and (Cov.H > 0);
+    if not HasCov then
+      Exit;
+  end;
+  R := TBfgReader.Create(Data, False);
+  try
+    R.BigInt64;
+    if R.BigUInt <> BimageMagic then
+      Exit;
+    TextureType := R.BigInt;
+    Format := R.BigInt;
+    ColorFormat := R.BigInt;
+    R.BigInt;
+    R.BigInt;
+    NumLevels := R.BigInt;
+    { 2D, with its mipmaps (GL can't make them for a compressed texture) }
+    if (TextureType <> 1) or (NumLevels < 2) then
+      Exit;
+    if not (((Format = FmtDxt1) and (ColorFormat = 0) and not HasCov) or
+            ((Format = FmtDxt5) and (ColorFormat = 0) and not HasCov) or
+            ((Format = FmtDxt5) and (ColorFormat = CfmYCoCgDxt5))) then
+      Exit;
+    Result := TMemoryStream.Create;
+    try
+      for I := 0 to NumLevels - 1 do
+      begin
+        R.BigInt;
+        R.BigInt;
+        W := R.BigInt;
+        H := R.BigInt;
+        DataSize := R.BigInt;
+        if (W <= 0) or (H <= 0) or (DataSize < 0) or (R.Position + DataSize > R.Size) then
+          raise EReadError.Create('Bad .bimage level');
+        if I = 0 then
+        begin
+          { CGE reads a DDS's mipmaps only for power of two sizes, and flips
+            blocks of rows only in heights of whole blocks }
+          if ((W and (W - 1)) <> 0) or ((H and (H - 1)) <> 0) or (W < 4) or (H < 4) then
+            raise EReadError.Create('Not a power of two');
+          if ColorFormat = CfmYCoCgDxt5 then
+          begin
+            if HasCov then
+              WriteDdsHeader(Result, W, H, NumLevels, ((W + 3) div 4) * ((H + 3) div 4) * 16, 'DXT5')
+            else
+              WriteDdsHeader(Result, W, H, NumLevels, ((W + 3) div 4) * ((H + 3) div 4) * 8, 'DXT1');
+          end else
+          if Format = FmtDxt1 then
+            WriteDdsHeader(Result, W, H, NumLevels, DataSize, 'DXT1')
+          else
+            WriteDdsHeader(Result, W, H, NumLevels, DataSize, 'DXT5');
+        end;
+        if ColorFormat = CfmYCoCgDxt5 then
+        begin
+          if not DecodeLevel(R.Here, DataSize, Format, W, H, Pixels) then
+            raise EReadError.Create('Bad .bimage level');
+          YCoCgToRgb(Pixels);
+          if HasCov then
+            for Y := 0 to H - 1 do
+              for X := 0 to W - 1 do
+                Pixels[Y * W + X][3] := Cov.Pixels[(Y * Cov.H div H) * Cov.W + X * Cov.W div W][3];
+          EncodeDxt(Pixels, W, H, HasCov, Result);
+        end else
+          Result.WriteBuffer(R.Here^, DataSize);
+        R.Skip(DataSize);
+      end;
+      Result.Position := 0;
+    except
+      FreeAndNil(Result);
+    end;
+  finally
+    R.Free;
   end;
 end;
 
