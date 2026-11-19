@@ -1789,7 +1789,7 @@ var
   B: TD3BrushEntity;
   ME: TD3ModelEntity;
   Area, L: Integer;
-  On: Boolean;
+  On, WorldPrelit: Boolean;
 begin
   if Camera <> nil then
   begin
@@ -1843,6 +1843,14 @@ begin
     { "deform tube" surfaces turn to face the view }
     UpdateViewDeforms(Camera.WorldTranslation);
   end;
+  { The world's shadow from a light with a precomputed volume is that volume
+    only, in Doom 3: the .cm brushes (clip shapes that only approximate
+    curved walls) would add shadows it doesn't have, at a cost. With one
+    shadow light it is known; with several, the brushes cast for all. }
+  WorldPrelit := False;
+  if (Length(FShadowLights) = 1) and (FShadowLights[0] <= High(FPrelightScenes)) and
+     (FPrelightScenes[FShadowLights[0]] <> nil) then
+    WorldPrelit := FPrelightScenes[FShadowLights[0]].Exists;
   { shadow casting brushes of visible areas and of areas the shadow light
     reaches }
   for I := 0 to High(FCasterScenes) do
@@ -1854,7 +1862,7 @@ begin
           for Area in FLights[L].Areas do
             if Area = I then
               On := True;
-      FCasterScenes[I].Exists := On and FShadows;
+      FCasterScenes[I].Exists := On and FShadows and not WorldPrelit;
     end;
 end;
 
