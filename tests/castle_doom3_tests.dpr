@@ -121,7 +121,7 @@ var
   Snd: TD3SoundShader;
 begin
   CheckEquals(55, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(79, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(80, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(5, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
@@ -831,7 +831,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(110, MapFile.Entities.Count, 'entity count');
+    CheckEquals(111, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -2558,7 +2558,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(48, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(49, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -8251,6 +8251,7 @@ var
   B: TD3BrushEntity;
   Yaw: Single;
   App: TAppearanceNode;
+  Health: Integer;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -8330,6 +8331,22 @@ begin
     Check((Game.PortalSky <> nil) and (Game.PortalSky.Name = 'info_portalsky_1'),
       'the portal sky without "triggered" is active from the start');
     Game.Activate(Game.FindEntity('info_portalsky_2'));
+
+    { a static entity only script/doom_main.script names isn't merged (the
+      merge read only maps/<map>.script; commoutside's goofyarm_4) }
+    Check(Map.FindBrush('static_scripted_1') <> nil,
+      'a func_static a script/ file names keeps its own scene');
+
+    { god mode stops all damage but noGod's (kill volumes); a god mode
+      route walk stops that too (BFG hell1's lava killed the route) }
+    Game.God := True;
+    Health := Game.Health;
+    Game.RouteInvulnerable := True;
+    Game.DamagePlayer(100, 'damage_test_lava', TVector3.Zero);
+    CheckEquals(Health, Game.Health, 'a god mode route walk survives noGod damage');
+    Game.RouteInvulnerable := False;
+    Game.DamagePlayer(100, 'damage_test_lava', TVector3.Zero);
+    Check(Game.Health < Health, 'noGod damage passes plain god mode');
 
     { an md5 model's shader parameters: script events set them, its head
       too (setShaderParm( 4, -sys.getTime() ) starts a fade) }

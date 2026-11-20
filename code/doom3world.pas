@@ -5512,6 +5512,7 @@ begin
   begin
     Mon.State := msDead;
     Mon.StateTime := 0;
+    WritelnLog('Doom3World', 'Killed %s (%s, %s)', [Mon.Model.Entity.Name, Mon.Model.Entity.ClassName_, DamageDefName]);
     { idAFEntity_Gibbable: gibbed by a gibbing def, or by taking it past
       -20, when the monster can be ("gib") }
     Gib := (Info.Gib or (Mon.Health < -20)) and
@@ -6819,6 +6820,7 @@ begin
   A.Monster.Health := 0;
   A.Monster.State := msDead;
   A.Monster.StateTime := 0;
+  WritelnLog('Doom3World', 'Killed %s (%s, script)', [A.Model.Entity.Name, A.Model.Entity.ClassName_]);
   MonsterSound(A.Monster, 'snd_death');
   if not MonsterDeathModel(A.Monster) then
     MonsterRagdoll(A.Monster, TVector3.Zero);
