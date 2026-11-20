@@ -120,6 +120,8 @@ The worst maps are mostly views from inside walls: Chocolate DOOM-3-BFG pushes t
 
 After the fog lights became Doom 3's fog pass (the depth curve exactly, the fade at the box's top, the box's far faces, every surface a fog light touches; `tools/chocolate_ours.ps1 -OutDir chocolate_fog`, the same Chocolate DOOM-3-BFG views): all maps 413 views under 5 (414 before), median difference 4.3; the fog maps: caverns1 16 of 19 (was 12 in this table), median luma 18.1 against 21.0 (12.2); caverns2 luma 10.1 against 14.5 (5.0); delta1 15 of 26 (15); erebus5 is unchanged (14 areas fogged now: its views are in walls). Other maps differ only by their moving lights and monsters.
 
+With fog on entities too (brush entities, static and md5 models whose box touches a fog light; `chocolate_fog3`): caverns1 17 of 19 views under 5, median difference 1.9, median luma 22.6 against 21.0; caverns2 6 of 8, 2.4, luma 14.8 against 14.5. delta1, erebus5, hell1 and recycling1 are about the same.
+
 ## What differs
 
 - **The view's state**: our route takes its screenshots mid-game (doors it opened, lights a trigger switched, a damage tint, monsters), Chocolate DOOM-3-BFG a fresh load seconds after the map starts. Most of the image differences over 5 are views where something else is open, on or alive. Comparing fresh loads (our port at Chocolate DOOM-3-BFG's views, `setviewpos`, eye height minus 68) removes most of it.

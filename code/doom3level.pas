@@ -214,15 +214,13 @@ type
     FFogDistances: array of Single;
     FFogNames: array of String;
     FAreaFogs: array of Integer;
-    { the area's fog covers at least half of its box (its merged static
-      entities get the fog) }
-    FAreaFogMostly: array of Boolean;
     FFogNodes: array of TEffectNode;
     { FogShapes' state: the fog light, its effect (made for the first shape)
       and the shapes fogged }
     FFogShapeIndex: Integer;
     FFogShapeEffect: TEffectNode;
-    FFogShapeCount: Integer;
+    FFogShapeTest: Boolean;
+    FFogShapeCount, FFogEntityCount: Integer;
     FFogScenes: array of TCastleScene;
     { the areas each fog light's box touches: its box shows while one of
       them is visible (Doom 3 draws the lights of the visible areas) }
@@ -295,11 +293,15 @@ type
     function BoxFog(const Box: TBox3D; const MinShare: Single): Integer;
     { fog light F's effect on the shapes under Root whose box touches the
       fog's box (Doom 3 fogs the surfaces a fog light touches) }
-    procedure FogShapes(const Root: TX3DRootNode; const F: Integer);
+    procedure FogShapes(const Root: TX3DNode; const F: Integer; const TestBoxes: Boolean = True);
     procedure FogShapeNode(Node: TX3DNode);
-    { the fog effect of fog light F (Doom 3's fog pass), added to Root: it
-      fogs the group's shapes }
-    procedure AddFog(const Root: TAbstractGroupingNode; const F: Integer);
+    { the fog light an entity's box (Doom 3 coordinates, LocalMin..LocalMax
+      turned by Rot and moved to Origin) touches most (-1: none) }
+    function EntityFog(const Origin: TVector3; const Rot: TMatrix3;
+      const LocalMin, LocalMax: TVector3): Integer;
+    { EntityFog's fog on the entity's shapes (Root not loaded yet) }
+    procedure FogEntity(const Root: TX3DNode; const E: TD3MapEntity;
+      const LocalMin, LocalMax: TVector3);
     { fog light F's fog effect: on the fogged surfaces, or (OnBox) the color
       and alpha of its box's far faces }
     function FogEffect(const F: Integer; const OnBox: Boolean): TEffectNode;
@@ -804,10 +806,10 @@ begin
   SetLength(FFogDistances, 0);
   SetLength(FFogNames, 0);
   SetLength(FAreaFogs, 0);
-  SetLength(FAreaFogMostly, 0);
   SetLength(FFogNodes, 0);
   FFogAreas := nil;
   FFogShapeCount := 0;
+  FFogEntityCount := 0;
   for I := 0 to High(FFogScenes) do
     FreeAndNil(FFogScenes[I]);
   FFogScenes := nil;
@@ -1682,6 +1684,44 @@ begin
       Result := I;
     end;
   end;
+  { a flat box (a floor) only touches }
+  if (Result < 0) and (MinShare <= 0) then
+    for I := 0 to High(FFogBoxes) do
+      if Box.Collides(FFogBoxes[I]) then
+        Exit(I);
+end;
+
+function TDoom3Map.EntityFog(const Origin: TVector3; const Rot: TMatrix3;
+  const LocalMin, LocalMax: TVector3): Integer;
+var
+  Box: TBox3D;
+  X, Y, Z: Integer;
+begin
+  Result := -1;
+  if (Length(FFogBoxes) = 0) or (LocalMin.X > LocalMax.X) then
+    Exit;
+  Box := TBox3D.Empty;
+  for X := 0 to 1 do
+    for Y := 0 to 1 do
+      for Z := 0 to 1 do
+        Box.Include(D3ToCge(Origin + RotateD3(Rot, Vector3(
+          Iff(X = 0, LocalMin.X, LocalMax.X), Iff(Y = 0, LocalMin.Y, LocalMax.Y),
+          Iff(Z = 0, LocalMin.Z, LocalMax.Z)))));
+  Result := BoxFog(Box, 0);
+end;
+
+procedure TDoom3Map.FogEntity(const Root: TX3DNode; const E: TD3MapEntity;
+  const LocalMin, LocalMax: TVector3);
+var
+  F, Before: Integer;
+begin
+  F := EntityFog(E.Origin, E.Rotation, LocalMin, LocalMax);
+  if F < 0 then
+    Exit;
+  Before := FFogShapeCount;
+  FogShapes(Root, F, False);
+  if FFogShapeCount > Before then
+    Inc(FFogEntityCount);
 end;
 
 function TDoom3Map.FogEffect(const F: Integer; const OnBox: Boolean): TEffectNode;
@@ -1770,15 +1810,22 @@ begin
   Shape := Node as TShapeNode;
   if (Shape.Geometry = nil) or (Shape.Appearance = nil) then
     Exit;
-  CoordField := Shape.Geometry.CoordField;
-  if (CoordField = nil) or not (CoordField.Value is TCoordinateNode) then
+  { Doom 3's ReceivesFog: translucent surfaces get no fog (what is behind
+    them has it) }
+  if Shape.Appearance.AlphaMode = amBlend then
     Exit;
-  Points := TCoordinateNode(CoordField.Value).FdPoint.Items;
-  Box := TBox3D.Empty;
-  for I := 0 to Points.Count - 1 do
-    Box.Include(Points.L[I]);
-  if Box.IsEmpty or not Box.Collides(FFogBoxes[FFogShapeIndex]) then
-    Exit;
+  if FFogShapeTest then
+  begin
+    CoordField := Shape.Geometry.CoordField;
+    if (CoordField = nil) or not (CoordField.Value is TCoordinateNode) then
+      Exit;
+    Points := TCoordinateNode(CoordField.Value).FdPoint.Items;
+    Box := TBox3D.Empty;
+    for I := 0 to Points.Count - 1 do
+      Box.Include(Points.L[I]);
+    if Box.IsEmpty or not Box.Collides(FFogBoxes[FFogShapeIndex]) then
+      Exit;
+  end;
   if FFogShapeEffect = nil then
   begin
     FFogShapeEffect := FogEffect(FFogShapeIndex, False);
@@ -1789,21 +1836,12 @@ begin
   Inc(FFogShapeCount);
 end;
 
-procedure TDoom3Map.FogShapes(const Root: TX3DRootNode; const F: Integer);
+procedure TDoom3Map.FogShapes(const Root: TX3DNode; const F: Integer; const TestBoxes: Boolean);
 begin
   FFogShapeIndex := F;
   FFogShapeEffect := nil;
+  FFogShapeTest := TestBoxes;
   Root.EnumerateNodes(TShapeNode, @FogShapeNode, False);
-end;
-
-procedure TDoom3Map.AddFog(const Root: TAbstractGroupingNode; const F: Integer);
-var
-  Fog: TEffectNode;
-begin
-  Fog := FogEffect(F, False);
-  Root.AddChildren(Fog);
-  SetLength(FFogNodes, Length(FFogNodes) + 1);
-  FFogNodes[High(FFogNodes)] := Fog;
 end;
 
 procedure TDoom3Map.BuildFogScenes;
@@ -2051,12 +2089,8 @@ begin
   SetLength(FAreaNonSolid, FProc.NumAreas);
   CollectFogLights;
   SetLength(FAreaFogs, FProc.NumAreas);
-  SetLength(FAreaFogMostly, FProc.NumAreas);
   for I := 0 to High(FAreaFogs) do
-  begin
     FAreaFogs[I] := -1;
-    FAreaFogMostly[I] := False;
-  end;
   SetLength(FFogAreas, Length(FFogBoxes));
   for I := 0 to FProc.ModelCount - 1 do
   begin
@@ -2078,8 +2112,7 @@ begin
     AddLightLibrary(Root);
     AddLightLibrary(RootNonSolid);
     { the fog light covering most of the area: the area's surfaces it
-      touches get its fog (the non-solid ones, sprites and overlays, all of
-      them: their coordinates may be local) }
+      touches get its fog, translucent ones not (FogShapeNode) }
     if Length(FFogBoxes) > 0 then
     begin
       AreaBox := TBox3D.Empty;
@@ -2095,9 +2128,8 @@ begin
       FAreaFogs[Area] := BoxFog(AreaBox, 0);
       if FAreaFogs[Area] >= 0 then
       begin
-        FAreaFogMostly[Area] := BoxFog(AreaBox, 0.5) = FAreaFogs[Area];
         FogShapes(Root, FAreaFogs[Area]);
-        AddFog(RootNonSolid, FAreaFogs[Area]);
+        FogShapes(RootNonSolid, FAreaFogs[Area]);
       end;
     end;
 
@@ -3118,6 +3150,7 @@ begin
     SetLength(Materials, Model.Surfaces.Count);
     for I := 0 to Model.Surfaces.Count - 1 do
       Materials[I] := Model.Surfaces[I].Material;
+    FogEntity(Root, E, B.LocalMin, B.LocalMax);
     if (SpriteCount = Sprites) and MergeableStatic(E, Materials) and
        MergeStaticEntity(E, Root, B.LocalMin, B.LocalMax, E.BoolValue('solid', True) and Solid,
          E.BoolValue('solid', True) and Solid and not ClipOnly, Closed, B.Parms) then
@@ -3290,9 +3323,6 @@ begin
     AddLightLibrary(FStaticGroupRoots[G]);
     FStaticGroupAreas[G] := Areas[0];
     FStaticGroupFlags[G] := Flags;
-    if (Areas[0] < Length(FAreaFogs)) and (FAreaFogs[Areas[0]] >= 0) and
-       FAreaFogMostly[Areas[0]] then
-      AddFog(FStaticGroupRoots[G], FAreaFogs[Areas[0]]);
   end;
   MT := TMatrixTransformNode.Create;
   MT.Matrix := M;
@@ -3422,6 +3452,7 @@ begin
     if (SkinName = '') and MergeableStatic(E, Materials) then
     begin
       StaticRoot := Model.BuildNode(SkinName, E.Pairs, B.Parms);
+      FogEntity(StaticRoot, E, Model.BoundsMin, Model.BoundsMax);
       if MergeStaticEntity(E, StaticRoot, Model.BoundsMin, Model.BoundsMax,
         not E.BoolValue('noclipmodel') and E.BoolValue('solid', True),
         not E.BoolValue('noclipmodel') and E.BoolValue('solid', True),
@@ -3438,7 +3469,9 @@ begin
     end else
     begin
       B.Scene := TD3Scene.Create(nil);
-      B.Scene.Load(Model.BuildNode(SkinName, E.Pairs, B.Parms), True);
+      StaticRoot := Model.BuildNode(SkinName, E.Pairs, B.Parms);
+      FogEntity(StaticRoot, E, Model.BoundsMin, Model.BoundsMax);
+      B.Scene.Load(StaticRoot, True);
     end;
     B.Scene.SetTransient;
     B.Scene.Name := 'Static_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
@@ -3479,6 +3512,7 @@ var
   Anims: TStringList;
   Rot: TMatrix3;
   Offset: TVector3;
+  FogBefore: Integer;
 begin
   Result := nil;
   if EntityInhibited(E) then
@@ -3532,6 +3566,14 @@ begin
   Rot := E.Rotation;
   SetD3Rotation(ME.Holder, Rot);
   ME.Holder.Add(ME.Instance.Scene);
+  { fog by the place it starts at (a box of a character's size) }
+  if (Length(FFogBoxes) > 0) and (ME.Instance.Scene.RootNode <> nil) then
+  begin
+    FogBefore := FFogEntityCount;
+    FogEntity(ME.Instance.Scene.RootNode, E, Vector3(-32, -32, 0), Vector3(32, 32, 96));
+    if FFogEntityCount > FogBefore then
+      ME.Instance.Scene.ChangedAll;
+  end;
   ME.Offset := Offset;
   if Def <> nil then
     BuildHead(ME, Def.Values['def_head'], Def.Values['head_joint']);
@@ -3751,8 +3793,9 @@ begin
     for FogI := 0 to High(FAreaFogs) do
       if FAreaFogs[FogI] >= 0 then
         Inc(FogAreas);
-    WritelnLog('Doom3Level', 'Fog lights: %d (%s), %d areas fogged, %d surfaces (%d fog effects)',
-      [Length(FFogBoxes), String.Join(' ', FFogNames), FogAreas, FFogShapeCount, Length(FFogNodes)]);
+    WritelnLog('Doom3Level', 'Fog lights: %d (%s), %d areas fogged, %d surfaces (%d of %d entities; %d fog effects)',
+      [Length(FFogBoxes), String.Join(' ', FFogNames), FogAreas, FFogShapeCount,
+       FFogEntityCount, FMapFile.Entities.Count, Length(FFogNodes)]);
   end;
   if FMergedStaticCount > 0 then
     WritelnLog('Doom3Level', 'Static entities: %d merged into %d scenes (env CD3_MERGE_STATIC=0: a scene each)',
