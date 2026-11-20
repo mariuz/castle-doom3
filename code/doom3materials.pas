@@ -827,6 +827,7 @@ begin
       Values[I] := 0;
   Effect := TEffectNode.Create;
   Effect.Language := slGLSL;
+  Effect.SharedUniforms := True;
   Effect.AddCustomField(TSFNode.Create(Effect, True, 'd3_turb_table', [TAbstractTextureNode], Texture));
   T.Fields[0] := TSFFloat.Create(Effect, True, 'd3_turb_range', Values[0]);
   T.Fields[1] := TSFFloat.Create(Effect, True, 'd3_turb_timeofs', Values[1]);
@@ -891,6 +892,7 @@ begin
     Amount := 0;
   Effect := TEffectNode.Create;
   Effect.Language := slGLSL;
+  Effect.SharedUniforms := True;
   D.Field := TSFFloat.Create(Effect, True, 'd3_deform_amount', Amount);
   Effect.AddCustomField(D.Field);
   Vert := TEffectPartNode.Create;
@@ -1398,6 +1400,10 @@ begin
 
   Effect := TEffectNode.Create;
   Effect.Language := slGLSL;
+  { one shader program for every haze surface with this code (its values
+    are set per shape; CGE change AD): an effect with uniforms otherwise
+    links a program of its own, again at every load (delta1: 18) }
+  Effect.SharedUniforms := True;
   Effect.AddCustomField(TSFNode.Create(Effect, True, 'screen_texture',
     [TAbstractTextureNode], TScreenTextureNode.Create));
   Effect.AddCustomField(TSFNode.Create(Effect, True, 'haze_normal_map',
@@ -1537,6 +1543,7 @@ begin
     Result.Material := Mat;
     Effect := TEffectNode.Create;
     Effect.Language := slGLSL;
+    Effect.SharedUniforms := True;
     Effect.SetShaderLibraries(['castle-shader:/EyeWorldSpace.glsl']);
     Effect.AddCustomField(TSFNode.Create(Effect, True, 'd3_refl_cube', [TAbstractTextureNode], Cube));
     R.Field := TSFVec4f.Create(Effect, True, 'd3_refl_color',
