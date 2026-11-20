@@ -1707,6 +1707,11 @@ def map_text():
         {'classname': 'trigger_flashlight', 'name': 'trigger_flashlight_1',
          'model': 'trigger_flashlight_1', 'origin': '-230 -230 150', 'target': 'null_flashlight'},
         {'classname': 'target_null', 'name': 'null_flashlight', 'origin': '-230 -230 120'},
+        # d3xp's portal skies: the first is active from the start, the
+        # second ("triggered") once activated (no surface shows them here)
+        {'classname': 'info_portalsky', 'name': 'info_portalsky_1', 'origin': '0 0 1000'},
+        {'classname': 'info_portalsky', 'name': 'info_portalsky_2', 'origin': '0 400 1000',
+         'triggered': '1'},
         # a lift that rests 48 below and comes up when stood on (func_plat),
         # a force field that throws up what is in it once activated, an
         # earthquake, an explosion, a security clearance, stamina off
@@ -1914,6 +1919,20 @@ textures/test/shinymetal
 		cubeMap env/testenv
 		texgen reflect
 		rgb 0.2
+	}
+}
+
+/* d3xp's portal sky material (sort portalSky): no surface uses it, the
+   unit tests check its parsing */
+textures/test/portal_sky
+{
+	qer_editorimage textures/test/flare.tga
+	forceOpaque
+	noshadows
+	sort portalSky
+	{
+		map _currentRender
+		screen
 	}
 }
 

@@ -215,6 +215,12 @@ type
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
     FBeams: array of TD3Beam;
+    { areas with a portal sky surface (in a map with an info_portalsky) }
+    FPortalSkyAreas: array of Boolean;
+    FHasPortalSky: Boolean;
+    { the main view's visible areas during the portal sky pass }
+    FMainAreaVisible: array of Boolean;
+    FMainVisibleCount: Integer;
     { Static entities (func_static brush models and static models that
       nothing refers to, in one area) merged into one scene per area and
       kind (MergeStaticEntity): CGE walks every scene every frame, and a map
@@ -297,6 +303,8 @@ type
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
     procedure BuildBeams;
+    procedure FindPortalSkyAreas;
+    procedure ApplyAreaVisibility;
     { func_beam quads to their targets' current places, facing the view }
     procedure UpdateBeams(const ViewPosition: TVector3);
     procedure BuildModelEntities;
@@ -384,6 +392,15 @@ type
       through the portals (call every frame). Everything is shown when
       PortalCulling is off or the camera is outside the map. }
     procedure UpdateVisibility(const Camera: TCastleCamera);
+    { d3xp's portal sky: does the map have one, and is a portal sky surface
+      in a visible area (after UpdateVisibility)? }
+    property HasPortalSky: Boolean read FHasPortalSky;
+    function PortalSkyInView: Boolean;
+    { Around the sky viewport's render: the areas seen from its camera (the
+      portal sky's place, the player's view direction), then the main
+      view's again (no new flow from the eye). }
+    procedure BeginPortalSkyPass(const Camera: TCastleCamera);
+    procedure EndPortalSkyPass(const MainCamera: TCastleCamera);
     { the light scene's global lights: only the ones that are on (from
       UpdateVisibility) }
     procedure FilterGlobalLights;
@@ -650,6 +667,11 @@ uses
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
   CastleRenderOptions, CastleTimeUtils, CastleTriangles, CastleShapes, Doom3Roq,
   Doom3Files, Doom3Images, Doom3StaticModels;
+
+var
+  { the map being built has an info_portalsky: its portal sky surfaces are
+    depth-only holes (PortalSkyAppearance) }
+  BuildingPortalSkyMap: Boolean;
 
 type
   { GuiTrace's ray against a shape's triangles (scene coordinates) }
@@ -1296,6 +1318,9 @@ begin
     Kind := ssNone;
     if GuiUrl <> '' then
       App := GuiAppearance(GuiUrl)
+    else
+    if M.PortalSky and BuildingPortalSkyMap then
+      App := PortalSkyAppearance
     else
     if M.DrawAsGlass then
     begin
@@ -2446,33 +2471,7 @@ begin
   end else
     FPortals.AllVisible;
 
-  for I := 0 to High(FAreaScenes) do
-  begin
-    if FAreaScenes[I] <> nil then
-      FAreaScenes[I].Visible := FPortals.AreaVisible[I];
-    if FAreaNonSolid[I] <> nil then
-      FAreaNonSolid[I].Visible := FPortals.AreaVisible[I];
-  end;
-  for B in FBrushes do
-    B.Scene.Visible := AnyAreaVisible(FPortals, B.Areas);
-  for I := 0 to High(FStaticGroupScenes) do
-    if FStaticGroupScenes[I] <> nil then
-      FStaticGroupScenes[I].Visible := (FStaticGroupAreas[I] > High(FPortals.AreaVisible)) or
-        FPortals.AreaVisible[FStaticGroupAreas[I]];
-  for I := 0 to High(FFogScenes) do
-    FFogScenes[I].Visible := AnyAreaVisible(FPortals, FFogAreas[I]);
-  for ME in FModels do
-  begin
-    Area := AreaAt(ME.Holder.Translation + Vector3(0, 32, 0));
-    ME.Holder.Visible := (Area < 0) or (Area > High(FPortals.AreaVisible)) or FPortals.AreaVisible[Area];
-  end;
-  for I := 0 to High(FLights) do
-  begin
-    On := FLights[I].StartOn and (FLightsInHiddenAreas or AnyAreaVisible(FPortals, FLights[I].Areas));
-    if FLights[I].Node.IsOn <> On then
-      FLights[I].Node.IsOn := On;
-  end;
-  FilterGlobalLights;
+  ApplyAreaVisibility;
   if Camera <> nil then
   begin
     UpdateShadowLight(Camera.WorldTranslation);
@@ -2501,6 +2500,123 @@ begin
               On := True;
       FCasterScenes[I].Exists := On and FShadows and not WorldPrelit;
     end;
+end;
+
+procedure TDoom3Map.ApplyAreaVisibility;
+var
+  I, Area: Integer;
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+  On: Boolean;
+begin
+  for I := 0 to High(FAreaScenes) do
+  begin
+    if FAreaScenes[I] <> nil then
+      FAreaScenes[I].Visible := FPortals.AreaVisible[I];
+    if FAreaNonSolid[I] <> nil then
+      FAreaNonSolid[I].Visible := FPortals.AreaVisible[I];
+  end;
+  for B in FBrushes do
+    B.Scene.Visible := AnyAreaVisible(FPortals, B.Areas);
+  for I := 0 to High(FStaticGroupScenes) do
+    if FStaticGroupScenes[I] <> nil then
+      FStaticGroupScenes[I].Visible := (FStaticGroupAreas[I] > High(FPortals.AreaVisible)) or
+        FPortals.AreaVisible[FStaticGroupAreas[I]];
+  for I := 0 to High(FFogScenes) do
+    FFogScenes[I].Visible := AnyAreaVisible(FPortals, FFogAreas[I]);
+  for ME in FModels do
+  begin
+    Area := AreaAt(ME.Holder.Translation + Vector3(0, 32, 0));
+    ME.Holder.Visible := (Area < 0) or (Area > High(FPortals.AreaVisible)) or FPortals.AreaVisible[Area];
+  end;
+  for I := 0 to High(FLights) do
+  begin
+    On := FLights[I].StartOn and (FLightsInHiddenAreas or AnyAreaVisible(FPortals, FLights[I].Areas));
+    if FLights[I].Node.IsOn <> On then
+      FLights[I].Node.IsOn := On;
+  end;
+  FilterGlobalLights;
+end;
+
+procedure TDoom3Map.FindPortalSkyAreas;
+var
+  I, A: Integer;
+  Model: TD3ProcModel;
+  Surf: TD3ProcSurface;
+  SkyAreas: Integer;
+begin
+  SetLength(FPortalSkyAreas, 0);
+  FHasPortalSky := False;
+  if not BuildingPortalSkyMap then
+    Exit;
+  SetLength(FPortalSkyAreas, FProc.NumAreas);
+  SkyAreas := 0;
+  for I := 0 to FProc.ModelCount - 1 do
+  begin
+    Model := FProc.Model(I);
+    A := Model.AreaIndex;
+    if (A < 0) or (A > High(FPortalSkyAreas)) then
+      Continue;
+    for Surf in Model.Surfaces do
+      if Decls.Material(Surf.Material).PortalSky then
+      begin
+        if not FPortalSkyAreas[A] then
+          Inc(SkyAreas);
+        FPortalSkyAreas[A] := True;
+      end;
+  end;
+  FHasPortalSky := SkyAreas > 0;
+  if FHasPortalSky then
+    WritelnLog('Doom3Level', 'Portal sky: surfaces in %d areas', [SkyAreas]);
+end;
+
+function TDoom3Map.PortalSkyInView: Boolean;
+var
+  I: Integer;
+begin
+  if (not FHasPortalSky) or (FPortals = nil) then
+    Exit(False);
+  for I := 0 to Min(High(FPortalSkyAreas), High(FPortals.AreaVisible)) do
+    if FPortalSkyAreas[I] and FPortals.AreaVisible[I] then
+      Exit(True);
+  Result := False;
+end;
+
+procedure TDoom3Map.BeginPortalSkyPass(const Camera: TCastleCamera);
+var
+  Planes: array [0..3] of TVector4;
+  P: TFrustumPlane;
+  Area: Integer;
+begin
+  if FPortals = nil then
+    Exit;
+  FMainAreaVisible := Copy(FPortals.AreaVisible);
+  FMainVisibleCount := FPortals.VisibleCount;
+  for P := fpLeft to fpTop do
+    Planes[Ord(P)] := Camera.Frustum.Planes[P];
+  Area := NearAreaAt(Camera.WorldTranslation);
+  if Area >= 0 then
+    FPortals.Compute(Camera.WorldTranslation, Area, Planes)
+  else
+    FPortals.AllVisible;
+  ApplyAreaVisibility;
+  UpdateViewDeforms(Camera.WorldTranslation);
+  UpdateBeams(Camera.WorldTranslation);
+end;
+
+procedure TDoom3Map.EndPortalSkyPass(const MainCamera: TCastleCamera);
+begin
+  if (FPortals = nil) or (Length(FMainAreaVisible) = 0) then
+    Exit;
+  FPortals.AreaVisible := FMainAreaVisible;
+  FPortals.VisibleCount := FMainVisibleCount;
+  FMainAreaVisible := nil;
+  ApplyAreaVisibility;
+  if MainCamera <> nil then
+  begin
+    UpdateViewDeforms(MainCamera.WorldTranslation);
+    UpdateBeams(MainCamera.WorldTranslation);
+  end;
 end;
 
 procedure TDoom3Map.AllLightsOn;
@@ -4066,6 +4182,12 @@ begin
   for E in FMapFile.Entities do
     MergeEntityDef(E);
 
+  { d3xp's portal sky: its surfaces are built as depth-only holes }
+  BuildingPortalSkyMap := False;
+  for E in FMapFile.Entities do
+    if SameText(E.ClassName_, 'info_portalsky') then
+      BuildingPortalSkyMap := True;
+
   FSpawnOrigin := TVector3.Zero;
   FSpawnAngle := 0;
   for E in FMapFile.Entities do
@@ -4092,6 +4214,7 @@ begin
   LoadProfileStep('shadow casters');
   BuildBrushEntities;
   BuildBeams;
+  FindPortalSkyAreas;
   LoadProfileStep('brushes');
   WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
     [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);

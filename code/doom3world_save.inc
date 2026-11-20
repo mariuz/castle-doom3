@@ -519,6 +519,8 @@ begin
     end;
 
     Add(['cheats', IntToStr(Ord(God)), IntToStr(Ord(NoTarget))]);
+    if FPortalSky <> nil then
+      Add(['portalsky', FPortalSky.Name]);
     for Proj in FProjectiles do
       if (Proj.HeldBy = nil) and (Proj.HeldByWeapon = nil) and (Proj.DefName <> '') then
         Add(['projectile', Proj.DefName, SaveText(Proj.Owner), SaveVec(Proj.Position), SaveVec(Proj.Velocity),
@@ -873,6 +875,9 @@ begin
             God := FieldInt(1) <> 0;
             NoTarget := FieldInt(2) <> 0;
           end;
+        'portalsky':
+          if FindEntity(Field(1)) <> nil then
+            FPortalSky := FindEntity(Field(1));
         'projectile':
           begin
             Proj := SpawnProjectile(Name, LoadText(Field(2)), LoadVec(Field(3)), LoadVec(Field(4)));

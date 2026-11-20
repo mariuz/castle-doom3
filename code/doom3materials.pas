@@ -185,6 +185,12 @@ function CubeMapUrls(const Name: String; const CameraCubeMap: Boolean;
   out Urls: array of String): Boolean;
 
 { An unlit, opaque appearance showing a rendered GUI (Doom3Gui). }
+{ A portal sky surface (sort portalSky) in a map with an info_portalsky:
+  it writes only the depth, so the sky viewport drawn before the main one
+  (from the portal sky's place) shows through it (CGE change AE,
+  DepthMode.colorWrite). }
+function PortalSkyAppearance: TAppearanceNode;
+
 function GuiAppearance(const Url: String): TAppearanceNode;
 
 { Re-evaluate the registered animated appearances at a time (seconds). }
@@ -618,6 +624,22 @@ begin
   Result.SetUrl([Url]);
   Result.RepeatS := True;
   Result.RepeatT := True;
+end;
+
+
+function PortalSkyAppearance: TAppearanceNode;
+var
+  Unlit: TUnlitMaterialNode;
+  DepthMode: TDepthModeNode;
+begin
+  Result := TAppearanceNode.Create;
+  Unlit := TUnlitMaterialNode.Create;
+  Unlit.EmissiveColor := Vector3(0, 0, 0);
+  Result.Material := Unlit;
+  DepthMode := TDepthModeNode.Create;
+  DepthMode.ColorWrite := False;
+  Result.DepthMode := DepthMode;
+  Result.ShadowCaster := False;
 end;
 
 function GuiAppearance(const Url: String): TAppearanceNode;
