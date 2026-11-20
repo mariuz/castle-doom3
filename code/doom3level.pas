@@ -34,6 +34,22 @@ type
     as a scene. Both can be movers (func_door, func_rotating...). }
   TCastleStringArray6 = array [0..5] of String;
 
+  TD3BrushEntity = class;
+
+  TCoordinateNodeArray = array of TCoordinateNode;
+
+  { A func_beam with a target (TDoom3Map.BuildBeams). }
+  TD3Beam = record
+    Brush: TD3BrushEntity;
+    { the target entity's name (lowercase), its brush entity followed;
+      its map origin if it has none }
+    Target: String;
+    TargetOrigin: TVector3;
+    Half: Single;
+    { the coordinates of the quad's shapes (one per drawn stage) }
+    Coords: TCoordinateNodeArray;
+  end;
+
   TD3BrushEntity = class
     Entity: TD3MapEntity;
     Scene: TCastleScene;
@@ -198,6 +214,7 @@ type
     FClipModelBrushes: Integer;
     FUseCollisionModel: Boolean;
     FBrushes: specialize TObjectList<TD3BrushEntity>;
+    FBeams: array of TD3Beam;
     { Static entities (func_static brush models and static models that
       nothing refers to, in one area) merged into one scene per area and
       kind (MergeStaticEntity): CGE walks every scene every frame, and a map
@@ -279,6 +296,9 @@ type
     procedure BuildShadowCasters(const WorldModel: TD3CollisionModel);
     procedure BuildLights(const Root: TX3DRootNode);
     procedure BuildBrushEntities;
+    procedure BuildBeams;
+    { func_beam quads to their targets' current places, facing the view }
+    procedure UpdateBeams(const ViewPosition: TVector3);
     procedure BuildModelEntities;
     function BuildModelEntity(const E: TD3MapEntity): TD3ModelEntity;
     procedure BuildHead(const ME: TD3ModelEntity; const HeadDefName, JointName: String);
@@ -1183,10 +1203,16 @@ var
   EyeIndexes: TInt32List;
 
   { The surface's shape with an appearance; "deform tube" shapes are
-    registered to follow the view. }
-  function SurfaceShape(const App: TAppearanceNode): TShapeNode;
+    registered to follow the view. Overlay: the stage drawn (-1 the base,
+    the overlay's number, -2 others), for its "vertexColor". }
+  function SurfaceShape(const App: TAppearanceNode; const Overlay: Integer): TShapeNode;
+  var
+    Inverse: Boolean;
   begin
     Result := ProcShape(Coords, Normals, UVs, Indexes, not M.TwoSided and not Tube, App);
+    if (Overlay >= -1) and (Length(Surf.Colors) = Length(Surf.Vertexes)) and
+       StageUsesVertexColors(M, Overlay, Inverse) then
+      (Result.Geometry as TIndexedTriangleSetNode).Color := VertexColorNode(Surf.Colors, Inverse);
     if Tube then
       RegisterTubeSurface(TCoordinateNode((Result.Geometry as TIndexedTriangleSetNode).Coord),
         Coords, Indexes);
@@ -1283,7 +1309,7 @@ begin
     end
     else
       App := MaterialAppearance(Surf.Material, Parms);
-    Shape := SurfaceShape(App);
+    Shape := SurfaceShape(App, -1);
     SetupSpecialShape(Shape, Kind);
     if (GuiUrl = '') and not M.DrawAsGlass then
       Group.AddChildren(ConditionalShapeNode(Shape, BaseStageCondition(M), Parms))
@@ -1295,7 +1321,7 @@ begin
     if (GuiUrl = '') and not M.DrawAsGlass then
       for J := 0 to M.OverlayCount - 1 do
       begin
-        Shape := SurfaceShape(OverlayAppearance(Surf.Material, J, Parms));
+        Shape := SurfaceShape(OverlayAppearance(Surf.Material, J, Parms), J);
         Group.AddChildren(ConditionalShapeNode(Shape, OverlayStageCondition(M, J), Parms));
         Inc(OverlayShapeCount);
       end;
@@ -1307,7 +1333,7 @@ begin
       App := HazeOverlayAppearance(Surf.Material);
       if App <> nil then
       begin
-        Shape := SurfaceShape(App);
+        Shape := SurfaceShape(App, -2);
         SetupSpecialShape(Shape, ssHaze);
         NonSolidGroup.AddChildren(Shape);
         Inc(HazeCount);
@@ -1321,7 +1347,7 @@ begin
       App := ReflectionAppearance(Surf.Material);
       if App <> nil then
       begin
-        Shape := SurfaceShape(App);
+        Shape := SurfaceShape(App, -2);
         SetupSpecialShape(Shape, ReflectionKind(M));
         Group.AddChildren(Shape);
         Inc(ReflectionCount);
@@ -1335,7 +1361,7 @@ begin
       App := RemoteAppearance(Surf.Material, RemoteView);
       if App <> nil then
       begin
-        Shape := SurfaceShape(App);
+        Shape := SurfaceShape(App, -2);
         Group.AddChildren(Shape);
         PendingRemoteViews.AddObject(Entity.Value('cameratarget') + '=' + M.RemoteImage + '|' +
           IntToStr(M.RemoteWidth) + '|' + IntToStr(M.RemoteHeight) + '|' + Entity.Name, RemoteView);
@@ -1348,7 +1374,7 @@ begin
       App := MirrorAppearance(Surf.Material);
       if App <> nil then
       begin
-        Shape := SurfaceShape(App);
+        Shape := SurfaceShape(App, -2);
         SetupSpecialShape(Shape, ssMirror);
         Group.AddChildren(Shape);
       end;
@@ -2452,6 +2478,7 @@ begin
     UpdateShadowLight(Camera.WorldTranslation);
     { "deform tube" surfaces turn to face the view }
     UpdateViewDeforms(Camera.WorldTranslation);
+    UpdateBeams(Camera.WorldTranslation);
   end;
   { The world's shadow from a light with a precomputed volume is that volume
     only, in Doom 3: the .cm brushes (clip shapes that only approximate
@@ -3256,6 +3283,184 @@ begin
     WritelnLog('Doom3Level', 'Brush entities: %d without surfaces (not in the .bproc), built empty', [EmptyModels]);
 end;
 
+{ func_beam (idBeam, idRenderModelBeam): a quad from the entity to its
+  "target" entity, "width" wide (2 without it), turned about its length to
+  face the view, drawn with its skin's "_default" material and its shader
+  parameters (_color). Every func_beam is a brush entity (the ends too, with
+  no surfaces), so scripts move both ends (setOrigin, bind) and the quad
+  follows (UpdateBeams). "start_off": hidden until activated (TD3Game
+  toggles it). }
+procedure TDoom3Map.BuildBeams;
+
+  procedure CollectCoords(const Node: TX3DNode; var Coords: TCoordinateNodeArray);
+  var
+    I: Integer;
+    G: TAbstractGroupingNode;
+    Tri: TIndexedTriangleSetNode;
+  begin
+    if Node is TShapeNode then
+    begin
+      if TShapeNode(Node).Geometry is TIndexedTriangleSetNode then
+      begin
+        Tri := TIndexedTriangleSetNode(TShapeNode(Node).Geometry);
+        Tri.Solid := False;
+        if (Tri.Coord is TCoordinateNode) and (TCoordinateNode(Tri.Coord).FdPoint.Count = 4) then
+          Coords := Concat(Coords, [TCoordinateNode(Tri.Coord)]);
+      end;
+    end else
+    if Node is TAbstractGroupingNode then
+    begin
+      G := TAbstractGroupingNode(Node);
+      for I := 0 to G.FdChildren.Count - 1 do
+        CollectCoords(G.FdChildren[I], Coords);
+    end;
+  end;
+
+var
+  E, T: TD3MapEntity;
+  Model: TD3ProcModel;
+  Surf: TD3ProcSurface;
+  B: TD3BrushEntity;
+  Root: TX3DRootNode;
+  L, Minor: TVector3;
+  Half: Single;
+  Skin: TD3Skin;
+  Beam: TD3Beam;
+  I, Beams: Integer;
+  Rot: TMatrix3;
+begin
+  Beams := 0;
+  SetLength(FBeams, 0);
+  for E in FMapFile.Entities do
+  begin
+    if not SameText(E.ClassName_, 'func_beam') or (E.Name = '') or (FindBrush(E.Name) <> nil) then
+      Continue;
+    T := nil;
+    if E.Value('target') <> '' then
+      for I := 0 to FMapFile.Entities.Count - 1 do
+        if SameText(FMapFile.Entities[I].Name, E.Value('target')) then
+        begin
+          T := FMapFile.Entities[I];
+          Break;
+        end;
+    B := TD3BrushEntity.Create;
+    B.Entity := E;
+    B.Parms := TD3EntityParms.Create;
+    B.Parms.FromKeys(E.Pairs);
+    B.Scene := TD3Scene.Create(nil);
+    B.Scene.SetTransient;
+    B.Scene.Name := 'Beam_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
+    Half := E.FloatValue('width', 0) / 2;
+    if Half <= 0 then
+      Half := 1;
+    L := Vector3(0, 0, 0);
+    if T <> nil then
+      L := T.Origin - E.Origin;
+    B.LocalMin := Vector3(Min(0, L.X) - Half, Min(0, L.Y) - Half, Min(0, L.Z) - Half);
+    B.LocalMax := Vector3(Max(0, L.X) + Half, Max(0, L.Y) + Half, Max(0, L.Z) + Half);
+    if T <> nil then
+    begin
+      Minor := TVector3.CrossProduct(L, Vector3(0, 0, 1));
+      if Minor.Length < 0.001 then
+        Minor := Vector3(0, Half, 0)
+      else
+        Minor := Minor.Normalize * Half;
+      Model := TD3ProcModel.Create;
+      try
+        Surf := TD3ProcSurface.Create;
+        Surf.Material := '_default';
+        Skin := nil;
+        if E.Value('skin') <> '' then
+          Skin := Decls.Skin(E.Value('skin'));
+        if Skin <> nil then
+          Surf.Material := Skin.Remap('_default');
+        { idRenderModelBeam's vertexes and texture coordinates }
+        SetLength(Surf.Vertexes, 4);
+        Surf.Vertexes[0].Position := Minor;
+        Surf.Vertexes[0].ST := Vector2(0, 0);
+        Surf.Vertexes[1].Position := -Minor;
+        Surf.Vertexes[1].ST := Vector2(0, 1);
+        Surf.Vertexes[2].Position := L + Minor;
+        Surf.Vertexes[2].ST := Vector2(1, 0);
+        Surf.Vertexes[3].Position := L - Minor;
+        Surf.Vertexes[3].ST := Vector2(1, 1);
+        for I := 0 to 3 do
+          Surf.Vertexes[I].Normal := Vector3(0, 0, 1);
+        Surf.Indexes := [0, 2, 1, 2, 3, 1];
+        { idRenderModelBeam's vertex colors: the shader parameters' color }
+        SetLength(Surf.Colors, 4);
+        for I := 0 to 3 do
+          Surf.Colors[I] := Vector4(B.Parms.Parms[0], B.Parms.Parms[1], B.Parms.Parms[2], B.Parms.Parms[3]);
+        Model.Surfaces.Add(Surf);
+        Root := TX3DRootNode.Create;
+        BuildProcModel(Model, Root, Root, E, B.Parms);
+        AddLightLibrary(Root);
+        Beam.Brush := B;
+        Beam.Target := LowerCase(T.Name);
+        Beam.TargetOrigin := T.Origin;
+        Beam.Half := Half;
+        Beam.Coords := nil;
+        CollectCoords(Root, Beam.Coords);
+        B.Scene.Load(Root, True);
+        FBeams := Concat(FBeams, [Beam]);
+      finally
+        FreeAndNil(Model);
+      end;
+      Inc(Beams);
+    end;
+    B.Scene.Collides := False;
+    B.Scene.Pickable := False;
+    B.Scene.CastShadows := False;
+    B.Scene.Translation := D3ToCge(E.Origin);
+    Rot := E.Rotation;
+    SetD3Rotation(B.Scene, Rot);
+    Add(B.Scene);
+    B.SetHidden(E.BoolValue('start_off') or (E.IntValue('hide', 0) <> 0));
+    FBrushes.Add(B);
+    FBrushByName.TryAdd(LowerCase(E.Name), B);
+  end;
+  if Beams > 0 then
+    WritelnLog('Doom3Level', 'Beams: %d func_beam', [Beams]);
+end;
+
+procedure TDoom3Map.UpdateBeams(const ViewPosition: TVector3);
+var
+  I, J: Integer;
+  TargetBrush: TD3BrushEntity;
+  TargetWorld, LocalTarget, LocalView, Minor: TVector3;
+  Inv: TMatrix4;
+  Points: TVector3List;
+begin
+  for I := 0 to High(FBeams) do
+  begin
+    if not FBeams[I].Brush.Scene.Exists then
+      Continue;
+    TargetBrush := FindBrush(FBeams[I].Target);
+    if TargetBrush <> nil then
+      TargetWorld := TargetBrush.Scene.WorldTranslation
+    else
+      TargetWorld := D3ToCge(FBeams[I].TargetOrigin);
+    Inv := FBeams[I].Brush.Scene.WorldInverseTransform;
+    LocalTarget := Inv.MultPoint(TargetWorld);
+    LocalView := Inv.MultPoint(ViewPosition);
+    { idRenderModelBeam::InstantiateDynamicModel: the minor axis across
+      the beam and the view }
+    Minor := TVector3.CrossProduct(LocalTarget, LocalTarget * 0.5 - LocalView);
+    if Minor.Length < 0.0001 then
+      Continue;
+    Minor := Minor.Normalize * FBeams[I].Half;
+    for J := 0 to High(FBeams[I].Coords) do
+    begin
+      Points := FBeams[I].Coords[J].FdPoint.Items;
+      Points[0] := Minor;
+      Points[1] := -Minor;
+      Points[2] := LocalTarget + Minor;
+      Points[3] := LocalTarget - Minor;
+      FBeams[I].Coords[J].FdPoint.Changed;
+    end;
+  end;
+end;
+
 { Model of an entity (its "model" key or its entityDef's), resolved through
   a model decl; '' when there is none. }
 function EntityModelPath(const E: TD3MapEntity; const Def: TStringList;
@@ -3278,6 +3483,67 @@ end;
 var
   { env CD3_MERGE_STATIC=0: every static entity a scene of its own }
   MergeStaticState: Integer = -1;
+  { names the scripts may refer to: every "$name" and quoted string of
+    every script file (the retail maps' scripts are script/map_*.script,
+    named unlike their maps), for the file system ScriptNamesFs }
+  ScriptNames: specialize TDictionary<String, Boolean>;
+  ScriptNamesFs: TObject;
+  ScriptNamesFiles: Integer = -1;
+
+procedure CollectScriptNames;
+var
+  Files: TStringList;
+  F, Text: String;
+  I, J, Count: Integer;
+begin
+  Files := D3Fs.FindFiles('script/', '.script');
+  try
+    Count := Files.Count;
+    if (ScriptNames <> nil) and (ScriptNamesFs = D3Fs) and (ScriptNamesFiles = Count) then
+      Exit;
+    if ScriptNames = nil then
+      ScriptNames := specialize TDictionary<String, Boolean>.Create
+    else
+      ScriptNames.Clear;
+    ScriptNamesFs := D3Fs;
+    ScriptNamesFiles := Count;
+    for F in Files do
+    begin
+      Text := LowerCase(D3Fs.ReadText(F));
+      I := 1;
+      while I <= Length(Text) do
+      begin
+        if Text[I] = '$' then
+        begin
+          J := I + 1;
+          while (J <= Length(Text)) and (Text[J] in ['a'..'z', '0'..'9', '_']) do
+            Inc(J);
+          if J > I + 1 then
+            ScriptNames.AddOrSetValue(Copy(Text, I + 1, J - I - 1), True);
+          I := J;
+        end else
+        if Text[I] = '"' then
+        begin
+          J := I + 1;
+          while (J <= Length(Text)) and (Text[J] <> '"') and (Text[J] <> #10) do
+            Inc(J);
+          if (J > I + 1) and (J - I < 64) then
+            ScriptNames.AddOrSetValue(Copy(Text, I + 1, J - I - 1), True);
+          I := J + 1;
+        end else
+        if (Text[I] = '/') and (I < Length(Text)) and (Text[I + 1] = '/') then
+        begin
+          { a line comment: names in it are not used }
+          while (I <= Length(Text)) and (Text[I] <> #10) do
+            Inc(I);
+        end else
+          Inc(I);
+      end;
+    end;
+  finally
+    FreeAndNil(Files);
+  end;
+end;
 
 procedure TDoom3Map.CollectReferencedNames;
 var
@@ -3303,6 +3569,7 @@ begin
   ScriptPath := MapBasePath(FMapName) + '.script';
   if D3Fs.FileExists(ScriptPath) then
     FMapScriptText := LowerCase(D3Fs.ReadText(ScriptPath));
+  CollectScriptNames;
 end;
 
 function TDoom3Map.MergeableStatic(const E: TD3MapEntity; const Materials: array of String): Boolean;
@@ -3331,6 +3598,8 @@ begin
     if FReferencedNames.ContainsKey(EName) then
       Exit;
     if (Pos('$' + EName, FMapScriptText) > 0) or (Pos('"' + EName + '"', FMapScriptText) > 0) then
+      Exit;
+    if (ScriptNames <> nil) and ScriptNames.ContainsKey(EName) then
       Exit;
   end;
   { surfaces that need their own scene's place or events: GUIs, deforms
@@ -3822,6 +4091,7 @@ begin
   BuildCollision(Base);
   LoadProfileStep('shadow casters');
   BuildBrushEntities;
+  BuildBeams;
   LoadProfileStep('brushes');
   WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
     [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
@@ -4490,5 +4760,6 @@ initialization
   TDoom3Map.Skill := 1; // Doom 3's default g_skill: medium
 finalization
   FreeAndNil(PendingRemoteViews);
+  FreeAndNil(ScriptNames);
   FreeAndNil(MapParticleDeforms);
 end.

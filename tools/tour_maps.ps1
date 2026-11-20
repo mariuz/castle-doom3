@@ -153,5 +153,19 @@ foreach ($Map in $Maps) {
   $Summary += ""
   Write-Host "$Map : $Status, $($Fps.Count) shots"
 }
+# a route run: its scripted events (cinematics, objectives, elevators, the
+# level's end, triggers, GUIs, script prints) against the baseline of its
+# data set (tools/map_events.py, docs/baselines/): <OutDir>\events.md
+if ($Route) {
+  if ($BasePath -match 'BFG') { $Baseline = 'events_bfg.json' }
+  elseif ($Game -eq 'd3xp') { $Baseline = 'events_d3xp.json' }
+  else { $Baseline = 'events_doom3.json' }
+  $BaselinePath = Join-Path $PSScriptRoot "../docs/baselines/$Baseline"
+  if (Test-Path $BaselinePath) {
+    $Check = & python (Join-Path $PSScriptRoot 'map_events.py') check $OutDir $BaselinePath (Join-Path $OutDir 'events.md')
+    $Summary += "Scripted events against docs/baselines/$($Baseline): $($Check | Select-Object -Last 1)"
+    Write-Host "Scripted events: $($Check | Select-Object -Last 1) ($OutDir\events.md)"
+  }
+}
 $Summary | Set-Content -Encoding utf8 (Join-Path $OutDir "summary.txt")
 Write-Host "Summary: $OutDir\summary.txt"

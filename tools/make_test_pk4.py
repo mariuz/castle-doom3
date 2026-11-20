@@ -1408,6 +1408,8 @@ def cm_text():
     out.append(cm_model('trigger_hurt_1', box_quads((-24, -24, -56), (24, 24, 56), TRIGONCE), []))
     # the volume of forcefield_1
     out.append(cm_model('forcefield_1', box_quads((-24, -24, -40), (24, 24, 40), TRIGONCE), []))
+    # the volume of trigger_flashlight_1 (the flashlight's beam fires it)
+    out.append(cm_model('trigger_flashlight_1', box_quads((-16, -16, -16), (16, 16, 16), TRIGONCE), []))
     return '\n'.join(out) + '\n'
 
 
@@ -1689,6 +1691,22 @@ def map_text():
          'model': 'models/mapobjects/test/barrel.lwo', 'origin': '880 170 96',
          'health': '10', 'count': '2', 'target': 'null_damagable'},
         {'classname': 'target_null', 'name': 'null_damagable', 'origin': '880 170 150'},
+        # a security camera in room A's south-east corner, sweeping 60
+        # degrees from facing north-west: it sees the player within 200
+        # (from (180, -100)) and fires its target after a second
+        {'classname': 'func_securitycamera', 'name': 'camera_1',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '230 -230 100', 'angle': '135',
+         'sweepAngle': '60', 'sweepSpeed': '2', 'scanDist': '200', 'scanFov': '120',
+         'sightTime': '1', 'wait': '3', 'target': 'null_camera'},
+        {'classname': 'target_null', 'name': 'null_camera', 'origin': '230 -230 150'},
+        # a green beam in room B (func_beam to its end, skins/test/beam)
+        {'classname': 'func_beam', 'name': 'beam_1', 'origin': '700 150 40',
+         'target': 'beam_1_end', 'width': '4', 'skin': 'skins/test/beam', '_color': '0 1 0'},
+        {'classname': 'func_beam', 'name': 'beam_1_end', 'origin': '700 260 40'},
+        # high in room A's south-west corner: the flashlight's beam fires it
+        {'classname': 'trigger_flashlight', 'name': 'trigger_flashlight_1',
+         'model': 'trigger_flashlight_1', 'origin': '-230 -230 150', 'target': 'null_flashlight'},
+        {'classname': 'target_null', 'name': 'null_flashlight', 'origin': '-230 -230 120'},
         # a lift that rests 48 below and comes up when stood on (func_plat),
         # a force field that throws up what is in it once activated, an
         # earthquake, an explosion, a security clearance, stamina off
@@ -1896,6 +1914,21 @@ textures/test/shinymetal
 		cubeMap env/testenv
 		texgen reflect
 		rgb 0.2
+	}
+}
+
+/* func_beam: the beam's vertex colors (its _color) tint the glow */
+textures/test/beamglow
+{
+	qer_editorimage textures/test/flare.tga
+	noshadows
+	nonsolid
+	translucent
+	twosided
+	{
+		blend add
+		map textures/test/flare.tga
+		vertexColor
 	}
 }
 
@@ -2424,6 +2457,11 @@ skin skins/test/emitbox {
 	textures/test/screen	textures/test/emitfrompoly
 }
 
+// func_beam's quad (its "_default" material)
+skin skins/test/beam {
+	_default	textures/test/beamglow
+}
+
 skin skins/test/player {
 	models/test/player		models/test/player_armor
 }
@@ -2761,6 +2799,29 @@ entityDef damage_test_barrelsplash {
 entityDef func_fracture {
 	"spawnclass"			"idBrittleFracture"
 	"snd_shatter"			"test_pain"
+}
+
+entityDef func_securitycamera {
+	"spawnclass"			"idSecurityCamera"
+	"sweepAngle"			"90"
+	"health"				"100"
+	"scanFov"				"90"
+	"scanDist"				"200"
+	"sightTime"				"5"
+	"sightResume"			"1.5"
+	"sweepSpeed"			"5"
+	"sweepWait"				"0.5"
+	"wait"					"20"
+}
+
+entityDef func_beam {
+	"spawnclass"			"idBeam"
+}
+
+entityDef trigger_flashlight {
+	"spawnclass"			"idTrigger_Multi"
+	"flashlight_trigger"	"1"
+	"wait"					"0.5"
 }
 
 entityDef func_damagable {

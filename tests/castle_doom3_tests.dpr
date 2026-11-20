@@ -120,10 +120,10 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(53, Decls.DeclCount(dtMaterial), 'material count');
-  CheckEquals(76, Decls.DeclCount(dtEntityDef), 'entityDef count');
+  CheckEquals(54, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(79, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
-  CheckEquals(4, Decls.DeclCount(dtSkin), 'skin count');
+  CheckEquals(5, Decls.DeclCount(dtSkin), 'skin count');
   Check(Decls.Skin('skins/test/player_berserk') <> nil, 'the player''s berserk skin');
   CheckEquals('models/test/player_berserk', Decls.Skin('skins/test/player_berserk').Remap('models/test/player'),
     'the berserk skin remaps the body');
@@ -789,7 +789,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(102, MapFile.Entities.Count, 'entity count');
+    CheckEquals(108, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -1091,7 +1091,7 @@ begin
   Cm := TD3CollisionFile.Create;
   try
     Check(Cm.LoadFromVfs('maps/testmap.cm'), 'load testmap.cm');
-    CheckEquals(17, Cm.ModelCount, 'cm models (world + 12 brush entities + 3 triggers + a force field)');
+    CheckEquals(18, Cm.ModelCount, 'cm models (world + 12 brush entities + 4 triggers + a force field)');
     CheckEquals(1234567890, Cm.Crc, 'cm crc');
     W := Cm.World;
     Check((W <> nil) and (W.Name = 'worldMap'), 'worldMap model');
@@ -2203,7 +2203,7 @@ begin
     Check(Map.LoadMap('testmap'), 'load testmap for triggers');
     Game := TD3Game.Create(Map);
     Game.Spawn;
-    CheckEquals(3, Game.Triggers.Count, 'three trigger volumes (trigger_once_1, trigger_once_cin, trigger_hurt_1)');
+    CheckEquals(4, Game.Triggers.Count, 'four trigger volumes (trigger_once_1, trigger_once_cin, trigger_hurt_1, trigger_flashlight_1)');
     if Game.Triggers.Count <> 2 then
       Exit;
     { the volume comes from the .cm model at the entity origin (330 0 56):
@@ -8177,6 +8177,87 @@ begin
   end;
 end;
 
+{ func_securitycamera, func_beam and trigger_flashlight in the test map. }
+procedure TestCameraBeamFlashlight;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye, Before: TVector3;
+  I: Integer;
+  RemoveMe: TRemoveType;
+  M: TD3MiscEntity;
+  B: TD3BrushEntity;
+  Yaw: Single;
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the camera, beam and flashlight trigger');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := False;
+    Game.God := True;
+
+    { the camera sweeps while nobody is in sight }
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    M := Game.MiscOf(Game.FindEntity('camera_1'));
+    Check(M <> nil, 'camera_1 is a security camera');
+    if M <> nil then
+    begin
+      Yaw := M.CamAngles.Y;
+      for I := 1 to 10 do
+        Game.Update(0.05, Eye);
+      Check(Abs(M.CamAngles.Y - Yaw) > 5, 'the camera sweeps its yaw');
+      CheckEquals(0, M.CamAlert, 'nobody in sight: scanning');
+      { the player in front of it, within scanDist }
+      Eye := D3ToCge(Vector3(180, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+      for I := 1 to 4 do
+        Game.Update(0.05, Eye);
+      CheckEquals(2, M.CamAlert, 'it sees the player: alert');
+      for I := 1 to 24 do
+        Game.Update(0.05, Eye);
+      CheckEquals(3, M.CamAlert, 'after sightTime it is activated (its targets fired)');
+      CheckNear(3, M.Brush.Parms.Parms[7], 'shaderParm7 is the alert mode', 0.01);
+      { shot to pieces: it stops }
+      Game.DamageMisc(M, 1000, 'damage_test_hurt');
+      Check(M.Dead, 'the camera is destroyed');
+    end;
+
+    { the beam: a quad from beam_1 to beam_1_end, tinted by its _color,
+      shown and hidden by activation }
+    B := Map.FindBrush('beam_1');
+    Check(B <> nil, 'beam_1 is built');
+    Check(Map.FindBrush('beam_1_end') <> nil, 'its end is an entity scripts can move');
+    if B <> nil then
+    begin
+      Map.UpdateVisibility(nil);
+      Check(B.Scene.Exists, 'the beam is on');
+      Before := B.Scene.BoundingBox.Size;
+      CheckNear(110, Before.Z, 'it reaches its target (110 units along y)', 6);
+      Game.Activate(B.Entity);
+      Check(not B.Scene.Exists, 'activation hides it');
+      Game.Activate(B.Entity);
+      Check(B.Scene.Exists, 'and shows it again');
+    end;
+
+    { the flashlight's beam fires trigger_flashlight_1; walking into it doesn't }
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.SetFlashlightBeam(False, TVector3.Zero);
+    for I := 1 to 3 do
+      Game.Update(0.05, Eye);
+    Check(not Game.TriggerFired('trigger_flashlight_1'), 'the flashlight is off: not fired');
+    Game.SetFlashlightBeam(True, D3ToCge(Vector3(-230, -230, 150)) - Eye);
+    Game.Update(0.05, Eye);
+    Check(Game.TriggerFired('trigger_flashlight_1'), 'the flashlight''s beam fires it');
+  finally
+    FreeAndNil(Game);
+    FreeAndNil(World);
+  end;
+end;
+
 { The fighting playthrough's choices: its target and its weapon. }
 procedure TestFight;
 var
@@ -8443,6 +8524,7 @@ begin
   TestPlayerMotion;
   TestDamageFeedback;
   TestScriptSpawn;
+  TestCameraBeamFlashlight;
   TestFight;
   TestSaveLoad;
   TestReloadMemory;

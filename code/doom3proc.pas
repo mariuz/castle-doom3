@@ -24,6 +24,9 @@ type
     Material: String;
     Vertexes: array of TD3ProcVertex;
     Indexes: array of Int32;
+    { vertex colors (one per vertex) or none: the .proc has none, a
+      func_beam's quad has its shader parameters' color }
+    Colors: array of TVector4;
   end;
 
   TD3ProcSurfaceList = specialize TObjectList<TD3ProcSurface>;
