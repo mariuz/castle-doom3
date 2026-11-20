@@ -295,6 +295,9 @@ type
       fog's box (Doom 3 fogs the surfaces a fog light touches) }
     procedure FogShapes(const Root: TX3DNode; const F: Integer; const TestBoxes: Boolean = True);
     procedure FogShapeNode(Node: TX3DNode);
+    { the fog of every fog light (FogEffect -1) on a loaded md5 scene, a
+      group effect: it moves (monsters, characters), its skins change }
+    procedure FogMovingModel(const Scene: TCastleScene);
     { the fog light an entity's box (Doom 3 coordinates, LocalMin..LocalMax
       turned by Rot and moved to Origin) touches most (-1: none) }
     function EntityFog(const Origin: TVector3; const Rot: TMatrix3;
@@ -303,7 +306,8 @@ type
     procedure FogEntity(const Root: TX3DNode; const E: TD3MapEntity;
       const LocalMin, LocalMax: TVector3);
     { fog light F's fog effect: on the fogged surfaces, or (OnBox) the color
-      and alpha of its box's far faces }
+      and alpha of its box's far faces; F = -1: every fog light, the one
+      whose box (16 units bigger) holds the fragment (moving models) }
     function FogEffect(const F: Integer; const OnBox: Boolean): TEffectNode;
     { a scene for each fog light: its box's far faces }
     procedure BuildFogScenes;
@@ -1725,13 +1729,42 @@ begin
 end;
 
 function TDoom3Map.FogEffect(const F: Integer; const OnBox: Boolean): TEffectNode;
+
+  function Vec3(const V: TVector3): String;
+  begin
+    Result := 'vec3(' + FloatToStrDot(V.X) + ', ' + FloatToStrDot(V.Y) + ', ' +
+      FloatToStrDot(V.Z) + ')';
+  end;
+
+  { the GLSL lines setting top, dist and color to fog light I's }
+  function FogValues(const I: Integer): String;
+  begin
+    Result := 'top = ' + FloatToStrDot(FFogBoxes[I].Data[1].Y) + '; dist = ' +
+      FloatToStrDot(FFogDistances[I]) + '; color = ' + Vec3(FFogColors[I]) + ';';
+  end;
+
 var
-  N, Color, Code: String;
+  N, Code, Pick: String;
   Part: TEffectPartNode;
+  I: Integer;
+  Margin: TVector3;
 begin
-  N := IntToStr(F);
-  Color := 'vec3(' + FloatToStrDot(FFogColors[F].X) + ', ' +
-    FloatToStrDot(FFogColors[F].Y) + ', ' + FloatToStrDot(FFogColors[F].Z) + ')';
+  if F < 0 then
+  begin
+    N := 'all';
+    Margin := Vector3(16, 16, 16);
+    Pick := '';
+    for I := 0 to High(FFogBoxes) do
+      Pick := Pick + Iff(I = 0, '  if', '  else if') +
+        ' (all(greaterThanEqual(p, ' + Vec3(FFogBoxes[I].Data[0] - Margin) +
+        ')) && all(lessThanEqual(p, ' + Vec3(FFogBoxes[I].Data[1] + Margin) + ')))' + LineEnding +
+        '    { ' + FogValues(I) + ' }' + LineEnding;
+    Pick := Pick + '  else return;' + LineEnding;
+  end else
+  begin
+    N := IntToStr(F);
+    Pick := '  ' + FogValues(F) + LineEnding;
+  end;
   { Doom 3's fog pass (RB_FogPass): a fogged surface is mixed with the fog's
     color by the _fog image at its depth, 1 - 0.982 ^ (255 * depth /
     distance), times the _fogEnter image (FogFraction) at the eye's and the
@@ -1769,14 +1802,16 @@ begin
     '}' + LineEnding +
     'void PLUG_fog_apply(inout vec4 fragment_color, const vec3 normal_eye_fragment)' + LineEnding +
     '{' + LineEnding +
-    '  float top = ' + FloatToStrDot(FFogBoxes[F].Data[1].Y) + ';' + LineEnding +
+    '  float top, dist;' + LineEnding +
+    '  vec3 color;' + LineEnding +
     '  vec3 p = position_eye_to_world_space(castle_vertex_eye).xyz;' + LineEnding +
+    Pick +
     '  vec3 eye = position_eye_to_world_space(vec4(0.0, 0.0, 0.0, 1.0)).xyz;' + LineEnding +
-    '  float depth = clamp(-castle_vertex_eye.z / ' + FloatToStrDot(FFogDistances[F]) + ', 0.0, 1.0);' + LineEnding +
+    '  float depth = clamp(-castle_vertex_eye.z / dist, 0.0, 1.0);' + LineEnding +
     '  float a = (1.0 - pow(0.982, 255.0 * depth)) * d3_fog_enter_' + N + '(eye.y - top, p.y - top);' + LineEnding;
   if OnBox then
     Code := Code +
-      '  fragment_color = vec4(' + Color + ', a);' + LineEnding
+      '  fragment_color = vec4(color, a);' + LineEnding
   else
     { a light's own pass (shadow volumes' additive passes) only loses its
       light to the fog, the fog's color is in the base pass }
@@ -1784,7 +1819,7 @@ begin
       '#ifdef CASTLE_LIGHT_CONTRIBUTION_ONLY' + LineEnding +
       '  fragment_color.rgb *= 1.0 - a;' + LineEnding +
       '#else' + LineEnding +
-      '  fragment_color.rgb = mix(fragment_color.rgb, ' + Color + ', a);' + LineEnding +
+      '  fragment_color.rgb = mix(fragment_color.rgb, color, a);' + LineEnding +
       '#endif' + LineEnding;
   Code := Code + '}' + LineEnding;
   Result := TEffectNode.Create;
@@ -1834,6 +1869,21 @@ begin
   end;
   Shape.Appearance.FdEffects.Add(FFogShapeEffect);
   Inc(FFogShapeCount);
+end;
+
+procedure TDoom3Map.FogMovingModel(const Scene: TCastleScene);
+var
+  Fog: TEffectNode;
+begin
+  if (Length(FFogBoxes) = 0) or (Scene.RootNode = nil) then
+    Exit;
+  { on the group: skins and wound overlays bring new appearances }
+  Fog := FogEffect(-1, False);
+  Scene.RootNode.AddChildren(Fog);
+  SetLength(FFogNodes, Length(FFogNodes) + 1);
+  FFogNodes[High(FFogNodes)] := Fog;
+  Inc(FFogEntityCount);
+  Scene.ChangedAll;
 end;
 
 procedure TDoom3Map.FogShapes(const Root: TX3DNode; const F: Integer; const TestBoxes: Boolean);
@@ -3512,7 +3562,6 @@ var
   Anims: TStringList;
   Rot: TMatrix3;
   Offset: TVector3;
-  FogBefore: Integer;
 begin
   Result := nil;
   if EntityInhibited(E) then
@@ -3566,14 +3615,7 @@ begin
   Rot := E.Rotation;
   SetD3Rotation(ME.Holder, Rot);
   ME.Holder.Add(ME.Instance.Scene);
-  { fog by the place it starts at (a box of a character's size) }
-  if (Length(FFogBoxes) > 0) and (ME.Instance.Scene.RootNode <> nil) then
-  begin
-    FogBefore := FFogEntityCount;
-    FogEntity(ME.Instance.Scene.RootNode, E, Vector3(-32, -32, 0), Vector3(32, 32, 96));
-    if FFogEntityCount > FogBefore then
-      ME.Instance.Scene.ChangedAll;
-  end;
+  FogMovingModel(ME.Instance.Scene);
   ME.Offset := Offset;
   if Def <> nil then
     BuildHead(ME, Def.Values['def_head'], Def.Values['head_joint']);
@@ -3644,6 +3686,7 @@ begin
         Trim(ME.Entity.Pairs.ValueFromIndex[I]));
   ME.HeadInstance.Scene.Collides := False;
   ME.HeadInstance.Scene.Pickable := False;
+  FogMovingModel(ME.HeadInstance.Scene);
   if Decl <> nil then
     ME.HeadInstance.Scene.Translation := D3ToCge(Decl.Offset);
   ME.HeadJoint := JointName;
