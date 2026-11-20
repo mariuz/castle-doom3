@@ -199,6 +199,13 @@ var
   DefaultSpecular: Single = 0.08;
   { Brightness of the glass stand-in. }
   GlassTint: Single = 0.06;
+  { The heat haze appearances made meanwhile share one Effect node per
+    material (one shader program instead of one per surface: an effect
+    with uniforms has its own program). Only for scenes that live as long
+    as the map (TDoom3Map's world, brush entities and static models): the
+    shared effect's textures lose their GPU copy when any shape using them
+    is freed. ClearAnimatedSurfaces forgets the shared effects. }
+  ShareHazeEffects: Boolean = False;
 
 implementation
 
@@ -274,6 +281,8 @@ var
   VertexDeformSurfaces: specialize TList<TVertexDeformSurface>;
   ReflectColors: specialize TList<TReflectColor>;
   TubeSurfaces: specialize TList<TTubeSurface>;
+  { ShareHazeEffects' effects by material name }
+  HazeEffects: specialize TDictionary<String, TEffectNode>;
   Mirrors: Integer;
   NodeWatcher: TNodeWatcher;
 
@@ -350,6 +359,9 @@ begin
   for I := TubeSurfaces.Count - 1 downto 0 do
     if TubeSurfaces[I].Coord = Node then
       TubeSurfaces.Delete(I);
+  if (Node is TEffectNode) and HazeEffects.ContainsKey(Node.X3DName) and
+     (HazeEffects[Node.X3DName] = Node) then
+    HazeEffects.Remove(Node.X3DName);
 end;
 
 function SurfaceContext(const Time: Single): TD3ExprContext;
@@ -566,6 +578,7 @@ begin
   VertexDeformSurfaces.Clear;
   ReflectColors.Clear;
   TubeSurfaces.Clear;
+  HazeEffects.Clear;
 end;
 
 function AnimatedSurfaceCount: Integer;
@@ -1396,7 +1409,14 @@ begin
   Result.AlphaMode := amBlend;
   Result.ShadowCaster := False;
 
-  Effect := TEffectNode.Create;
+  if ShareHazeEffects and HazeEffects.TryGetValue(M.Name, Effect) then
+  begin
+    Result.SetEffects([Effect]);
+    Exit;
+  end;
+
+  { named by the material: HazeEffects' key, for NodeDestroyed }
+  Effect := TEffectNode.Create(M.Name);
   Effect.Language := slGLSL;
   Effect.AddCustomField(TSFNode.Create(Effect, True, 'screen_texture',
     [TAbstractTextureNode], TScreenTextureNode.Create));
@@ -1418,6 +1438,9 @@ begin
   Part.Contents := Code;
   Effect.SetParts([Part]);
   Result.SetEffects([Effect]);
+  Effect.AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
+  if ShareHazeEffects then
+    HazeEffects.AddOrSetValue(M.Name, Effect);
 
   if ((M.HazeScroll[0] <> nil) and M.HazeScroll[0].UsesTime) or
      ((M.HazeScroll[1] <> nil) and M.HazeScroll[1].UsesTime) then
@@ -1425,8 +1448,6 @@ begin
     Haze.Field := ScrollField;
     Haze.Scroll[0] := M.HazeScroll[0];
     Haze.Scroll[1] := M.HazeScroll[1];
-    if ScrollField.ParentNode is TX3DNode then
-      TX3DNode(ScrollField.ParentNode).AddDestructionNotification({$ifdef FPC}@{$endif} NodeWatcher.NodeDestroyed);
     HazeScrolls.Add(Haze);
   end;
 end;
@@ -1804,6 +1825,7 @@ initialization
   VertexDeformSurfaces := specialize TList<TVertexDeformSurface>.Create;
   ReflectColors := specialize TList<TReflectColor>.Create;
   TubeSurfaces := specialize TList<TTubeSurface>.Create;
+  HazeEffects := specialize TDictionary<String, TEffectNode>.Create;
   NodeWatcher := TNodeWatcher.Create;
 finalization
   FreeAndNil(AnimatedSurfaces);
@@ -1813,5 +1835,6 @@ finalization
   FreeAndNil(VertexDeformSurfaces);
   FreeAndNil(ReflectColors);
   FreeAndNil(TubeSurfaces);
+  FreeAndNil(HazeEffects);
   FreeAndNil(NodeWatcher);
 end.
