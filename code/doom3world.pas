@@ -331,6 +331,9 @@ type
     Disabled: Boolean;
     { trigger_hurt damage per hit }
     Damage: Integer;
+    { "flashlight_trigger" (trigger_flashlight): the flashlight's beam
+      touches it, not the player (CONTENTS_FLASHLIGHT_TRIGGER) }
+    Flashlight: Boolean;
   end;
 
   { An entity bound to a mover ("bind"): it keeps its placement relative
@@ -636,7 +639,7 @@ type
   end;
 
   TD3MiscKind = (ekBarrel, ekFracture, ekDamagable, ekForceField, ekShaking,
-    ekEarthQuake, ekActivator, ekShockwave, ekHarvest);
+    ekEarthQuake, ekActivator, ekShockwave, ekHarvest, ekSecurityCamera);
 
   { One of the smaller entity classes (doom3world_entities.inc):
     idExplodingBarrel, idBrittleFracture, idDamagable, idForceField,
@@ -666,6 +669,15 @@ type
       damagable's return / a quake's shaking end, a shockwave's start }
     ExplodeTime, OffTime, NextTime, NextTriggerTime, ShowTime, StartTime: Single;
     Phase, LastRadius: Single;
+    { idSecurityCamera: its angles now (Doom 3), the sweep's start yaw,
+      start and end times, the reverse direction, the alert mode
+      (0 scanning, 1 losing interest, 2 alert, 3 activated: shaderParm7),
+      when the sweep stopped, and the one posted event (CamEvent at
+      CamEventTime: 1 pause, 2 reverse, 3 alert, 4 continue) }
+    CamAngles: TVector3;
+    CamYaw, CamSweepStart, CamSweepEnd, CamStopSweeping, CamEventTime: Single;
+    CamNegative, CamSweeping: Boolean;
+    CamAlert, CamEvent: Integer;
   end;
 
   TD3Moveable = class
@@ -1020,6 +1032,8 @@ type
     { func_fx entities a script spawned with "start": they play at the
       next update, where the script has put them by then }
     FSpawnedFx: array of TD3MapEntity;
+    FFlashlightBeamLit: Boolean;
+    FFlashlightBeamDir: TVector3;
     { movers scripts spawned (comm1's pipes), for the log }
     FSpawnedMovers: Integer;
     { the grabber (idGrabber): on, what it holds, since when, the last throw }
@@ -1166,6 +1180,7 @@ type
     { func_remove: remove (hide) an entity for good }
     procedure RemoveEntity(const E: TD3MapEntity);
     procedure UpdateTriggers(const Feet: TVector3);
+    procedure UpdateFlashlightTriggers(const Eye: TVector3);
     procedure SpawnBindings;
     procedure SpreadLocations;
     procedure SpawnCombatNode(const E: TD3MapEntity);
@@ -1783,6 +1798,12 @@ type
     property OnEndLevel: TD3MessageEvent read FOnEndLevel write FOnEndLevel;
     { Doom 3 BFG's target_checkpoint (the entity's name): an autosave }
     property OnCheckpoint: TD3MessageEvent read FOnCheckpoint write FOnCheckpoint;
+    { The view's flashlight this frame (any kind: the weapon, the mounted
+      one, the plain light), lit and its direction (CGE): its beam touches
+      flashlight triggers (idWeapon::AlertMonsters' trace). }
+    procedure SetFlashlightBeam(const Lit: Boolean; const Dir: TVector3);
+    { Did the trigger of this entity name fire (at least once)? }
+    function TriggerFired(const AName: String): Boolean;
     { Stick a decal at a Doom 3 point with a surface normal (console
       decal, projectiles); the decal scene joins the map on the first. }
     procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
@@ -1883,6 +1904,9 @@ type
       const DefName: String; const Skip: TD3MiscEntity);
     procedure DamageMisc(const M: TD3MiscEntity; const Damage: Integer; const DefName: String);
     procedure KillMisc(const M: TD3MiscEntity);
+    procedure CameraSetAlert(const M: TD3MiscEntity; const Mode: Integer);
+    procedure CameraStartSweep(const M: TD3MiscEntity);
+    procedure UpdateSecurityCamera(const M: TD3MiscEntity; const Feet: TVector3);
     procedure QuakeMisc(const M: TD3MiscEntity; const BySelf: Boolean);
     procedure UpdateMisc(const SecondsPassed: Single);
     function ActivateMisc(const E: TD3MapEntity; const Cls, SC: String): Boolean;
@@ -6846,7 +6870,8 @@ begin
       if Cls = 'speaker' then
         SpawnSpeaker(E)
       else
-      if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') then
+      if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') or
+         (Cls = 'trigger_flashlight') then
         SpawnTrigger(E)
       else
       if E.Value('spawnclass') = 'idCombatNode' then
@@ -6972,6 +6997,7 @@ begin
   end;
   T.WaitingForActivation := E.BoolValue('triggerFirst');
   T.NoTouch := E.BoolValue('noTouch');
+  T.Flashlight := E.BoolValue('flashlight_trigger', SameText(E.ClassName_, 'trigger_flashlight'));
   FTriggers.Add(T);
 end;
 
@@ -7247,7 +7273,8 @@ begin
     Exit;
   end;
 
-  if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') then
+  if (Cls = 'trigger_once') or (Cls = 'trigger_multiple') or (Cls = 'trigger_hurt') or
+     (Cls = 'trigger_flashlight') then
   begin
     for Trig in FTriggers do
       if Trig.Entity = E then
@@ -7401,6 +7428,14 @@ begin
       Handled := True;
     end;
   end;
+  { idBeam::Event_Activate: shown or hidden }
+  if Cls = 'func_beam' then
+  begin
+    B := FMap.FindBrush(E.Name);
+    if B <> nil then
+      B.SetHidden(not B.Hidden);
+    Handled := True;
+  end;
   { func_static without "hide": idStaticEntity only toggles its "active"
     state (for its materials' shader parameters), nothing visible here }
   if Cls = 'func_static' then
@@ -7439,7 +7474,7 @@ begin
       Feet + Vector3(PlayerRadius, PlayerBodyHeight, PlayerRadius));
     for T in FTriggers do
       if (not T.Disabled) and (not T.NoTouch) and (not T.WaitingForActivation) and
-         (FTime >= T.NextTime) and T.Box.Collision(PlayerBox) then
+         (not T.Flashlight) and (FTime >= T.NextTime) and T.Box.Collision(PlayerBox) then
       begin
         if T.Kind = tkHurt then
         begin
@@ -7479,6 +7514,57 @@ begin
     end else
       Inc(I);
   end;
+end;
+
+function TD3Game.TriggerFired(const AName: String): Boolean;
+var
+  T: TD3Trigger;
+begin
+  for T in FTriggers do
+    if SameText(T.Entity.Name, AName) and (T.NextTime > 0) then
+      Exit(True);
+  Result := False;
+end;
+
+procedure TD3Game.SetFlashlightBeam(const Lit: Boolean; const Dir: TVector3);
+begin
+  FFlashlightBeamLit := Lit;
+  FFlashlightBeamDir := Dir;
+end;
+
+procedure TD3Game.UpdateFlashlightTriggers(const Eye: TVector3);
+const
+  { idWeapon::AlertMonsters traces to the flashlight light's target
+    (weapon_flashlight's light is 1280 long on BFG data, ~1200 here) }
+  BeamRange = 1200;
+var
+  T: TD3Trigger;
+  Dir: TVector3;
+  WallDist, BoxDist: Single;
+  Hit: TVector3;
+begin
+  if (not FFlashlightBeamLit) or PlayerDead or (FFlashlightBeamDir.Length < 0.0001) then
+    Exit;
+  Dir := FFlashlightBeamDir.Normalize;
+  WallDist := -1;
+  for T in FTriggers do
+    if T.Flashlight and (not T.Disabled) and (not T.NoTouch) and
+       (not T.WaitingForActivation) and (FTime >= T.NextTime) and
+       T.Box.TryRayEntrance(Hit, Eye, Dir) then
+    begin
+      BoxDist := PointsDistance(Eye, Hit);
+      if T.Box.Contains(Eye) then
+        BoxDist := 0;
+      if BoxDist > BeamRange then
+        Continue;
+      { walls stop the beam (one ray for all triggers) }
+      if WallDist < 0 then
+        if not MapRay(Eye, Dir, BeamRange, WallDist) then
+          WallDist := BeamRange;
+      if BoxDist > WallDist + 1 then
+        Continue;
+      FireTrigger(T);
+    end;
 end;
 
 function TD3Game.CanSee(const A, B: TVector3): Boolean;
@@ -7735,6 +7821,7 @@ begin
       UpdateMonster(Mon, SecondsPassed * WorldTimeScale, Feet);
   Part(8);
   UpdateTriggers(Feet);
+  UpdateFlashlightTriggers(PlayerEye);
   Part(9);
   if (FScript <> nil) and not ScriptsPaused then
     UpdateActors(SecondsPassed * WorldTimeScale);
@@ -10823,7 +10910,7 @@ begin
             end;
       { the first touch trigger among them }
       for T in FTriggers do
-        if (Wanted.IndexOf(T.Entity.Name) >= 0) and not T.NoTouch then
+        if (Wanted.IndexOf(T.Entity.Name) >= 0) and not T.NoTouch and not T.Flashlight then
         begin
           Goal := CgeToD3(T.Box.Center);
           Goal.Z := CgeToD3(T.Box.Data[0]).Z;

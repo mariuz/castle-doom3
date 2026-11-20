@@ -3625,7 +3625,8 @@ begin
   Names := TStringList.Create;
   try
     for T in FGame.Triggers do
-      if (T.Kind <> tkHurt) and not T.NoTouch and not SameText(T.Entity.Name, GoalName) then
+      { flashlight triggers: the beam fires them, walking there doesn't }
+      if (T.Kind <> tkHurt) and not T.NoTouch and not T.Flashlight and not SameText(T.Entity.Name, GoalName) then
       begin
         P := CgeToD3(T.Box.Center);
         P.Z := CgeToD3(T.Box.Data[0]).Z;
@@ -4458,6 +4459,7 @@ begin
 
   { during cinematics the player stays where the camera was }
   PartTimer := Timer;
+  FGame.SetFlashlightBeam(Flashlight.Exists and not FInCinematic, Camera.Direction);
   if FInCinematic then
     FGame.Update(SecondsPassed, FPlayerEye)
   else

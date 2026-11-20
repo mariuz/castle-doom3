@@ -174,6 +174,19 @@ begin
     { d3xp: a body whose soul the artifact takes (idHarvestable) }
     NewMisc(ekHarvest)
   else
+  if SC = 'idSecurityCamera' then
+  begin
+    { idSecurityCamera::Spawn: it sweeps its yaw back and forth by
+      "sweepAngle" (negative: the other way first) and watches }
+    if (B = nil) or (B.Scene = nil) then
+      Exit;
+    M := NewMisc(ekSecurityCamera);
+    M.Health := E.IntValue('health', 100);
+    D3PlacementFromMatrix(B.Scene.Transform, V, M.CamAngles);
+    M.CamYaw := M.CamAngles.Y;
+    M.CamNegative := E.FloatValue('sweepAngle', 90) < 0;
+    CameraStartSweep(M);
+  end else
   if (SC = 'idFuncSmoke') and (E.Value('smoke') <> '') then
   begin
     { idFuncSmoke: its "smoke" particle from its origin, toggled like an
@@ -286,7 +299,7 @@ var
 begin
   Result := False;
   for M in FMisc do
-    if (M.Kind in [ekBarrel, ekFracture, ekDamagable]) and not M.Dead and (M.Brush <> nil) and
+    if (M.Kind in [ekBarrel, ekFracture, ekDamagable, ekSecurityCamera]) and not M.Dead and (M.Brush <> nil) and
        not M.Brush.Hidden and M.Brush.Scene.BoundingBox.Grow(2).Contains(Point) then
     begin
       DamageMisc(M, Damage, DefName);
@@ -307,7 +320,7 @@ begin
     Exit;
   for M in FMisc do
   begin
-    if (M = Skip) or M.Dead or not (M.Kind in [ekBarrel, ekFracture, ekDamagable]) or
+    if (M = Skip) or M.Dead or not (M.Kind in [ekBarrel, ekFracture, ekDamagable, ekSecurityCamera]) or
        (M.Brush = nil) or M.Brush.Hidden then
       Continue;
     Box := M.Brush.Scene.BoundingBox;
@@ -358,6 +371,169 @@ begin
         if M.Health <= 0 then
           KillMisc(M);
       end;
+    ekSecurityCamera:
+      if M.Health > 0 then
+      begin
+        Dec(M.Health, Damage);
+        if M.Health <= 0 then
+          KillMisc(M);
+      end;
+  end;
+end;
+
+{ idSecurityCamera ------------------------------------------------------------ }
+
+procedure TD3Game.CameraSetAlert(const M: TD3MiscEntity; const Mode: Integer);
+begin
+  { SetAlertMode: shaderParm7 (SHADERPARM_MODE) shows it on the model }
+  M.CamAlert := Mode;
+  if M.Brush.Parms <> nil then
+    M.Brush.Parms.Parms[7] := Mode;
+end;
+
+procedure TD3Game.CameraStartSweep(const M: TD3MiscEntity);
+begin
+  { StartSweep: "sweepSpeed" seconds a sweep, then a pause }
+  M.CamSweeping := True;
+  M.CamSweepStart := FTime;
+  M.CamSweepEnd := FTime + Max(0.01, M.Entity.FloatValue('sweepSpeed', 5));
+  M.CamEvent := 1;
+  M.CamEventTime := M.CamSweepEnd;
+  if M.Entity.FloatValue('sweepAngle', 90) <> 0 then
+    StartScriptSound(EntityHandle(M.Entity), M.Entity.Value('snd_moving'), 3);
+end;
+
+procedure TD3Game.UpdateSecurityCamera(const M: TD3MiscEntity; const Feet: TVector3);
+const
+  CamScanning = 0;
+  CamLosingInterest = 1;
+  CamAlertMode = 2;
+  CamActivated = 3;
+var
+  E: TD3MapEntity;
+  Handle, ModelAxis: Integer;
+  Pos, Dir, Axis: TVector3;
+  Rot: TMatrix3;
+  Pct, Dist, SweepAngle: Single;
+  Sees: Boolean;
+begin
+  E := M.Entity;
+  if CinematicActive or M.Brush.Hidden then
+    Exit;
+  Handle := EntityHandle(E);
+  { the posted events }
+  if (M.CamEvent <> 0) and (FTime >= M.CamEventTime) then
+  begin
+    case M.CamEvent of
+      1:
+        begin
+          { Event_Pause: "sweepWait" seconds, then the other way }
+          M.CamSweeping := False;
+          StopScriptSound(Handle, 3);
+          if E.FloatValue('sweepAngle', 90) <> 0 then
+            StartScriptSound(Handle, E.Value('snd_stop'), 3);
+          M.CamEvent := 2;
+          M.CamEventTime := FTime + E.FloatValue('sweepWait', 0.5);
+        end;
+      2:
+        begin
+          { Event_ReverseSweep }
+          M.CamYaw := M.CamAngles.Y;
+          M.CamNegative := not M.CamNegative;
+          CameraStartSweep(M);
+        end;
+      3:
+        begin
+          { Event_Alert: it saw the player for "sightTime": its targets,
+            then back to sweeping after "wait" }
+          CameraSetAlert(M, CamActivated);
+          StopScriptSound(Handle, 3);
+          StartScriptSound(Handle, E.Value('snd_activate'), 3);
+          WritelnLog('Doom3World', 'Security camera %s alerts', [E.Name]);
+          M.CamEvent := 4;
+          M.CamEventTime := FTime + E.FloatValue('wait', 20);
+          ActivateTargets(E, 0);
+        end;
+      4:
+        begin
+          { Event_ContinueSweep: the rest of the sweep it stopped in }
+          CameraSetAlert(M, CamScanning);
+          if M.CamSweepEnd > M.CamSweepStart then
+            Pct := (M.CamStopSweeping - M.CamSweepStart) / (M.CamSweepEnd - M.CamSweepStart)
+          else
+            Pct := 0;
+          Pct := EnsureRange(Pct, 0, 1);
+          M.CamSweepStart := FTime - Max(0.01, E.FloatValue('sweepSpeed', 5)) * Pct;
+          M.CamSweepEnd := M.CamSweepStart + Max(0.01, E.FloatValue('sweepSpeed', 5));
+          M.CamSweeping := True;
+          M.CamEvent := 1;
+          M.CamEventTime := M.CamSweepEnd;
+          if E.FloatValue('sweepAngle', 90) <> 0 then
+            StartScriptSound(Handle, E.Value('snd_moving'), 3);
+        end;
+    end;
+  end;
+
+  { CanSeePlayer: within scanDist and scanFov of its axis, nothing opaque
+    between }
+  Sees := False;
+  if not NoTarget and not PlayerDead then
+  begin
+    Pos := M.Brush.Scene.WorldTranslation;
+    Dir := CgeToD3(Feet - Pos);
+    Dist := Dir.Length;
+    if (Dist > 0.01) and (Dist <= E.FloatValue('scanDist', 200)) then
+    begin
+      Dir := Dir / Dist;
+      Rot := AnglesMatrix(M.CamAngles);
+      ModelAxis := EnsureRange(E.IntValue('modelAxis', 0), 0, 2);
+      Axis := Vector3(Rot.Data[ModelAxis, 0], Rot.Data[ModelAxis, 1], Rot.Data[ModelAxis, 2]);
+      if E.BoolValue('flipAxis') then
+        Axis := -Axis;
+      { the trace skips the camera itself: it starts out of its box }
+      if TVector3.DotProduct(Dir, Axis) >= Cos(DegToRad(E.FloatValue('scanFov', 90)) / 2) then
+        Sees := CanSee(Pos + (FPlayerEye - Pos).Normalize * (M.Brush.Scene.BoundingBox.Diagonal / 2 + 1),
+          FPlayerEye);
+    end;
+  end;
+
+  if (M.CamAlert = CamLosingInterest) and (M.CamEvent = 0) then
+    CameraSetAlert(M, CamScanning);
+  if Sees then
+  begin
+    if M.CamAlert = CamScanning then
+    begin
+      CameraSetAlert(M, CamAlertMode);
+      M.CamStopSweeping := FTime;
+      M.CamSweeping := False;
+      StopScriptSound(Handle, 3);
+      StartScriptSound(Handle, E.Value('snd_sight'), 3);
+      WritelnLog('Doom3World', 'Security camera %s sees the player', [E.Name]);
+      M.CamEvent := 3;
+      M.CamEventTime := FTime + E.FloatValue('sightTime', 5);
+    end;
+  end else
+  begin
+    if M.CamAlert = CamAlertMode then
+    begin
+      CameraSetAlert(M, CamLosingInterest);
+      M.CamEvent := 4;
+      M.CamEventTime := FTime + E.FloatValue('sightResume', 1.5);
+    end;
+    if M.CamSweeping then
+    begin
+      SweepAngle := Abs(E.FloatValue('sweepAngle', 90));
+      Pct := EnsureRange((FTime - M.CamSweepStart) / Max(0.001, M.CamSweepEnd - M.CamSweepStart), 0, 1);
+      if M.CamNegative then
+        M.CamAngles.Y := M.CamYaw + Pct * SweepAngle
+      else
+        M.CamAngles.Y := M.CamYaw - Pct * SweepAngle;
+      if SweepAngle <> 0 then
+      begin
+        Rot := AnglesMatrix(M.CamAngles);
+        SetD3Rotation(M.Brush.Scene, Rot);
+      end;
+    end;
   end;
 end;
 
@@ -459,6 +635,17 @@ begin
           M.Brush.SetHidden(True);
           M.ShowTime := M.NextTime;
         end;
+      end;
+    ekSecurityCamera:
+      begin
+        { idSecurityCamera::Killed: it stops, "fx_destroyed" plays }
+        M.Dead := True;
+        M.CamSweeping := False;
+        M.CamEvent := 0;
+        StopScriptSound(EntityHandle(E), 3);
+        if E.Value('fx_destroyed') <> '' then
+          StartFx(E.Value('fx_destroyed'), CgeToD3(Center), E.Rotation, E);
+        WritelnLog('Doom3World', 'Security camera %s destroyed', [E.Name]);
       end;
   end;
 end;
@@ -635,6 +822,9 @@ begin
         end;
       ekHarvest:
         UpdateHarvest(M);
+      ekSecurityCamera:
+        if not M.Dead then
+          UpdateSecurityCamera(M, Feet);
       ekShockwave:
         if M.On then
         begin
@@ -739,6 +929,8 @@ begin
           M.LastRadius := 0;
           WritelnLog('Doom3World', 'Shockwave %s', [E.Name]);
         end;
+      ekSecurityCamera:
+        { idSecurityCamera has no Event_Activate };
     end;
     Exit;
   end;
