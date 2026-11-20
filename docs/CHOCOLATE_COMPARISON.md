@@ -8,6 +8,8 @@ How it is made: `tools/tour_maps.ps1 -BasePath "F:\GogGalaxyGames\DOOM 3 BFG" -R
 
 All 47 maps load and play to their end with no exception and no shader error; every map with a next one loads it (deltax's route stops short of its end, `game/hell` loads after it); 15 stalls over 0.3 s in all (6.5 s). `playthrough_bfg/summary.txt` has each map's numbers.
 
+Played again 2026-11-20 (`playthrough_bfg2`) after BFG brush entities without surfaces were built empty (the script movers' anchors the `.bproc` leaves out, on 41 of the 47 maps): again no exceptions, every map with a next one loads it, deltax's route still stops short. The "Not supported" lines went from 1958 to 591 (mars_city1 27 to 0, mc_underground 35 to 6, erebus3 235 to 17); 392 of the rest are comm1's mover events on `func_mover`s that scripts spawn (`func_mover_spawned_N`: `setModel`, `time`, `move`, `rotateOnce`...), 50 more in commoutside. The run was from a copy with another exe name, so NVIDIA's shader disk cache started empty: 175 stalls over 0.3 s (108 s), against 13; played again with the cache warm, erebus4 had 3 (17 cold) and le_enpro1 0 (17 cold). Frame rates are capped at 60 by vertical sync now, so the medians don't compare with the first run's.
+
 ## All maps, default settings
 
 | Map | Views | Luma here | Luma chocolate | Median luma difference | Views within 15% | Median image difference | Views under 5 | Left out (outside areas) |
