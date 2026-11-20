@@ -2335,6 +2335,7 @@ var
   HitNormal: TVector3;
   RayOrigin, RayDirection: TVector3;
   Found: Boolean;
+  T: TD3Trigger;
   Total: Single;
   Args2: String;
 begin
@@ -3524,6 +3525,22 @@ begin
       WritelnLog('Lights', S);
     end;
   end else
+  if Cmd = 'triggers' then
+  begin
+    { triggers [name part]: each trigger's volume (Doom 3 coordinates) and
+      state }
+    for T in FGame.Triggers do
+      if (Args = '') or (Pos(LowerCase(Args), LowerCase(T.Entity.Name)) > 0) then
+      begin
+        S := Format('Trigger %s (%s): %s - %s%s%s%s%s', [T.Entity.Name, T.Entity.ClassName_,
+          CgeToD3(T.Box.Data[0]).ToString, CgeToD3(T.Box.Data[1]).ToString,
+          BoolToStr(T.Disabled, ' disabled', ''), BoolToStr(T.NoTouch, ' noTouch', ''),
+          BoolToStr(T.WaitingForActivation, ' waiting for activation', ''),
+          BoolToStr(T.Flashlight, ' flashlight', '')]);
+        WritelnLog('Triggers', S);
+        Console.Print(S);
+      end;
+  end else
   if Cmd = 'portals' then
   begin
     Console.Print(Format('area %d, %d of %d areas visible, %d portals',
@@ -4083,6 +4100,7 @@ begin
     if FRouteMap <> MapName then
       WritelnLog('GameViewPlay', 'Route: the map changed to "%s" after %.0f units', [MapName, FRouteWalked]);
     FRoute := nil;
+    FGame.RouteInvulnerable := False;
     Exit;
   end;
   { cinematics play for 2 s, then they are skipped }
@@ -4106,6 +4124,7 @@ begin
     FRouteHold := 2;
     FRouteLastEye := Camera.Translation;
   end;
+  FGame.RouteInvulnerable := not FFight;
   if FFight and FightStep(SecondsPassed) then
     Exit(False);
   if FRouteHold > 0 then
@@ -4164,6 +4183,7 @@ begin
       FightSummary;
     CaptureScreenshot;
     FRoute := nil;
+    FGame.RouteInvulnerable := False;
     Exit;
   end;
   SegLen := Max(0.001, PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]));

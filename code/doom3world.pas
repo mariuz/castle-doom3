@@ -55,7 +55,7 @@ uses
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors, CastleTimeUtils,
   CastleRenderOptions, X3DNodes,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
-  Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals;
+  Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals, Doom3Materials;
 
 const
   { the timed parts of TD3Game.Update }
@@ -1033,6 +1033,8 @@ type
       next update, where the script has put them by then }
     FSpawnedFx: array of TD3MapEntity;
     FFlashlightBeamLit: Boolean;
+    FRouteIgnoredDamage: TStringList;
+    FRouteInvulnerable: Boolean;
     FFlashlightBeamDir: TVector3;
     { d3xp's info_portalsky the sky viewport looks from (nil: none) }
     FPortalSky: TD3MapEntity;
@@ -1806,10 +1808,20 @@ type
     procedure SetFlashlightBeam(const Lit: Boolean; const Dir: TVector3);
     { Did the trigger of this entity name fire (at least once)? }
     function TriggerFired(const AName: String): Boolean;
+    { The shader parameters of an entity's brush entity, static model or
+      md5 model (nil: none), and one set (an md5 model's head too). }
+    function EntityParms(const E: TD3MapEntity): TD3EntityParms;
+    procedure SetEntityParm(const E: TD3MapEntity; const Index: Integer; const Value: Single);
     { d3xp's active info_portalsky (idGameLocal::portalSkyEnt): the one
       without "triggered" at the start, the last one activated after; nil
       when the map has none }
     property PortalSky: TD3MapEntity read FPortalSky;
+    { A god mode route run (TViewPlay.WalkRoute, not fighting): damage that
+      passes god mode ("noGod": pits, lava kill triggers) is ignored too,
+      logged once per damage def; the route places the player along its
+      path, which may cross such a volume where Doom 3's player would ride
+      a platform (Doom 3 BFG's hell1). }
+    property RouteInvulnerable: Boolean read FRouteInvulnerable write FRouteInvulnerable;
     { Stick a decal at a Doom 3 point with a surface normal (console
       decal, projectiles); the decal scene joins the map on the first. }
     procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
@@ -2055,7 +2067,7 @@ uses
   Generics.Defaults,
   CastleShapes,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
-  Doom3AF, Doom3Images, Doom3Materials, Doom3LightEffects,
+  Doom3AF, Doom3Images, Doom3LightEffects,
   CastleInternalSoundFile;
 
 const
@@ -2324,6 +2336,7 @@ begin
   FSoundLastFile := specialize TDictionary<String, Integer>.Create;
   FSoundEnvelopes := specialize TDictionary<String, TBytes>.Create;
   FTriggers := specialize TObjectList<TD3Trigger>.Create(True);
+  FRouteIgnoredDamage := TStringList.Create;
   FEntities := specialize TDictionary<String, TD3MapEntity>.Create;
   FPending := specialize TList<TD3PendingTargets>.Create;
   FBindings := specialize TObjectList<TD3Binding>.Create(True);
@@ -2393,6 +2406,7 @@ begin
   FSoundEnvelopes.Free;
   FScriptLights.Free;
   FTriggers.Free;
+  FRouteIgnoredDamage.Free;
   FEntities.Free;
   FPending.Free;
   FBindings.Free;
@@ -7533,6 +7547,36 @@ begin
   end;
 end;
 
+function TD3Game.EntityParms(const E: TD3MapEntity): TD3EntityParms;
+var
+  B: TD3BrushEntity;
+  ME: TD3ModelEntity;
+begin
+  Result := nil;
+  if E = nil then
+    Exit;
+  B := FMap.FindBrush(E.Name);
+  if (B <> nil) and (B.Parms <> nil) then
+    Exit(B.Parms);
+  ME := FMap.FindModelEntity(E.Name);
+  if (ME <> nil) and (ME.Instance <> nil) then
+    Result := ME.Instance.Parms;
+end;
+
+procedure TD3Game.SetEntityParm(const E: TD3MapEntity; const Index: Integer; const Value: Single);
+var
+  ME: TD3ModelEntity;
+begin
+  if (Index < 0) or (Index > 11) or (EntityParms(E) = nil) then
+    Exit;
+  EntityParms(E).Parms[Index] := Value;
+  { an md5 model's head shows the same parameters (idActor's head
+    entity gets the body's shaderParms) }
+  ME := FMap.FindModelEntity(E.Name);
+  if (ME <> nil) and (ME.HeadInstance <> nil) then
+    ME.HeadInstance.Parms.Parms[Index] := Value;
+end;
+
 function TD3Game.TriggerFired(const AName: String): Boolean;
 var
   T: TD3Trigger;
@@ -8102,6 +8146,7 @@ end;
 procedure TD3Game.UpdatePlayerModel(const SecondsPassed: Single);
 var
   Anim: String;
+  Frac: Single;
 begin
   if FPlayerModel = nil then
     Exit;
@@ -8133,6 +8178,13 @@ begin
   end;
   FPlayerHolder.Translation := PlayerFeet;
   SetD3Rotation(FPlayerHolder, AnglesMatrix(Vector3(0, D3DirYaw(CgeToD3(PlayerViewDir)), 0)));
+  { idPlayer::AdjustBodyAngles: the torso's and legs' synced anims (aim
+    down, straight, up) weighted by the view's pitch }
+  Frac := EnsureRange(D3DirPitch(CgeToD3(PlayerViewDir)) / 90, -1, 1);
+  if Frac > 0 then
+    FPlayerModel.SyncWeights := Vector3(Frac, 1 - Frac, 0)
+  else
+    FPlayerModel.SyncWeights := Vector3(0, 1 + Frac, -Frac);
   { the legs' anim by the speed (idPlayer's legs states: run over the
     walking speed, walk, idle; crouched crouch_walk, crouch); dead the
     death anim once, holding its last frame (Doom 3 has a ragdoll) }
@@ -14186,6 +14238,7 @@ var
   Dist: Single;
   Def: TStringList;
   Trig: TD3Trigger;
+  P: TD3EntityParms;
 
   function ArgF(const Index: Integer): Single;
   begin
@@ -14558,25 +14611,30 @@ begin
       Unsupported(Format('setModel "%s" on %s (not a .proc model)', [D3ValueToString(Args[0]), E.Name]));
   end else
 
-  { shader parameters of brush entities and static models: their
-    materials' stage colors (parm0..11) and "if" conditions read them }
-  if (Light < 0) and (FMap.FindBrush(E.Name) <> nil) and
-     ((N = 'setColor') or (N = 'setShaderParm') or (N = 'getShaderParm')) then
+  { shader parameters of brush entities, static models and md5 models
+    (their heads too): their materials' stage colors (parm0..11) and "if"
+    conditions read them }
+  if (Light < 0) and (EntityParms(E) <> nil) and
+     ((N = 'setColor') or (N = 'setShaderParm') or (N = 'setShaderParms') or
+      (N = 'getShaderParm') or (N = 'getColor')) then
   begin
-    B := FMap.FindBrush(E.Name);
-    if N = 'setColor' then
-    begin
-      B.Parms.Parms[0] := ArgF(0);
-      B.Parms.Parms[1] := ArgF(1);
-      B.Parms.Parms[2] := ArgF(2);
-    end else
-    if N = 'setShaderParm' then
-    begin
-      if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 11) then
-        B.Parms.Parms[Round(ArgF(0))] := ArgF(1);
-    end else
-    if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 11) then
-      EventResult := D3FloatValue(B.Parms.Parms[Round(ArgF(0))]);
+    P := EntityParms(E);
+    case N of
+      'setColor':
+        for I := 0 to 2 do
+          SetEntityParm(E, I, ArgF(I));
+      'setShaderParm':
+        SetEntityParm(E, Round(ArgF(0)), ArgF(1));
+      'setShaderParms':
+        { idEntity::SetShaderParms( parm0, parm1, parm2, parm3 ) }
+        for I := 0 to 3 do
+          SetEntityParm(E, I, ArgF(I));
+      'getColor':
+        EventResult := D3VectorValue(Vector3(P.Parms[0], P.Parms[1], P.Parms[2]));
+      else
+        if (Round(ArgF(0)) >= 0) and (Round(ArgF(0)) <= 11) then
+          EventResult := D3FloatValue(P.Parms[Round(ArgF(0))]);
+    end;
   end else
 
   { doors (idDoor) }
@@ -14930,6 +14988,16 @@ begin
   Info := DamageInfo(DamageDefName, Amount);
   if (God and not Info.NoGod) or PlayerDead then
     Exit;
+  if God and FRouteInvulnerable then
+  begin
+    if FRouteIgnoredDamage.IndexOf(DamageDefName) < 0 then
+    begin
+      FRouteIgnoredDamage.Add(DamageDefName);
+      WritelnLog('Doom3World', 'Route: %s (%d, noGod) ignored at %s',
+        [DamageDefName, Amount, CgeToD3(PlayerFeet).ToString]);
+    end;
+    Exit;
+  end;
   { d3xp's invulnerability (the artifact's third power) }
   if PowerUpActive(PowerupInvulnerability) and not Info.NoGod then
     Exit;
@@ -15047,6 +15115,8 @@ begin
     end else
       PlayerSound('snd_death');
     Health := 0;
+    WritelnLog('Doom3World', 'Player killed by %s (%d)%s', [DamageDefName, Amount,
+      BoolToStr(God, ' through god mode (noGod)', '')]);
     Message('You died');
     Exit;
   end;

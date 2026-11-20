@@ -2942,6 +2942,9 @@ model model_test_player {
 	channel torso			( *arm_l *arm_r *head )
 	channel legs			( *origin -*arm_l -*arm_r -*head )
 	anim test_pistol_fire1	models/md5/test/blob_pain.md5anim
+	// synced anims (idAnim with several files, the retail player's aim
+	// down, straight, up): weighted by the view's pitch
+	anim aimtest			models/md5/test/blob_idle.md5anim, models/md5/test/player_crouch.md5anim, models/md5/test/player_death.md5anim
 }
 
 // the guns in the body's right hand (third person): the weapon defs'

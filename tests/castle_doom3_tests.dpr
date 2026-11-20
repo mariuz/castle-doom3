@@ -314,6 +314,48 @@ begin
   end;
 end;
 
+{ Synced anims (an anim listing several md5anim files: the retail player's
+  aim down / straight / up), weighted like idAnimBlend::SetSyncedAnimWeight,
+  and an md5 model's shader parameters. }
+procedure TestSyncedAnims;
+var
+  Decl: TD3ModelDecl;
+  Md5: TD3Md5Model;
+  Synced, Plain: TD3Md5Instance;
+  A, B: TVector3;
+begin
+  Decl := Decls.ModelDecl('model_test_player');
+  Check(Decl <> nil, 'model_test_player');
+  if Decl = nil then
+    Exit;
+  CheckEquals('models/md5/test/blob_idle.md5anim', Decl.Anims.Values['aimtest'], 'the first file is the anim');
+  CheckEquals('models/md5/test/player_crouch.md5anim', Decl.Anims.Values['aimtest#1'], 'the second file');
+  CheckEquals('models/md5/test/player_death.md5anim', Decl.Anims.Values['aimtest#2'], 'the third file');
+  Md5 := Md5Cache.Model(Decl.Mesh);
+  Synced := TD3Md5Instance.Create(Md5, Decl.Anims);
+  Plain := TD3Md5Instance.Create(Md5, Decl.Anims);
+  try
+    Check(Synced.PlayAnim('aimtest') and Plain.PlayAnim('idle'), 'aimtest and idle');
+    Synced.Update(0.1);
+    Plain.Update(0.1);
+    Check(Synced.JointPosition('head', A) and Plain.JointPosition('head', B), 'head joints');
+    CheckVectorNear(B, A, 'by default only the first file plays (Doom 3''s weights)', 0.01);
+    Check(Plain.PlayAnim('crouch'), 'crouch');
+    Plain.Update(0.1);
+    Synced.SyncWeights := Vector3(0, 1, 0);
+    Check(Synced.JointPosition('head', A) and Plain.JointPosition('head', B), 'head joints again');
+    CheckVectorNear(B, A, 'weight on the second file: its pose', 0.01);
+    Synced.SyncWeights := Vector3(0.5, 0.5, 0);
+    Check(Synced.JointPosition('head', A), 'head joint blended');
+    Check((PointsDistance(A, B) > 0.5) and (A.Y < 70), 'half and half: between idle and crouch');
+    CheckNear(1, Synced.Parms.Parms[0], 'an md5 model''s parm0 defaults to 1', 0.001);
+    CheckNear(0, Synced.Parms.Parms[4], 'its parm4 (the time offset) to 0', 0.001);
+  finally
+    FreeAndNil(Synced);
+    FreeAndNil(Plain);
+  end;
+end;
+
 { idAnimator's torso channel: the model decl's "channel torso" joints play
   their own anim over the body's (the player body's weapon anims) }
 procedure TestTorsoChannel;
@@ -5265,7 +5307,7 @@ var
   I: Integer;
   App: TAppearanceNode;
   Far: TVector3;
-  Img: TCastleImage;
+  Img, Src: TCastleImage;
 begin
   M := Decls.Material('models/test/blob');
   CheckEquals('models/test/blob_bmp.tga', M.BurnImage, 'the burn stage''s dissolve map');
@@ -5284,6 +5326,25 @@ begin
     if Img <> nil then
       Check(Img.HasAlpha, 'with an alpha channel');
   finally
+    Img.Free;
+  end;
+  { a camera cube map's face turned for CGE's background: transform 6
+    (transposed, flipped top to bottom) is a quarter turn counter-clockwise:
+    the source's bottom left pixel goes to the bottom right }
+  Src := EvaluateImageProgram('models/test/blob_d.tga', ikColor);
+  Img := EvaluateImageProgram('castlecubeface(6, models/test/blob_d.tga)', ikColor);
+  try
+    Check((Src <> nil) and (Img <> nil), 'castlecubeface reads its image');
+    if (Src <> nil) and (Img <> nil) then
+    begin
+      CheckEquals(Src.Height, Img.Width, 'transposed: the width is the height');
+      CheckVectorNear(Src.Colors[0, 0, 0].XYZ, Img.Colors[Img.Width - 1, 0, 0].XYZ,
+        'the bottom left pixel is at the bottom right', 0.001);
+      CheckVectorNear(Src.Colors[Src.Width - 1, 0, 0].XYZ, Img.Colors[Img.Width - 1, Img.Height - 1, 0].XYZ,
+        'the bottom right pixel is at the top right', 0.001);
+    end;
+  finally
+    Src.Free;
     Img.Free;
   end;
   World := TCastleRootTransform.Create(nil);
@@ -8269,6 +8330,15 @@ begin
     Check((Game.PortalSky <> nil) and (Game.PortalSky.Name = 'info_portalsky_1'),
       'the portal sky without "triggered" is active from the start');
     Game.Activate(Game.FindEntity('info_portalsky_2'));
+
+    { an md5 model's shader parameters: script events set them, its head
+      too (setShaderParm( 4, -sys.getTime() ) starts a fade) }
+    Game.SetEntityParm(Game.FindEntity('blob_1'), 4, -2.5);
+    Check((Map.FindModelEntity('blob_1') <> nil) and
+      (Abs(Map.FindModelEntity('blob_1').Instance.Parms.Parms[4] + 2.5) < 0.001),
+      'setShaderParm on an md5 model sets its parm4');
+    Check(Game.EntityParms(Game.FindEntity('blob_1')) = Map.FindModelEntity('blob_1').Instance.Parms,
+      'an md5 model''s parameters are its instance''s');
     Check((Game.PortalSky <> nil) and (Game.PortalSky.Name = 'info_portalsky_2'),
       'activating the other one makes it the portal sky');
   finally
@@ -8488,6 +8558,7 @@ begin
   TestGuiClipping;
   TestRoq;
   TestTorsoChannel;
+  TestSyncedAnims;
   TestGuiTrigger;
   TestGuiWidgets;
   TestGuiTransforms;

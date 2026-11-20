@@ -465,6 +465,39 @@ begin
     end;
 end;
 
+{ The image turned for a cube face: bit 1 flips it left to right, bit 2
+  top to bottom, bit 4 transposes it (rows become columns), in that order
+  (Doom 3's R_HorizontalFlip, R_VerticalFlip, R_RotatePic). }
+function CubeFace(const Image: TCastleImage; const Transform: Integer): TCastleImage;
+var
+  X, Y, SX, SY, W, H: Integer;
+begin
+  W := Image.Width;
+  H := Image.Height;
+  if (Transform and 4) <> 0 then
+    Result := TCastleImageClass(Image.ClassType).Create(H, W)
+  else
+    Result := TCastleImageClass(Image.ClassType).Create(W, H);
+  for Y := 0 to Result.Height - 1 do
+    for X := 0 to Result.Width - 1 do
+    begin
+      if (Transform and 4) <> 0 then
+      begin
+        SX := Y;
+        SY := X;
+      end else
+      begin
+        SX := X;
+        SY := Y;
+      end;
+      if (Transform and 1) <> 0 then
+        SX := W - 1 - SX;
+      if (Transform and 2) <> 0 then
+        SY := H - 1 - SY;
+      Result.Colors[X, Y, 0] := Image.Colors[SX, SY, 0];
+    end;
+end;
+
 function Evaluate(const Lexer: TDoom3Lexer; const Kind: TD3ImageKind): TCastleImage;
 var
   Func: String;
@@ -492,6 +525,20 @@ begin
           B.Free;
         end;
       finally
+        A.Free;
+      end;
+    end else
+    if Func = 'castlecubeface' then
+    begin
+      { (this port's) castlecubeface( transform, image ): a camera cube
+        map's face flipped / transposed for CGE's background (CubeFace) }
+      Scale := Lexer.ReadFloat;
+      Lexer.Check(',');
+      A := Evaluate(Lexer, Kind);
+      Lexer.Check(')');
+      if A <> nil then
+      begin
+        Result := CubeFace(A, Round(Scale));
         A.Free;
       end;
     end else

@@ -191,7 +191,9 @@ type
     Mesh: String;
     Skin: String;
     Offset: TVector3;
-    { Anim name (lowercase) -> md5anim file (the first one listed). }
+    { Anim name (lowercase) -> md5anim file (the first one listed). An
+      anim listing more files (idAnim's synced anims: the player's aim
+      down / straight / up) has them as "<name>#1", "<name>#2"... }
     Anims: TStringList;
     { Frame commands: lines "animname=frame command arguments" (frame
       1-based), like "melee_attack1=11 melee melee_zombie_maint_Right". }
@@ -1586,6 +1588,7 @@ var
   Lexer: TDoom3Lexer;
   Parent: TD3ModelDecl;
   V: TVector3;
+  SyncIndex: Integer;
 begin
   Key := LowerCase(Name);
   if FModels.TryGetValue(Key, Result) then
@@ -1646,8 +1649,12 @@ begin
       begin
         AnimName := LowerCase(Lexer.NextStr);
         Result.Anims.Values[AnimName] := Lexer.NextStr;
+        SyncIndex := 0;
         while Lexer.Check(',') do
-          Lexer.NextStr;
+        begin
+          Inc(SyncIndex);
+          Result.Anims.Values[AnimName + '#' + IntToStr(SyncIndex)] := Lexer.NextStr;
+        end;
         if Lexer.Check('{') then
         begin
           { frame <n> <command> <arguments...>, up to the next frame or the closing brace }

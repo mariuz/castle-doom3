@@ -2332,25 +2332,49 @@ const
     Doom 3 +X is CGE +X, Doom 3 +Z (up) is CGE +Y, Doom 3 +Y (left) is
     CGE -Z. CGE's background draws TexturePositiveZ ("front") at -Z. }
   CameraSuffixes: array [0..5] of String = ('_forward', '_back', '_up', '_down', '_left', '_right');
+  { CubeFace transforms of the camera images for CGE's faces: the sides
+    fit as they are; Doom 3's _up has _forward along its bottom edge and
+    _left along its left one, CGE's top face wants the front face (-Z,
+    Doom 3's left) along its bottom edge: a quarter turn counter-clockwise
+    (transposed, flipped top to bottom); _down a quarter turn clockwise
+    (transposed, flipped left to right). Found from the images' matching
+    edges (game/commoutside's env/cloudy). }
+  SkyFaceTransforms: array [0..5] of Integer = (0, 0, 6, 5, 0, 0);
   CubeSuffixes: array [0..5] of String = ('_px', '_nx', '_pz', '_nz', '_py', '_ny');
 var
   M: TD3Material;
   I: Integer;
-  F: String;
+  F, FaceName: String;
+  Transforms: array [0..5] of Integer;
+  Parts: TStringArray;
 begin
   Result := False;
   if FSkyMaterial = '' then
     Exit;
   M := Decls.Material(FSkyMaterial);
+  { the faces' flips (CubeFace, castlecubeface); env CD3_SKY_FACES
+    "a,b,c,d,e,f" to try others }
+  for I := 0 to 5 do
+    Transforms[I] := SkyFaceTransforms[I];
+  if GetEnvironmentVariable('CD3_SKY_FACES') <> '' then
+  begin
+    Parts := GetEnvironmentVariable('CD3_SKY_FACES').Split([',']);
+    for I := 0 to Min(5, High(Parts)) do
+      Transforms[I] := StrToIntDef(Trim(Parts[I]), 0);
+  end;
   for I := 0 to 5 do
   begin
     if M.SkyCameraCubeMap then
-      F := FindImageFile(M.SkyCubeMap + CameraSuffixes[I])
+      FaceName := M.SkyCubeMap + CameraSuffixes[I]
     else
-      F := FindImageFile(M.SkyCubeMap + CubeSuffixes[I]);
+      FaceName := M.SkyCubeMap + CubeSuffixes[I];
+    F := FindImageFile(FaceName);
     if F = '' then
       Exit;
-    Urls[I] := D3FsUrl(F);
+    if M.SkyCameraCubeMap and (Transforms[I] <> 0) then
+      Urls[I] := ImageProgramUrl(Format('castlecubeface(%d, %s)', [Transforms[I], FaceName]), ikColor)
+    else
+      Urls[I] := D3FsUrl(F);
   end;
   Result := True;
 end;
@@ -4013,6 +4037,7 @@ begin
   ME.Entity := E;
   ME.EntityDef := Def;
   ME.Instance := TD3Md5Instance.Create(Md5, Anims, SkinName);
+  ME.Instance.Parms.FromKeys(E.Pairs);
   if Decl <> nil then
     ME.Instance.FrameCommands := Decl.FrameCommands;
   ME.Instance.Scene.Collides := False;

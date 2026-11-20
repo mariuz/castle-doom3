@@ -205,6 +205,11 @@ type
     FTorsoName: String;
     FTorsoPose: TD3JointArray;
     FLoop: Boolean;
+    { the playing anims' synced files ("<anim>#1", "#2": nil none) and
+      their weights (idAnimBlend::SetSyncedAnimWeight; X the first file) }
+    FAnimSync, FTorsoSync: array [1..2] of TD3Md5Anim;
+    FSyncWeights: TVector3;
+    FSyncPose, FSyncAccum: TD3JointArray;
     { the origin joint's position after the last Update (before
       LockOrigin), for LastOriginDelta }
     FPrevOrigin: TVector3;
@@ -221,6 +226,11 @@ type
       material only hides the shape, keeping its appearance) }
     FAppearanceMaterials: array of String;
     procedure SetShown(const Value: Boolean);
+    procedure SetSyncWeights(const Value: TVector3);
+    procedure LoadSynced(const Resolved: String; var Sync: array of TD3Md5Anim);
+    procedure LocalSyncedPose(const A: TD3Md5Anim; const Sync: array of TD3Md5Anim;
+      const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
+    function SyncActive(const Sync: array of TD3Md5Anim): Boolean;
     { the animation's joints at the current times into FPose (with
       LockOrigin) }
     procedure SamplePose;
@@ -252,6 +262,11 @@ type
     OnFrameCommand: TD3FrameCommandEvent;
     { The anim playing (its name in the decl, e.g. "idle2"). }
     PlayingAnim: String;
+    { The entity's shader parameters (_color, shaderParmN; scripts'
+      setShaderParm), which the meshes' stage expressions read: parm4 is
+      the time offset of fades and transformations (the zombie head's
+      1-death_fade[(time + parm4) * .5]). Owned. }
+    Parms: TD3EntityParms;
     { The meshes shrink towards their joints (1: as modelled, 0: nothing),
       Doom 3's SHADERPARM_MD5_SKINSCALE for gibbed bodies. }
     SkinScale: Single;
@@ -301,6 +316,11 @@ type
     function PlayTorsoAnim(const AnimName: String; const Loop: Boolean = True): Boolean;
     function TorsoAnimFinished: Boolean;
     property TorsoAnim: String read FTorsoName;
+    { The weights of an anim's synced files (the decl lists several:
+      "<name>#1", "#2"): X the first, Y the second, Z the third. Default
+      (1, 0, 0), only the first, like Doom 3; the player sets (down,
+      forward, up) from the view's pitch (idPlayer::AdjustBodyAngles). }
+    property SyncWeights: TVector3 read FSyncWeights write SetSyncWeights;
     function HasTorsoChannel: Boolean;
     function HasAnim(const AnimName: String): Boolean;
     function TriangleCount: Integer;
@@ -1364,6 +1384,8 @@ var
   Eye: TD3Md5Eyeball;
   EyeIndexes: TInt32List;
 begin
+  FSyncWeights := Vector3(1, 0, 0);
+  Parms := TD3EntityParms.Create;
   inherited Create;
   FShown := True;
   SkinScale := 1;
@@ -1432,7 +1454,7 @@ begin
     Geometry.NormalPerVertex := True;
     Shape := TShapeNode.Create;
     Shape.Geometry := Geometry;
-    Shape.Appearance := MaterialAppearance(MaterialName);
+    Shape.Appearance := MaterialAppearance(MaterialName, Parms);
     MeshShapes := Concat(MeshShapes, [Shape]);
     MeshMaterials := Concat(MeshMaterials, [MaterialName]);
     FAppearanceMaterials := Concat(FAppearanceMaterials, [MaterialName]);
@@ -1514,7 +1536,7 @@ begin
         Old := Concat(Old, [MeshShapes[I].Appearance]);
       end;
       MeshShapes[I].Visible := not Decls.Material(MaterialName).IsInvisible;
-      MeshShapes[I].Appearance := MaterialAppearance(MaterialName);
+      MeshShapes[I].Appearance := MaterialAppearance(MaterialName, Parms);
       if FUseHulls then
         MeshShapes[I].Appearance.ShadowCaster := False;
     end;
@@ -1546,6 +1568,8 @@ begin
   { no scene uses them now }
   FreeReplacedAppearances;
   FAnims.Free;
+  { after the nodes whose expressions read them }
+  FreeAndNil(Parms);
   inherited Destroy;
 end;
 
@@ -2155,6 +2179,7 @@ begin
   FTorsoTime := 0;
   FTorsoLoop := Loop;
   FTorsoName := Resolved;
+  LoadSynced(Resolved, FTorsoSync);
   Result := True;
 end;
 
@@ -2273,7 +2298,7 @@ begin
       Geometry.SetIndex(Indexes);
       { the mesh's winding (Doom 3's clockwise front faces) }
       Geometry.Ccw := False;
-      App := MaterialAppearance(MaterialName);
+      App := MaterialAppearance(MaterialName, Parms);
       App.ShadowCaster := False;
       { over the skin (polygonOffset), clamped at its edges }
       DepthMode := TDepthModeNode.Create;
@@ -2321,6 +2346,7 @@ begin
   FAnimTime := 0;
   FLoop := Loop;
   Paused := False;
+  LoadSynced(Resolved, FAnimSync);
   { its origin moves from the first frame }
   First := nil;
   FAnim.FramePose(0, First);
@@ -2556,6 +2582,86 @@ begin
   ApplyPose;
 end;
 
+procedure TD3Md5Instance.SetSyncWeights(const Value: TVector3);
+begin
+  if TVector3.Equals(Value, FSyncWeights, 0.001) then
+    Exit;
+  FSyncWeights := Value;
+  FPoseStale := True;
+end;
+
+procedure TD3Md5Instance.LoadSynced(const Resolved: String; var Sync: array of TD3Md5Anim);
+var
+  I: Integer;
+  Path: String;
+  A: TD3Md5Anim;
+begin
+  for I := 0 to High(Sync) do
+  begin
+    Sync[I] := nil;
+    Path := FAnims.Values[Resolved + '#' + IntToStr(I + 1)];
+    if Path = '' then
+      Continue;
+    A := Md5Cache.Anim(Path);
+    if (A <> nil) and (Length(A.Hierarchy) = Length(FModel.Joints)) then
+      Sync[I] := A;
+  end;
+end;
+
+function TD3Md5Instance.SyncActive(const Sync: array of TD3Md5Anim): Boolean;
+begin
+  Result := (FSyncWeights.X < 0.999) and ((Sync[0] <> nil) or (Sync[1] <> nil));
+end;
+
+{ idAnimBlend's synced anims: the parent-relative joints of the anim's
+  files at the same time, weighted (orientations by a normalized weighted
+  sum, signs aligned with the first). }
+procedure TD3Md5Instance.LocalSyncedPose(const A: TD3Md5Anim; const Sync: array of TD3Md5Anim;
+  const Time: Single; const Loop: Boolean; var Pose: TD3JointArray);
+var
+  K, I: Integer;
+  W, Total: Single;
+  S: TD3Md5Anim;
+  Q: TVector4;
+begin
+  A.LocalPoseAt(Time, Loop, Pose);
+  if not SyncActive(Sync) then
+    Exit;
+  SetLength(FSyncAccum, Length(Pose));
+  Total := FSyncWeights.X;
+  for I := 0 to High(Pose) do
+  begin
+    FSyncAccum[I].Position := Pose[I].Position * FSyncWeights.X;
+    FSyncAccum[I].Orientation.Data.Vector4 := Pose[I].Orientation.Data.Vector4 * FSyncWeights.X;
+  end;
+  for K := 0 to 1 do
+  begin
+    S := Sync[K];
+    W := FSyncWeights.Data[K + 1];
+    if (S = nil) or (W <= 0.001) then
+      Continue;
+    Total := Total + W;
+    if Length(FSyncPose) <> Length(Pose) then
+      FSyncPose := Copy(Pose);
+    S.LocalPoseAt(Time, Loop, FSyncPose);
+    for I := 0 to High(Pose) do
+    begin
+      FSyncAccum[I].Position := FSyncAccum[I].Position + FSyncPose[I].Position * W;
+      Q := FSyncPose[I].Orientation.Data.Vector4;
+      if TVector4.DotProduct(Q, Pose[I].Orientation.Data.Vector4) < 0 then
+        Q := -Q;
+      FSyncAccum[I].Orientation.Data.Vector4 := FSyncAccum[I].Orientation.Data.Vector4 + Q * W;
+    end;
+  end;
+  if Total <= 0.001 then
+    Exit;
+  for I := 0 to High(Pose) do
+  begin
+    Pose[I].Position := FSyncAccum[I].Position / Total;
+    Pose[I].Orientation := QuatNormalize(FSyncAccum[I].Orientation);
+  end;
+end;
+
 procedure TD3Md5Instance.SamplePose;
 var
   I: Integer;
@@ -2564,14 +2670,21 @@ begin
   begin
     { the torso channel's joints from its own anim, the rest from the
       body's, joined relative to their parents }
-    FAnim.LocalPoseAt(FAnimTime, FLoop, FPose);
-    FTorsoAnimData.LocalPoseAt(FTorsoTime, FTorsoLoop, FTorsoPose);
+    LocalSyncedPose(FAnim, FAnimSync, FAnimTime, FLoop, FPose);
+    if Length(FTorsoPose) <> Length(FPose) then
+      FTorsoPose := Copy(FPose);
+    LocalSyncedPose(FTorsoAnimData, FTorsoSync, FTorsoTime, FTorsoLoop, FTorsoPose);
     for I := 0 to Min(High(FPose), High(FTorsoPose)) do
       if FTorsoMask[I] then
       begin
         FPose[I].Position := FTorsoPose[I].Position;
         FPose[I].Orientation := FTorsoPose[I].Orientation;
       end;
+    ComposePose(FPose);
+  end else
+  if SyncActive(FAnimSync) then
+  begin
+    LocalSyncedPose(FAnim, FAnimSync, FAnimTime, FLoop, FPose);
     ComposePose(FPose);
   end else
     FAnim.PoseAt(FAnimTime, FLoop, FPose);
