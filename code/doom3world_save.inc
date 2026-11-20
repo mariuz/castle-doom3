@@ -426,6 +426,9 @@ begin
     Add(['mission', SaveText(FMissionObjective)]);
     Add(['security', SaveText(FSecurity)]);
     Add(['stamina', SaveFloat(FStamina), IntToStr(Ord(FNoStamina)), SaveFloat(FAirTics)]);
+    if FMountedFlashlight then
+      Add(['flashlight', IntToStr(Ord(FMountedLightOn)), SaveFloat(FFlashlightBattery),
+        IntToStr(Ord(FMountedOnBeforeCinematic))]);
     for I := 0 to High(FPowerupEnd) do
       if FPowerupEnd[I] > FTime then
         Add(['powerup', IntToStr(I), SaveFloat(FPowerupEnd[I] - FTime)]);
@@ -952,6 +955,12 @@ begin
             FStamina := LoadFloat(Field(1));
             FNoStamina := FieldInt(2) <> 0;
             FAirTics := LoadFloat(Field(3));
+          end;
+        'flashlight':
+          begin
+            FMountedLightOn := FieldInt(1) <> 0;
+            FFlashlightBattery := LoadFloat(Field(2));
+            FMountedOnBeforeCinematic := FieldInt(3) <> 0;
           end;
         'powerup':
           if (FieldInt(1) >= 0) and (FieldInt(1) <= High(FPowerupEnd)) then

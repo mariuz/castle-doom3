@@ -1082,7 +1082,14 @@ type
     FSelectWeaponName: String;
     FSelectWeaponAt: Single;
     FOnFlashlight: TD3BoolEvent;
+    { Doom 3 BFG's armor mounted flashlight (idPlayer::flashlight,
+      UpdateFlashlight): on, on before a cinematic, the battery (seconds of
+      light left), this frame's low battery flicker }
+    FMountedFlashlight: Boolean;
+    FMountedLightOn, FMountedOnBeforeCinematic, FMountedInCinematic, FMountedFlicker: Boolean;
+    FFlashlightBattery: Single;
     FOnEndLevel: TD3MessageEvent;
+    FOnCheckpoint: TD3MessageEvent;
     { the interactive GUI the player looks at (idPlayer::focusUI) }
     FTalkFocus: TD3Actor;
     FTalkAttackDown: Boolean;
@@ -1166,6 +1173,8 @@ type
     procedure InitInventory;
     function SpawnWeapon(const Slot: Integer): TD3Weapon;
     procedure UpdateWeapon(const SecondsPassed: Single);
+    function FlashlightWeaponSlot(const Slot: Integer): Boolean;
+    procedure UpdateMountedFlashlight(const SecondsPassed: Single);
     procedure UpdateWeaponFlags(const W: TD3Weapon);
     procedure WeaponScriptTics(const SecondsPassed: Single);
     procedure UpdateGuiFocus;
@@ -1755,7 +1764,23 @@ type
     procedure RemoveWeapon(const WeaponName: String);
     { the weapon's flashlight event (weapon scripts) }
     property OnFlashlight: TD3BoolEvent read FOnFlashlight write FOnFlashlight;
+    { Doom 3 BFG's armor mounted flashlight instead of the flashlight weapon
+      (the weapon isn't picked up or selected): set by Clear on BFG data }
+    property MountedFlashlight: Boolean read FMountedFlashlight write FMountedFlashlight;
+    { idPlayer's IMPULSE_16: off, or on when allowed (alive, weapons
+      enabled, no cinematic, a quarter of the battery); the new state }
+    function ToggleMountedFlashlight: Boolean;
+    { the mounted flashlight lights this frame (on, no cinematic, no flicker) }
+    function MountedFlashlightLit: Boolean;
+    property MountedFlashlightOn: Boolean read FMountedLightOn;
+    { the battery, 0..1 }
+    function FlashlightBattery: Single;
+    { weapon_flashlight's global_flashlight_intensity (alphalabs2's plasma
+      discharges dim it): 1 without the script global }
+    function FlashlightIntensity: Single;
     property OnEndLevel: TD3MessageEvent read FOnEndLevel write FOnEndLevel;
+    { Doom 3 BFG's target_checkpoint (the entity's name): an autosave }
+    property OnCheckpoint: TD3MessageEvent read FOnCheckpoint write FOnCheckpoint;
     { Stick a decal at a Doom 3 point with a surface normal (console
       decal, projectiles); the decal scene joins the map on the first. }
     procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
@@ -2011,6 +2036,12 @@ const
   MonsterDamage = 10;
   PistolDamage = 14;
   PistolDelay = 0.35;
+  { Doom 3 BFG's flashlight_batteryDrainTimeMS, _batteryChargeTimeMS,
+    _minActivatePercent, _batteryFlickerPercent }
+  FlashlightDrainTime = 30.0;
+  FlashlightChargeTime = 3.0;
+  FlashlightMinActivate = 0.25;
+  FlashlightFlickerChance = 0.1;
 
 { TD3Mover }
 
@@ -2245,6 +2276,7 @@ constructor TD3Game.Create(const AMap: TDoom3Map);
 begin
   inherited Create;
   FMap := AMap;
+  FFlashlightBattery := FlashlightDrainTime;
   DormancyEnabled := True;
   Broadphase := GetEnvironmentVariable('CD3_BROADPHASE') <> '0';
   FBroadTime := -1;
@@ -2379,6 +2411,12 @@ end;
 
 procedure TD3Game.Clear;
 begin
+  FMountedFlashlight := (D3Fs <> nil) and D3Fs.IsBfg;
+  FMountedLightOn := False;
+  FMountedOnBeforeCinematic := False;
+  FMountedInCinematic := False;
+  FMountedFlicker := False;
+  FFlashlightBattery := FlashlightDrainTime;
   FPreparedViews.Clear;
   FreeAndNil(FPreparedViewsHolder);
   FSoundDistValid := False;
@@ -3953,6 +3991,10 @@ begin
     { no heart rate yet: taken, nothing happens }
     Result := True
   else
+  if (S = 'desc') or (S = 'icon') or (S = 'name') then
+    { Doom 3 BFG's idInventory::Give ignores the item's texts }
+    Result := False
+  else
   begin
     Unsupported('inventory stat ' + S);
     Result := False;
@@ -3969,6 +4011,12 @@ begin
   if Item.PickedUp or PlayerDead then
     Exit;
   E := Item.Entity;
+  { Doom 3 BFG's idPlayer::GiveItem: no flashlight weapon (the armor has
+    one); the item stays }
+  if FMountedFlashlight and
+     ((Pos('weapon_flashlight', E.Name) > 0) or (Pos('weapon_flashlight', E.ClassName_) > 0) or
+      (Pos('weapon_flashlight', E.Value('inv_weapon')) > 0)) then
+    Exit;
   ItemName := LangString(E.Value('inv_name', E.Name));
   { idItem::GiveToPlayer: carried items (keys, PDAs, video discs) go to
     the inventory, the others give their inv_ keys }
@@ -4208,6 +4256,9 @@ begin
     Done := '';
     for S in Names do
     begin
+      { Doom 3 BFG: the flashlight weapons are never raised }
+      if FMountedFlashlight and (Copy(S, 1, Length('weapon_flashlight')) = 'weapon_flashlight') then
+        Continue;
       Def := Decls.EntityDef(S);
       if Def = nil then
         Continue;
@@ -4350,9 +4401,17 @@ begin
   WritelnLog('Doom3World', 'Weapon %s removed', [Trim(WeaponName)]);
 end;
 
+{ Doom 3 BFG: the flashlight weapons can't be selected (idPlayer::
+  SelectWeapon, NextBestWeapon, UpdateFlashlight skip weapon_flashlight) }
+function TD3Game.FlashlightWeaponSlot(const Slot: Integer): Boolean;
+begin
+  Result := FMountedFlashlight and (Slot >= 0) and (Slot < Length(WeaponDefs)) and
+    (Copy(WeaponDefs[Slot], 1, Length('weapon_flashlight')) = 'weapon_flashlight');
+end;
+
 procedure TD3Game.SelectWeapon(const Slot: Integer);
 begin
-  if HasWeapon(Slot) then
+  if HasWeapon(Slot) and not FlashlightWeaponSlot(Slot) then
     FIdealSlot := Slot;
 end;
 
@@ -4364,7 +4423,7 @@ begin
   for I := 1 to Length(WeaponDefs) do
   begin
     Slot := (Slot + Delta + Length(WeaponDefs)) mod Length(WeaponDefs);
-    if HasWeapon(Slot) then
+    if HasWeapon(Slot) and not FlashlightWeaponSlot(Slot) then
     begin
       FIdealSlot := Slot;
       Exit;
@@ -7625,6 +7684,7 @@ begin
       for P in Mover.Portals do
         FMap.Portals.PortalClosed[P] := Mover.State = dsClosed;
   end;
+  UpdateMountedFlashlight(SecondsPassed);
   Part(0);
   UpdateElevators;
   UpdateShakes;
@@ -11359,6 +11419,13 @@ begin
     WritelnLog('Doom3World', 'End of level: next map "%s"', [FEndLevelMap]);
     if Assigned(FOnEndLevel) then
       FOnEndLevel(FEndLevelMap);
+  end else
+  if IsClass('target_checkpoint', 'idTarget_Checkpoint') then
+  begin
+    { Doom 3 BFG: "savegame autosave" (with g_checkpoints, on by default) }
+    WritelnLog('Doom3World', 'Checkpoint %s', [E.Name]);
+    if Assigned(FOnCheckpoint) then
+      FOnCheckpoint(E.Name);
   end else
   if IsClass('target_giveemail', 'idTarget_GiveEmail') then
   begin
@@ -15179,6 +15246,86 @@ end;
 function TD3Game.PlayerDead: Boolean;
 begin
   Result := Health <= 0;
+end;
+
+function TD3Game.ToggleMountedFlashlight: Boolean;
+begin
+  if FMountedLightOn then
+  begin
+    FMountedLightOn := False;
+    WritelnLog('Doom3World', 'Flashlight off (battery %d%%)', [Round(FlashlightBattery * 100)]);
+  end else
+  { idPlayer::PerformImpulse IMPULSE_16, FlashlightOn }
+  if PlayerDead or FWeaponsDisabled or CinematicActive then
+    WritelnLog('Doom3World', 'Flashlight: not now (dead, weapons disabled or a cinematic)')
+  else
+  if FFlashlightBattery < FlashlightMinActivate * FlashlightDrainTime then
+    WritelnLog('Doom3World', 'Flashlight: battery too low (%d%%)', [Round(FlashlightBattery * 100)])
+  else
+  begin
+    FMountedLightOn := True;
+    WritelnLog('Doom3World', 'Flashlight on (battery %d%%)', [Round(FlashlightBattery * 100)]);
+  end;
+  Result := FMountedLightOn;
+end;
+
+{ idPlayer::UpdateFlashlight: the battery drains while the light is on (off
+  when empty) and charges ten times faster while it is off; with less than
+  half the charge time left it flickers (off this frame at 10% chance);
+  weapon_flashlight's EnterCinematic / ExitCinematic turn it off and back }
+procedure TD3Game.UpdateMountedFlashlight(const SecondsPassed: Single);
+var
+  Cinematic: Boolean;
+begin
+  if not FMountedFlashlight then
+    Exit;
+  Cinematic := CinematicActive;
+  if Cinematic <> FMountedInCinematic then
+  begin
+    FMountedInCinematic := Cinematic;
+    if Cinematic then
+    begin
+      FMountedOnBeforeCinematic := FMountedLightOn;
+      FMountedLightOn := False;
+    end else
+      FMountedLightOn := FMountedOnBeforeCinematic;
+  end;
+  if PlayerDead then
+    FMountedLightOn := False;
+  if FMountedLightOn then
+  begin
+    FFlashlightBattery := FFlashlightBattery - SecondsPassed;
+    if FFlashlightBattery < 0 then
+    begin
+      FFlashlightBattery := 0;
+      FMountedLightOn := False;
+      WritelnLog('Doom3World', 'Flashlight off: the battery is empty');
+    end;
+  end else
+    FFlashlightBattery := Min(FlashlightDrainTime, FFlashlightBattery +
+      SecondsPassed * Max(1, FlashlightDrainTime / FlashlightChargeTime));
+  FMountedFlicker := FMountedLightOn and (FFlashlightBattery < FlashlightChargeTime / 2) and
+    (Random < FlashlightFlickerChance);
+end;
+
+function TD3Game.MountedFlashlightLit: Boolean;
+begin
+  Result := FMountedLightOn and not FMountedFlicker;
+end;
+
+function TD3Game.FlashlightBattery: Single;
+begin
+  Result := FFlashlightBattery / FlashlightDrainTime;
+end;
+
+function TD3Game.FlashlightIntensity: Single;
+var
+  V: TD3Value;
+begin
+  Result := 1;
+  if (FScript <> nil) and FScript.TryGlobalValue('global_flashlight_intensity', V) and
+     (V.Kind = sbFloat) then
+    Result := Max(0, V.F);
 end;
 
 {$I doom3world_entities.inc}

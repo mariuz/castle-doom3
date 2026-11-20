@@ -32,6 +32,8 @@ type
     Stamina: Integer;
     AmmoText: String;
     FlashlightOn: Boolean;
+    { Doom 3 BFG's mounted flashlight's battery in percent (-1: none) }
+    FlashlightBattery: Integer;
     Dead: Boolean;
     InfoText: String;
     { seconds since the player was hurt (the tunnel vision pulses) }
@@ -317,6 +319,18 @@ begin
   { wide enough for "TEST SHOTGUN  7 / 16    KILLS 10" }
   DrawRectangle(FloatRectangle(R.Right - 440 * S, R.Bottom + 20 * S, 420 * S, 70 * S), PanelColor);
   UIFont.Print(R.Right - 426 * S, R.Bottom + 56 * S, Cyan, AmmoText);
+  if FlashlightBattery >= 0 then
+  begin
+    { a battery bar like the BFG HUD's flashlight meter }
+    if FlashlightOn then
+      UIFont.Print(R.Right - 426 * S, R.Bottom + 30 * S, Vector4(1, 0.95, 0.6, 1), 'FLASHLIGHT ON  (F)')
+    else
+      UIFont.Print(R.Right - 426 * S, R.Bottom + 30 * S, Cyan, 'FLASHLIGHT     (F)');
+    DrawRectangle(FloatRectangle(R.Right - 160 * S, R.Bottom + 34 * S, 110 * S, 6 * S),
+      Vector4(0.2, 0.2, 0.1, 0.8));
+    DrawRectangle(FloatRectangle(R.Right - 160 * S, R.Bottom + 34 * S, 110 * S * FlashlightBattery / 100, 6 * S),
+      Vector4(1, 0.95, 0.6, 1));
+  end else
   if FlashlightOn then
     UIFont.Print(R.Right - 426 * S, R.Bottom + 30 * S, Vector4(1, 0.95, 0.6, 1), 'FLASHLIGHT ON  (F)')
   else
