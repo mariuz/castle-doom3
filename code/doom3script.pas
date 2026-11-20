@@ -243,6 +243,8 @@ type
     procedure UpdateThread(const T: TD3ScriptThread; const ATime: Single);
     procedure KillThreads;
     function GlobalValue(const AName: String): TD3Value;
+    { a global variable's value, if the program has it }
+    function TryGlobalValue(const AName: String; out Value: TD3Value): Boolean;
     { the global variables by index (saved games) }
     function GlobalCount: Integer;
     function GlobalAt(const Index: Integer): TD3Value;
@@ -2629,6 +2631,15 @@ begin
     Result := FGlobals[Index]
   else
     Result := D3FloatValue(0);
+end;
+
+function TD3ScriptVM.TryGlobalValue(const AName: String; out Value: TD3Value): Boolean;
+var
+  Index: Integer;
+begin
+  Result := FGlobalNames.TryGetValue(AName, Index) and (Index < Length(FGlobals));
+  if Result then
+    Value := FGlobals[Index];
 end;
 
 function TD3ScriptVM.GlobalCount: Integer;

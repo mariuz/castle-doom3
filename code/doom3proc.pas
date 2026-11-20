@@ -87,6 +87,9 @@ type
     function ModelCount: Integer;
     function Model(const I: Integer): TD3ProcModel;
     function FindModel(const Name: String): TD3ProcModel;
+    { A model without surfaces, added (Doom 3 BFG's binary .bproc leaves
+      them out, the text .proc has them). }
+    function AddEmptyModel(const Name: String): TD3ProcModel;
     function ShadowModelCount: Integer;
     { A shadow model by name (case-insensitive, like
       "_prelight_light_5625"), nil if none. }
@@ -485,6 +488,14 @@ end;
 function TD3ProcFile.Model(const I: Integer): TD3ProcModel;
 begin
   Result := FModels[I];
+end;
+
+function TD3ProcFile.AddEmptyModel(const Name: String): TD3ProcModel;
+begin
+  Result := TD3ProcModel.Create;
+  Result.Name := Name;
+  FModels.Add(Result);
+  FModelIndex.AddOrSetValue(LowerCase(Name), Result);
 end;
 
 function TD3ProcFile.FindModel(const Name: String): TD3ProcModel;

@@ -154,6 +154,11 @@ type
     { target_endlevel's next map, loaded FPendingMapIn seconds later }
     FPendingMap: String;
     FPendingMapIn: Single;
+    { target_checkpoint fired: saved ("autosave") at the next frame, like
+      Doom 3 BFG's appended "savegame autosave" (console g_checkpoints 0
+      turns it off) }
+    FPendingAutosave: Boolean;
+    FCheckpoints: Boolean;
     { a saved game to restore once its map has spawned }
     FPendingRestore: String;
     FPdaIndex: Integer;
@@ -186,6 +191,8 @@ type
     FGpuQueryActive: Boolean;
     { the flashlight's projection image ('-' none, '' not looked for) }
     FFlashlightProfileName: String;
+    { the flashlight's designed intensity (global_flashlight_intensity scales it) }
+    FFlashlightIntensity: Single;
     { perf: the main thread's CPU time at its start }
     FPerfCpuStart: Double;
     { perf: from the end of Update to the view's rendering (CGE updating
@@ -229,6 +236,7 @@ type
     procedure PlaceCamera(const FeetPos: TVector3; const YawDeg: Single);
     procedure HandleMessage(const Msg: String);
     procedure HandleFlashlight(const Value: Boolean);
+    procedure HandleCheckpoint(const Msg: String);
     procedure HandleEndLevel(const Msg: String);
     function SaveFileName(const AName: String): String;
     procedure SaveGame(const AName: String);
@@ -257,6 +265,8 @@ type
     procedure ApplyKnockback(const SecondsPassed: Single);
     procedure CreateDoubleVision;
     procedure SetFlashlight(const Value: Boolean);
+    { the F key: Doom 3 BFG's mounted flashlight (TD3Game), or the view's }
+    procedure ToggleFlashlight;
     procedure SetNoclip(const Value: Boolean);
     procedure RunDemoStep(const SecondsPassed: Single);
     procedure ReleaseDemoKeys;
@@ -470,7 +480,10 @@ begin
   FGame := TD3Game.Create(Map);
   FGame.OnMessage := @HandleMessage;
   FGame.OnFlashlight := @HandleFlashlight;
+  FFlashlightIntensity := Flashlight.Intensity;
   FGame.OnEndLevel := @HandleEndLevel;
+  FGame.OnCheckpoint := @HandleCheckpoint;
+  FCheckpoints := True;
   { g_fov's default (90, or 80 with the BFG look) the way Doom 3 means it }
   ApplyDefaultFov;
   { the PDA screen }
@@ -965,6 +978,12 @@ end;
 procedure TViewPlay.HandleFlashlight(const Value: Boolean);
 begin
   SetFlashlight(Value);
+end;
+
+procedure TViewPlay.HandleCheckpoint(const Msg: String);
+begin
+  if FCheckpoints then
+    FPendingAutosave := True;
 end;
 
 { Saved games: <user config>/saves/<name>.sav ("quick" without a name). }
@@ -1565,6 +1584,14 @@ begin
   Flashlight.Exists := Value;
 end;
 
+procedure TViewPlay.ToggleFlashlight;
+begin
+  if FGame.MountedFlashlight then
+    FGame.ToggleMountedFlashlight
+  else
+    SetFlashlight(not Flashlight.Exists);
+end;
+
 procedure TViewPlay.SetNoclip(const Value: Boolean);
 begin
   FNoclip := Value;
@@ -2109,22 +2136,28 @@ end;
   light, a light kind of its own, every shape it reached linked a new
   shader program, stalls of up to 1.7 s on a first play (erebus5). }
 procedure TViewPlay.UpdateFlashlight;
-const
-  Range = 1200;
-  HalfAngle = 0.4;
 var
   P, Dir, Up, Right, CamPos, CamDir, CamUp: TVector3;
-  W: Single;
+  Range, W: Single;
   M: TMatrix4;
 begin
   if not Flashlight.Exists then
     Exit;
+  if FGame.MountedFlashlight then
+  begin
+    { weapon_flashlight_new: flashTarget 1280, flashUp / flashRight 640 }
+    Range := 1280;
+    W := 640;
+  end else
+  begin
+    Range := 1200;
+    W := Range * Tan(0.4);
+  end;
   P := CgeToD3(Flashlight.WorldTranslation);
   MainViewport.Camera.GetWorldView(CamPos, CamDir, CamUp);
   Dir := CgeToD3(CamDir).Normalize;
   Up := CgeToD3(CamUp).Normalize;
   Right := TVector3.CrossProduct(Dir, Up);
-  W := Range * Tan(HalfAngle);
   M := ProjectedLightMatrix(P, TMatrix3.Identity, Dir * Range, Up * W, Right * W,
     TVector3.Zero, TVector3.Zero, False);
   if Flashlight.InternalLightNode.Field('d3_light_matrix_') = nil then
@@ -2255,13 +2288,19 @@ begin
     FGame.God := not FGame.God;
     Console.Print('godmode ' + BoolToStr(FGame.God, 'ON', 'OFF'));
   end else
+  if Cmd = 'g_checkpoints' then
+  begin
+    if Args <> '' then
+      FCheckpoints := Trim(Args) <> '0';
+    Console.Print('g_checkpoints ' + IntToStr(Ord(FCheckpoints)));
+  end else
   if Cmd = 'notarget' then
   begin
     FGame.NoTarget := not FGame.NoTarget;
     Console.Print('notarget ' + BoolToStr(FGame.NoTarget, 'ON', 'OFF'));
   end else
   if Cmd = 'flashlight' then
-    SetFlashlight(not Flashlight.Exists)
+    ToggleFlashlight
   else
   if Cmd = 'kill' then
     FGame.DamagePlayer(1000)
@@ -4187,7 +4226,7 @@ begin
     PlaceCamera(D3ToCge(ParseVector3(Param, TVector3.Zero)), CameraYaw)
   else
   if Action = 'F' then
-    SetFlashlight(not Flashlight.Exists)
+    ToggleFlashlight
   else
   if Action = 'X' then
     Fire(True)
@@ -4308,6 +4347,12 @@ begin
       RunDemoStep(SecondsPassed);
     Exit;
   end;
+  if FPendingAutosave then
+  begin
+    FPendingAutosave := False;
+    if not FGame.PlayerDead then
+      SaveGame('autosave');
+  end;
   if FPendingMap <> '' then
   begin
     FPendingMapIn := FPendingMapIn - SecondsPassed;
@@ -4427,6 +4472,11 @@ begin
   FPartVisibility := TimerSeconds(Timer, PartTimer);
   UpdateReverb;
   UpdateMuzzleFlash;
+  if FGame.MountedFlashlight then
+  begin
+    Flashlight.Exists := FGame.MountedFlashlightLit;
+    Flashlight.Intensity := FFlashlightIntensity * FGame.FlashlightIntensity;
+  end;
   UpdateFlashlight;
 
   Hud.Health := FGame.Health;
@@ -4435,7 +4485,15 @@ begin
   Hud.Dead := FGame.PlayerDead;
   UpdateDamageView;
   UpdateRemoteViews(SecondsPassed);
-  Hud.FlashlightOn := Flashlight.Exists;
+  if FGame.MountedFlashlight then
+  begin
+    Hud.FlashlightOn := FGame.MountedFlashlightOn;
+    Hud.FlashlightBattery := Round(FGame.FlashlightBattery * 100);
+  end else
+  begin
+    Hud.FlashlightOn := Flashlight.Exists;
+    Hud.FlashlightBattery := -1;
+  end;
   Hud.AmmoText := Format('%s    KILLS %d', [FGame.WeaponHudText, FGame.Kills]);
   PartTimer := Timer;
   UpdateHudGui(SecondsPassed);
@@ -4511,7 +4569,7 @@ begin
   end;
   if Event.IsKey(keyF) then
   begin
-    SetFlashlight(not Flashlight.Exists);
+    ToggleFlashlight;
     Exit(True);
   end;
   if Event.IsKey(keyTab) then

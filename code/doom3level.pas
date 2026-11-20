@@ -3110,8 +3110,10 @@ var
   CollisionNode: TCollisionNode;
   ClipOnly: Boolean;
   Materials: array of String;
+  EmptyModels: Integer;
 begin
   FClipModelBrushes := 0;
+  EmptyModels := 0;
   CollectReferencedNames;
   for E in FMapFile.Entities do
   begin
@@ -3127,6 +3129,16 @@ begin
       Model := FProc.FindModel(ModelName);
     if (Model = nil) and (E.Name <> '') then
       Model := FProc.FindModel(E.Name);
+    { Doom 3 BFG's binary .bproc leaves out the models without surfaces
+      (only nodraw or trigger faces): such an entity still exists in Doom 3
+      (mc_underground's canismover_anchor, a func_mover the visible parts
+      are bound to, moved by the map's script) }
+    if (Model = nil) and D3Fs.IsBfg and (E.PrimitiveCount > 0) and (E.Name <> '') and
+       ((ModelName = '') or SameText(ModelName, E.Name)) then
+    begin
+      Model := FProc.AddEmptyModel(E.Name);
+      Inc(EmptyModels);
+    end;
     if (Model = nil) or (Model.AreaIndex >= 0) then
       Continue;
 
@@ -3229,6 +3241,8 @@ begin
   end;
   if FClipModelBrushes > 0 then
     WritelnLog('Doom3Level', 'Brush entities: %d collide with their clip models', [FClipModelBrushes]);
+  if EmptyModels > 0 then
+    WritelnLog('Doom3Level', 'Brush entities: %d without surfaces (not in the .bproc), built empty', [EmptyModels]);
 end;
 
 { Model of an entity (its "model" key or its entityDef's), resolved through
@@ -3792,24 +3806,18 @@ begin
   Tubes := TubeSurfaceCount;
   Eyeballs := EyeballSurfaceCount;
   MapParticleDeforms.Clear;
-  { the map's own scenes (freed with the map) share heat haze effects }
-  ShareHazeEffects := True;
-  try
-    BuildWorld;
-    LoadProfileStep('world');
-    BuildCollision(Base);
-    LoadProfileStep('shadow casters');
-    BuildBrushEntities;
-    LoadProfileStep('brushes');
-    WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
-      [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
-    WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections, %d mirrors',
-      [HazeCount - Haze, ReflectionCount - Reflections, MirrorCount - MirrorsBefore]);
-    PlaceRemoteViews;
-    BuildStaticModelEntities;
-  finally
-    ShareHazeEffects := False;
-  end;
+  BuildWorld;
+  LoadProfileStep('world');
+  BuildCollision(Base);
+  LoadProfileStep('shadow casters');
+  BuildBrushEntities;
+  LoadProfileStep('brushes');
+  WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
+    [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
+  WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections, %d mirrors',
+    [HazeCount - Haze, ReflectionCount - Reflections, MirrorCount - MirrorsBefore]);
+  PlaceRemoteViews;
+  BuildStaticModelEntities;
   LoadProfileStep('static models');
   WritelnLog('Doom3Level', 'Conditional stages: %d shapes with an "if" condition',
     [ConditionalShapeCount - Conditionals]);

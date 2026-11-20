@@ -4393,6 +4393,79 @@ end;
 
 { Stamina (idPlayer::AdjustSpeed), the player's body and its powerup
   skins, a knockback throwing the player up. }
+{ Doom 3 BFG's armor mounted flashlight (TD3Game.MountedFlashlight, on BFG
+  data): 30 s of battery, recharged ten times faster, a quarter needed to
+  switch on, off when dead. }
+procedure TestMountedFlashlight;
+var
+  World: TCastleRootTransform;
+  Map: TDoom3Map;
+  Game: TD3Game;
+  Eye: TVector3;
+  Waited: Single;
+
+  procedure Step(const Seconds: Single);
+  var
+    T: Single;
+  begin
+    T := 0;
+    while T < Seconds - 0.001 do
+    begin
+      Game.Update(0.05, Eye);
+      T := T + 0.05;
+    end;
+  end;
+
+begin
+  World := TCastleRootTransform.Create(nil);
+  Map := TDoom3Map.Create(World);
+  World.Add(Map);
+  Game := nil;
+  try
+    Check(Map.LoadMap('testmap'), 'load testmap for the mounted flashlight');
+    Game := TD3Game.Create(Map);
+    Game.Spawn;
+    Game.NoTarget := True;
+    Eye := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Check(not Game.MountedFlashlight, 'the test data has the flashlight weapon, not the mounted one');
+    Game.MountedFlashlight := True;
+    CheckNear(1, Game.FlashlightBattery, 'battery full at the start');
+    Check(Game.ToggleMountedFlashlight, 'switched on');
+    Step(0.1);
+    Check(Game.MountedFlashlightLit, 'lit');
+    Step(15);
+    CheckNear(0.5, Game.FlashlightBattery, 'half the battery after 15 s', 0.02);
+    { until it goes off (the battery charges again once it is off) }
+    Waited := 0;
+    while Game.MountedFlashlightOn and (Waited < 20) do
+    begin
+      Step(0.05);
+      Waited := Waited + 0.05;
+    end;
+    CheckNear(15, Waited, 'the rest of the 30 s', 0.2);
+    Check(not Game.MountedFlashlightOn, 'off when the battery is empty');
+    CheckNear(0, Game.FlashlightBattery, 'empty', 0.02);
+    Check(not Game.ToggleMountedFlashlight, 'not with an empty battery');
+    Step(0.5);
+    CheckNear(5 / 30, Game.FlashlightBattery, 'charged ten times faster than it drains', 0.02);
+    Check(not Game.ToggleMountedFlashlight, 'not with less than a quarter');
+    Step(0.5);
+    Check(Game.ToggleMountedFlashlight, 'on again with a third');
+    Check(not Game.ToggleMountedFlashlight, 'toggled off');
+    Step(3);
+    CheckNear(1, Game.FlashlightBattery, 'full again 3 s later');
+    CheckNear(1, Game.FlashlightIntensity, 'full intensity without global_flashlight_intensity');
+    Check(Game.ToggleMountedFlashlight, 'on');
+    Game.DamagePlayer(1000);
+    Step(0.1);
+    Check(not Game.MountedFlashlightOn, 'off when dead');
+    Check(not Game.ToggleMountedFlashlight, 'not when dead');
+  finally
+    Game.Free;
+    World.Free;
+  end;
+end;
+
 procedure TestStaminaSkinsKnockback;
 var
   World: TCastleRootTransform;
@@ -8352,6 +8425,7 @@ begin
   TestBfgCompressedDds;
   TestInstallsAndDemoExtract;
   TestPowerups;
+  TestMountedFlashlight;
   TestStaminaSkinsKnockback;
   TestCrouchAndDeath;
   TestBrassAndRagdoll;
