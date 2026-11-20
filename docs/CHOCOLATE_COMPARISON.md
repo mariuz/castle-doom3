@@ -116,7 +116,9 @@ All 47 maps load and play to their end with no exception and no shader error; ev
 | site3 | 15 | 21.1 | 23.3 | 19% | 7 | 3.7 | 9 | 1 |
 | **all** | 701 | | | 32% | 167 | 4.3 | 414 | 126 |
 
-The worst maps are mostly views from inside walls: Chocolate DOOM-3-BFG pushes the player out of a wall after `setviewpos`, this port's noclip stays there (erebus5's views 12 to 16 look at a wall from up close here, at a room there). erebus5's 2 fog lights cover less than half of every area's box, so no area there is fogged yet.
+The worst maps are mostly views from inside walls: Chocolate DOOM-3-BFG pushes the player out of a wall after `setviewpos`, this port's noclip stays there (erebus5's views 12 to 16 look at a wall from up close here, at a room there). erebus5's 2 fog lights cover less than half of every area's box, so no area there was fogged.
+
+After the fog lights became Doom 3's fog pass (the depth curve exactly, the fade at the box's top, the box's far faces, every surface a fog light touches; `tools/chocolate_ours.ps1 -OutDir chocolate_fog`, the same Chocolate DOOM-3-BFG views): all maps 413 views under 5 (414 before), median difference 4.3; the fog maps: caverns1 16 of 19 (was 12 in this table), median luma 18.1 against 21.0 (12.2); caverns2 luma 10.1 against 14.5 (5.0); delta1 15 of 26 (15); erebus5 is unchanged (14 areas fogged now: its views are in walls). Other maps differ only by their moving lights and monsters.
 
 ## What differs
 
