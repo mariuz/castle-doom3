@@ -1034,6 +1034,8 @@ type
     FSpawnedFx: array of TD3MapEntity;
     FFlashlightBeamLit: Boolean;
     FFlashlightBeamDir: TVector3;
+    { d3xp's info_portalsky the sky viewport looks from (nil: none) }
+    FPortalSky: TD3MapEntity;
     { movers scripts spawned (comm1's pipes), for the log }
     FSpawnedMovers: Integer;
     { the grabber (idGrabber): on, what it holds, since when, the last throw }
@@ -1804,6 +1806,10 @@ type
     procedure SetFlashlightBeam(const Lit: Boolean; const Dir: TVector3);
     { Did the trigger of this entity name fire (at least once)? }
     function TriggerFired(const AName: String): Boolean;
+    { d3xp's active info_portalsky (idGameLocal::portalSkyEnt): the one
+      without "triggered" at the start, the last one activated after; nil
+      when the map has none }
+    property PortalSky: TD3MapEntity read FPortalSky;
     { Stick a decal at a Doom 3 point with a surface normal (console
       decal, projectiles); the decal scene joins the map on the first. }
     procedure AddDecal(const MaterialName: String; const Position, Normal: TVector3;
@@ -2460,6 +2466,7 @@ begin
   FSpawnArgs.Clear;
   SetLength(FSpawnedFx, 0);
   FSpawnedMovers := 0;
+  FPortalSky := nil;
   FBrass.Clear;
   FBrassDue := -1;
   FreeAndNil(FRagdoll);
@@ -6867,6 +6874,9 @@ begin
       Cls := LowerCase(E.ClassName_);
       if (Cls = 'light') and E.HasKey('s_shader') then
         SpawnLightSound(E);
+      { idPortalSky::Spawn: active from the start unless "triggered" }
+      if (Cls = 'info_portalsky') and not E.BoolValue('triggered') then
+        FPortalSky := E;
       if Cls = 'speaker' then
         SpawnSpeaker(E)
       else
@@ -7427,6 +7437,13 @@ begin
       ME.Holder.Exists := not ME.Hidden;
       Handled := True;
     end;
+  end;
+  { idPortalSky::Event_Activate: the sky is seen from it now }
+  if Cls = 'info_portalsky' then
+  begin
+    FPortalSky := E;
+    WritelnLog('Doom3World', 'Portal sky from %s', [E.Name]);
+    Handled := True;
   end;
   { idBeam::Event_Activate: shown or hidden }
   if Cls = 'func_beam' then

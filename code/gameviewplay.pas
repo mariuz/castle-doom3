@@ -13,6 +13,18 @@ uses
   Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui, Doom3RenderDoc;
 
 type
+  { d3xp's portal sky (idPlayerView::SingleView renders it before the
+    view): the map seen from the info_portalsky, drawn under the main
+    viewport, which is then transparent and whose portal sky surfaces
+    write only the depth (holes). Around its render the map's area
+    visibility is the sky camera's. }
+  TD3PortalSkyViewport = class(TCastleViewport)
+  public
+    Map: TDoom3Map;
+    MainCamera: TCastleCamera;
+    procedure Render; override;
+  end;
+
   TViewPlay = class(TCastleView)
   published
     { Components designed using CGE editor.
@@ -45,6 +57,11 @@ type
       rendering the cameras GUIs show, a few times a second }
     FRemoteViewport: TCastleViewport;
     FRemoteCamera: TCastleCamera;
+    { d3xp's portal sky; FPortalSkyOn: console g_enablePortalSky, env
+      CD3_PORTAL_SKY=0 }
+    FSkyViewport: TD3PortalSkyViewport;
+    FSkyCamera: TCastleCamera;
+    FPortalSkyOn, FPortalSkyActive: Boolean;
     FRemoteTime: Single;
     FEnvProbesOn: Boolean;
     { don't prepare the map's rendering resources at load (console
@@ -256,6 +273,7 @@ type
       flashTime), else the built-in pistol's }
     procedure UpdateMuzzleFlash;
     procedure UpdateFlashlight;
+    procedure UpdatePortalSky;
     { the HUD's tunnel vision and blood blobs from the game's damage }
     procedure UpdateDamageView;
     procedure UpdateRemoteViews(const SecondsPassed: Single);
@@ -471,6 +489,10 @@ begin
     pixels behind (game/caverns1's start view: 2.5 M pixel shader runs in
     the first pass, 1.8 M sorted; console r_occlusionSort) }
   MainViewport.OcclusionSort := sort3D;
+  FPortalSkyOn := GetEnvironmentVariable('CD3_PORTAL_SKY') <> '0';
+  FSkyViewport := nil;
+  FSkyCamera := nil;
+  FPortalSkyActive := False;
   { the shadow light's lit pass adds only its light to the shapes it
     reaches, in its screen rectangle (CGE change AC), like Doom 3's
     interactions: the other way every shape is drawn again with all its
@@ -1935,6 +1957,66 @@ begin
   WalkNavigation.FallSpeedStart := FGame.FallSpeed(FFallTime + SecondsPassed * 0.5) /
     (WalkNavigation.MoveSpeed * WalkNavigation.MoveVerticalSpeed);
   WalkNavigation.Falling := False;
+end;
+
+procedure TD3PortalSkyViewport.Render;
+begin
+  if Map <> nil then
+    Map.BeginPortalSkyPass(Camera);
+  try
+    inherited Render;
+  finally
+    if Map <> nil then
+      Map.EndPortalSkyPass(MainCamera);
+  end;
+end;
+
+procedure TViewPlay.UpdatePortalSky;
+var
+  Sky: TD3MapEntity;
+  Holder: TCastleUserInterface;
+  SkyOn: Boolean;
+begin
+  Sky := FGame.PortalSky;
+  { gameLocal.IsPortalSkyAcive: a portal sky surface in a visible area }
+  SkyOn := FPortalSkyOn and (Sky <> nil) and Map.HasPortalSky and Map.PortalSkyInView;
+  if SkyOn <> FPortalSkyActive then
+  begin
+    if SkyOn then
+      WritelnLog('GameViewPlay', 'Portal sky on (from %s)', [Sky.Name])
+    else
+      WritelnLog('GameViewPlay', 'Portal sky off');
+  end;
+  FPortalSkyActive := SkyOn;
+  if SkyOn and (FSkyViewport = nil) and (MainViewport.Parent <> nil) then
+  begin
+    FSkyViewport := TD3PortalSkyViewport.Create(FreeAtStop);
+    FSkyViewport.FullSize := True;
+    FSkyViewport.Items := MainViewport.Items;
+    FSkyCamera := TCastleCamera.Create(FreeAtStop);
+    MainViewport.Items.Add(FSkyCamera);
+    FSkyViewport.Camera := FSkyCamera;
+    FSkyViewport.BackgroundColor := Black;
+    { a far away room: no shadow volumes (the main view's shadow light) }
+    FSkyViewport.ShadowVolumes := False;
+    FSkyViewport.OcclusionSort := MainViewport.OcclusionSort;
+    FSkyViewport.Map := Map;
+    FSkyViewport.MainCamera := Camera;
+    { drawn first, under the main viewport }
+    Holder := MainViewport.Parent;
+    Holder.InsertControl(Holder.IndexOfControl(MainViewport), FSkyViewport);
+  end;
+  if FSkyViewport <> nil then
+    FSkyViewport.Exists := SkyOn;
+  MainViewport.Transparent := SkyOn;
+  if not SkyOn then
+    Exit;
+  { idPlayerView: the player's view, from the portal sky's origin }
+  FSkyCamera.SetView(D3ToCge(Sky.Origin), Camera.Direction, Camera.Up);
+  FSkyCamera.Perspective.FieldOfViewAxis := Camera.Perspective.FieldOfViewAxis;
+  FSkyCamera.Perspective.FieldOfView := Camera.Perspective.FieldOfView;
+  FSkyCamera.ProjectionNear := Camera.ProjectionNear;
+  FSkyCamera.ProjectionFar := Camera.ProjectionFar;
 end;
 
 procedure TViewPlay.UpdateRemoteViews(const SecondsPassed: Single);
@@ -3453,6 +3535,15 @@ begin
   if Cmd = 'fps' then
     LabelFps.Exists := not LabelFps.Exists
   else
+  if Cmd = 'g_enableportalsky' then
+  begin
+    { g_enablePortalSky [0|1]: d3xp's cvar }
+    if Args <> '' then
+      FPortalSkyOn := StrToIntDef(Args, 1) <> 0;
+    Console.Print(Format('g_enablePortalSky %d (%s; the map %s)', [Ord(FPortalSkyOn),
+      BoolToStr(FPortalSkyActive, 'drawn now', 'not drawn now'),
+      BoolToStr(Map.HasPortalSky, 'has portal sky surfaces', 'has none')]));
+  end else
   if Cmd = 'r_skipfoglights' then
   begin
     { r_skipFogLights [0|1]: Doom 3's cvar, fog lights off }
@@ -4471,6 +4562,7 @@ begin
     RunSkippedCinematic;
   PartTimer := Timer;
   Map.UpdateVisibility(Camera);
+  UpdatePortalSky;
   FPartVisibility := TimerSeconds(Timer, PartTimer);
   UpdateReverb;
   UpdateMuzzleFlash;

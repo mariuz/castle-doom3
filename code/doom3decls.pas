@@ -63,6 +63,9 @@ type
     StageColor: TVector4;
     AlphaTest: Single;
     Translucent, TwoSided, NonSolid, NoShadows, PlayerClip, MonsterClip: Boolean;
+    { "sort portalSky" (d3xp's textures/smf/portal_sky): the view from the
+      info_portalsky entity shows on it }
+    PortalSky: Boolean;
     { noOverlays: no decals on it (idMaterial::AllowOverlays) }
     NoOverlays: Boolean;
     { noDamage (SURF_NODAMAGE, textures/common/cushion): no falling damage
@@ -1458,8 +1461,11 @@ begin
           Lexer.Check(')');
         end;
       end else
-      if (L = 'description') or (L = 'renderbump') or
-         (L = 'sort') or (L = 'spectrum') then
+      if L = 'sort' then
+      begin
+        Result.PortalSky := SameText(Trim(Lexer.RestOfLine), 'portalSky');
+      end else
+      if (L = 'description') or (L = 'renderbump') or (L = 'spectrum') then
         Lexer.SkipLine;
     end;
   finally

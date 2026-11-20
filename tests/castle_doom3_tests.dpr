@@ -120,7 +120,7 @@ var
   Model: TD3ModelDecl;
   Snd: TD3SoundShader;
 begin
-  CheckEquals(54, Decls.DeclCount(dtMaterial), 'material count');
+  CheckEquals(55, Decls.DeclCount(dtMaterial), 'material count');
   CheckEquals(79, Decls.DeclCount(dtEntityDef), 'entityDef count');
   CheckEquals(8, Decls.DeclCount(dtModel), 'model decl count');
   CheckEquals(5, Decls.DeclCount(dtSkin), 'skin count');
@@ -789,7 +789,7 @@ begin
   MapFile := TD3MapFile.Create;
   try
     Check(MapFile.LoadFromVfs('maps/testmap.map'), 'load testmap.map');
-    CheckEquals(108, MapFile.Entities.Count, 'entity count');
+    CheckEquals(110, MapFile.Entities.Count, 'entity count');
     Check(MapFile.WorldSpawn <> nil, 'worldspawn');
     E := MapFile.FindByName('info_player_start_1');
     Check(E <> nil, 'find player start');
@@ -8189,6 +8189,7 @@ var
   M: TD3MiscEntity;
   B: TD3BrushEntity;
   Yaw: Single;
+  App: TAppearanceNode;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -8252,6 +8253,24 @@ begin
     Game.SetFlashlightBeam(True, D3ToCge(Vector3(-230, -230, 150)) - Eye);
     Game.Update(0.05, Eye);
     Check(Game.TriggerFired('trigger_flashlight_1'), 'the flashlight''s beam fires it');
+
+    { d3xp's portal sky: the material's sort, the depth-only appearance,
+      the active info_portalsky }
+    Check(Decls.Material('textures/test/portal_sky').PortalSky, 'sort portalSky is read');
+    Check(not Decls.Material('textures/test/flare').PortalSky, 'other materials are no portal sky');
+    App := PortalSkyAppearance;
+    try
+      Check((App.DepthMode <> nil) and not App.DepthMode.ColorWrite,
+        'portal sky surfaces write only the depth (DepthMode.colorWrite)');
+    finally
+      FreeAndNil(App);
+    end;
+    Check(not Map.HasPortalSky, 'no surface shows the portal sky in the test map');
+    Check((Game.PortalSky <> nil) and (Game.PortalSky.Name = 'info_portalsky_1'),
+      'the portal sky without "triggered" is active from the start');
+    Game.Activate(Game.FindEntity('info_portalsky_2'));
+    Check((Game.PortalSky <> nil) and (Game.PortalSky.Name = 'info_portalsky_2'),
+      'activating the other one makes it the portal sky');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);
