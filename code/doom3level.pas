@@ -3792,18 +3792,24 @@ begin
   Tubes := TubeSurfaceCount;
   Eyeballs := EyeballSurfaceCount;
   MapParticleDeforms.Clear;
-  BuildWorld;
-  LoadProfileStep('world');
-  BuildCollision(Base);
-  LoadProfileStep('shadow casters');
-  BuildBrushEntities;
-  LoadProfileStep('brushes');
-  WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
-    [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
-  WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections, %d mirrors',
-    [HazeCount - Haze, ReflectionCount - Reflections, MirrorCount - MirrorsBefore]);
-  PlaceRemoteViews;
-  BuildStaticModelEntities;
+  { the map's own scenes (freed with the map) share heat haze effects }
+  ShareHazeEffects := True;
+  try
+    BuildWorld;
+    LoadProfileStep('world');
+    BuildCollision(Base);
+    LoadProfileStep('shadow casters');
+    BuildBrushEntities;
+    LoadProfileStep('brushes');
+    WritelnLog('Doom3Level', 'Material stages: %d overlays, %d sprites, %d glass surfaces',
+      [OverlayShapeCount - Overlays, SpriteCount - Sprites, GlassCount - Glass]);
+    WritelnLog('Doom3Level', 'Special stages: %d heat haze glass surfaces, %d reflections, %d mirrors',
+      [HazeCount - Haze, ReflectionCount - Reflections, MirrorCount - MirrorsBefore]);
+    PlaceRemoteViews;
+    BuildStaticModelEntities;
+  finally
+    ShareHazeEffects := False;
+  end;
   LoadProfileStep('static models');
   WritelnLog('Doom3Level', 'Conditional stages: %d shapes with an "if" condition',
     [ConditionalShapeCount - Conditionals]);
