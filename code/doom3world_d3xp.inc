@@ -501,6 +501,14 @@ begin
             if (ME = nil) and (SameText(Other.ClassName_, 'light') or (Other.Value('spawnclass') = 'idLight')) then
               SpawnScriptLight(Other)
             else
+            if (ME = nil) and (SameText(Other.ClassName_, 'func_mover') or (Other.Value('spawnclass') = 'idMover')) then
+            begin
+              { idMover: the script gives it a model (setModel) and moves it }
+              FMap.SpawnBrushEntity(Other);
+              Inc(FSpawnedMovers);
+              if FSpawnedMovers = 1 then
+                WritelnLog('Doom3World', 'Script spawned the mover %s (%s)', [Other.Name, Other.ClassName_]);
+            end else
             if Other.Value('spawnclass') <> 'idProjectile' then
               Unsupported('sys.spawn of ' + ArgStr(0) + ' (the entity exists for scripts; no light or behavior is made)');
           end;

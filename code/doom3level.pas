@@ -46,6 +46,8 @@ type
     { The entity's shader parameters (_color, shaderParmN), read by its
       materials' stage colors and "if" conditions (setColor, setShaderParm). }
     Parms: TD3EntityParms;
+    { a script spawned it (TDoom3Map.SpawnBrushEntity) }
+    Spawned: Boolean;
     procedure SetHidden(const Value: Boolean);
     destructor Destroy; override;
   end;
@@ -481,6 +483,15 @@ type
     function SetGuiParm(const E: TD3MapEntity; const Key, Value: String): Integer;
     { The brush entity or static model with this entity name, nil if none. }
     function FindBrush(const AName: String): TD3BrushEntity;
+    { A brush entity a script spawned (sys.spawn of a func_mover): an empty
+      scene at the entity's origin, that move events move and setModel
+      fills (SetBrushModel). Areas are left empty: always drawn. }
+    function SpawnBrushEntity(const E: TD3MapEntity): TD3BrushEntity;
+    { idEntity::SetModel on a brush entity: the .proc model of that name
+      (comm1's pipes: "pipe1"...) replaces its surfaces; like Doom 3 the
+      clip model stays (a spawned mover has none). False if the .proc has
+      no such model. }
+    function SetBrushModel(const B: TD3BrushEntity; const ModelName: String): Boolean;
     { The md5 model entity with this entity name, nil if none. }
     function FindModelEntity(const AName: String): TD3ModelEntity;
     { Seconds since the map was loaded (the "time" of material
@@ -4327,6 +4338,74 @@ function TDoom3Map.FindModelEntity(const AName: String): TD3ModelEntity;
 begin
   if not FModelByName.TryGetValue(LowerCase(AName), Result) then
     Result := nil;
+end;
+
+function TDoom3Map.SpawnBrushEntity(const E: TD3MapEntity): TD3BrushEntity;
+var
+  Rot: TMatrix3;
+begin
+  Result := TD3BrushEntity.Create;
+  Result.Entity := E;
+  Result.Spawned := True;
+  Result.Parms := TD3EntityParms.Create;
+  Result.Parms.FromKeys(E.Pairs);
+  Result.Scene := TD3Scene.Create(nil);
+  Result.Scene.SetTransient;
+  Result.Scene.Name := 'Brush_' + SReplaceChars(E.Name, AllChars - ['a'..'z', 'A'..'Z', '0'..'9'], '_');
+  Result.Scene.Collides := False;
+  Result.Scene.Pickable := False;
+  Result.Scene.Translation := D3ToCge(E.Origin);
+  Rot := E.Rotation;
+  SetD3Rotation(Result.Scene, Rot);
+  Add(Result.Scene);
+  FBrushes.Add(Result);
+  FBrushByName.AddOrSetValue(LowerCase(E.Name), Result);
+  { a "model" key naming a .proc model }
+  if (E.Value('model') <> '') and (ExtractFileExt(E.Value('model')) = '') then
+    SetBrushModel(Result, E.Value('model'));
+end;
+
+function TDoom3Map.SetBrushModel(const B: TD3BrushEntity; const ModelName: String): Boolean;
+var
+  Model: TD3ProcModel;
+  Root: TX3DRootNode;
+  Surf: TD3ProcSurface;
+  I, Sprites: Integer;
+  Positions: array of TVector3;
+  Closed: Boolean;
+begin
+  Model := FProc.FindModel(ModelName);
+  if (Model = nil) or (Model.AreaIndex >= 0) then
+    Exit(False);
+  B.LocalMin := Vector3(MaxSingle, MaxSingle, MaxSingle);
+  B.LocalMax := Vector3(-MaxSingle, -MaxSingle, -MaxSingle);
+  Closed := False;
+  for Surf in Model.Surfaces do
+  begin
+    for I := 0 to High(Surf.Vertexes) do
+    begin
+      B.LocalMin := Vector3(Min(B.LocalMin.X, Surf.Vertexes[I].Position.X),
+        Min(B.LocalMin.Y, Surf.Vertexes[I].Position.Y), Min(B.LocalMin.Z, Surf.Vertexes[I].Position.Z));
+      B.LocalMax := Vector3(Max(B.LocalMax.X, Surf.Vertexes[I].Position.X),
+        Max(B.LocalMax.Y, Surf.Vertexes[I].Position.Y), Max(B.LocalMax.Z, Surf.Vertexes[I].Position.Z));
+    end;
+    if not Closed then
+    begin
+      SetLength(Positions, Length(Surf.Vertexes));
+      for I := 0 to High(Surf.Vertexes) do
+        Positions[I] := Surf.Vertexes[I].Position;
+      Closed := TrianglesClosed(Positions, Surf.Indexes);
+    end;
+  end;
+  Root := TX3DRootNode.Create;
+  Sprites := SpriteCount;
+  BuildProcModel(Model, Root, Root, B.Entity, B.Parms);
+  AddLightLibrary(Root);
+  { no fog lights: they are picked by the place at load, and this one moves }
+  B.Scene.Load(Root, True);
+  B.Scene.ProcessEvents := SpriteCount <> Sprites;
+  B.Scene.CastShadows := Closed;
+  Result := True;
 end;
 
 function TDoom3Map.AreaAt(const P: TVector3): Integer;

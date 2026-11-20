@@ -4353,6 +4353,8 @@ scriptEvent void    trigger( entity ent );
 scriptEvent void    setSpawnArg( string key, string value );
 scriptEvent entity  spawn( string classname );
 scriptEvent void    setOrigin( vector origin );
+scriptEvent void    setModel( string modelName );
+scriptEvent void    remove();
 scriptEvent void    projectileCreateProjectile( entity owner, vector start, vector dir );
 scriptEvent void    projectileLaunchProjectile( vector start, vector dir, vector pushVelocity );
 scriptEvent float   getTime();
@@ -4686,6 +4688,21 @@ void test_spawn_light() {
     light.setColor( 0, 1, 0 );
     sys.wait( 0.3 );
     light.fadeOutLight( 0.2 );
+}
+
+// a mover a script spawns (comm1's pipes): crate_1's .proc model, moved
+// up 64 in 0.5 s, then removed
+void test_spawn_mover() {
+    entity m;
+    sys.setSpawnArg( "name", "mover_spawned_1" );
+    m = sys.spawn( "func_mover" );
+    m.setModel( "crate_1" );
+    m.setOrigin( '300 -150 0' );
+    m.time( 0.5 );
+    m.move( -1, 64 );
+    sys.waitFor( m );
+    sys.wait( 0.2 );
+    m.remove();
 }
 
 void test_trigger_called() {
