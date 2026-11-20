@@ -1020,6 +1020,8 @@ type
     { func_fx entities a script spawned with "start": they play at the
       next update, where the script has put them by then }
     FSpawnedFx: array of TD3MapEntity;
+    { movers scripts spawned (comm1's pipes), for the log }
+    FSpawnedMovers: Integer;
     { the grabber (idGrabber): on, what it holds, since when, the last throw }
     FGrabEnabled: Boolean;
     FGrabbed: TD3Moveable;
@@ -2433,6 +2435,7 @@ begin
   FPreviousWeaponName := '';
   FSpawnArgs.Clear;
   SetLength(FSpawnedFx, 0);
+  FSpawnedMovers := 0;
   FBrass.Clear;
   FBrassDue := -1;
   FreeAndNil(FRagdoll);
@@ -7049,7 +7052,15 @@ begin
     FMap.SetLightOn(I, False);
   B := FMap.FindBrush(E.Name);
   if B <> nil then
+  begin
     B.SetHidden(True);
+    { a mover a script spawned and removed (comm1 makes a pipe every few
+      seconds): its nodes are freed, the empty scene stays for what still
+      refers to it (bindings, its script mover); not with sprites, which
+      the map's particle deforms point at }
+    if B.Spawned and not B.Scene.ProcessEvents then
+      B.Scene.Load(TX3DRootNode.Create, True);
+  end;
   ME := FMap.FindModelEntity(E.Name);
   if ME <> nil then
   begin
@@ -14435,6 +14446,13 @@ begin
   if (Light >= 0) and ((N = 'setShaderParm') or (N = 'setLightParm')) then
     FMap.SetLightParm(Light, Round(ArgF(0)), ArgF(1))
   else
+
+  { idEntity::SetModel on a brush entity (a mover a script spawned) }
+  if (N = 'setModel') and (Light < 0) and (FMap.FindBrush(E.Name) <> nil) then
+  begin
+    if not FMap.SetBrushModel(FMap.FindBrush(E.Name), D3ValueToString(Args[0])) then
+      Unsupported(Format('setModel "%s" on %s (not a .proc model)', [D3ValueToString(Args[0]), E.Name]));
+  end else
 
   { shader parameters of brush entities and static models: their
     materials' stage colors (parm0..11) and "if" conditions read them }

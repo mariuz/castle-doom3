@@ -2516,7 +2516,7 @@ begin
     Check((Lift <> nil) and (Bar <> nil) and (LightTrig >= 0), 'lift_1, bar_1, light_trig exist');
     if (Game.Script = nil) or (Lift = nil) or (Bar = nil) or (LightTrig < 0) then
       Exit;
-    CheckEquals(47, Game.Script.FunctionCount, 'script functions');
+    CheckEquals(48, Game.Script.FunctionCount, 'script functions');
     CheckNear(4, Lift.Scene.Translation.Y, 'lift starts on the floor');
     Away := D3ToCge(Vector3(-160, -160, 0)) + Vector3(0, PlayerEyeHeight, 0);
     { main starts on the first frame: the lift goes up 64 in 2 s (accelerating
@@ -8076,6 +8076,7 @@ var
   RemoveMe: TRemoveType;
   SL: TD3ScriptLight;
   Field: TX3DField;
+  B: TD3BrushEntity;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -8145,6 +8146,30 @@ begin
       for I := 1 to 6 do
         Game.Update(0.05, Eye);
       Check(not SL.Light.Exists, 'faded out, the light is off');
+    end;
+
+    { a mover a script spawns: setModel gives it a .proc model, move
+      events move it, remove frees its nodes }
+    Check(Map.FindBrush('mover_spawned_1') = nil, 'no spawned mover yet');
+    Game.RunScriptFunction('test_spawn_mover');
+    Game.Update(0.05, Eye);
+    B := Map.FindBrush('mover_spawned_1');
+    Check(B <> nil, 'the script spawned a mover');
+    if B <> nil then
+    begin
+      Check(B.Spawned, 'it is marked spawned');
+      Check(not B.Scene.BoundingBox.IsEmpty, 'setModel gave it crate_1''s surfaces');
+      CheckNear(300, CgeToD3(B.Scene.Translation).X, 'setOrigin placed it', 1);
+      for I := 1 to 4 do
+        Game.Update(0.05, Eye);
+      CheckNear(32, CgeToD3(B.Scene.Translation).Z, 'move( UP, 64 ) is halfway after 0.25 s', 12);
+      for I := 1 to 16 do
+        Game.Update(0.05, Eye);
+      CheckNear(64, CgeToD3(B.Scene.Translation).Z, 'it moved 64 up', 0.5);
+      for I := 1 to 8 do
+        Game.Update(0.05, Eye);
+      Check(not B.Scene.Exists, 'remove hid it');
+      Check((B.Scene.RootNode = nil) or (B.Scene.RootNode.FdChildren.Count = 0), 'remove freed its nodes');
     end;
   finally
     FreeAndNil(Game);
