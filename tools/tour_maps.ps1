@@ -168,4 +168,15 @@ if ($Route) {
   }
 }
 $Summary | Set-Content -Encoding utf8 (Join-Path $OutDir "summary.txt")
+# per-map performance against the baseline of its data set and kind
+# (tools/map_perf.py, docs/baselines/perf_<set>_<route|tour>.json): <OutDir>\perf.md
+if ($BasePath -match 'BFG') { $PerfSet = 'bfg' } elseif ($Game -eq 'd3xp') { $PerfSet = 'd3xp' } else { $PerfSet = 'doom3' }
+if ($Route) { $PerfKind = 'route' } else { $PerfKind = 'tour' }
+$PerfBaseline = Join-Path $PSScriptRoot "../docs/baselines/perf_$($PerfSet)_$($PerfKind).json"
+if (Test-Path $PerfBaseline) {
+  $Perf = & python (Join-Path $PSScriptRoot 'map_perf.py') check $OutDir $PerfBaseline (Join-Path $OutDir 'perf.md')
+  $Line = "Performance against docs/baselines/perf_$($PerfSet)_$($PerfKind).json: $($Perf | Select-Object -Last 1)"
+  Add-Content -Encoding utf8 (Join-Path $OutDir "summary.txt") $Line
+  Write-Host $Line
+}
 Write-Host "Summary: $OutDir\summary.txt"

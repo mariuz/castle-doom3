@@ -1707,6 +1707,10 @@ def map_text():
         {'classname': 'trigger_flashlight', 'name': 'trigger_flashlight_1',
          'model': 'trigger_flashlight_1', 'origin': '-230 -230 150', 'target': 'null_flashlight'},
         {'classname': 'target_null', 'name': 'null_flashlight', 'origin': '-230 -230 120'},
+        # a func_static named only by script/doom_main.script: kept apart
+        # (not merged), so the script can remove it
+        {'classname': 'func_static', 'name': 'static_scripted_1',
+         'model': 'models/mapobjects/test/barrel.lwo', 'origin': '-240 240 200'},
         # d3xp's portal skies: the first is active from the start, the
         # second ("triggered") once activated (no surface shows them here)
         {'classname': 'info_portalsky', 'name': 'info_portalsky_1', 'origin': '0 0 1000'},
@@ -2643,6 +2647,13 @@ entityDef damage_test_projectile {
 }
 
 // a gibbing hit (like the chainsaw's): the victim goes to pieces
+// a kill volume's damage (lava, Doom 3's damage_triggerhurt_100): it
+// passes god mode, not a god mode route walk (RouteInvulnerable)
+entityDef damage_test_lava {
+	"damage"				"100"
+	"noGod"					"1"
+}
+
 entityDef damage_test_gib {
 	"damage"				"200"
 	"gib"					"1"
@@ -4710,6 +4721,12 @@ void weapon_test_fists::Punch() {
     }
     waitUntil( animDone( ANIMCHANNEL_ALL, 0 ) );
     weaponState( "Idle", 0 );
+}
+
+// a static entity only this file names (the retail maps' scripts are
+// script/map_*.script): it must not be merged into its area's scene
+void test_remove_static() {
+    $static_scripted_1.remove();
 }
 
 #endif

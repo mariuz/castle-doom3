@@ -13,11 +13,15 @@ Events (the log line's kind and name; numbers in names are kept):
   elevator    Elevator <name> at floor <n>     an elevator arrived
   gui         GUI <file> (<entity>) triggered  a GUI's button or script ran
   camera      Security camera <name> alerts
+  boss        Killed <name> (monster_boss_...)  a boss died (fighting runs)
+  kill        Killed <name> (<class>, ...)      a monster died (fighting runs)
   trigger     Trigger <name> fired
   script      Script: <print>                  the map script's prints
 
-next, objective, cinematic and elevator are the "key" events: missing ones
-are listed by name; the others are counted.
+next, objective, cinematic, elevator and boss are the "key" events: missing
+ones are listed by name; the others are counted. Kills come from fighting
+runs (tools/tour_maps.ps1 -Route -Fight); a god mode route kills nothing,
+so check it against a baseline of its own kind.
 
   python tools/map_events.py baseline <run dir> <baseline.json>
   python tools/map_events.py check <run dir> <baseline.json> [<out.md>]
@@ -33,8 +37,8 @@ import os
 import re
 import sys
 
-KEY_KINDS = ['next', 'objective', 'cinematic', 'elevator']
-KINDS = KEY_KINDS + ['gui', 'camera', 'trigger', 'script']
+KEY_KINDS = ['next', 'objective', 'cinematic', 'elevator', 'boss']
+KINDS = KEY_KINDS + ['gui', 'camera', 'trigger', 'script', 'kill']
 
 PATTERNS = [
     ('objective', re.compile(r'Doom3World: (?:New objective|Objective complete): ([^(]*?)\s*(?:\(|$)')),
@@ -43,6 +47,8 @@ PATTERNS = [
     ('gui', re.compile(r'Doom3World: GUI (\S+ \(\S+\)) triggered')),
     ('camera', re.compile(r'Doom3World: Security camera (\S+) alerts')),
     ('trigger', re.compile(r'Doom3World: Trigger (\S+) fired')),
+    ('boss', re.compile(r'Doom3World: Killed (\S+) \(monster_boss_')),
+    ('kill', re.compile(r'Doom3World: Killed (\S+) \(')),
     ('script', re.compile(r'^Script: (?!Not supported)(?!Event ")(.+)$')),
 ]
 LOADING = re.compile(r'GameViewPlay: Loading map "([^"]+)"')
@@ -73,9 +79,12 @@ def events_of(path):
                 if m:
                     found[kind].add(m.group(1).strip())
                     break
-    # the first load is the map itself, a second one its end
-    if len(loads) > 1:
-        found['next'].add(loads[1])
+    # the first load is the map itself, the first other map its end (a
+    # fighting run loads the same map again from a save after a death)
+    for name in loads[1:]:
+        if loads and name != loads[0]:
+            found['next'].add(name)
+            break
     return {k: sorted(v) for k, v in found.items()}
 
 
