@@ -53,7 +53,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleSoundEngine, CastleBoxes, CastleBehaviors, CastleTimeUtils,
-  CastleRenderOptions, X3DNodes,
+  CastleRenderOptions, X3DNodes, X3DFields,
   Doom3Level, Doom3MapFile, Doom3Decls, Doom3Script, Doom3Camera, Doom3Md5, Doom3Aas, Doom3Ragdoll,
   Doom3Particles, Doom3Decals, Doom3Gui, Doom3Pda, Doom3Portals, Doom3Materials;
 
@@ -443,6 +443,9 @@ type
     { the burning edges' appearances (one per burning mesh with an edge
       stage, nil without), alpha tested by the edge stage }
     BurnEdges: array of TAppearanceNode;
+    { the burning skins' and edges' alpha test thresholds (BurnEffect's
+      uniforms; an edge's nil without one) }
+    BurnCutoffs, BurnEdgeCutoffs: array of TSFFloat;
     { stopThinking: its threads stopped }
     Thinking: Boolean;
     { the player is its enemy; moving to it }
@@ -5640,13 +5643,47 @@ begin
       if I > High(A.Model.Instance.MeshShapes) then
         Continue;
       M := Decls.Material(A.Model.Instance.MeshMaterials[I]);
-      App := A.Model.Instance.MeshShapes[I].Appearance;
-      if (M.BurnAlphaTest <> nil) and (App <> nil) then
-        App.AlphaCutoff := EnsureRange(M.BurnAlphaTest.Eval(Ctx), 0.001, 1);
-      if (J <= High(A.BurnEdges)) and (A.BurnEdges[J] <> nil) and (M.BurnEdgeAlphaTest <> nil) then
-        A.BurnEdges[J].AlphaCutoff := EnsureRange(M.BurnEdgeAlphaTest.Eval(Ctx), 0.001, 1);
+      { a uniform, not the appearance's AlphaCutoff: CGE writes that into
+        the shader code, so each frame of a burn linked new programs for
+        every burning mesh (thousands in a fight in hell1) }
+      if (M.BurnAlphaTest <> nil) and (J <= High(A.BurnCutoffs)) and (A.BurnCutoffs[J] <> nil) then
+        A.BurnCutoffs[J].Send(EnsureRange(M.BurnAlphaTest.Eval(Ctx), 0.001, 1));
+      if (M.BurnEdgeAlphaTest <> nil) and (J <= High(A.BurnEdgeCutoffs)) and (A.BurnEdgeCutoffs[J] <> nil) then
+        A.BurnEdgeCutoffs[J].Send(EnsureRange(M.BurnEdgeAlphaTest.Eval(Ctx), 0.001, 1));
     end;
   end;
+end;
+
+{ The burn-away stages' alpha test with its threshold a uniform
+  (d3_burn_cutoff): the code is the same for every burning shape, and
+  SharedUniforms lets them share their programs (each shape sends its own
+  value). The appearance's own alpha test stays at a fixed 0.01. }
+function BurnEffect(const App: TAppearanceNode; out Cutoff: TSFFloat): TEffectNode;
+var
+  Frag: TEffectPartNode;
+  Effects: array of TEffectNode;
+  I: Integer;
+begin
+  Result := TEffectNode.Create;
+  Result.Language := slGLSL;
+  Result.SharedUniforms := True;
+  Cutoff := TSFFloat.Create(Result, True, 'd3_burn_cutoff', 0.01);
+  Result.AddCustomField(Cutoff);
+  Frag := TEffectPartNode.Create;
+  Frag.ShaderType := stFragment;
+  Frag.Contents :=
+    'uniform float d3_burn_cutoff;' + LineEnding +
+    'void PLUG_fragment_modify(inout vec4 fragment_color)' + LineEnding +
+    '{' + LineEnding +
+    '  if (fragment_color.a < d3_burn_cutoff)' + LineEnding +
+    '    discard;' + LineEnding +
+    '}' + LineEnding;
+  Result.SetParts([Frag]);
+  Effects := nil;
+  for I := 0 to App.FdEffects.Count - 1 do
+    if App.FdEffects[I] is TEffectNode then
+      Effects := Concat(Effects, [TEffectNode(App.FdEffects[I])]);
+  App.SetEffects(Concat(Effects, [Result]));
 end;
 
 procedure TD3Game.ActorBurn(const A: TD3Actor);
@@ -5661,6 +5698,7 @@ var
   Unlit: TUnlitMaterialNode;
   EdgeTex: TImageTextureNode;
   Depth: TDepthModeNode;
+  Cutoff, EdgeCutoff: TSFFloat;
 begin
   { idAI::Event_Burn: the time of death (the materials' burn-away stages
     use it) and "smoke_burnParticleSystem" ("particle-joint") at that
@@ -5671,6 +5709,8 @@ begin
     (UpdateBurns) }
   A.BurnMeshes := nil;
   A.BurnEdges := nil;
+  A.BurnCutoffs := nil;
+  A.BurnEdgeCutoffs := nil;
   if A.Model.Instance <> nil then
     for I := 0 to High(A.Model.Instance.MeshShapes) do
     begin
@@ -5684,11 +5724,14 @@ begin
         [ImageProgramUrl('castlealphafrom(' + M.DiffuseImage + ',' + M.BurnImage + ')', ikColor)]);
       App.AlphaMode := amMask;
       App.AlphaCutoff := 0.01;
+      BurnEffect(App, Cutoff);
       A.BurnMeshes := Concat(A.BurnMeshes, [I]);
+      A.BurnCutoffs := Concat(A.BurnCutoffs, [Cutoff]);
       { the burning edge: the same triangles with the edge stage's map,
         unlit, behind the skin (privatePolygonOffset -1), alpha tested a
         little lower than the skin: it shows where the skin has just gone }
       EdgeApp := nil;
+      EdgeCutoff := nil;
       if (M.BurnEdgeAlphaTest <> nil) and (A.Model.Instance.Scene.RootNode <> nil) then
       begin
         Edge := TShapeNode.Create;
@@ -5701,6 +5744,7 @@ begin
         EdgeApp.Material := Unlit;
         EdgeApp.AlphaMode := amMask;
         EdgeApp.AlphaCutoff := 0.01;
+        BurnEffect(EdgeApp, EdgeCutoff);
         EdgeApp.ShadowCaster := False;
         Depth := TDepthModeNode.Create;
         Depth.DepthFunc := dmfLessEqual;
@@ -5710,6 +5754,7 @@ begin
         A.Model.Instance.Scene.RootNode.AddChildren(Edge);
       end;
       A.BurnEdges := Concat(A.BurnEdges, [EdgeApp]);
+      A.BurnEdgeCutoffs := Concat(A.BurnEdgeCutoffs, [EdgeCutoff]);
     end;
   Def := A.Model.EntityDef;
   Value := A.Model.Entity.Value('smoke_burnParticleSystem');
