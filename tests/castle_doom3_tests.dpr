@@ -5374,10 +5374,21 @@ begin
       'its diffuse texture with the dissolve image''s alpha');
     for I := 1 to 20 do
       Game.Update(0.05, Far);
-    CheckNear(0.05 + 0.3 * 1, App.AlphaCutoff, 'the cutoff after 1 s', 0.03);
+    { the cutoff is a shared effect's uniform: the appearance's own (baked
+      into the shader code) stays, so a burn links no new programs a frame }
+    CheckNear(0.01, App.AlphaCutoff, 'the appearance''s cutoff stays', 0.0001);
+    Check((Length(A.BurnCutoffs) > 0) and (A.BurnCutoffs[0] <> nil), 'a burn cutoff uniform');
+    if (Length(A.BurnCutoffs) > 0) and (A.BurnCutoffs[0] <> nil) then
+    begin
+      CheckNear(0.05 + 0.3 * 1, A.BurnCutoffs[0].Value, 'the cutoff after 1 s', 0.03);
+      Check((A.BurnCutoffs[0].ParentNode is TEffectNode) and TEffectNode(A.BurnCutoffs[0].ParentNode).SharedUniforms,
+        'in an effect sharing its program');
+    end;
     Check((Length(A.BurnEdges) > 0) and (A.BurnEdges[0] <> nil), 'a burning edge');
-    if (Length(A.BurnEdges) > 0) and (A.BurnEdges[0] <> nil) then
-      CheckNear(0.3 * 1, A.BurnEdges[0].AlphaCutoff, 'the edge''s cutoff after 1 s, a little lower', 0.03);
+    if (Length(A.BurnEdgeCutoffs) > 0) and (A.BurnEdgeCutoffs[0] <> nil) then
+      CheckNear(0.3 * 1, A.BurnEdgeCutoffs[0].Value, 'the edge''s cutoff after 1 s, a little lower', 0.03)
+    else
+      Check(False, 'the edge''s cutoff uniform');
   finally
     FreeAndNil(Game);
     FreeAndNil(World);

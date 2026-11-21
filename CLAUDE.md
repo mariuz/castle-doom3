@@ -121,5 +121,6 @@ Unit tests: `cd tests; castle-engine compile; .\castle-doom3-tests.exe` (2166 ch
 - Locals named like `TCastleTransform` properties (`Center`, `Up`, `Direction`, `World`...) clash inside `TDoom3Map` methods.
 - `TCastleSoundSource` lives in `CastleBehaviors`; `Container.Pressed.KeyUp` has an `out` key string.
 - CGE cuts a light off hard at its `Radius`, unless `RadiusFalloff` (CGE change H, `doom3-port`) fades it to zero there: use it for lights that aren't light volumes (see `BuildLights`).
+- An appearance's `AlphaCutoff` is written into the shader code: a threshold that changes during play must be a uniform (`BurnEffect` in `Doom3World`, an Effect with `SharedUniforms`), or each value links new programs. The `shader programs linked` count is links started (with parallel compiles also those dropped before they finished); find what links with a temporary log in CGE's `TRendererCache.Program_IncReference` (the shape's scene name) and env `CD3_LOGSHADERS=1` in a `-dCASTLE_COLLECT_SHADER_SOURCE` build.
 - One X3D node must not be in two scenes: `MaterialAppearance` creates fresh nodes each call, textures are shared by URL.
 - Doom 3 decls: the first definition wins; names are lowercase with `/`. `ReadImageProgram` normalizes programs without spaces (they are also the `d3img:` URL paths).
