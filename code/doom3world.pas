@@ -707,6 +707,9 @@ type
     { where the last damage hit it, from where (CGE; HitDir zero for a
       splash): the fracture's shards fly away from there }
     HitPoint, HitDir: TVector3;
+    { a barrel's splash radius (its def_splash_damage's "radius"), 0 not
+      looked up yet }
+    SplashRadius: Single;
   end;
 
   TD3Moveable = class
@@ -1899,6 +1902,16 @@ type
       Ignore are left out. }
     function FightThreat(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
       out Target: TVector3; out TargetName: String): Boolean;
+    { The fighting bot's hazards at the player's feet Feet (CGE): a
+      trigger_hurt that is on (its volume grown by Margin) or a barrel that
+      can still explode (within its splash radius plus Margin); What names
+      it. }
+    function HazardAt(const Feet: TVector3; const Margin: Single; out What: String): Boolean;
+    { A monster's projectile that will pass within MissDist of the eye Eye
+      (CGE) in the next Within seconds: Away is the horizontal way out of
+      its path (CGE, unit), Proj the projectile. }
+    function IncomingProjectile(const Eye: TVector3; const MissDist, Within, MaxSpeed: Single;
+      out Away: TVector3; out Proj: TObject; out What: String): Boolean;
     { Per frame: the monster review's numbers (TD3Monster.Appeared...). }
     procedure TrackMonsters(const SecondsPassed: Single);
     { The monster review in the log (console "monsters", the fight's

@@ -5625,6 +5625,7 @@ var
   Plat, Mover: TD3Mover;
   Far, Eye: TVector3;
   I, Before, HealthBefore: Integer;
+  HazardWhat: String;
   H: Single;
 begin
   World := TCastleRootTransform.Create(nil);
@@ -5647,6 +5648,15 @@ begin
       Exit;
     Check(B1.Kind = ekBarrel, 'an exploding barrel');
     CheckEquals(20, B1.Health, 'barrel health');
+    { the fighting bot's hazards: by a barrel that can explode, in a hurt
+      volume that is on }
+    Check(Game.HazardAt(D3ToCge(Vector3(800, -60, 96)), 0, HazardWhat), 'a hazard 80 from a barrel');
+    CheckEquals('barrel_exp_1', HazardWhat, 'the barrel');
+    Check(not Game.HazardAt(D3ToCge(Vector3(600, -60, 96)), 0, HazardWhat), 'none 280 away');
+    Check(Game.HazardAt(D3ToCge(Vector3(640, -260, 0)), 0, HazardWhat), 'a hazard in trigger_hurt_1');
+    CheckEquals('trigger_hurt_1', HazardWhat, 'the hurt volume');
+    Check(not Game.HazardAt(D3ToCge(Vector3(420, -250, 0)), 0, HazardWhat), 'none in room B''s middle');
+    Check(Game.HazardAt(D3ToCge(Vector3(420, -250, 0)), 300, HazardWhat), 'one within a margin of 300');
     Check(Game.MoveableOf(B1.Entity) <> nil, 'an exploding barrel is a moveable');
     Check(not Game.DamageMiscAt(D3ToCge(Vector3(-200, -200, 50)), 10, 'damage_test_hurt'), 'nothing to damage there');
     Check(Game.DamageMiscAt(B1.Brush.Scene.BoundingBox.Center, 10, 'damage_test_hurt'), 'a shot hits the barrel');
@@ -5658,6 +5668,7 @@ begin
     for I := 1 to 12 do
       Game.Update(0.05, Far);
     Check(B2.Dead and B2.Brush.Hidden, 'the chain reaction');
+    Check(not Game.HazardAt(D3ToCge(Vector3(800, -60, 96)), 0, HazardWhat), 'no hazard once the barrels exploded');
 
     { idBrittleFracture: breaks at the first damage }
     Glass := Game.MiscOf(Game.FindEntity('glass_1'));
@@ -8267,6 +8278,9 @@ var
   CamFwd: TVector3;
   Proj: TD3Projectile;
   Along: Single;
+  DodgeAway: TVector3;
+  DodgeProj: TObject;
+  DodgeWhat: String;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -8392,6 +8406,33 @@ begin
       Check(Proj.FromPlayer, 'thrown, it is the player''s');
       CheckNear(1000, Proj.Velocity.Length, 'thrown at 1000 (THROW_SCALE)', 1);
       Check(TVector3.DotProduct(Proj.Velocity, D3ToCge(Vector3(1, 0, 0))) > 990, 'along the view');
+    end;
+
+    { the fighting bot's dodge: a monster's ball on its way to the eye, the
+      way out sideways; none when it flies past or away }
+    Proj := Game.SpawnProjectile('projectile_test', 'blob_ranged_1',
+      Eye + D3ToCge(Vector3(150, 10, 0)), D3ToCge(Vector3(-300, 0, 0)));
+    Check(Proj <> nil, 'a ball thrown at the player');
+    if Proj <> nil then
+    begin
+      Check(Game.IncomingProjectile(Eye, 40, 0.7, 1000, DodgeAway, DodgeProj, DodgeWhat), 'a ball on its way');
+      Check(DodgeProj = Proj, 'that ball');
+      CheckEquals('projectile_test', DodgeWhat, 'its def');
+      CheckNear(1, DodgeAway.Length, 'a way out', 0.001);
+      CheckNear(0, DodgeAway.Y, 'sideways, not up', 0.001);
+      Check(TVector3.DotProduct(CgeToD3(Eye + DodgeAway) - CgeToD3(Eye), Vector3(0, -1, 0)) > 0.9,
+        'away from the side it passes (it passes 10 to the left: out to the right)');
+      Proj.Velocity := D3ToCge(Vector3(300, 0, 0));
+      Check(not Game.IncomingProjectile(Eye, 40, 0.7, 1000, DodgeAway, DodgeProj, DodgeWhat), 'none flying away');
+      Proj.Velocity := D3ToCge(Vector3(-30, 0, 0));
+      Check(not Game.IncomingProjectile(Eye, 40, 0.7, 1000, DodgeAway, DodgeProj, DodgeWhat), 'none 5 s away');
+      Proj.Position := Eye + D3ToCge(Vector3(150, 100, 0));
+      Proj.Velocity := D3ToCge(Vector3(-300, 0, 0));
+      Check(not Game.IncomingProjectile(Eye, 40, 0.7, 1000, DodgeAway, DodgeProj, DodgeWhat), 'none passing 100 away');
+      Proj.Position := Eye + D3ToCge(Vector3(1000, 10, 0));
+      Proj.Velocity := D3ToCge(Vector3(-2000, 0, 0));
+      Check(not Game.IncomingProjectile(Eye, 40, 0.7, 1000, DodgeAway, DodgeProj, DodgeWhat), 'none as fast as a bullet');
+      Check(Game.IncomingProjectile(Eye, 40, 0.7, 3000, DodgeAway, DodgeProj, DodgeWhat), 'unless faster ones count');
     end;
 
     { armor saves ceil(damage * 0.3f) in float (idPlayer::CalcDamagePoints),
