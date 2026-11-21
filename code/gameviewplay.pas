@@ -4108,10 +4108,11 @@ begin
   if FightTactics and (FFightTime >= FFightSkipUntil) and
      FGame.FightThreat(Camera.Translation, FightWaitDist, FFightIgnore + FFightWaitIgnore, Target, TargetName) then
   begin
+    { the wait counts on when the nearest threat changes: two trites taking
+      turns being the nearest kept it waiting for hours (caverns1) }
     if TargetName <> FFightWaitFor then
     begin
       FFightWaitFor := TargetName;
-      FFightWait := 0;
       WritelnLog('GameViewPlay', 'Fight: waiting for %s at %s (out of sight, %.0f away)',
         [TargetName, CgeToD3(Target).ToString, PointsDistance(Target, Camera.Translation)]);
     end;
@@ -4125,8 +4126,12 @@ begin
       FRouteLastEye := Camera.Translation;
       Exit(True);
     end;
-    { it doesn't come: walk on }
+    { it doesn't come: walk on (a second for the next one) }
     FFightWaitIgnore := FFightWaitIgnore + ',' + TargetName;
+    FFightWaitFor := '';
+    FFightWait := FightWaitMax - 1;
+  end else
+  begin
     FFightWaitFor := '';
     FFightWait := 0;
   end;
@@ -4198,7 +4203,10 @@ begin
     FRouteHold := 2;
     FRouteLastEye := Camera.Translation;
   end;
-  FGame.RouteInvulnerable := not FFight;
+  { given up at a place (god mode): noGod damage too, or a kill volume on
+    the route (le_enpro2's, le_hell's trigger_hurt of 1000) kills it again
+    and again after every load }
+  FGame.RouteInvulnerable := not FFight or FFightGod;
   if FFight and FightStep(SecondsPassed) then
     Exit(False);
   if FRouteHold > 0 then
