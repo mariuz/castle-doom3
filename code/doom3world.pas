@@ -638,6 +638,32 @@ type
     destructor Destroy; override;
   end;
 
+  { A shard of a shattered idBrittleFracture (TD3Game.ShatterFracture):
+    its center (CGE, world), the corners around it as they were, how it
+    flies and spins, the floor under it. }
+  TD3ShardPiece = record
+    Center, Velocity, Axis: TVector3;
+    Corners: array [0..2] of TVector3;
+    Angle, Spin, FloorY: Single;
+    Resting: Boolean;
+  end;
+
+  { The shards of one shattered surface: one scene, a shape per shape of
+    the brush (its appearance copied), the corners moved every frame. }
+  TD3ShatterPart = record
+    Coord: TCoordinateNode;
+    First, Count: Integer;
+  end;
+
+  TD3Shatter = class
+    Scene: TCastleScene;
+    Pieces: array of TD3ShardPiece;
+    Parts: array of TD3ShatterPart;
+    Age: Single;
+    Name: String;
+    destructor Destroy; override;
+  end;
+
   TD3MiscKind = (ekBarrel, ekFracture, ekDamagable, ekForceField, ekShaking,
     ekEarthQuake, ekActivator, ekShockwave, ekHarvest, ekSecurityCamera);
 
@@ -678,6 +704,9 @@ type
     CamYaw, CamSweepStart, CamSweepEnd, CamStopSweeping, CamEventTime: Single;
     CamNegative, CamSweeping: Boolean;
     CamAlert, CamEvent: Integer;
+    { where the last damage hit it, from where (CGE; HitDir zero for a
+      splash): the fracture's shards fly away from there }
+    HitPoint, HitDir: TVector3;
   end;
 
   TD3Moveable = class
@@ -1007,6 +1036,7 @@ type
     FTorsoPainAge: Single;
     { brass, and when the current weapon ejects the next (-1: none) }
     FBrass: specialize TObjectList<TD3Brass>;
+    FShatters: specialize TObjectList<TD3Shatter>;
     FBrassDue: Single;
     { the dead body's ragdoll (nil: none) }
     FRagdoll: TD3Ragdoll;
@@ -1043,6 +1073,11 @@ type
     { the grabber (idGrabber): on, what it holds, since when, the last throw }
     FGrabEnabled: Boolean;
     FGrabbed: TD3Moveable;
+    { the grabber's catch when it isn't a moveable: a projectile (it stays
+      in front of the eye, then flies the player's) or a small monster
+      (idGrabber::grabbableAI: it stops, then dies thrown) }
+    FGrabbedProjectile: TD3Projectile;
+    FGrabbedMonster: TD3Monster;
     FGrabStart, FGrabFired, FGrabDistance: Single;
     FPreviousWeaponName: String;
     FBlobs: array of TD3ScreenBlob;
@@ -1521,6 +1556,8 @@ type
     { Doom 3's falling speed (gravity 1066) after Seconds of falling, at
       least FallSpeedMin (stepping down stays quick) }
     class function FallSpeed(const Seconds: Single): Single; static;
+    { What armor saves of a hit to the player (idPlayer::CalcDamagePoints). }
+    class function ArmorSaves(const Amount, ArmorLeft: Integer; const NoArmor: Boolean): Integer; static;
     { The screen blobs still showing (idPlayerView's screenBlobs). }
     function ScreenBlobs: specialize TArray<TD3ScreenBlob>;
     { Seconds since the player was last hurt (large when never). }
@@ -1857,6 +1894,11 @@ type
       left out. }
     function FightTarget(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
       out Target: TVector3; out TargetName: String; const Hunted: String = ''): Boolean;
+    { The fight's chasers: the nearest monster after the player within
+      MaxDist of Eye that it can't see (behind a corner, a wall); names in
+      Ignore are left out. }
+    function FightThreat(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
+      out Target: TVector3; out TargetName: String): Boolean;
     { Per frame: the monster review's numbers (TD3Monster.Appeared...). }
     procedure TrackMonsters(const SecondsPassed: Single);
     { The monster review in the log (console "monsters", the fight's
@@ -1914,6 +1956,10 @@ type
     { doom3world_entities.inc }
     function CmBox(const E: TD3MapEntity; out Box: TBox3D): Boolean;
     function MiscOf(const E: TD3MapEntity): TD3MiscEntity;
+    { A func_securitycamera's view now (idSecurityCamera::GetRenderView):
+      its rotation from the sweep's angles, its scanFov (both fovs in Doom
+      3); False for other entities. }
+    function SecurityCameraView(const E: TD3MapEntity; out Rot: TMatrix3; out FovY: Single): Boolean;
     procedure SpawnMisc(const E: TD3MapEntity);
     procedure SpawnPlat(const B: TD3BrushEntity);
     procedure SplashAt(const Position: TVector3; const DefName, Who: String; const Skip: TD3MiscEntity);
@@ -1927,6 +1973,15 @@ type
     procedure UpdateSecurityCamera(const M: TD3MiscEntity; const Feet: TVector3);
     procedure QuakeMisc(const M: TD3MiscEntity; const BySelf: Boolean);
     procedure UpdateMisc(const SecondsPassed: Single);
+    { idBrittleFracture::Shatter: the surface in shards (one scene) that
+      fall and go in 5 s (UpdateShatters). }
+    procedure ShatterFracture(const M: TD3MiscEntity);
+    procedure UpdateShatters(const SecondsPassed: Single);
+    { shattered surfaces whose shards are still falling, and their shards }
+    function ShatterCount: Integer;
+    function ShardCount: Integer;
+    { the shards' mean height (CGE Y; 0 without shards) }
+    function ShardMeanHeight: Single;
     function ActivateMisc(const E: TD3MapEntity; const Cls, SC: String): Boolean;
     { doom3world_d3xp.inc }
     procedure SpawnVacuum;
@@ -1934,6 +1989,13 @@ type
     function AreaInVacuum(const Area: Integer): Boolean;
     procedure UpdateAir(const SecondsPassed: Single);
     function UpdateGrabber: Integer;
+    { UpdateGrabber's projectiles and monsters: a catch nearer than
+      BestAlong (0 none, 1 in reach, 2 caught), its release }
+    function UpdateGrabberCatch(const Fwd, Eye: TVector3; const Held: Boolean;
+      var BestAlong: Single): Integer;
+    procedure ReleaseGrabberCatch(const Fwd: TVector3);
+    property GrabbedProjectile: TD3Projectile read FGrabbedProjectile;
+    property GrabbedMonster: TD3Monster read FGrabbedMonster;
     procedure UpdateThrownMoveables;
     procedure UpdateHarvest(const M: TD3MiscEntity);
     { idMoveable::ApplyImpulse on the moveable at Point (CGE world): its
@@ -2065,7 +2127,7 @@ uses
   Math,
   CastleLog, CastleUtils, CastleQuaternions,
   Generics.Defaults,
-  CastleShapes,
+  CastleShapes, CastleTriangles,
   Doom3Files, Doom3Collision, Doom3Lexer, Doom3Expressions, Doom3StaticModels, Doom3Scene,
   Doom3AF, Doom3Images, Doom3LightEffects,
   CastleInternalSoundFile;
@@ -2327,6 +2389,7 @@ begin
   FMovers := specialize TObjectList<TD3Mover>.Create(True);
   FElevators := specialize TObjectList<TD3Elevator>.Create(True);
   FBrass := specialize TObjectList<TD3Brass>.Create(True);
+  FShatters := specialize TObjectList<TD3Shatter>.Create(True);
   FBrassDue := -1;
   RagdollEnabled := True;
   ShowBrass := True;
@@ -2399,6 +2462,7 @@ begin
   FMovers.Free;
   FElevators.Free;
   FBrass.Free;
+  FShatters.Free;
   FMonsters.Free;
   FSpeakers.Free;
   FSounds.Free;
@@ -2474,6 +2538,8 @@ begin
   FMisc.Clear;
   FSecurity := '';
   FGrabbed := nil;
+  FGrabbedProjectile := nil;
+  FGrabbedMonster := nil;
   FGrabEnabled := False;
   FGrabFired := 0;
   FPreviousWeaponName := '';
@@ -2482,6 +2548,7 @@ begin
   FSpawnedMovers := 0;
   FPortalSky := nil;
   FBrass.Clear;
+  FShatters.Clear;
   FBrassDue := -1;
   FreeAndNil(FRagdoll);
   FPlayerGibbed := False;
@@ -7861,6 +7928,7 @@ begin
   UpdateMoveables(SecondsPassed * WorldTimeScale);
   Part(2);
   UpdateMisc(SecondsPassed * WorldTimeScale);
+  UpdateShatters(SecondsPassed * WorldTimeScale);
   UpdateThrownMoveables;
   UpdateAir(SecondsPassed);
   FMap.AnimTimeScale := WorldTimeScale;
@@ -10927,6 +10995,9 @@ begin
     else
       Result := FTime - ME.LastInPvs > DormantDelay;
   end;
+  { held by the grabber (a ragdoll in Doom 3): it does nothing }
+  if (ME <> nil) and (FGrabbedMonster <> nil) and (FGrabbedMonster.Model = ME) then
+    Result := True;
   if ME <> nil then
   begin
     if Result and not ME.Dormant then
@@ -12726,6 +12797,8 @@ var
   begin
     if (P.HeldBy <> nil) and (P.HeldBy.Missile = P) then
       P.HeldBy.Missile := nil;
+    if P = FGrabbedProjectile then
+      FGrabbedProjectile := nil;
     { its trail fades out by itself }
     if P.Trail <> nil then
     begin
@@ -12778,6 +12851,14 @@ begin
         ExplodeParticles(P, False, TVector3.Zero);
       end;
       Remove;
+      Continue;
+    end;
+    { in the grabber: where UpdateGrabber puts it (its fuse runs on) }
+    if P = FGrabbedProjectile then
+    begin
+      if P.Visual <> nil then
+        P.Visual.Translation := P.Position;
+      UpdateTrail(P);
       Continue;
     end;
     { idGuidedProjectile::Think: turn towards the player's eyes }
@@ -14971,6 +15052,20 @@ begin
   PlaySoundAt(FPlayerDef.Values[Key], FPlayerEye);
 end;
 
+class function TD3Game.ArmorSaves(const Amount, ArmorLeft: Integer; const NoArmor: Boolean): Integer;
+var
+  { in float like Doom 3 (dhewm3's SSE builds): 10 * 0.3f rounds to 3.0 }
+  Protection, Saved: Single;
+begin
+  if NoArmor or (Amount <= 0) or (ArmorLeft <= 0) then
+    Exit(0);
+  Protection := 0.3;
+  Saved := Amount * Protection;
+  Result := Min(ArmorLeft, Ceil(Saved));
+  if Result >= Amount then
+    Result := Amount - 1;
+end;
+
 procedure TD3Game.DamagePlayer(const Amount: Integer; const DamageDefName: String;
   const Direction: TVector3);
 const
@@ -15006,11 +15101,9 @@ begin
   Def := nil;
   if DamageDefName <> '' then
     Def := Decls.EntityDef(DamageDefName);
-  { Doom 3 armor absorbs 1/3 of the damage (noArmor defs none) }
-  if Info.NoArmor then
-    Absorbed := 0
-  else
-    Absorbed := Min(Armor, Amount div 3);
+  { idPlayer::CalcDamagePoints: armor saves ceil(damage * g_armorProtection
+    0.3), at most what is left, and leaves at least 1 (noArmor defs none) }
+  Absorbed := ArmorSaves(Amount, Armor, Info.NoArmor);
   Dec(Armor, Absorbed);
   if (Absorbed > 0) and (FTime > FLastArmorPulse + 0.2) then
     PlayerSound('snd_hitArmor');

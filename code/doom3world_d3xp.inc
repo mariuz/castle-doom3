@@ -261,6 +261,137 @@ end;
 
 { idGrabber::Update: 0 nothing in reach, 1 something to grab, 2 holding
   it, 3 just thrown. }
+{ idGrabber::grabbableAI: the monsters it can hold (the name after
+  "monster_"). }
+function GrabbableMonster(const ClassName: String): Boolean;
+var
+  S: String;
+begin
+  S := LowerCase(ClassName);
+  if Copy(S, 1, 8) <> 'monster_' then
+    Exit(False);
+  Delete(S, 1, 8);
+  Result := (Copy(S, 1, 15) = 'flying_lostsoul') or (Copy(S, 1, 11) = 'demon_trite') or
+    (S = 'flying_forgotten') or (S = 'demon_cherub') or (S = 'demon_tick');
+end;
+
+function TD3Game.UpdateGrabberCatch(const Fwd, Eye: TVector3; const Held: Boolean;
+  var BestAlong: Single): Integer;
+const
+  { Grabber.cpp: MAX_PICKUP_SIZE, MAX_PICKUP_VELOCITY }
+  MaxPickupSize = 96;
+  MaxPickupVelocity = 1500;
+var
+  P, BestP: TD3Projectile;
+  Mon, BestMon: TD3Monster;
+  Center: TVector3;
+  Def: TStringList;
+  Along, Off: Single;
+begin
+  Result := 0;
+  BestP := nil;
+  BestMon := nil;
+  { a projectile in flight (a monster's: the player's own fly away) }
+  for P in FProjectiles do
+  begin
+    if P.FromPlayer or (P.HeldBy <> nil) or (P.HeldByWeapon <> nil) or P.Resting or
+       (P.Velocity.Length >= MaxPickupVelocity) or (P.Radius >= MaxPickupSize) then
+      Continue;
+    Def := Decls.EntityDef(P.DefName);
+    if (Def <> nil) and (StrToIntDef(Def.Values['nograb'], 0) <> 0) then
+      Continue;
+    Center := CgeToD3(P.Position);
+    Along := TVector3.DotProduct(Center - Eye, Fwd);
+    if (Along <= 8) or (Along >= BestAlong) then
+      Continue;
+    Off := ((Center - Eye) - Fwd * Along).Length;
+    if Off > Max(12, P.Radius) then
+      Continue;
+    if not CanSee(FPlayerEye, P.Position) then
+      Continue;
+    BestP := P;
+    BestAlong := Along;
+  end;
+  { a small monster, alive }
+  for Mon in FMonsters do
+  begin
+    if (Mon.State = msDead) or (Mon.Health <= 0) or (Mon.Model = nil) or Mon.Model.Hidden or
+       not Mon.Model.Holder.Exists or (Mon.Radius >= MaxPickupSize) or
+       not GrabbableMonster(Mon.Model.Entity.ClassName_) then
+      Continue;
+    Center := CgeToD3(Mon.Center);
+    Along := TVector3.DotProduct(Center - Eye, Fwd);
+    if (Along <= 8) or (Along >= BestAlong) then
+      Continue;
+    Off := ((Center - Eye) - Fwd * Along).Length;
+    if Off > Max(12, Mon.Radius) then
+      Continue;
+    if not CanSee(FPlayerEye, Mon.Center) then
+      Continue;
+    BestMon := Mon;
+    BestP := nil;
+    BestAlong := Along;
+  end;
+  if (BestP = nil) and (BestMon = nil) then
+    Exit(0);
+  if not Held then
+    Exit(1);
+  FGrabStart := FTime;
+  if BestMon <> nil then
+  begin
+    FGrabbedMonster := BestMon;
+    WritelnLog('Doom3World', 'Grabber holds %s', [BestMon.Model.Entity.Name]);
+  end else
+  begin
+    FGrabbedProjectile := BestP;
+    BestP.Velocity := TVector3.Zero;
+    WritelnLog('Doom3World', 'Grabber catches %s of %s', [BestP.DefName, BestP.Owner]);
+  end;
+  Result := 2;
+end;
+
+procedure TD3Game.ReleaseGrabberCatch(const Fwd: TVector3);
+const
+  { THROW_SCALE: an impulse of 1000 times the mass }
+  ThrowSpeed = 1000;
+var
+  P: TD3Projectile;
+  Def: TStringList;
+  D: TVector3;
+begin
+  if FGrabbedProjectile <> nil then
+  begin
+    { idProjectile::CatchProjectile( player, "_catch" ): the player's now,
+      with its def_damage + "_catch" when there is one; always thrown, never
+      dropped }
+    P := FGrabbedProjectile;
+    FGrabbedProjectile := nil;
+    P.FromPlayer := True;
+    P.Owner := 'player';
+    P.SeeksPlayer := False;
+    Def := Decls.EntityDef(P.DamageDefName + '_catch');
+    if Def <> nil then
+    begin
+      P.DamageDefName := P.DamageDefName + '_catch';
+      P.Damage := StrToIntDef(Def.Values['damage'], P.Damage);
+    end;
+    D := Fwd.Normalize;
+    P.Speed := ThrowSpeed;
+    P.Velocity := D3ToCge(D) * ThrowSpeed;
+    P.Pitch := D3DirPitch(D);
+    P.Yaw := D3DirYaw(D);
+    WritelnLog('Doom3World', 'Grabber throws %s (%s, %d)', [P.DefName, P.DamageDefName, P.Damage]);
+  end;
+  if FGrabbedMonster <> nil then
+  begin
+    { idGrabber::StopDrag: damage_suicide on a grabbable monster, its body
+      thrown along the view }
+    WritelnLog('Doom3World', 'Grabber throws %s', [FGrabbedMonster.Model.Entity.Name]);
+    DamageMonster(FGrabbedMonster, 9999, 'damage_suicide', D3ToCge(Fwd.Normalize) * ThrowSpeed);
+    FGrabbedMonster := nil;
+  end;
+end;
+
 function TD3Game.UpdateGrabber: Integer;
 const
   { Grabber.cpp: the reach, where the thing is held in front of the eye,
@@ -275,18 +406,40 @@ var
   M, Best: TD3Moveable;
   Along, Off, BestAlong: Single;
   Held, WasPickable, Visible: Boolean;
+  Catch: Integer;
 begin
   if (FGrabFired > 0) and (FTime < FGrabFired + FiringDelay) then
     Exit(3);
+  Axis := PlayerViewAxis;
+  Fwd := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);
   if not FGrabEnabled or PlayerDead or (FWeapon = nil) then
   begin
     FGrabbed := nil;
+    ReleaseGrabberCatch(Fwd);
     Exit(0);
   end;
-  Axis := PlayerViewAxis;
-  Fwd := Vector3(Axis.Data[0, 0], Axis.Data[0, 1], Axis.Data[0, 2]);
   Eye := CgeToD3(FPlayerEye);
   Held := FWeapon.Flag('WEAPON_ATTACK');
+  { holding a projectile or a monster }
+  if (FGrabbedMonster <> nil) and ((FGrabbedMonster.State = msDead) or (FGrabbedMonster.Health <= 0) or
+     FGrabbedMonster.Model.Hidden or not FGrabbedMonster.Model.Holder.Exists) then
+    FGrabbedMonster := nil;
+  if (FGrabbedProjectile <> nil) or (FGrabbedMonster <> nil) then
+  begin
+    if not Held or (FTime > FGrabStart + HoldSeconds) then
+    begin
+      ReleaseGrabberCatch(Fwd);
+      FGrabFired := FTime;
+      Exit(3);
+    end;
+    Goal := D3ToCge(Eye + Fwd * HoldDistance);
+    if FGrabbedProjectile <> nil then
+      FGrabbedProjectile.Position := Goal
+    else
+      FGrabbedMonster.Model.Holder.Translation := FGrabbedMonster.Model.Holder.Translation +
+        (Goal - FGrabbedMonster.Center);
+    Exit(2);
+  end;
   if (FGrabbed <> nil) and (FGrabbed.Brush.Hidden or (FMoveables.IndexOf(FGrabbed) < 0)) then
     FGrabbed := nil;
   if FGrabbed = nil then
@@ -319,6 +472,10 @@ begin
       Best := M;
       BestAlong := Along;
     end;
+    { or a projectile or a small monster nearer along the view }
+    Catch := UpdateGrabberCatch(Fwd, Eye, Held, BestAlong);
+    if Catch <> 0 then
+      Exit(Catch);
     if Best = nil then
       Exit(0);
     if not Held then

@@ -4265,7 +4265,7 @@ begin
     Game.DamagePlayer(20);
     CheckEquals('snd_pain_huge', Game.LastPlayerSound, 'below 25: snd_pain_huge');
     Step(0.6);
-    { armor takes a third and clanks }
+    { armor takes 30% (rounded up) and clanks }
     Game.Health := 100;
     Game.Armor := 30;
     Game.DamagePlayer(9);
@@ -5625,6 +5625,7 @@ var
   Plat, Mover: TD3Mover;
   Far, Eye: TVector3;
   I, Before, HealthBefore: Integer;
+  H: Single;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -5666,6 +5667,16 @@ begin
       Check(not Glass.Dead, 'the pane is out of the barrels'' splash (radius 100)');
       Game.DamageMiscAt(Glass.Brush.Scene.BoundingBox.Center, 5, 'damage_test_hurt');
       Check(Glass.Dead and Glass.Brush.Hidden, 'the pane shattered');
+      { into shards (one scene) that fall and go in 5 s }
+      CheckEquals(1, Game.ShatterCount, 'the pane''s shards');
+      Check(Game.ShardCount > 20, Format('cut into small shards (%d)', [Game.ShardCount]));
+      H := Game.ShardMeanHeight;
+      for I := 1 to 10 do
+        Game.Update(0.05, Far);
+      Check(Game.ShardMeanHeight < H - 10, 'the shards fall');
+      for I := 1 to 100 do
+        Game.Update(0.05, Far);
+      CheckEquals(0, Game.ShatterCount, 'the shards are gone after 5 s');
     end;
 
     { idDamagable: its target each time its health is gone, "count" times }
@@ -8249,9 +8260,13 @@ var
   RemoveMe: TRemoveType;
   M: TD3MiscEntity;
   B: TD3BrushEntity;
-  Yaw: Single;
+  Yaw, CamFov: Single;
   App: TAppearanceNode;
   Health: Integer;
+  CamRot: TMatrix3;
+  CamFwd: TVector3;
+  Proj: TD3Projectile;
+  Along: Single;
 begin
   World := TCastleRootTransform.Create(nil);
   Map := TDoom3Map.Create(World);
@@ -8271,9 +8286,16 @@ begin
     if M <> nil then
     begin
       Yaw := M.CamAngles.Y;
+      Check(Game.SecurityCameraView(M.Entity, CamRot, CamFov), 'a security camera has a view');
+      CamFwd := Vector3(CamRot.Data[0, 0], CamRot.Data[0, 1], CamRot.Data[0, 2]);
       for I := 1 to 10 do
         Game.Update(0.05, Eye);
       Check(Abs(M.CamAngles.Y - Yaw) > 5, 'the camera sweeps its yaw');
+      { a monitor showing it follows the sweep (scanFov: 120) }
+      Game.SecurityCameraView(M.Entity, CamRot, CamFov);
+      Check(TVector3.DotProduct(CamFwd, Vector3(CamRot.Data[0, 0], CamRot.Data[0, 1], CamRot.Data[0, 2])) < 0.999,
+        'the camera''s view turned with the sweep');
+      CheckNear(120, CamFov, 'its view''s fov is its scanFov', 0.01);
       CheckEquals(0, M.CamAlert, 'nobody in sight: scanning');
       { the player in front of it, within scanDist }
       Eye := D3ToCge(Vector3(180, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
@@ -8347,6 +8369,39 @@ begin
     Game.RouteInvulnerable := False;
     Game.DamagePlayer(100, 'damage_test_lava', TVector3.Zero);
     Check(Game.Health < Health, 'noGod damage passes plain god mode');
+
+    { the grabber catches a monster's projectile in front of the eye (it
+      stays there, its fuse running) and throws it as the player's }
+    Eye := D3ToCge(Vector3(0, -100, 0)) + Vector3(0, PlayerEyeHeight, 0);
+    Game.Update(0.05, Eye);
+    Proj := Game.SpawnProjectile('projectile_test', 'blob_ranged_1',
+      Eye + D3ToCge(Vector3(100, 0, 0)), D3ToCge(Vector3(-300, 0, 0)));
+    Check(Proj <> nil, 'a monster''s projectile');
+    if Proj <> nil then
+    begin
+      Along := 384;
+      CheckEquals(1, Game.UpdateGrabberCatch(Vector3(1, 0, 0), CgeToD3(Eye), False, Along),
+        'the grabber has it in reach');
+      Along := 384;
+      CheckEquals(2, Game.UpdateGrabberCatch(Vector3(1, 0, 0), CgeToD3(Eye), True, Along),
+        'the grabber catches it');
+      Check(Game.GrabbedProjectile = Proj, 'held');
+      Game.Update(0.05, Eye);
+      Check(Proj.Velocity.IsZero, 'it stays in the grabber');
+      Game.ReleaseGrabberCatch(Vector3(1, 0, 0));
+      Check(Proj.FromPlayer, 'thrown, it is the player''s');
+      CheckNear(1000, Proj.Velocity.Length, 'thrown at 1000 (THROW_SCALE)', 1);
+      Check(TVector3.DotProduct(Proj.Velocity, D3ToCge(Vector3(1, 0, 0))) > 990, 'along the view');
+    end;
+
+    { armor saves ceil(damage * 0.3f) in float (idPlayer::CalcDamagePoints),
+      at most what is left, and leaves at least 1 }
+    CheckEquals(3, TD3Game.ArmorSaves(8, 100, False), 'armor saves 3 of 8');
+    CheckEquals(3, TD3Game.ArmorSaves(10, 100, False), 'armor saves 3 of 10 (float)');
+    CheckEquals(9, TD3Game.ArmorSaves(30, 100, False), 'armor saves 9 of 30');
+    CheckEquals(2, TD3Game.ArmorSaves(30, 2, False), 'armor saves what is left');
+    CheckEquals(0, TD3Game.ArmorSaves(1, 100, False), 'a hit of 1 goes through armor');
+    CheckEquals(0, TD3Game.ArmorSaves(30, 100, True), 'noArmor damage');
 
     { an md5 model's shader parameters: script events set them, its head
       too (setShaderParm( 4, -sys.getTime() ) starts a fade) }

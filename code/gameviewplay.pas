@@ -116,6 +116,10 @@ type
       god mode no save (which ends it) before the walk is past that }
     FFightDeathWalked, FFightGodUntil: Single;
     FFightTarget, FFightIgnore: String;
+    { waiting for a chaser out of sight (FightStep): its name, how long, the
+      ones waited for long enough }
+    FFightWaitFor, FFightWaitIgnore: String;
+    FFightWait: Single;
     FFightHasSave, FFightGod: Boolean;
     FFightRoute: TD3PointArray;
     FFightSeg: Integer;
@@ -2030,6 +2034,9 @@ var
   Rgba: TRGBAlphaImage;
   W: String;
   Want: Boolean;
+  Cam: TD3MapEntity;
+  CamRot: TMatrix3;
+  CamFov: Single;
 begin
   FRemoteTime := FRemoteTime + SecondsPassed;
   if (FRemoteTime < Interval) or (Map.RemoteViews.Count = 0) then
@@ -2063,6 +2070,10 @@ begin
         Want := True;
     if not Want then
       Continue;
+    { a security camera's view follows its sweep }
+    Cam := Map.MapFile.FindByName(RV.CameraName);
+    if (Cam <> nil) and FGame.SecurityCameraView(Cam, CamRot, CamFov) then
+      Map.AimRemoteView(RV, Cam, CamRot, CamFov);
     FRemoteViewport.Width := RV.Width;
     FRemoteViewport.Height := RV.Height;
     { portal visibility from the security camera, the player's again after }
@@ -3911,6 +3922,13 @@ begin
     Result := 'fight';
 end;
 
+{ The fight's tactics (waiting for chasers out of sight, backing off from
+  claws): env CD3_FIGHT_TACTICS=0 turns them off, to compare. }
+function FightTactics: Boolean;
+begin
+  Result := GetEnvironmentVariable('CD3_FIGHT_TACTICS') <> '0';
+end;
+
 function TViewPlay.FightStep(const SecondsPassed: Single): Boolean;
 const
   FightSaveEvery = 20;
@@ -3920,8 +3938,14 @@ const
   FightSaveAnyway = 90;
   FightStrafeSpeed = 140;
   FightStrafeReach = 44;
+  { closer than this it backs off (melee: claws, bites), at this speed }
+  FightBackOffDist = 160;
+  FightBackOffSpeed = 160;
+  { a chaser out of sight this close holds the walk, this long at most }
+  FightWaitDist = 600;
+  FightWaitMax = 6;
 var
-  Target, Dir, Side, NewEye: TVector3;
+  Target, Dir, Side, NewEye, Back: TVector3;
   TargetName: String;
   Slot: Integer;
   Mon: TD3Monster;
@@ -3979,6 +4003,9 @@ begin
     FFightLastKills := FGame.Kills;
     FFightTarget := '';
     FFightIgnore := '';
+    FFightWaitFor := '';
+    FFightWaitIgnore := '';
+    FFightWait := 0;
     FFightSinceSave := 0;
     if FFightDeathsHere >= 3 then
     begin
@@ -4038,6 +4065,24 @@ begin
     { held, not a pulse per frame: a shot ends a pulse, and the weapon's
       script gets a turn per game tic (several in a long frame) }
     FGame.Attack := True;
+    FFightWaitFor := '';
+    FFightWait := 0;
+    { back off from claws and bites: it keeps shooting while the monster
+      walks after it (hell knights, imps up close) }
+    if FightTactics and (Dir.Length < FightBackOffDist) then
+    begin
+      Back := Vector3(-Dir.X, 0, -Dir.Z);
+      if Back.Length > 0.01 then
+      begin
+        Back := Back.Normalize;
+        NewEye := Camera.Translation + Back * (FightBackOffSpeed * Min(SecondsPassed, 0.1));
+        if not MainViewport.Items.WorldSegmentCollision(Camera.Translation, NewEye + Back * (PlayerRadius + 8)) then
+        begin
+          Camera.Translation := NewEye;
+          FFightAnchor := NewEye;
+        end;
+      end;
+    end;
     { sidestep: fireballs and bursts aimed at where it stood miss }
     Side := TVector3.CrossProduct(Dir, Vector3(0, 1, 0));
     if Side.Length > 0.01 then
@@ -4056,6 +4101,35 @@ begin
   end;
   FFightTarget := '';
   FFightOnTarget := 0;
+
+  { a chaser out of sight (around a corner, behind): wait for it facing its
+    way, so the ones after the player come one by one, not in a crowd at
+    the next stop (the walk is faster than they are) }
+  if FightTactics and (FFightTime >= FFightSkipUntil) and
+     FGame.FightThreat(Camera.Translation, FightWaitDist, FFightIgnore + FFightWaitIgnore, Target, TargetName) then
+  begin
+    if TargetName <> FFightWaitFor then
+    begin
+      FFightWaitFor := TargetName;
+      FFightWait := 0;
+      WritelnLog('GameViewPlay', 'Fight: waiting for %s at %s (out of sight, %.0f away)',
+        [TargetName, CgeToD3(Target).ToString, PointsDistance(Target, Camera.Translation)]);
+    end;
+    FFightWait := FFightWait + SecondsPassed;
+    if FFightWait <= FightWaitMax then
+    begin
+      Dir := Target - Camera.Translation;
+      Dir.Y := 0;
+      if Dir.Length > 0.01 then
+        Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
+      FRouteLastEye := Camera.Translation;
+      Exit(True);
+    end;
+    { it doesn't come: walk on }
+    FFightWaitIgnore := FFightWaitIgnore + ',' + TargetName;
+    FFightWaitFor := '';
+    FFightWait := 0;
+  end;
 
   { quiet: save now and then }
   FFightSinceSave := FFightSinceSave + SecondsPassed;
