@@ -503,7 +503,12 @@ type
     { the remoteRenderMap viewpoints at their cameras (after the map loaded) }
     procedure PlaceRemoteViews;
     { a remote view looking from a camera entity (its place, axis, fov) }
-    procedure AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity);
+    procedure AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity); overload;
+    { the same with the camera's rotation now (a security camera's sweep)
+      and its vertical field of view in degrees (FovY <= 0: its "fov" key,
+      horizontal) }
+    procedure AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity;
+      const Rot: TMatrix3; const FovY: Single); overload;
     { Move a light (bound to a mover): its CGE location and light volume
       matrix (world to the light's texture space) }
     procedure SetLightPose(const I: Integer; const Location: TVector3; const Matrix: TMatrix4);
@@ -1125,9 +1130,14 @@ var
   PendingRemoteViews: TStringList;
 
 procedure TDoom3Map.AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity);
+begin
+  AimRemoteView(RV, Cam, Cam.Rotation, -1);
+end;
+
+procedure TDoom3Map.AimRemoteView(const RV: TD3RemoteView; const Cam: TD3MapEntity;
+  const Rot: TMatrix3; const FovY: Single);
 var
   Axis: Integer;
-  Rot: TMatrix3;
   CamFwd, CamUp, Org: TVector3;
   Fov: Single;
 begin
@@ -1135,7 +1145,6 @@ begin
     modelAxis, flipAxis), axis 2 up; its viewOffset forward; Doom 3's fov
     is horizontal }
   RV.CameraName := Cam.Name;
-  Rot := Cam.Rotation;
   Axis := EnsureRange(Cam.IntValue('modelaxis', 0), 0, 2);
   CamFwd := Vector3(Rot.Data[Axis, 0], Rot.Data[Axis, 1], Rot.Data[Axis, 2]);
   if Cam.BoolValue('flipaxis') then
@@ -1149,6 +1158,8 @@ begin
   RV.Direction := D3ToCge(CamFwd);
   RV.Up := D3ToCge(CamUp);
   RV.FieldOfView := 2 * ArcTan(Tan(Fov / 2) * RV.Height / Max(1, RV.Width));
+  if FovY > 0 then
+    RV.FieldOfView := DegToRad(EnsureRange(FovY, 10, 170));
 end;
 
 procedure TDoom3Map.PlaceRemoteViews;

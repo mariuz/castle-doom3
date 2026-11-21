@@ -144,6 +144,41 @@ begin
   end;
 end;
 
+function TD3Game.FightThreat(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
+  out Target: TVector3; out TargetName: String): Boolean;
+var
+  Mon: TD3Monster;
+  Best, Dist: Single;
+begin
+  Result := False;
+  Best := MaxDist;
+  Target := TVector3.Zero;
+  TargetName := '';
+  for Mon in FMonsters do
+  begin
+    if (Mon.State = msDead) or (Mon.Health <= 0) or (Mon.Model = nil) or Mon.Model.Hidden or
+       not Mon.Model.Holder.Exists or Mon.Model.Dormant or Mon.Dormant then
+      Continue;
+    if Mon.Actor <> nil then
+    begin
+      if not Mon.Actor.HasEnemy then
+        Continue;
+    end else
+    if not (Mon.State in [msChase, msAttack]) then
+      Continue;
+    if Pos(',' + Mon.Model.Entity.Name + ',', ',' + Ignore + ',') > 0 then
+      Continue;
+    Dist := PointsDistance(Eye, Mon.Center);
+    if (Dist < Best) and not CanSee(Eye, Mon.Center) then
+    begin
+      Best := Dist;
+      Target := Mon.Center;
+      TargetName := Mon.Model.Entity.Name;
+      Result := True;
+    end;
+  end;
+end;
+
 function TD3Game.MonsterHuntable(const Mon: TD3Monster): Boolean;
 begin
   Result := (Mon.Model <> nil) and (Mon.State <> msDead) and (Mon.Health > 0) and
