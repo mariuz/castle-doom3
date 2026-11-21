@@ -120,6 +120,12 @@ type
       ones waited for long enough }
     FFightWaitFor, FFightWaitIgnore: String;
     FFightWait: Single;
+    { hazards (TD3Game.HazardAt): the walk's way to the side of the route
+      around them now and where it heads (Doom 3), the last one logged; the
+      fight's last hazard stepped out of and projectile dodged }
+    FRouteOffset, FRouteOffsetGoal: TVector3;
+    FRouteHazardLogged, FFightHazardLogged: String;
+    FFightDodged: TObject;
     FFightHasSave, FFightGod: Boolean;
     FFightRoute: TD3PointArray;
     FFightSeg: Integer;
@@ -246,6 +252,10 @@ type
     { R: returns True when the walk is over }
     function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
     function FightStep(const SecondsPassed: Single): Boolean;
+    { fighting: a hurt volume or a barrel at the eye's feet }
+    function FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;
+    { the route's point P (Doom 3 feet) moved aside around hazards }
+    function RouteAroundHazards(const P, Dir: TVector3; const Step: Single): TVector3;
     { the hunt's next monster: FRoute to it; False when none is left }
     function HuntNext: Boolean;
     procedure LogMemory(const Title: String);
@@ -3944,12 +3954,66 @@ const
   { a chaser out of sight this close holds the walk, this long at most }
   FightWaitDist = 600;
   FightWaitMax = 6;
+  { out of a projectile's path: one passing within FightDodgeMiss of the
+    eye in the next FightDodgeWithin seconds, at Doom 3's run speed
+    (pm_runspeed) }
+  FightDodgeMiss = 40;
+  FightDodgeWithin = 0.7;
+  FightDodgeSpeed = 220;
+  { faster ones (bullets, 2000 and more) can't be dodged: sidestepping them
+    only jitters (fireballs 325 to 475, rockets 300 to 700) }
+  FightDodgeMaxSpeed = 1000;
 var
-  Target, Dir, Side, NewEye, Back: TVector3;
-  TargetName: String;
+  Target, Dir, Side, NewEye, Back, Away: TVector3;
+  TargetName, What: String;
   Slot: Integer;
   Mon: TD3Monster;
   HuntAlive: Boolean;
+  Proj: TObject;
+
+  { free to move to: no wall on the way, no hazard there }
+  function CanMoveTo(const Eye, Dir: TVector3): Boolean;
+  var
+    W: String;
+  begin
+    Result := not MainViewport.Items.WorldSegmentCollision(Camera.Translation, Eye + Dir * (PlayerRadius + 8)) and
+      not FightHazard(Eye, 0, W);
+  end;
+
+  { standing in a hazard: towards the nearest spot out of it with a floor;
+    False when there is none }
+  function StepOutOfHazard: Boolean;
+  const
+    Dirs = 16;
+  var
+    R, I: Integer;
+    D, C, N: TVector3;
+    Dist: Single;
+    W: String;
+  begin
+    Result := False;
+    for R := 1 to 6 do
+      for I := 0 to Dirs - 1 do
+      begin
+        D := Vector3(Cos(2 * Pi * I / Dirs), 0, Sin(2 * Pi * I / Dirs));
+        C := Camera.Translation + D * (R * 32);
+        if MainViewport.Items.WorldSegmentCollision(Camera.Translation, C + D * (PlayerRadius + 8)) or
+           FightHazard(C, 8, W) or
+           not FGame.WorldHit(C, Vector3(0, -1, 0), FGame.EyeHeight + 48, Dist, N) then
+          Continue;
+        if What <> FFightHazardLogged then
+        begin
+          FFightHazardLogged := What;
+          WritelnLog('GameViewPlay', 'Fight: stepping out of %s at %s (%d away)',
+            [What, CgeToD3(Camera.Translation).ToString, R * 32]);
+        end;
+        Camera.Translation := Camera.Translation + D * Min(R * 32, FightDodgeSpeed * 2 * Min(SecondsPassed, 0.1));
+        FFightAnchor := Camera.Translation;
+        FRouteLastEye := Camera.Translation;
+        Exit(True);
+      end;
+  end;
+
 begin
   Result := False;
   { the fire button is held only while there is a target }
@@ -4007,6 +4071,8 @@ begin
     FFightWaitIgnore := '';
     FFightWait := 0;
     FFightSinceSave := 0;
+    FRouteOffset := TVector3.Zero;
+    FRouteOffsetGoal := TVector3.Zero;
     if FFightDeathsHere >= 3 then
     begin
       { it can't get past here alive: on in god mode, until the next save,
@@ -4021,6 +4087,29 @@ begin
     end;
     FGame.God := FFightGod;
     Exit(True);
+  end;
+
+  if FightTactics then
+  begin
+    { a fireball (a rocket, a burst) on its way: out of its path }
+    if FGame.IncomingProjectile(Camera.Translation, FightDodgeMiss, FightDodgeWithin, FightDodgeMaxSpeed, Away, Proj, What) then
+    begin
+      NewEye := Camera.Translation + Away * (FightDodgeSpeed * Min(SecondsPassed, 0.1));
+      if CanMoveTo(NewEye, Away) then
+      begin
+        if Proj <> FFightDodged then
+        begin
+          FFightDodged := Proj;
+          WritelnLog('GameViewPlay', 'Fight: dodging %s at %s', [What, CgeToD3(Camera.Translation).ToString]);
+        end;
+        Camera.Translation := NewEye;
+        FFightAnchor := NewEye;
+        FRouteLastEye := NewEye;
+      end;
+    end;
+    { in a hurt volume or by a barrel: out first, or walk on }
+    if FightHazard(Camera.Translation, 0, What) and not StepOutOfHazard then
+      Exit(False);
   end;
 
   if FGame.FightTarget(Camera.Translation, 1200, FFightIgnore, Target, TargetName, FHuntTarget) and
@@ -4076,7 +4165,7 @@ begin
       begin
         Back := Back.Normalize;
         NewEye := Camera.Translation + Back * (FightBackOffSpeed * Min(SecondsPassed, 0.1));
-        if not MainViewport.Items.WorldSegmentCollision(Camera.Translation, NewEye + Back * (PlayerRadius + 8)) then
+        if CanMoveTo(NewEye, Back) then
         begin
           Camera.Translation := NewEye;
           FFightAnchor := NewEye;
@@ -4090,6 +4179,7 @@ begin
       Side := Side.Normalize * FFightSide;
       NewEye := Camera.Translation + Side * (FightStrafeSpeed * Min(SecondsPassed, 0.1));
       if (PointsDistance(NewEye, FFightAnchor) > FightStrafeReach) or
+         (FightTactics and not CanMoveTo(NewEye, Side)) or
          MainViewport.Items.WorldSegmentCollision(Camera.Translation, NewEye + Side * (PlayerRadius + 8)) then
         FFightSide := -FFightSide
       else
@@ -4287,6 +4377,7 @@ begin
   Yaw := CameraYaw;
   if Sqr(Dir.X) + Sqr(Dir.Y) > 1 then
     Yaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
+  P := RouteAroundHazards(P, Dir, Speed * Min(SecondsPassed, 0.1));
   PlaceCamera(D3ToCge(P), Yaw);
   FRouteLastEye := Camera.Translation;
   if FRouteSinceShot >= ShotEvery then
@@ -4296,6 +4387,92 @@ begin
     CaptureScreenshot;
   end;
   Result := False;
+end;
+
+function TViewPlay.FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;
+begin
+  What := '';
+  { in god mode (given up there) nothing hurts it: the hazards don't count }
+  Result := FightTactics and FFight and not FFightGod and
+    FGame.HazardAt(Eye - Vector3(0, FGame.EyeHeight, 0), Margin, What);
+end;
+
+function TViewPlay.RouteAroundHazards(const P, Dir: TVector3; const Step: Single): TVector3;
+const
+  { looks this far ahead along the route, tries this far to the side }
+  AheadDist = 64;
+  SideStep = 24;
+  SideSteps = 8;
+var
+  Ahead, Side, Off, C, N: TVector3;
+  What, W: String;
+  I, S: Integer;
+  Dist: Single;
+  Found: Boolean;
+
+  function Hazard(const Feet: TVector3; const Margin: Single; out Name: String): Boolean;
+  begin
+    Result := FightHazard(D3ToCge(Feet) + Vector3(0, FGame.EyeHeight, 0), Margin, Name);
+  end;
+
+begin
+  Ahead := Vector3(Dir.X, Dir.Y, 0);
+  if Ahead.Length > 0.01 then
+    Ahead := Ahead.Normalize
+  else
+    Ahead := TVector3.Zero;
+  if not (FightTactics and FFight and not FFightGod) then
+    FRouteOffsetGoal := TVector3.Zero
+  else if Hazard(P + FRouteOffsetGoal, 4, What) or Hazard(P + FRouteOffsetGoal + Ahead * AheadDist, 4, What) then
+  begin
+    { a way to the side: the nearest one with a floor that the route's eye
+      sees }
+    Side := Vector3(-Ahead.Y, Ahead.X, 0);
+    if Side.Length < 0.01 then
+      Side := Vector3(1, 0, 0);
+    Found := False;
+    Off := TVector3.Zero;
+    for I := 1 to SideSteps do
+    begin
+      for S := 0 to 1 do
+      begin
+        Off := Side * (I * SideStep * (1 - 2 * S));
+        C := P + Off;
+        if Hazard(C, 8, W) or Hazard(C + Ahead * AheadDist, 8, W) or
+           MainViewport.Items.WorldSegmentCollision(D3ToCge(P) + Vector3(0, FGame.EyeHeight, 0),
+             D3ToCge(C) + Vector3(0, FGame.EyeHeight, 0)) or
+           not FGame.WorldHit(D3ToCge(C) + Vector3(0, 8, 0), Vector3(0, -1, 0), 64, Dist, N) then
+          Continue;
+        Found := True;
+        Break;
+      end;
+      if Found then
+        Break;
+    end;
+    if Found then
+    begin
+      FRouteOffsetGoal := Off;
+      if What <> FRouteHazardLogged then
+        WritelnLog('GameViewPlay', 'Route: around %s at %s (%.0f to the side)', [What, P.ToString, Off.Length]);
+    end else
+    if What <> FRouteHazardLogged then
+      WritelnLog('GameViewPlay', 'Route: through %s at %s (no way around)', [What, P.ToString]);
+    FRouteHazardLogged := What;
+  end else
+  if not FRouteOffsetGoal.IsPerfectlyZero then
+  begin
+    { back onto the route where that is safe }
+    if not Hazard(P, 8, W) and not Hazard(P + Ahead * AheadDist, 8, W) then
+      FRouteOffsetGoal := TVector3.Zero;
+  end;
+  { towards the goal at the walk's speed (a jump would look like a
+    teleport) }
+  C := FRouteOffsetGoal - FRouteOffset;
+  if C.Length <= Step then
+    FRouteOffset := FRouteOffsetGoal
+  else
+    FRouteOffset := FRouteOffset + C.Normalize * Step;
+  Result := P + FRouteOffset;
 end;
 
 procedure TViewPlay.ReleaseDemoKeys;

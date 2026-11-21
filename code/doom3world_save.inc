@@ -144,6 +144,94 @@ begin
   end;
 end;
 
+function TD3Game.HazardAt(const Feet: TVector3; const Margin: Single; out What: String): Boolean;
+var
+  T: TD3Trigger;
+  M: TD3MiscEntity;
+  PlayerBox: TBox3D;
+  Def: TStringList;
+  Center: TVector3;
+begin
+  What := '';
+  PlayerBox := Box3D(
+    Feet - Vector3(PlayerRadius + Margin, Margin, PlayerRadius + Margin),
+    Feet + Vector3(PlayerRadius + Margin, PlayerBodyHeight + Margin, PlayerRadius + Margin));
+  for T in FTriggers do
+    if (T.Kind = tkHurt) and not T.Disabled and not T.NoTouch and not T.WaitingForActivation and
+       (T.Damage > 0) and T.Box.Collision(PlayerBox) then
+    begin
+      What := T.Entity.Name;
+      Exit(True);
+    end;
+  for M in FMisc do
+  begin
+    if (M.Kind <> ekBarrel) or M.Dead or (M.Brush = nil) or M.Brush.Hidden then
+      Continue;
+    if M.SplashRadius <= 0 then
+    begin
+      Def := Decls.EntityDef(M.Entity.Value('def_splash_damage', 'damage_explosion'));
+      M.SplashRadius := 50;
+      if Def <> nil then
+        M.SplashRadius := StrToFloatDef(Def.Values['radius'], 50, DefaultFormatSettings);
+    end;
+    if M.Brush.Scene.BoundingBox.IsEmpty then
+      Continue;
+    Center := M.Brush.Scene.BoundingBox.Center;
+    if PointsDistance(Center, Feet + Vector3(0, Min(PlayerBodyHeight / 2, Max(0, Center.Y - Feet.Y)), 0)) <
+       M.SplashRadius + Margin then
+    begin
+      What := M.Entity.Name;
+      Exit(True);
+    end;
+  end;
+  Result := False;
+end;
+
+function TD3Game.IncomingProjectile(const Eye: TVector3; const MissDist, Within, MaxSpeed: Single;
+  out Away: TVector3; out Proj: TObject; out What: String): Boolean;
+var
+  P: TD3Projectile;
+  V, Rel, Closest, Side: TVector3;
+  Speed2, T, BestT: Single;
+begin
+  Result := False;
+  Away := TVector3.Zero;
+  Proj := nil;
+  What := '';
+  BestT := Within;
+  for P in FProjectiles do
+  begin
+    if P.FromPlayer or (P.HeldBy <> nil) or (P.HeldByWeapon <> nil) or P.Resting or
+       (P = FGrabbedProjectile) then
+      Continue;
+    V := P.Velocity;
+    Speed2 := V.LengthSqr;
+    { too slow to matter, or too fast to get out of the way of (bullets) }
+    if (Speed2 < 100) or (Speed2 > Sqr(MaxSpeed)) then
+      Continue;
+    { the time of its closest approach }
+    Rel := Eye - P.Position;
+    T := TVector3.DotProduct(Rel, V) / Speed2;
+    if (T <= 0) or (T > BestT) then
+      Continue;
+    Closest := P.Position + V * T;
+    if PointsDistance(Closest, Eye) > MissDist then
+      Continue;
+    { out of its path, sideways, away from where it passes }
+    Side := Vector3(-V.Z, 0, V.X);
+    if Side.Length < 0.01 then
+      Continue;
+    Side := Side.Normalize;
+    if TVector3.DotProduct(Eye - Closest, Side) < 0 then
+      Side := -Side;
+    BestT := T;
+    Away := Side;
+    Proj := P;
+    What := P.DefName;
+    Result := True;
+  end;
+end;
+
 function TD3Game.FightThreat(const Eye: TVector3; const MaxDist: Single; const Ignore: String;
   out Target: TVector3; out TargetName: String): Boolean;
 var
