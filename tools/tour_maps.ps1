@@ -39,6 +39,10 @@ param(
   # (console "fight 2"); the log then reviews each monster (moved, feet on
   # the floor)
   [switch] $Hunt,
+  # with -Route: walk on foot (console "route_walk 1": collisions, gravity,
+  # doors and elevators used, stuck spots logged) instead of noclip, at
+  # Doom 3's run speed unless -Speed is given
+  [switch] $Walk,
   # instead of the spots: a screenshot in front of each of the first
   # -Monsters monsters shown at the start (demo N:i; hidden ones are left
   # out), in god mode, noclip and notarget, to compare their places with
@@ -85,11 +89,17 @@ if ($Monsters -gt 0) {
   $Steps += "O:monsters"; $Steps += "Q"
 }
 if ($Route) {
-  $Steps = @("W:3", "O:skipcinematic", "W:2", "O:god", "O:noclip") + $Setup + @("O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
+  $Move = @("O:noclip")
+  if ($Walk) {
+    $Move = @("O:route_walk 1")
+    if (-not $PSBoundParameters.ContainsKey('Speed')) { $Speed = 220 }
+  }
+  $Steps = @("W:3", "O:skipcinematic", "W:2", "O:god") + $Move + $Setup + @("O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
   if ($Fight) {
     $FightMode = if ($Hunt) { 2 } else { 1 }
-    $Steps = @("W:3", "O:skipcinematic", "W:2", "O:noclip") + $Setup + @("O:fight $FightMode", "O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
+    $Steps = @("W:3", "O:skipcinematic", "W:2") + $Move + $Setup + @("O:fight $FightMode", "O:route all", "R:$Speed $ShotEvery", "W:3", "O:endlevel", "W:25", "S", "Q")
     if ($TimeoutSeconds -eq 400) { $TimeoutSeconds = if ($Hunt) { 3600 } else { 2400 } }
+    if ($Walk -and -not $PSBoundParameters.ContainsKey('TimeoutSeconds')) { $TimeoutSeconds = if ($Hunt) { 5400 } else { 3600 } }
   }
   if ($TimeoutSeconds -eq 400) { $TimeoutSeconds = 1200 }
 }
@@ -133,7 +143,7 @@ foreach ($Map in $Maps) {
   $Stalls = @($NoDemo | Where-Object { $_ -gt 0.3 })
   $Shots = @($Long | Where-Object { $_ -gt 0.3 }).Count - $Stalls.Count
   $Text += "Stalls over 0.3 s: $($Stalls.Count), $([Math]::Round(($Stalls | Measure-Object -Sum).Sum, 1)) s (not counting screenshots' capture: $Shots more with it)"
-  $Tours = $Lines | Select-String 'Tour \d+/|Route to|Route: done|Route: the map|Route: skipping|Loading map|Fight: (summary|died|gave up|no save|hunt done|hunt: )|doesn''t die|Monsters: \d|Monster suspects|Monsters never shown|FLOATING|SUNK|NEVER MOVED' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
+  $Tours = $Lines | Select-String 'Tour \d+/|Route to|Route: done|Route: the map|Route: skipping|Walk: (summary|stuck|door|calling|fell)|Loading map|Fight: (summary|died|gave up|no save|hunt done|hunt: )|doesn''t die|Monsters: \d|Monster suspects|Monsters never shown|FLOATING|SUNK|NEVER MOVED' | ForEach-Object { $_.Line -replace '^GameViewPlay: ', '' }
   $Text += $Tours
   foreach ($Kind in @(
       @('Exceptions', 'Exception'),
