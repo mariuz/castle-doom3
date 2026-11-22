@@ -72,7 +72,7 @@ type
     { a cinematic camera has the view: the player's view to go back to }
     FInCinematic: Boolean;
     { the camera before ApplyViewBob }
-    FBobApplied: Boolean;
+    FBobApplied, FBobBadLogged: Boolean;
     { seconds walk navigation has been falling (Doom 3's falling speed) }
     FFallTime: Single;
     { double vision (idPlayerView::DoubleVision) as a screen effect }
@@ -141,6 +141,16 @@ type
     FHuntTries, FHuntRoutes: Integer;
     FHuntTime: Single;
     FRouteGaps: Single;
+    { console "route_walk 1": the route is walked on foot (collisions,
+      gravity, doors opened by touch, elevators called) instead of in
+      noclip; where it can't go on it is stuck: it tries a door or an
+      elevator there, then is put ahead along the route (WalkOnFoot) }
+    FRouteWalkMode: Boolean;
+    FWalkStuck, FWalkProgressAt: Single;
+    FWalkUsed: Boolean;
+    FWalkStuckCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkPutStreak, FWalkElevatorTries, FWalkFellCount: Integer;
+    FWalkLastFloor: TVector3;
+    FWalkStuckSpots: String;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
     FPlayerEye, FPlayerDir: TVector3;
@@ -251,6 +261,14 @@ type
     procedure BuildCoverageRoute(const Goal: TVector3; const GoalName: String);
     { R: returns True when the walk is over }
     function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
+    { route_walk: the feet towards the route's point Goal (Doom 3 feet),
+      with collisions; the view along Yaw }
+    procedure WalkOnFoot(const Goal: TVector3; const Yaw, MaxStep: Single);
+    { route_walk: no progress along the route for a while: a door or an
+      elevator near the feet is used, later it is put ahead }
+    procedure WalkStuck(const SecondsPassed: Single);
+    procedure WalkSummary;
+    function FightSafeToSave: Boolean;
     function FightStep(const SecondsPassed: Single): Boolean;
     { fighting: a hurt volume or a barrel at the eye's feet }
     function FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;
@@ -894,6 +912,9 @@ begin
     FightSummary;
   end;
   FGame.Clear;
+  { Doom 3 loads the HUD again with every map: its DEAD window ("BIOSIGNAL
+    LOST") and the red border, once health hit 0, stay on until then }
+  FreeHudGui;
   if FInCinematic then
   begin
     FInCinematic := False;
@@ -1814,6 +1835,17 @@ begin
   end else
   if Angles.IsZero(0.0001) and FGame.ViewBobOffset.IsZero then
     Exit;
+  { a bob that isn't finite would make the whole view black (every shape
+    culled): left out, logged once }
+  if IsNan(Angles.X) or IsNan(Angles.Y) or IsNan(Angles.Z) or IsInfinite(Angles.X) or IsInfinite(Angles.Z) or
+     IsNan(Pos.X) or IsNan(Pos.Y) or IsNan(Pos.Z) or IsInfinite(Pos.Y) then
+  begin
+    if not FBobBadLogged then
+      WritelnWarning('GameViewPlay', 'View bob not finite (angles %s, offset %s, eye %s): left out',
+        [Angles.ToString, FGame.ViewBobOffset.ToString, Camera.Translation.ToString]);
+    FBobBadLogged := True;
+    Exit;
+  end;
   M := AnglesMatrix(Angles);
   Camera.SetView(Pos,
     D3ToCge(Vector3(M.Data[0, 0], M.Data[0, 1], M.Data[0, 2])),
@@ -2624,6 +2656,23 @@ begin
       WritelnLog('GameViewPlay', 'Fight: %s, then the hunt for every monster left', [BoolToStr(FFight, 'on', 'off')])
     else
       WritelnLog('GameViewPlay', 'Fight: %s', [BoolToStr(FFight, 'on', 'off')]);
+  end else
+  if Cmd = 'route_walk' then
+  begin
+    FRouteWalkMode := StrToIntDef(Trim(Args), Ord(not FRouteWalkMode)) <> 0;
+    if FRouteWalkMode and FNoclip then
+      SetNoclip(False);
+    FWalkStuck := 0;
+    FWalkProgressAt := 0;
+    FWalkUsed := False;
+    FWalkElevatorTries := 0;
+    FWalkStuckCount := 0;
+    FWalkFellCount := 0;
+    FWalkDoorsOpened := 0;
+    FWalkElevatorsCalled := 0;
+    FWalkStuckSpots := '';
+    WritelnLog('GameViewPlay', 'Route walk on foot: %s', [BoolToStr(FRouteWalkMode, 'on', 'off')]);
+    Console.Print('route_walk ' + BoolToStr(FRouteWalkMode, 'ON', 'OFF'));
   end else
   if Cmd = 'monsters' then
   begin
@@ -3823,6 +3872,14 @@ begin
   WritelnLog('GameViewPlay', 'Fight: summary: %d kills, %d deaths, %d saves, %d places given up (god mode), health %d, armor %d, %.0f s',
     [FFightKills, FFightDeaths, FFightSaves, FFightGaveUp, FGame.Health, FGame.Armor, FFightTime]);
   FGame.MonsterReport;
+  if FRouteWalkMode then
+    WalkSummary;
+end;
+
+procedure TViewPlay.WalkSummary;
+begin
+  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots, %d falls through the floor, %d doors opened for the walk, %d elevators called%s',
+    [FWalkStuckCount, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkStuckSpots]);
 end;
 
 function TViewPlay.HuntNext: Boolean;
@@ -4233,7 +4290,7 @@ begin
   FFightSinceSave := FFightSinceSave + SecondsPassed;
   if (FFightSinceSave >= FightSaveEvery) and not FGame.CinematicActive and (FGame.Health > 0) and
      ((FGame.Health >= FightSaveHealth) or (FFightSinceSave >= FightSaveAnyway) or not FFightHasSave) and
-     (not FFightGod or (FRouteWalked >= FFightGodUntil)) then
+     (not FFightGod or (FRouteWalked >= FFightGodUntil)) and FightSafeToSave then
   begin
     FFightSinceSave := 0;
     SaveGame(FightSaveName);
@@ -4256,6 +4313,18 @@ begin
       FGame.God := False;
     end;
   end;
+end;
+
+function TViewPlay.FightSafeToSave: Boolean;
+var
+  What: String;
+  D: Single;
+  N: TVector3;
+begin
+  { not in a hurt volume (a save in a kill pit dies on every load: Mars
+    City Underground looped there) and, walking, on a floor (not falling) }
+  Result := not FGame.HazardAt(Camera.Translation - Vector3(0, FGame.EyeHeight, 0), 0, What) and
+    (not FRouteWalkMode or FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 24, D, N));
 end;
 
 function TViewPlay.WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
@@ -4302,7 +4371,9 @@ begin
   end;
   { the game teleported the player (info_player_teleport): stand there for
     a while (its triggers fire, a fade in...), then walk back to the route }
-  if PointsDistance(Camera.Translation, FRouteLastEye) > 64 then
+  if (not FRouteWalkMode and (PointsDistance(Camera.Translation, FRouteLastEye) > 64)) or
+     (FRouteWalkMode and (Sqr(Camera.Translation.X - FRouteLastEye.X) +
+       Sqr(Camera.Translation.Z - FRouteLastEye.Z) > Sqr(96))) then
   begin
     WritelnLog('GameViewPlay', 'Route: teleported to %s, back to the route in 2 s',
       [CgeToD3(Camera.Translation).ToString]);
@@ -4336,6 +4407,45 @@ begin
   end;
   { at most 1/10 s of walking per frame (slow frames, loads) }
   Step := Speed * Min(SecondsPassed, 0.1);
+  if FRouteWalkMode then
+  begin
+    { on foot the route's point goes on only while the feet keep up }
+    SegLen := Max(0.001, PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]));
+    P := FRoute[FRouteSeg] + (FRoute[FRouteSeg + 1] - FRoute[FRouteSeg]) * (FRouteAlong / SegLen);
+    Q := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+    { up to 100 above the feet: items on tables and shelves (the route
+      visits the item's own point) }
+    if (Sqr(P.X - Q.X) + Sqr(P.Y - Q.Y) > Sqr(40)) or (P.Z - Q.Z > 100) or (Q.Z - P.Z > 72) then
+      Step := 0;
+    { fallen through the floor, out of the world: logged where it was last
+      on a floor, then back on the route }
+    if Q.Z < P.Z - 1024 then
+    begin
+      Inc(FWalkFellCount);
+      WritelnLog('GameViewPlay', 'Walk: fell through the floor near %s (last on a floor at %s), back on the route',
+        [P.ToString, FWalkLastFloor.ToString]);
+      if Length(FWalkStuckSpots) < 2000 then
+        FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (fell through the floor)',
+          [FWalkLastFloor.X, FWalkLastFloor.Y, FWalkLastFloor.Z]);
+      PlaceCamera(D3ToCge(P), CameraYaw);
+      { the fall's speed would take it down again in a frame }
+      WalkNavigation.CancelFalling;
+      FRouteLastEye := Camera.Translation;
+      Step := 0;
+    end else
+    if FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 8, SegLen, Dir) then
+      FWalkLastFloor := Q;
+    if (FRouteWalked > FWalkProgressAt + 32) or (FRouteWalked < FWalkProgressAt) then
+    begin
+      FWalkProgressAt := FRouteWalked;
+      FWalkStuck := 0;
+      FWalkUsed := False;
+      FWalkElevatorTries := 0;
+      FWalkPutStreak := 0;
+    end;
+    if Step = 0 then
+      WalkStuck(SecondsPassed);
+  end;
   while (Step > 0) and (FRouteSeg < High(FRoute)) do
   begin
     SegLen := PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]);
@@ -4363,12 +4473,16 @@ begin
   if FRouteSeg >= High(FRoute) then
   begin
     P := FRoute[High(FRoute)];
-    PlaceCamera(D3ToCge(P), CameraYaw);
+    if not FRouteWalkMode then
+      PlaceCamera(D3ToCge(P), CameraYaw);
     if FFight and FHunt and HuntNext then
       Exit(False);
     WritelnLog('GameViewPlay', 'Route: done, %.0f units', [FRouteWalked]);
     if FFight then
-      FightSummary;
+      FightSummary
+    else
+    if FRouteWalkMode then
+      WalkSummary;
     CaptureScreenshot;
     FRoute := nil;
     FGame.RouteInvulnerable := False;
@@ -4394,7 +4508,10 @@ begin
   if Sqr(Dir.X) + Sqr(Dir.Y) > 1 then
     Yaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
   P := RouteAroundHazards(P, Dir, Speed * Min(SecondsPassed, 0.1));
-  PlaceCamera(D3ToCge(P), Yaw);
+  if FRouteWalkMode then
+    WalkOnFoot(P, Yaw, Speed * Min(SecondsPassed, 0.1))
+  else
+    PlaceCamera(D3ToCge(P), Yaw);
   FRouteLastEye := Camera.Translation;
   if FRouteSinceShot >= ShotEvery then
   begin
@@ -4403,6 +4520,202 @@ begin
     CaptureScreenshot;
   end;
   Result := False;
+end;
+
+procedure TViewPlay.WalkOnFoot(const Goal: TVector3; const Yaw, MaxStep: Single);
+var
+  Feet, D, Move, From, Side: TVector3;
+  Moved, Angle: Single;
+  I: Integer;
+
+  function TryMove(const M: TVector3): Boolean;
+  var
+    NewPos: TVector3;
+  begin
+    Result := Map.World.WorldMoveAllowed(Camera.Translation, Camera.Translation + M, NewPos,
+      True, WalkNavigation.Radius, TBox3D.Empty, TBox3D.Empty, False);
+    if Result then
+      Camera.Translation := NewPos;
+  end;
+
+begin
+  Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+  D := Goal - Feet;
+  D.Z := 0;
+  if D.Length > 0.5 then
+  begin
+    { Doom 3 (x, y) to CGE (x, -z); along walls when straight on is blocked }
+    D := D.Normalize * Min(MaxStep, D.Length);
+    Move := Vector3(D.X, 0, -D.Y);
+    From := Camera.Translation;
+    if not TryMove(Move) then
+      if not TryMove(Vector3(Move.X, 0, 0)) then
+        TryMove(Vector3(0, 0, Move.Z));
+    { hardly on (a corner the route's line cuts): 45 and 90 degrees to
+      either side, the first that gets on }
+    Moved := Sqr(Camera.Translation.X - From.X) + Sqr(Camera.Translation.Z - From.Z);
+    if Moved < Sqr(0.3 * Move.Length) then
+      for I := 1 to 4 do
+      begin
+        Angle := Pi / 4 * ((I + 1) div 2) * (1 - 2 * (I mod 2));
+        Side := Vector3(Move.X * Cos(Angle) - Move.Z * Sin(Angle), 0, Move.X * Sin(Angle) + Move.Z * Cos(Angle));
+        Camera.Translation := From;
+        if TryMove(Side) then
+          Break;
+        Camera.Translation := From;
+      end;
+  end;
+  Camera.SetWorldView(Camera.Translation, YawToCgeDir(Yaw), Vector3(0, 1, 0));
+end;
+
+procedure TViewPlay.WalkStuck(const SecondsPassed: Single);
+const
+  { after this long it uses what is near (a door, an elevator); after
+    PutAheadAfter (longer after an elevator was called) it is put ahead }
+  UseAfter = 3;
+  PutAheadAfter = 10;
+  ElevatorWait = 20;
+  PutAheadBy = 96;
+var
+  Feet, P, Ahead: TVector3;
+  Mover: TD3Mover;
+  El: TD3Elevator;
+  I, BestFloor: Integer;
+  Reason, GoalName: String;
+  D, BestD, Along, SegLen, Extra: Single;
+  Seg: Integer;
+  Near: TBox3D;
+  N: TVector3;
+
+  { the route's point Dist units further on }
+  function RouteAhead(const Dist: Single): TVector3;
+  begin
+    Seg := FRouteSeg;
+    Along := FRouteAlong + Dist;
+    while (Seg < High(FRoute)) and (Along > PointsDistance(FRoute[Seg], FRoute[Seg + 1])) do
+    begin
+      Along := Along - PointsDistance(FRoute[Seg], FRoute[Seg + 1]);
+      Inc(Seg);
+    end;
+    if Seg >= High(FRoute) then
+      Exit(FRoute[High(FRoute)]);
+    SegLen := Max(0.001, PointsDistance(FRoute[Seg], FRoute[Seg + 1]));
+    Result := FRoute[Seg] + (FRoute[Seg + 1] - FRoute[Seg]) * (Along / SegLen);
+  end;
+
+begin
+  FWalkStuck := FWalkStuck + SecondsPassed;
+  if FWalkStuck < UseAfter then
+    Exit;
+  Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+  P := RouteAhead(0);
+  if not FWalkUsed then
+  begin
+    FWalkUsed := True;
+    { a door near the feet that touching doesn't open }
+    Near := Box3DAroundPoint(Camera.Translation, 192);
+    for Mover in FGame.Movers do
+      if (Mover.Kind = mkDoor) and (Mover.State = dsClosed) and (Mover.Brush.Scene <> nil) and
+         Mover.Brush.Scene.WorldBoundingBox.Collides(Near) then
+      begin
+        if Mover.Locked then
+          Reason := 'locked'
+        else if (Mover.Requires <> '') and (FGame.Carried.IndexOf(D3LangString(Mover.Requires)) < 0) then
+          Reason := 'needs ' + Mover.Requires
+        else if Mover.Disabled then
+          Reason := 'disabled by its elevator'
+        else if Mover.NoTouch then
+          Reason := 'no_touch: a button, a GUI or a script opens it'
+        else
+          Reason := 'didn''t open on touch';
+        WritelnLog('GameViewPlay', 'Walk: door %s closed (%s) at %s: opened for the walk',
+          [Mover.Brush.Entity.Name, Reason, Feet.ToString]);
+        Mover.Locked := False;
+        FGame.OpenTeam(Mover);
+        Inc(FWalkDoorsOpened);
+      end;
+    { an elevator: to the floor nearest the height the route goes to }
+    for El in FGame.Elevators do
+    begin
+      if Length(El.Floors) = 0 then
+        Continue;
+      BestD := MaxSingle;
+      for I := 0 to High(El.Floors) do
+        BestD := Min(BestD, Sqr(El.Floors[I].Pos.X - Feet.X) + Sqr(El.Floors[I].Pos.Y - Feet.Y));
+      if BestD > Sqr(256) then
+        Continue;
+      Ahead := RouteAhead(400);
+      BestFloor := -1;
+      BestD := MaxSingle;
+      for I := 0 to High(El.Floors) do
+      begin
+        D := Abs(El.Floors[I].Pos.Z - Ahead.Z);
+        if D < BestD then
+        begin
+          BestD := D;
+          BestFloor := El.Floors[I].Floor;
+        end;
+      end;
+      if (BestFloor >= 0) and (FWalkElevatorTries < 2) then
+      begin
+        Inc(FWalkElevatorTries);
+        WritelnLog('GameViewPlay', 'Walk: calling elevator %s to floor %d (at %d) at %s',
+          [El.Entity.Name, BestFloor, El.CurrentFloor, Feet.ToString]);
+        FGame.ElevatorChangeFloor(El, BestFloor);
+        Inc(FWalkElevatorsCalled);
+        { on it: the floor it is at opens its doors, the next call (after
+          the wait) moves it }
+        FWalkStuck := UseAfter - ElevatorWait + PutAheadAfter;
+        FWalkUsed := (BestFloor = El.CurrentFloor) or (FWalkElevatorTries >= 2);
+      end;
+    end;
+    Exit;
+  end;
+  if FWalkStuck < PutAheadAfter then
+    Exit;
+  { it can't get on: logged, then put ahead past the spot }
+  if MainViewport.Items.WorldSegmentCollision(Camera.Translation,
+    D3ToCge(P) + Vector3(0, FGame.EyeHeight, 0)) then
+    Reason := 'a wall between'
+  else if P.Z - Feet.Z > 40 then
+    Reason := Format('%.0f up', [P.Z - Feet.Z])
+  else if Feet.Z - P.Z > 72 then
+    Reason := Format('%.0f down (fell off)', [Feet.Z - P.Z])
+  else
+    Reason := 'blocked';
+  GoalName := '';
+  if FRouteNextMark <= High(FRouteMarkNames) then
+    GoalName := FRouteMarkNames[FRouteNextMark]
+  else if FHuntTarget <> '' then
+    GoalName := FHuntTarget;
+  Inc(FWalkStuckCount);
+  WritelnLog('GameViewPlay', 'Walk: stuck at %s for %.0f s, the route''s point %s (%s, on the way to %s, %.0f units): put ahead',
+    [Feet.ToString, FWalkStuck, P.ToString, Reason, GoalName, FRouteWalked]);
+  if Length(FWalkStuckSpots) < 2000 then
+    FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (%s)', [Feet.X, Feet.Y, Feet.Z, Reason]);
+  { stuck again right after: further each time (a gap in the route, where
+    the AAS found no way, is one long straight line) }
+  Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak, 6)));
+  Inc(FWalkPutStreak);
+  { a point with a floor under it (not one of the items up in the air the
+    route visits), up to 512 units further }
+  Extra := 0;
+  while (Extra < 512) and (not FGame.WorldHit(D3ToCge(Ahead) + Vector3(0, 8, 0), Vector3(0, -1, 0), 96, D, N) or
+    FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
+  begin
+    Extra := Extra + 64;
+    Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+  end;
+  FRouteSeg := Seg;
+  FRouteAlong := Along;
+  FRouteWalked := FRouteWalked + PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra;
+  PlaceCamera(D3ToCge(Ahead), CameraYaw);
+  WalkNavigation.CancelFalling;
+  FRouteLastEye := Camera.Translation;
+  FWalkStuck := 0;
+  FWalkUsed := False;
+  FWalkElevatorTries := 0;
+  FWalkProgressAt := FRouteWalked;
 end;
 
 function TViewPlay.FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;

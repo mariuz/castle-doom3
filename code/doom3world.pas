@@ -1401,7 +1401,6 @@ type
     procedure ClearScriptSounds;
     function EntityHandle(const E: TD3MapEntity): Integer;
     { Doors of the same team as Door (Door itself too). }
-    procedure OpenTeam(const Door: TD3Mover);
     procedure CloseTeam(const Door: TD3Mover);
     procedure LockTeam(const Door: TD3Mover; const Value: Boolean);
     procedure UpdateMonster(const M: TD3Monster; const SecondsPassed: Single;
@@ -1409,6 +1408,8 @@ type
     procedure SetMonsterYaw(const M: TD3Monster; const YawDeg: Single);
     function CanSee(const A, B: TVector3): Boolean;
   public
+    { opens Door and the doors of its team }
+    procedure OpenTeam(const Door: TD3Mover);
     { A brush entity's world bounds, also while hidden or without visible
       surfaces (its model or collision model bounds); empty when none. }
     function MoverBounds(const B: TD3BrushEntity): TBox3D;
@@ -3943,6 +3944,10 @@ begin
   FWorldFlashLogged := -1000;
   FEyeHeight := PlayerEyeHeight;
   FKickFinish := 0;
+  { the step up's and the landing's dips (a saved game sets the clock back:
+    the old times would be in its future) }
+  FStepUpTime := -1000;
+  FLandTime := -1000;
   FBlobs := nil;
   FLastDamageTime := -1000;
   FLastArmorPulse := -1000;
@@ -4830,10 +4835,14 @@ begin
     FViewBobAngles.Z := FViewBobAngles.Z + FBobFracSin * 0.002 * Speed;
   FViewBob := Vector3(0, 0, Min(6, FBobFracSin * FXYSpeed * 0.005));
   { below the body just after a step up }
+  { (times from before a saved game's restore are in its future: no dip) }
   T := FTime - FStepUpTime;
-  if T < StepUpTime then
+  if (T >= 0) and (T < StepUpTime) then
     FViewBob.Z := FViewBob.Z - FStepUpDelta * (StepUpTime - T) / StepUpTime;
   Delta := FTime - FLandTime;
+  if Delta < 0 then
+    F := 0
+  else
   if Delta < LandDeflectTime then
     F := Delta / LandDeflectTime
   else
