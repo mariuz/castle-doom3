@@ -1,5 +1,5 @@
-{ Doom 3 static models: LightWave objects (.lwo, LWO2) and 3ds Max ASCII
-  exports (.ase), used for props, items, light fixtures and func_static
+{ Doom 3 static models: LightWave objects (.lwo, LWO2), 3ds Max ASCII
+  exports (.ase) and Maya ASCII scenes (.ma), used for props, items, light fixtures and func_static
   models.
 
   Both are read into TD3StaticModel: surfaces per material with positions in
@@ -15,7 +15,12 @@
     tag is the material name.
   - ASE is right-handed and Z up like Doom 3; Doom flips faces (A, C, B) to
     its clockwise style, so the file's order is counter-clockwise. The
-    material is the *BITMAP path from "base/" on, without its extension. }
+    material is the *BITMAP path from "base/" on, without its extension.
+  - Maya ASCII (.ma) is Y up; Doom 3 reads (x, y, z) as (x, -z, y), a
+    rotation, and swaps two corners of each face to draw it clockwise, so
+    the file's order is counter-clockwise. A face's corners come from its
+    edges; the material is the texture path of the file node that the
+    mesh's shading group leads to (OSPathToRelativePath). }
 unit Doom3StaticModels;
 
 {$mode objfpc}{$H+}
@@ -56,6 +61,9 @@ type
     destructor Destroy; override;
     function LoadLwo(const Stream: TStream): Boolean;
     function LoadAse(const Text: String): Boolean;
+    { Maya ASCII (.ma: Resurrection of Evil's hell and Erebus pieces),
+      read like Doom 3's Model_ma.cpp }
+    function LoadMa(const Text: String): Boolean;
     { Doom 3 BFG's binary version of either (generated/rendermodels/*.blwo,
       *.base): a render model. }
     function LoadBinary(const Stream: TStream): Boolean;
@@ -80,7 +88,7 @@ type
     procedure Clear;
   end;
 
-{ Is this a static model file we can load (.lwo, .ase)? }
+{ Is this a static model file we can load (.lwo, .ase, .ma)? }
 function IsStaticModelPath(const Path: String): Boolean;
 
 { Material name of an ASE *BITMAP path: from "base/" on, no extension. }
@@ -102,7 +110,7 @@ var
   Ext: String;
 begin
   Ext := LowerCase(ExtractFileExt(Path));
-  Result := (Ext = '.lwo') or (Ext = '.ase');
+  Result := (Ext = '.lwo') or (Ext = '.ase') or (Ext = '.ma');
 end;
 
 function AseBitmapToMaterial(const Bitmap: String): String;
@@ -831,6 +839,667 @@ begin
   end;
 end;
 
+{ Maya ASCII ----------------------------------------------------------------- }
+
+type
+  TMaTransform = class
+    Translate, Rotate, Scale: TVector3; { Doom 3's axes (MA_ParseTransform) }
+    Parent: TMaTransform;
+  end;
+
+  TMaMaterialNode = class
+    Child: TMaMaterialNode;
+    FilePath: String;
+    HasFile: Boolean;
+  end;
+
+  TMaFace = record
+    Edge, TVert, Color: array [0..2] of Integer;
+  end;
+
+  TMaTweak = record
+    Index: Integer;
+    Offset: TVector3;
+  end;
+
+  TMaMesh = class
+    Name, MaterialName: String;
+    Transform: TMaTransform;
+    Verts: array of TVector3;
+    Edges: array of array [0..2] of Integer;
+    TVerts: array of TVector2;
+    Colors: array of TVector4;
+    Faces: array of TMaFace;
+    Tweaks: array of TMaTweak;
+  end;
+
+  TMaTokens = record
+    Text: array of String;
+    Quoted: array of Boolean;
+    Count: Integer;
+  end;
+
+procedure MaTokenize(const S: String; out T: TMaTokens);
+var
+  I, Start, N: Integer;
+
+  procedure Add(const Tok: String; const Q: Boolean);
+  begin
+    if T.Count = Length(T.Text) then
+    begin
+      SetLength(T.Text, T.Count * 2 + 1024);
+      SetLength(T.Quoted, Length(T.Text));
+    end;
+    T.Text[T.Count] := Tok;
+    T.Quoted[T.Count] := Q;
+    Inc(T.Count);
+  end;
+
+begin
+  T.Count := 0;
+  T.Text := nil;
+  T.Quoted := nil;
+  N := Length(S);
+  I := 1;
+  while I <= N do
+  begin
+    case S[I] of
+      #0..' ':
+        Inc(I);
+      ';':
+        begin
+          Add(';', False);
+          Inc(I);
+        end;
+      '"':
+        begin
+          Start := I + 1;
+          Inc(I);
+          while (I <= N) and (S[I] <> '"') do
+          begin
+            if (S[I] = '\') and (I < N) then
+              Inc(I);
+            Inc(I);
+          end;
+          Add(Copy(S, Start, I - Start), True);
+          Inc(I);
+        end;
+      else
+        begin
+          if (S[I] = '/') and (I < N) and (S[I + 1] = '/') then
+          begin
+            while (I <= N) and not (S[I] in [#10, #13]) do
+              Inc(I);
+            Continue;
+          end;
+          Start := I;
+          while (I <= N) and not (S[I] in [#0..' ', ';', '"']) do
+            Inc(I);
+          Add(Copy(S, Start, I - Start), False);
+        end;
+    end;
+  end;
+end;
+
+function TD3StaticModel.LoadMa(const Text: String): Boolean;
+var
+  T: TMaTokens;
+  P: Integer;
+  Transforms: specialize TObjectDictionary<String, TMaTransform>;
+  MatNodes: specialize TObjectDictionary<String, TMaMaterialNode>;
+  FileNodes: specialize TDictionary<String, String>;
+  Meshes: specialize TObjectList<TMaMesh>;
+
+  function AtEnd: Boolean;
+  begin
+    Result := P >= T.Count;
+  end;
+
+  { the end of a node's attributes: the next command Doom 3 looks for }
+  function NodeComplete: Boolean;
+  begin
+    Result := AtEnd or (not T.Quoted[P] and (
+      (T.Text[P] = 'createNode') or (T.Text[P] = 'connectAttr') or (T.Text[P] = 'select')));
+  end;
+
+  { createNode's flags up to ";": the name and the parent }
+  procedure NodeHeader(out Name, Parent: String);
+  begin
+    Name := '';
+    Parent := '';
+    while not AtEnd and (T.Text[P] <> ';') do
+    begin
+      if (T.Text[P] = '-n') and (P + 1 < T.Count) then
+      begin
+        Name := T.Text[P + 1];
+        Inc(P);
+      end else
+      if (T.Text[P] = '-p') and (P + 1 < T.Count) then
+      begin
+        Parent := T.Text[P + 1];
+        Inc(P);
+      end;
+      Inc(P);
+    end;
+    Inc(P);
+  end;
+
+  { a setAttr (P past the word): its attribute, its "-s" size and its
+    values up to ";" without "-type <type>" and parentheses; P past the
+    ";" }
+  function ReadSetAttr(out Attr: String; out Size: Integer; out Values: TStringArray): Boolean;
+  var
+    Count: Integer;
+  begin
+    Attr := '';
+    Size := 0;
+    Values := nil;
+    while not AtEnd and (T.Text[P] <> ';') and not T.Quoted[P] do
+    begin
+      if (T.Text[P] = '-s') and (P + 1 < T.Count) then
+      begin
+        Size := StrToIntDef(T.Text[P + 1], 0);
+        Inc(P);
+      end;
+      Inc(P);
+    end;
+    if not AtEnd and T.Quoted[P] then
+    begin
+      Attr := T.Text[P];
+      Inc(P);
+    end;
+    Count := 0;
+    while not AtEnd and (T.Text[P] <> ';') do
+    begin
+      if not T.Quoted[P] and (T.Text[P] = '-type') then
+        Inc(P, 2)
+      else
+      { a long string is wrapped: ( "..." ) }
+      if not T.Quoted[P] and ((T.Text[P] = '(') or (T.Text[P] = ')')) then
+        Inc(P)
+      else
+      begin
+        if Count = Length(Values) then
+          SetLength(Values, Count * 2 + 16);
+        Values[Count] := T.Text[P];
+        Inc(Count);
+        Inc(P);
+      end;
+    end;
+    SetLength(Values, Count);
+    Inc(P);
+    Result := Attr <> '';
+  end;
+
+  { "[a:b]" or "[a]" after Skip in the attribute name }
+  function HeaderIndex(const Attr, Skip: String; out MinI, MaxI: Integer): Boolean;
+  var
+    S: String;
+    B, C, E: Integer;
+  begin
+    MinI := 0;
+    MaxI := -1;
+    S := Attr;
+    if Skip <> '' then
+    begin
+      B := Pos(Skip, S);
+      if B = 0 then
+        Exit(False);
+      S := Copy(S, B + Length(Skip), MaxInt);
+    end;
+    B := Pos('[', S);
+    E := Pos(']', S);
+    if (B = 0) or (E < B) then
+      Exit(False);
+    S := Copy(S, B + 1, E - B - 1);
+    C := Pos(':', S);
+    if C > 0 then
+    begin
+      MinI := StrToIntDef(Copy(S, 1, C - 1), 0);
+      MaxI := StrToIntDef(Copy(S, C + 1, MaxInt), MinI);
+    end else
+    begin
+      MinI := StrToIntDef(S, 0);
+      MaxI := MinI;
+    end;
+    Result := (MinI >= 0) and (MaxI >= MinI);
+  end;
+
+  function F(const Values: TStringArray; const I: Integer): Single;
+  begin
+    if I < Length(Values) then
+      Result := D3StrToFloat(Values[I])
+    else
+      Result := 0;
+  end;
+
+  function N(const Values: TStringArray; const I: Integer): Integer;
+  begin
+    if I < Length(Values) then
+      Result := StrToIntDef(Values[I], 0)
+    else
+      Result := 0;
+  end;
+
+  { Maya's (x, y, z) as Doom 3's: x, -z, y }
+  function MayaVec(const Values: TStringArray; const I: Integer): TVector3;
+  begin
+    Result := Vector3(F(Values, I), -F(Values, I + 2), F(Values, I + 1));
+  end;
+
+  procedure ParseTransform;
+  var
+    Name, Parent, Attr: String;
+    Size: Integer;
+    Values: TStringArray;
+    Tr, Par: TMaTransform;
+  begin
+    NodeHeader(Name, Parent);
+    Tr := TMaTransform.Create;
+    Tr.Scale := Vector3(1, 1, 1);
+    while not NodeComplete do
+    begin
+      if T.Quoted[P] or (T.Text[P] <> 'setAttr') then
+      begin
+        Inc(P);
+        Continue;
+      end;
+      Inc(P);
+      if not ReadSetAttr(Attr, Size, Values) or (Length(Values) < 3) then
+        Continue;
+      { MA_ReadVec3 reads (x, z, y); only the translation's y is negated }
+      if Attr = '.t' then
+        Tr.Translate := Vector3(F(Values, 0), -F(Values, 2), F(Values, 1))
+      else
+      if Attr = '.r' then
+        Tr.Rotate := Vector3(F(Values, 0), F(Values, 2), F(Values, 1))
+      else
+      if Attr = '.s' then
+        Tr.Scale := Vector3(F(Values, 0), F(Values, 2), F(Values, 1));
+    end;
+    if (Parent <> '') and Transforms.TryGetValue(Parent, Par) then
+      Tr.Parent := Par;
+    Transforms.AddOrSetValue(Name, Tr);
+  end;
+
+  procedure ParseFaces(const M: TMaMesh; const Values: TStringArray; const MinI: Integer);
+  var
+    I, K, Face, Count: Integer;
+    Kind: String;
+  begin
+    Face := MinI - 1;
+    I := 0;
+    while I < Length(Values) do
+    begin
+      Kind := Values[I];
+      if Kind = 'f' then
+      begin
+        Count := N(Values, I + 1);
+        if Count <> 3 then
+          raise Exception.Create('Face is not a triangle');
+        Inc(Face);
+        if Face > High(M.Faces) then
+          SetLength(M.Faces, Face + 1);
+        for K := 0 to 2 do
+        begin
+          M.Faces[Face].Edge[K] := N(Values, I + 2 + K);
+          M.Faces[Face].TVert[K] := 0;
+          M.Faces[Face].Color[K] := -1;
+        end;
+        Inc(I, 5);
+      end else
+      if ((Kind = 'mu') or (Kind = 'mf') or (Kind = 'fc')) and (Face >= MinI) then
+      begin
+        if Kind = 'mu' then
+          Inc(I); { the uv set }
+        Count := N(Values, I + 1);
+        if Count <> 3 then
+          raise Exception.Create('Invalid texture coordinates or colors');
+        for K := 0 to 2 do
+          if Kind = 'fc' then
+            M.Faces[Face].Color[K] := N(Values, I + 2 + K)
+          else
+            M.Faces[Face].TVert[K] := N(Values, I + 2 + K);
+        Inc(I, 5);
+      end else
+        Inc(I);
+    end;
+  end;
+
+  procedure ParseMesh;
+  var
+    Name, Parent, Attr: String;
+    Size, MinI, MaxI, I, J, K: Integer;
+    Values: TStringArray;
+    M: TMaMesh;
+    Tr: TMaTransform;
+    FacesDone: Boolean;
+  begin
+    NodeHeader(Name, Parent);
+    M := TMaMesh.Create;
+    M.Name := Name;
+    Meshes.Add(M);
+    if (Parent <> '') and Transforms.TryGetValue(Parent, Tr) then
+      M.Transform := Tr;
+    { Doom 3 reads faces up to the node's end: other attributes after them
+      are skipped }
+    FacesDone := False;
+    while not NodeComplete do
+    begin
+      if T.Quoted[P] or (T.Text[P] <> 'setAttr') then
+      begin
+        Inc(P);
+        Continue;
+      end;
+      Inc(P);
+      if not ReadSetAttr(Attr, Size, Values) then
+        Continue;
+      if FacesDone and (Pos('.fc', Attr) = 0) then
+        Continue;
+      if Pos('.vt', Attr) > 0 then
+      begin
+        if Size > Length(M.Verts) then
+          SetLength(M.Verts, Size);
+        if HeaderIndex(Attr, '', MinI, MaxI) then
+        begin
+          if MaxI >= Length(M.Verts) then
+            SetLength(M.Verts, MaxI + 1);
+          for I := MinI to MaxI do
+            M.Verts[I] := MayaVec(Values, (I - MinI) * 3);
+        end;
+      end else
+      if Pos('.ed', Attr) > 0 then
+      begin
+        if Size > Length(M.Edges) then
+          SetLength(M.Edges, Size);
+        if HeaderIndex(Attr, '', MinI, MaxI) then
+        begin
+          if MaxI >= Length(M.Edges) then
+            SetLength(M.Edges, MaxI + 1);
+          for I := MinI to MaxI do
+            for K := 0 to 2 do
+              M.Edges[I][K] := N(Values, (I - MinI) * 3 + K);
+        end;
+      end else
+      if Pos('.pt', Attr) > 0 then
+      begin
+        if HeaderIndex(Attr, '', MinI, MaxI) then
+          for I := MinI to MaxI do
+          begin
+            J := Length(M.Tweaks);
+            SetLength(M.Tweaks, J + 1);
+            M.Tweaks[J].Index := I;
+            M.Tweaks[J].Offset := MayaVec(Values, (I - MinI) * 3);
+          end;
+      end else
+      if Pos('.n', Attr) > 0 then
+        { explicit normals: smoothed like the other models instead
+          (ComputeNormals) }
+      else
+      if Pos('.fc', Attr) > 0 then
+      begin
+        if Size > Length(M.Faces) then
+          SetLength(M.Faces, Size);
+        if HeaderIndex(Attr, '', MinI, MaxI) then
+        begin
+          FacesDone := True;
+          ParseFaces(M, Values, MinI);
+        end;
+      end else
+      if Pos('.clr', Attr) > 0 then
+      begin
+        if Size > Length(M.Colors) then
+          SetLength(M.Colors, Size);
+        if HeaderIndex(Attr, '', MinI, MaxI) then
+        begin
+          if MaxI >= Length(M.Colors) then
+            SetLength(M.Colors, MaxI + 1);
+          for I := MinI to MaxI do
+            M.Colors[I] := Vector4(F(Values, (I - MinI) * 4), F(Values, (I - MinI) * 4 + 1),
+              F(Values, (I - MinI) * 4 + 2), F(Values, (I - MinI) * 4 + 3));
+        end;
+      end else
+      if (Pos('.uvst', Attr) > 0) and (Pos('uvsn', Attr) = 0) then
+      begin
+        if Size > Length(M.TVerts) then
+          SetLength(M.TVerts, Size);
+        if HeaderIndex(Attr, 'uvsp', MinI, MaxI) then
+        begin
+          if MaxI >= Length(M.TVerts) then
+            SetLength(M.TVerts, MaxI + 1);
+          { Doom 3's t = 1 - v; CGE's v = 1 - t }
+          for I := MinI to MaxI do
+            M.TVerts[I] := Vector2(F(Values, (I - MinI) * 2), F(Values, (I - MinI) * 2 + 1));
+        end;
+      end;
+    end;
+  end;
+
+  procedure ParseFileNode;
+  var
+    Name, Parent, Attr: String;
+    Size: Integer;
+    Values: TStringArray;
+  begin
+    NodeHeader(Name, Parent);
+    while not NodeComplete do
+    begin
+      if T.Quoted[P] or (T.Text[P] <> 'setAttr') then
+      begin
+        Inc(P);
+        Continue;
+      end;
+      Inc(P);
+      if ReadSetAttr(Attr, Size, Values) and (Pos('.ftn', Attr) > 0) and (Length(Values) > 0) then
+        FileNodes.AddOrSetValue(Name, Values[0]);
+    end;
+  end;
+
+  { MA_ParseConnectAttr: shading nodes' chains ("oc") and the meshes'
+    shading groups ("iog") }
+  procedure ParseConnectAttr;
+  var
+    Src, Dest, SrcName, SrcType, DestName, Path: String;
+    D: Integer;
+    SrcNode, DestNode: TMaMaterialNode;
+    M: TMaMesh;
+  begin
+    if P + 1 >= T.Count then
+    begin
+      P := T.Count;
+      Exit;
+    end;
+    Src := T.Text[P];
+    Dest := T.Text[P + 1];
+    Inc(P, 2);
+    D := Pos('.', Src);
+    if (D = 0) or (Pos('.', Dest) = 0) then
+      Exit;
+    SrcName := Copy(Src, 1, D - 1);
+    SrcType := Copy(Src, D + 1, MaxInt);
+    DestName := Copy(Dest, 1, Pos('.', Dest) - 1);
+    if Pos('oc', SrcType) > 0 then
+    begin
+      if MatNodes.TryGetValue(SrcName, SrcNode) and MatNodes.TryGetValue(DestName, DestNode) then
+        DestNode.Child := SrcNode;
+      if FileNodes.TryGetValue(SrcName, Path) and MatNodes.TryGetValue(DestName, DestNode) then
+      begin
+        DestNode.FilePath := Path;
+        DestNode.HasFile := True;
+      end;
+    end;
+    if Pos('iog', SrcType) > 0 then
+      for M in Meshes do
+        if M.Name = SrcName then
+        begin
+          M.MaterialName := DestName;
+          Break;
+        end;
+  end;
+
+  { MA_AddMaterial: the shading group's chain down to a node with a file,
+    its texture's path from "base/" or a known root on (like Doom 3 BFG's
+    binary copies: "D:/d3xp/d3xp/textures/david/x.tga" is
+    textures/david/x, where Doom 3's OSPathToRelativePath would keep
+    d3xp/) }
+  function MaterialOf(const M: TMaMesh): String;
+  var
+    Node: TMaMaterialNode;
+    Guard: Integer;
+  begin
+    Result := '';
+    if not MatNodes.TryGetValue(M.MaterialName, Node) then
+      Exit;
+    Guard := 0;
+    while (Node <> nil) and not Node.HasFile and (Guard < 100) do
+    begin
+      Node := Node.Child;
+      Inc(Guard);
+    end;
+    if (Node <> nil) and Node.HasFile then
+      Result := AseBitmapToMaterial(Node.FilePath);
+  end;
+
+  { MA_BuildAxisRotation's matrices (idMat4 rows times the vector) }
+  function RotX(const V: TVector3; const A: Single): TVector3;
+  begin
+    Result := Vector3(V.X, Cos(A) * V.Y + Sin(A) * V.Z, -Sin(A) * V.Y + Cos(A) * V.Z);
+  end;
+
+  function RotY(const V: TVector3; const A: Single): TVector3;
+  begin
+    Result := Vector3(Cos(A) * V.X - Sin(A) * V.Z, V.Y, Sin(A) * V.X + Cos(A) * V.Z);
+  end;
+
+  function RotZ(const V: TVector3; const A: Single): TVector3;
+  begin
+    Result := Vector3(Cos(A) * V.X + Sin(A) * V.Y, -Sin(A) * V.X + Cos(A) * V.Y, V.Z);
+  end;
+
+  procedure Build(const M: TMaMesh);
+  var
+    I, K, E, V, Base: Integer;
+    Tr: TMaTransform;
+    Surf: TD3StaticSurface;
+    Mat: String;
+    HasColors: Boolean;
+    P3: TVector3;
+  begin
+    if (Length(M.Faces) = 0) or (Length(M.Verts) = 0) then
+      Exit;
+    Mat := MaterialOf(M);
+    if Mat = '' then
+      Exit;
+    for I := 0 to High(M.Tweaks) do
+      if (M.Tweaks[I].Index >= 0) and (M.Tweaks[I].Index < Length(M.Verts)) then
+        M.Verts[M.Tweaks[I].Index] := M.Verts[M.Tweaks[I].Index] + M.Tweaks[I].Offset;
+    { MA_ApplyTransformation: scale, rotations about x, z, y, translation,
+      for the mesh's transform and each parent }
+    Tr := M.Transform;
+    while Tr <> nil do
+    begin
+      for I := 0 to High(M.Verts) do
+      begin
+        P3 := M.Verts[I] * Tr.Scale;
+        if Tr.Rotate.X <> 0 then
+          P3 := RotX(P3, DegToRad(-Tr.Rotate.X));
+        if Tr.Rotate.Z <> 0 then
+          P3 := RotZ(P3, DegToRad(-Tr.Rotate.Z));
+        if Tr.Rotate.Y <> 0 then
+          P3 := RotY(P3, DegToRad(Tr.Rotate.Y));
+        M.Verts[I] := P3 + Tr.Translate;
+      end;
+      Tr := Tr.Parent;
+    end;
+    HasColors := Length(M.Colors) > 0;
+    Surf := SurfaceFor(Mat);
+    Base := Length(Surf.Positions);
+    SetLength(Surf.Positions, Base + Length(M.Faces) * 3);
+    SetLength(Surf.TexCoords, Length(Surf.Positions));
+    SetLength(Surf.Indexes, Length(Surf.Positions));
+    if HasColors or (Length(Surf.Colors) > 0) then
+      SetLength(Surf.Colors, Length(Surf.Positions));
+    for I := 0 to High(M.Faces) do
+      for K := 0 to 2 do
+      begin
+        { a corner: its edge's start, or its end for an edge used backwards
+          (-1 - e); the file's order is counter-clockwise from the front
+          (Doom 3 swaps two corners to draw it clockwise) }
+        E := M.Faces[I].Edge[K];
+        if E < 0 then
+          E := -E - 1;
+        V := -1;
+        if E < Length(M.Edges) then
+          if M.Faces[I].Edge[K] < 0 then
+            V := M.Edges[E][1]
+          else
+            V := M.Edges[E][0];
+        if (V < 0) or (V >= Length(M.Verts)) then
+          raise Exception.CreateFmt('Bad vertex index %d', [V]);
+        Surf.Positions[Base + I * 3 + K] := M.Verts[V];
+        if (M.Faces[I].TVert[K] >= 0) and (M.Faces[I].TVert[K] < Length(M.TVerts)) then
+          Surf.TexCoords[Base + I * 3 + K] := M.TVerts[M.Faces[I].TVert[K]];
+        Surf.Indexes[Base + I * 3 + K] := Base + I * 3 + K;
+        if Length(Surf.Colors) > 0 then
+        begin
+          Surf.Colors[Base + I * 3 + K] := Vector4(1, 1, 1, 1);
+          if HasColors and (M.Faces[I].Color[K] >= 0) and (M.Faces[I].Color[K] < Length(M.Colors)) then
+            Surf.Colors[Base + I * 3 + K] := M.Colors[M.Faces[I].Color[K]];
+        end;
+      end;
+  end;
+
+var
+  Tok, NodeName, NodeParent: String;
+  M: TMaMesh;
+begin
+  MaTokenize(Text, T);
+  Transforms := specialize TObjectDictionary<String, TMaTransform>.Create([doOwnsValues]);
+  MatNodes := specialize TObjectDictionary<String, TMaMaterialNode>.Create([doOwnsValues]);
+  FileNodes := specialize TDictionary<String, String>.Create;
+  Meshes := specialize TObjectList<TMaMesh>.Create(True);
+  try
+    P := 0;
+    while not AtEnd do
+    begin
+      Tok := T.Text[P];
+      Inc(P);
+      if T.Quoted[P - 1] then
+        Continue;
+      if (Tok = 'createNode') and not AtEnd then
+      begin
+        Tok := T.Text[P];
+        Inc(P);
+        if Tok = 'transform' then
+          ParseTransform
+        else
+        if Tok = 'mesh' then
+          ParseMesh
+        else
+        if Tok = 'file' then
+          ParseFileNode
+        else
+        if (Tok = 'shadingEngine') or (Tok = 'lambert') or (Tok = 'phong') or (Tok = 'blinn') then
+        begin
+          NodeHeader(NodeName, NodeParent);
+          MatNodes.AddOrSetValue(NodeName, TMaMaterialNode.Create);
+        end;
+      end else
+      if Tok = 'connectAttr' then
+        ParseConnectAttr;
+    end;
+    for M in Meshes do
+      Build(M);
+    UpdateBounds;
+    Result := Surfaces.Count > 0;
+  finally
+    Meshes.Free;
+    FileNodes.Free;
+    MatNodes.Free;
+    Transforms.Free;
+  end;
+end;
+
 function TD3StaticModel.HasClosedSurface: Boolean;
 var
   S: TD3StaticSurface;
@@ -847,6 +1516,32 @@ begin
       end;
   end;
   Result := FClosed;
+end;
+
+{ an invisible shape that only collides (and casts no shadow) }
+function CollisionShape(const S: TD3StaticSurface): TShapeNode;
+var
+  Geometry: TIndexedTriangleSetNode;
+  C: TCoordinateNode;
+  Coords: array of TVector3;
+  I: Integer;
+  App: TAppearanceNode;
+begin
+  SetLength(Coords, Length(S.Positions));
+  for I := 0 to High(S.Positions) do
+    Coords[I] := D3ToCge(S.Positions[I]);
+  C := TCoordinateNode.Create;
+  C.SetPoint(Coords);
+  Geometry := TIndexedTriangleSetNode.Create;
+  Geometry.Coord := C;
+  Geometry.SetIndex(S.Indexes);
+  Geometry.Solid := False;
+  App := TAppearanceNode.Create;
+  App.ShadowCaster := False;
+  Result := TShapeNode.Create;
+  Result.Geometry := Geometry;
+  Result.Appearance := App;
+  Result.Visible := False;
 end;
 
 function TD3StaticModel.BuildNode(const SkinName: String; const EntityKeys: TStrings;
@@ -916,8 +1611,17 @@ begin
     GuiUrl := '';
     if M.GuiSurf <> '' then
       GuiUrl := GuiSurfaceUrl(M.GuiSurf, EntityKeys);
-    if (M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass) or (Length(S.Indexes) < 3) then
+    if Length(S.Indexes) < 3 then
       Continue;
+    if M.IsInvisible and (GuiUrl = '') and not M.DrawAsGlass then
+    begin
+      { nothing to draw, but solid or player clip: Doom 3's clip model of a
+        render model has it (Doom 3 BFG's hell: its rock pieces are
+        "solid" "0", invisible clip meshes collide instead) }
+      if M.BlocksPlayer then
+        Result.AddChildren(CollisionShape(S));
+      Continue;
+    end;
     { deform particle: its particles instead (TD3Game.SpawnParticleDeforms) }
     if (M.Deform = 'particle') or (M.Deform = 'particle2') then
       Continue;
@@ -1124,6 +1828,9 @@ begin
       else
       if LowerCase(ExtractFileExt(Key)) = '.lwo' then
         Ok := Result.LoadLwo(Stream)
+      else
+      if LowerCase(ExtractFileExt(Key)) = '.ma' then
+        Ok := Result.LoadMa(D3Fs.ReadText(Key))
       else
         Ok := Result.LoadAse(D3Fs.ReadText(Key));
     except

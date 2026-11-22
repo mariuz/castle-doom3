@@ -2136,6 +2136,117 @@ begin
   end;
 end;
 
+{ Maya ASCII (.ma, Resurrection of Evil): a 64 square in Maya's XZ plane
+  (two triangles, the second using an edge backwards), a vertex tweak, a
+  transform 10 up, a long texture path wrapped in parentheses; a second mesh
+  with a clip material (collision only) }
+procedure TestMayaModels;
+const
+  Nl = LineEnding;
+var
+  M: TD3StaticModel;
+  S, Clip: TD3StaticSurface;
+  Root: TX3DRootNode;
+  Shapes, Visible: Integer;
+
+  procedure CountShapes(const Node: TX3DNode);
+  var
+    I: Integer;
+  begin
+    if Node is TShapeNode then
+    begin
+      Inc(Shapes);
+      if TShapeNode(Node).Visible then
+        Inc(Visible);
+    end;
+    if Node is TAbstractGroupingNode then
+      for I := 0 to TAbstractGroupingNode(Node).FdChildren.Count - 1 do
+        CountShapes(TAbstractGroupingNode(Node).FdChildren[I]);
+  end;
+
+begin
+  M := TD3StaticModel.Create;
+  try
+    Check(M.LoadMa(
+      '//Maya ASCII 6.0 scene' + Nl +
+      'requires maya "6.0";' + Nl +
+      'createNode transform -n "Mesh";' + Nl +
+      '  setAttr ".t" -type "double3" 0 10 0 ;' + Nl +
+      'createNode mesh -n "MeshShape" -p "Mesh";' + Nl +
+      '  setAttr -k off ".v";' + Nl +
+      '  setAttr ".uvst[0].uvsn" -type "string" "map1";' + Nl +
+      '  setAttr -s 4 ".uvst[0].uvsp[0:3]" -type "float2" 0 0 1 0 0 1 1 1;' + Nl +
+      '  setAttr -s 1 ".pt[3]" -type "float3" 0 8 0;' + Nl +
+      '  setAttr -s 4 ".vt";' + Nl +
+      '  setAttr ".vt[0:3]" 0 0 0 64 0 0 0 0 -64' + Nl +
+      '    64 0 -64;' + Nl +
+      '  setAttr -s 5 ".ed[0:4]" 0 1 0 1 3 0 3 0 0 3 2 0 2 0 0;' + Nl +
+      '  setAttr -s 4 ".n[0:3]" -type "float3" 0 1 0 0 1 0 0 1 0 0 1 0;' + Nl +
+      '  setAttr -s 2 ".fc[0:1]" -type "polyFaces"' + Nl +
+      '    f 3 0 1 2' + Nl +
+      '    mu 0 3 0 1 3' + Nl +
+      '    f 3 3 4 -3' + Nl +
+      '    mu 0 3 3 2 0 ;' + Nl +
+      'createNode transform -n "Wall";' + Nl +
+      'createNode mesh -n "WallShape" -p "Wall";' + Nl +
+      '  setAttr -s 3 ".vt[0:2]" 0 0 0 0 64 0 64 0 0;' + Nl +
+      '  setAttr -s 3 ".ed[0:2]" 0 1 0 1 2 0 2 0 0;' + Nl +
+      '  setAttr -s 1 ".fc[0]" -type "polyFaces" f 3 0 1 2 ;' + Nl +
+      'createNode lambert -n "metal";' + Nl +
+      'createNode shadingEngine -n "metalSG";' + Nl +
+      'createNode file -n "file1";' + Nl +
+      '  setAttr ".ftn" -type "string" (' + Nl +
+      '    "Z:/D3XP/base/textures/test/metal.tga");' + Nl +
+      'createNode phong -n "clip";' + Nl +
+      'createNode shadingEngine -n "clipSG";' + Nl +
+      'createNode file -n "file2";' + Nl +
+      '  setAttr ".ftn" -type "string" "D:/d3xp/d3xp/textures/common/clip.tga";' + Nl +
+      'connectAttr "file1.oc" "metal.c";' + Nl +
+      'connectAttr "metal.oc" "metalSG.ss";' + Nl +
+      'connectAttr "MeshShape.iog" "metalSG.dsm" -na;' + Nl +
+      'connectAttr "file2.oc" "clip.c";' + Nl +
+      'connectAttr "clip.oc" "clipSG.ss";' + Nl +
+      'connectAttr "WallShape.iog" "clipSG.dsm" -na;' + Nl), 'Maya ASCII model loads');
+    CheckEquals(2, M.Surfaces.Count, 'Maya surfaces: one per shading group''s file');
+    S := FindSurface(M, 'textures/test/metal');
+    Check(S <> nil, 'Maya material from the file node (wrapped path, from base/ on)');
+    if S <> nil then
+    begin
+      CheckEquals(2, S.TriangleCount, 'Maya square: 2 triangles');
+      { Maya (x, y, z) is Doom 3's (x, -z, y), then 10 up by the transform }
+      Check(TVector3.Equals(S.Positions[1], Vector3(64, 0, 10), 0.001),
+        'Maya vertex 1 (64 0 0) at Doom 3 (64 0 10), got ' + S.Positions[1].ToString);
+      { vertex 3 (64 0 -64), tweaked 8 up: the first face's third corner }
+      Check(TVector3.Equals(S.Positions[2], Vector3(64, 64, 18), 0.001),
+        'Maya tweaked vertex 3 at (64 64 18), got ' + S.Positions[2].ToString);
+      { the second face: edges 3 (3-2), 4 (2-0) and edge 2 backwards (its end, 0) }
+      Check(TVector3.Equals(S.Positions[5], Vector3(0, 0, 10), 0.001),
+        'Maya edge used backwards gives its end, got ' + S.Positions[5].ToString);
+      Check(FirstNormal(S).Z > 0.9, 'Maya face faces up (counter-clockwise in the file)');
+      CheckNear(1, S.TexCoords[2].X, 'Maya u');
+      CheckNear(1, S.TexCoords[2].Y, 'Maya v kept (CGE convention)');
+      CheckNear(64, M.BoundsMax.Z, 'Maya bounds: the clip wall''s top (Maya y 64)');
+      CheckNear(64, M.BoundsMax.Y, 'Maya bounds');
+    end;
+    Clip := FindSurface(M, 'textures/common/clip');
+    Check(Clip <> nil, 'Maya clip surface (path with neither base/ nor a mod: from textures/ on)');
+    { a clip surface collides without being drawn }
+    Root := M.BuildNode;
+    try
+      Shapes := 0;
+      Visible := 0;
+      CountShapes(Root);
+      Check(Shapes >= 2, 'a shape for the clip surface too');
+      CheckEquals(Shapes - 1, Visible, 'the clip surface''s shape is invisible');
+    finally
+      Root.Free;
+    end;
+  finally
+    M.Free;
+  end;
+  Check(IsStaticModelPath('models/david/hell_h1a.MA'), 'IsStaticModelPath: .ma');
+end;
+
 procedure TestEfx;
 var
   Efx: TD3EfxFile;
@@ -8696,6 +8807,7 @@ begin
   TestJointMods;
   TestTrianglesClosed;
   TestStaticModels;
+  TestMayaModels;
   TestEntityRotation;
   TestCollisionModel;
   TestPortals;
