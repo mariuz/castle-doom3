@@ -669,6 +669,9 @@ begin
   if Ext = '.ase' then
     Result := 'generated/rendermodels/' + ChangeFileExt(Key, '.base')
   else
+  if Ext = '.ma' then
+    Result := 'generated/rendermodels/' + ChangeFileExt(Key, '.bma')
+  else
   if Ext = '.wav' then
   begin
     { speech is per language (idSoundSample::LoadResource) }

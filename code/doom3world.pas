@@ -913,7 +913,7 @@ type
     { a skip runs the game fast (TViewPlay.Update steps it) until the
       cinematic ends, like Doom 3's skipCinematic; FSkipStart and
       FSkipMaxTime are game times }
-    FSkipping: Boolean;
+    FSkipping, FSkipRanOut: Boolean;
     FSkipStart, FSkipMaxTime, FSkipVolume: Single;
     FSkipTimer: TTimerResult;
     { screen fade (idPlayerView::Fade) }
@@ -1733,6 +1733,9 @@ type
     { A skipped cinematic still runs: step the game (1/60 s at a time,
       without drawing) until this is false. }
     property Skipping: Boolean read FSkipping;
+    { the last skip ran its 600 s of game time out with the camera still on:
+      a camera that never ends (Resurrection of Evil's credits after hell) }
+    property SkipRanOut: Boolean read FSkipRanOut;
     { Color over the screen (alpha 0: nothing), from trigger_fade and the
       scripts' fades. }
     function FadeColor: TVector4;
@@ -2597,6 +2600,7 @@ begin
   FCameraEntity := nil;
   FCameraAnim := nil;
   FSkipUntil := 0;
+  FSkipRanOut := False;
   if FSkipping then
     SoundEngine.Volume := FSkipVolume;
   FSkipping := False;
@@ -7627,8 +7631,11 @@ begin
   { touches }
   if not PlayerDead then
   begin
+    { the feet a unit up: the walk can sink them a little into the floor
+      (0.2 at hell's start, whose lava hurt volume ends at the floor: in
+      Doom 3 the player stands on it unhurt) }
     PlayerBox := Box3D(
-      Feet - Vector3(PlayerRadius, 0, PlayerRadius),
+      Feet - Vector3(PlayerRadius, -1, PlayerRadius),
       Feet + Vector3(PlayerRadius, PlayerBodyHeight, PlayerRadius));
     for T in FTriggers do
       if (not T.Disabled) and (not T.NoTouch) and (not T.WaitingForActivation) and
@@ -9152,6 +9159,7 @@ var
   DamageDef: TStringList;
   I: Integer;
   Targets: array of Integer;
+  Ignored: Integer;
   Node: TD3CombatNode;
   Mov: TD3Moveable;
   Eye, Other3, Dir: TVector3;
@@ -9339,6 +9347,14 @@ begin
     'animLength':
       EventResult := D3FloatValue(A.Model.Instance.AnimDurationOf(
         A.Model.Instance.ResolveAnim(D3ValueToString(Args[1]))));
+    { Resurrection of Evil's idActor::Event_AnimDistance: how far the
+      anim's root moves in all (the berserk hunter's charges) }
+    'animDistance':
+      if A.Model.Instance.HasAnim(D3ValueToString(Args[1])) then
+        EventResult := D3FloatValue(A.Model.Instance.AnimMovementDelta(
+          A.Model.Instance.ResolveAnim(D3ValueToString(Args[1]))).Length)
+      else
+        EventResult := D3FloatValue(0);
     { no dodging, leaping, combat nodes or touching yet }
     'touches': EventResult := D3FloatValue(0);
     'getClosestHiddenTarget': EventResult := D3EntityValue(0);
@@ -9730,6 +9746,32 @@ begin
         if not PlayerDead and (Pos.X >= Args[0].V.X) and (Pos.Y >= Args[0].V.Y) and (Pos.Z >= Args[0].V.Z) and
            (Pos.X <= Args[1].V.X) and (Pos.Y <= Args[1].V.Y) and (Pos.Z <= Args[1].V.Z) then
           EventResult := D3EntityValue(PlayerHandle)
+        else
+          EventResult := D3EntityValue(0);
+      end;
+    { Resurrection of Evil's idEntity::Event_RandomTarget: one of its
+      targets at random, not the one named (when it has others) }
+    'randomTarget':
+      begin
+        Targets := nil;
+        Ignored := 0;
+        for I := 0 to A.Model.Entity.Pairs.Count - 1 do
+          if IsTargetPair(A.Model.Entity.Pairs[I]) then
+          begin
+            Other := FindEntity(A.Model.Entity.Pairs.ValueFromIndex[I]);
+            if Other = nil then
+              Continue;
+            if (Ignored = 0) and (D3ValueToString(Args[0]) <> '') and
+               SameText(Other.Name, D3ValueToString(Args[0])) then
+              Ignored := EntityHandle(Other)
+            else
+              Targets := Concat(Targets, [EntityHandle(Other)]);
+          end;
+        { the ignored one only when it is the only target }
+        if (Length(Targets) = 0) and (Ignored <> 0) then
+          Targets := [Ignored];
+        if Length(Targets) > 0 then
+          EventResult := D3EntityValue(Targets[Random(Length(Targets))])
         else
           EventResult := D3EntityValue(0);
       end;
@@ -13384,6 +13426,7 @@ var
 begin
   E := FCameraEntity;
   FCameraEntity := nil;
+  FSkipRanOut := False;
   FCameraAnim := nil;
   { idCameraAnim::Stop activates its targets }
   if (E <> nil) and (E.Value('spawnclass') = 'idCameraAnim') then
@@ -13415,6 +13458,7 @@ begin
   { gameLocal.SkipCinematic: the game runs on (its relays, fades and
     scripts keep their timing) until the cinematic is over, muted }
   FSkipping := True;
+  FSkipRanOut := False;
   FSkipStart := FTime;
   FSkipTimer := Timer;
   FSkipMaxTime := FTime + 600;
@@ -13429,6 +13473,7 @@ begin
   { the cameras a cinematic starts soon after (a chain of shots) are
     skipped too }
   FSkipping := False;
+  FSkipRanOut := FCameraEntity <> nil;
   FSkipUntil := FTime + 1;
   SoundEngine.Volume := FSkipVolume;
   WritelnLog('Doom3World', 'Cinematic skipped: %.1f s of game time in %.1f s',
@@ -15692,5 +15737,10 @@ initialization
       bosses, unchecked too }
     'monster_flying_cacodemon', 'monster_flying_lostsoul',
     'monster_boss_cyberdemon', 'monster_boss_guardian', 'monster_boss_guardian_seeker',
-    'monster_boss_sabaoth', 'monster_boss_vagary'];
+    'monster_boss_sabaoth', 'monster_boss_vagary',
+    { Resurrection of Evil's (d3xp): every event their scripts call is
+      handled; the sentry (the player's ally) is left out }
+    'monster_demon_vulgar', 'monster_flying_forgotten', 'monster_demon_d3xp_bruiser',
+    'monster_turret_ancient', 'monster_hunter_berserk', 'monster_hunter_helltime',
+    'monster_hunter_invul', 'monster_boss_maledict'];
 end.

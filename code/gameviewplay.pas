@@ -3243,9 +3243,12 @@ begin
     for I := 0 to Map.Brushes.Count - 1 do
       if SameText(Map.Brushes[I].Entity.Name, Args) then
       begin
-        S := Format('%s %s exists=%s visible=%s areas=%d box=%s', [Args, Map.Brushes[I].Entity.ClassName_,
+        S := Format('%s %s exists=%s visible=%s collides=%s pickable=%s areas=%d box=%s scene %s', [Args,
+          Map.Brushes[I].Entity.ClassName_,
           BoolToStr(Map.Brushes[I].Scene.Exists, '1', '0'), BoolToStr(Map.Brushes[I].Scene.Visible, '1', '0'),
-          Length(Map.Brushes[I].Areas), Map.Brushes[I].Scene.WorldBoundingBox.ToString]);
+          BoolToStr(Map.Brushes[I].Scene.Collides, '1', '0'), BoolToStr(Map.Brushes[I].Scene.Pickable, '1', '0'),
+          Length(Map.Brushes[I].Areas), Map.Brushes[I].Scene.WorldBoundingBox.ToString,
+          Map.Brushes[I].Scene.Name]);
         Break;
       end;
     Console.Print(S);
@@ -4276,6 +4279,19 @@ begin
   if FGame.CinematicActive then
   begin
     FRouteCinematic := FRouteCinematic + SecondsPassed;
+    { a camera that a skip (game time run on fast up to its cap) didn't
+      end is the game's end (Resurrection of Evil's credits after hell):
+      the route is done }
+    if FGame.SkipRanOut and not FGame.Skipping then
+    begin
+      WritelnLog('GameViewPlay', 'Route: cinematic %s never ends (the game''s end), the route stops',
+        [FGame.CinematicName]);
+      if FFight then
+        FightSummary;
+      FRoute := nil;
+      FGame.RouteInvulnerable := False;
+      Exit(True);
+    end;
     if FRouteCinematic > 2 then
     begin
       WritelnLog('GameViewPlay', 'Route: skipping cinematic %s', [FGame.CinematicName]);
