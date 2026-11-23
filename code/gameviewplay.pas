@@ -137,7 +137,7 @@ type
     { fight 2: after the route, the hunt walks to every monster alive and
       shown (the nearest first) and kills it (HuntNext) }
     FHunt: Boolean;
-    FHuntTarget, FHuntDone: String;
+    FHuntTarget, FHuntDone, FHuntHidden, FHuntWoken: String;
     FHuntTries, FHuntRoutes: Integer;
     FHuntTime: Single;
     FRouteGaps: Single;
@@ -148,8 +148,25 @@ type
     FRouteWalkMode: Boolean;
     FWalkStuck, FWalkProgressAt: Single;
     FWalkUsed: Boolean;
-    FWalkStuckCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkPutStreak, FWalkElevatorTries, FWalkFellCount: Integer;
+    FWalkStuckCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkPutStreak, FWalkElevatorTries, FWalkFellCount, FWalkReroutes: Integer;
+    { the view's turns during a route (how smooth the bots look) }
+    FViewFrames, FViewJerks, FViewReversals: Integer;
+    FViewTurnSum, FViewLastTurn: Single;
+    FViewLastDir: TVector3;
+    FViewBy, FViewShakeBy: String;
+    FViewShakeTimes: array [0..7] of Single;
+    FViewShakeNext: Integer;
+    FViewShakeLogged, FViewClock: Single;
+    { the bots keep looking at a monster a moment after it went out of
+      sight (at corners the sight came and went every frame: the view
+      swung between it and the route) }
+    FViewHoldPoint: TVector3;
+    FViewHoldUntil: Single;
     FWalkLastFloor: TVector3;
+    FWalkRerouted, FWalkCrouch: Boolean;
+    FWalkRerouteSpot: TVector3;
+    FWalkRerouteTries: Integer;
+    FWalkJumpAt: Single;
     FWalkStuckSpots: String;
     FDvShift: TSFFloat;
     FBobSavedPos, FBobSavedDir, FBobSavedUp: TVector3;
@@ -263,10 +280,17 @@ type
     function WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
     { route_walk: the feet towards the route's point Goal (Doom 3 feet),
       with collisions; the view along Yaw }
-    procedure WalkOnFoot(const Goal: TVector3; const Yaw, MaxStep: Single);
+    procedure WalkOnFoot(const Goal: TVector3; const Yaw, MaxStep, SecondsPassed: Single);
+    { turns the view towards Dir at a player's pace (the bots: a view set
+      to its goal every frame shook as the goals took turns); returns the
+      angle still to turn, in degrees }
+    function TurnViewTo(const Dir: TVector3; const SecondsPassed: Single;
+      const DegreesPerSecond: Single; const Who: String; const DeadBand: Single = 0): Single;
+    { the walk's turn: along the route, or at a monster just out of sight }
+    procedure TurnRouteView(const Yaw, SecondsPassed: Single; const Who: String);
     { route_walk: no progress along the route for a while: a door or an
       elevator near the feet is used, later it is put ahead }
-    procedure WalkStuck(const SecondsPassed: Single);
+    procedure WalkStuck(const SecondsPassed: Single; const Fell: Boolean = False);
     procedure WalkSummary;
     function FightSafeToSave: Boolean;
     function FightStep(const SecondsPassed: Single): Boolean;
@@ -1966,7 +1990,7 @@ procedure TViewPlay.UpdateCrouch(const SecondsPassed: Single);
 var
   OldHeight: Single;
 begin
-  FGame.PlayerCrouchHeld := FDemoCrouch or FDemoGoCrouch or
+  FGame.PlayerCrouchHeld := FDemoCrouch or FDemoGoCrouch or FWalkCrouch or
     (not Console.IsOpen and WalkNavigation.Input_Crouch.IsPressed(Container));
   OldHeight := FGame.EyeHeight;
   FGame.UpdateCrouch(SecondsPassed, Camera.Translation);
@@ -2633,6 +2657,8 @@ begin
     FHunt := StrToIntDef(Trim(Args), 0) = 2;
     FHuntTarget := '';
     FHuntDone := '';
+    FHuntHidden := '';
+    FHuntWoken := '';
     FHuntTries := 0;
     FHuntRoutes := 0;
     FHuntTime := 0;
@@ -2668,6 +2694,13 @@ begin
     FWalkElevatorTries := 0;
     FWalkStuckCount := 0;
     FWalkFellCount := 0;
+    FWalkReroutes := 0;
+    FViewFrames := 0;
+    FViewJerks := 0;
+    FViewReversals := 0;
+    FViewTurnSum := 0;
+    FViewLastTurn := 0;
+    FViewLastDir := TVector3.Zero;
     FWalkDoorsOpened := 0;
     FWalkElevatorsCalled := 0;
     FWalkStuckSpots := '';
@@ -3878,18 +3911,18 @@ end;
 
 procedure TViewPlay.WalkSummary;
 begin
-  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots, %d falls through the floor, %d doors opened for the walk, %d elevators called%s',
-    [FWalkStuckCount, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkStuckSpots]);
+  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots, %d falls through the floor, %d doors opened for the walk, %d elevators called, %d detours%s',
+    [FWalkStuckCount, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkReroutes, FWalkStuckSpots]);
 end;
 
 function TViewPlay.HuntNext: Boolean;
 const
   HuntTries = 3;
-  HuntMaxSeconds = 900;
+  HuntMaxSeconds = 1500;
 var
-  Mon, Best: TD3Monster;
+  Mon, Best, Hidden: TD3Monster;
   Feet, P, Away: TVector3;
-  D, BestD, Gap: Single;
+  D, BestD, Gap, HiddenD: Single;
   Hop: TD3PointArray;
   Areas: Integer;
   MonName, AliveList: String;
@@ -3916,6 +3949,55 @@ begin
           Best := Mon;
         end;
       end;
+    { none shown is left: the places of the monsters never shown (their
+      trigger never fired: a part of the map the route didn't go through,
+      a closet a script opens); walking there fires it, or, once there,
+      it is woken as its trigger would }
+    if (Best = nil) and (FHuntTime <= HuntMaxSeconds) then
+    begin
+      Hidden := nil;
+      HiddenD := MaxSingle;
+      for Mon in FGame.Monsters do
+        if (Mon.Model <> nil) and not Mon.Appeared and Mon.Model.Hidden and
+           (Mon.State <> msDead) and not Listed(FHuntWoken, Mon.Model.Entity.Name) then
+        begin
+          D := PointsDistance(Feet, Mon.Model.Entity.Origin);
+          if D < HiddenD then
+          begin
+            HiddenD := D;
+            Hidden := Mon;
+          end;
+        end;
+      if Hidden <> nil then
+      begin
+        MonName := Hidden.Model.Entity.Name;
+        if Listed(FHuntHidden, MonName) then
+        begin
+          FHuntWoken := FHuntWoken + ',' + MonName;
+          WritelnLog('GameViewPlay', 'Fight: hunt: %s (%s) still hidden, %.0f from its place: woken, as its trigger would',
+            [MonName, Hidden.Model.Entity.ClassName_, HiddenD]);
+          FGame.Activate(Hidden.Model.Entity);
+          Continue;
+        end;
+        FHuntHidden := FHuntHidden + ',' + MonName;
+        P := Hidden.Model.Entity.Origin;
+        FGame.PlayerRoute(Feet, P, Hop, Gap, Areas);
+        if Length(Hop) < 2 then
+          Hop := [Feet, P];
+        FRoute := Hop;
+        FRouteSeg := 0;
+        FRouteAlong := 0;
+        FRouteMarks := nil;
+        FRouteMarkNames := nil;
+        FRouteNextMark := 0;
+        FRouteLastEye := Camera.Translation;
+        FHuntTarget := MonName;
+        Inc(FHuntRoutes);
+        WritelnLog('GameViewPlay', 'Fight: hunt: to the place of %s (%s, never shown) at %s, %.0f away',
+          [MonName, Hidden.Model.Entity.ClassName_, P.ToString, HiddenD]);
+        Exit(True);
+      end;
+    end;
     if (Best = nil) or (FHuntTime > HuntMaxSeconds) then
     begin
       AliveList := '';
@@ -3951,7 +4033,8 @@ begin
   { wake it, as a trigger would: it comes for the player }
   FGame.Activate(Best.Model.Entity);
   P := CgeToD3(Best.Position);
-  if BestD < 96 then
+  if (BestD < 96) and not ((FGame.IdealSlot >= 0) and
+     (Pos('fists', LowerCase(FGame.WeaponDefs[FGame.IdealSlot])) > 0)) then
   begin
     { arrived on top of it, and the fight didn't take aim (too close: the
       routes of tries 2 and 3 were empty, the hunt gave up on a monster
@@ -4024,9 +4107,10 @@ const
     only jitters (fireballs 325 to 475, rockets 300 to 700) }
   FightDodgeMaxSpeed = 1000;
 var
-  Target, Dir, Side, NewEye, Back, Away: TVector3;
+  Target, Dir, Side, NewEye, Back, Away, Close: TVector3;
   TargetName, What: String;
   Slot: Integer;
+  Fists: Boolean;
   Mon: TD3Monster;
   HuntAlive: Boolean;
   Proj: TObject;
@@ -4209,16 +4293,23 @@ begin
     if (Slot >= 0) and (Slot <> FGame.IdealSlot) then
       FGame.SelectWeapon(Slot);
     Dir := Target - Camera.Translation;
-    if Dir.Length > 0.01 then
-      Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
     { held, not a pulse per frame: a shot ends a pulse, and the weapon's
-      script gets a turn per game tic (several in a long frame) }
-    FGame.Attack := True;
+      script gets a turn per game tic (several in a long frame); only once
+      the view is on the target (it turns there smoothly) }
+    { up close it fires anyway: a calm view there (a zombie stepping across
+      it swung the aim back and forth) }
+    if Dir.Length < 128 then
+      FGame.Attack := (TurnViewTo(Dir, SecondsPassed, 200, 'aim', 10) < 20) or (Dir.Length < 96)
+    else
+      FGame.Attack := TurnViewTo(Dir, SecondsPassed, 540, 'aim', 3) < 12;
+    FViewHoldPoint := Target;
+    FViewHoldUntil := FViewClock + 0.8;
     FFightWaitFor := '';
     FFightWait := 0;
     { back off from claws and bites: it keeps shooting while the monster
       walks after it (hell knights, imps up close) }
-    if FightTactics and (Dir.Length < FightBackOffDist) then
+    Fists := (Slot >= 0) and (Pos('fists', LowerCase(FGame.WeaponDefs[Slot])) > 0);
+    if FightTactics and (Dir.Length < FightBackOffDist) and not Fists then
     begin
       Back := Vector3(-Dir.X, 0, -Dir.Z);
       if Back.Length > 0.01 then
@@ -4245,9 +4336,27 @@ begin
       else
         Camera.Translation := NewEye;
     end;
+    { the hunt with only the fists: close in and punch (the hunt's route
+      got there and backed off again, until it gave up) }
+    if Fists and FHunt and (FHuntTarget <> '') then
+    begin
+      Close := Vector3(Dir.X, 0, Dir.Z);
+      if Close.Length > 40 then
+      begin
+        Close := Close.Normalize;
+        NewEye := Camera.Translation + Close * (FightBackOffSpeed * Min(SecondsPassed, 0.1));
+        if CanMoveTo(NewEye, Close) then
+        begin
+          Camera.Translation := NewEye;
+          FFightAnchor := NewEye;
+        end;
+      end;
+      FRouteLastEye := Camera.Translation;
+      Exit(True);
+    end;
     FRouteLastEye := Camera.Translation;
     { with only the fists it can't wait for the monster: it walks on }
-    Exit((Slot < 0) or (Pos('fists', LowerCase(FGame.WeaponDefs[Slot])) = 0));
+    Exit(not Fists);
   end;
   FFightTarget := '';
   FFightOnTarget := 0;
@@ -4271,8 +4380,9 @@ begin
     begin
       Dir := Target - Camera.Translation;
       Dir.Y := 0;
-      if Dir.Length > 0.01 then
-        Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
+      TurnViewTo(Dir, SecondsPassed, 240, 'wait', 3);
+      FViewHoldPoint := Camera.Translation + Dir;
+      FViewHoldUntil := FViewClock + 0.8;
       FRouteLastEye := Camera.Translation;
       Exit(True);
     end;
@@ -4329,13 +4439,74 @@ end;
 
 function TViewPlay.WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
 var
-  Step, SegLen, Ahead, Yaw: Single;
-  P, Q, Dir: TVector3;
+  Step, SegLen, Ahead, Yaw, D: Single;
+  P, Q, Dir, OldDir: TVector3;
   Seg: Integer;
   Along: Single;
   Hop: TD3PointArray;
+
+  function ShakeWho: String;
+  var
+    W: String;
+  begin
+    Result := '';
+    for W in ['walk', 'route', 'aim', 'wait', 'hold'] do
+      if Pos(W, FViewShakeBy) > 0 then
+        Result := Result + ' ' + W;
+    FViewShakeBy := '';
+  end;
+
+  procedure MeasureViewTurn;
+  var
+    A, B: TVector3;
+    Turn: Single;
+  begin
+    B := CgeToD3(Camera.Direction);
+    FViewShakeBy := FViewShakeBy + FViewBy;
+    if Length(FViewShakeBy) > 400 then
+      FViewShakeBy := Copy(FViewShakeBy, 201, MaxInt);
+    FViewBy := '';
+    A := FViewLastDir;
+    FViewLastDir := B;
+    if A.IsPerfectlyZero then
+      Exit;
+    { signed yaw change; a big jump (a teleport, a load) isn't a turn }
+    Turn := RadToDeg(ArcTan2(B.Y, B.X) - ArcTan2(A.Y, A.X));
+    while Turn > 180 do
+      Turn := Turn - 360;
+    while Turn < -180 do
+      Turn := Turn + 360;
+    if Abs(Turn) > 90 then
+      Exit;
+    Inc(FViewFrames);
+    FViewTurnSum := FViewTurnSum + Abs(Turn);
+    if Abs(Turn) > 10 then
+      Inc(FViewJerks);
+    if (Abs(Turn) > 2) and (Abs(FViewLastTurn) > 2) and (Turn * FViewLastTurn < 0) then
+    begin
+      Inc(FViewReversals);
+      { 8 reversals within 2 s: the view shakes here; log the place and
+        what turned it }
+      FViewShakeTimes[FViewShakeNext] := FViewClock;
+      FViewShakeNext := (FViewShakeNext + 1) mod Length(FViewShakeTimes);
+      FViewShakeBy := FViewShakeBy + FViewBy;
+      if (FViewClock - FViewShakeTimes[FViewShakeNext] < 2) and (FViewClock - FViewShakeLogged > 3) then
+      begin
+        FViewShakeLogged := FViewClock;
+        WritelnLog('GameViewPlay', 'View: shaking at %s (8 reversals in %.1f s; turned by%s; fight target "%s", waiting for "%s")',
+          [(CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight)).ToString,
+           FViewClock - FViewShakeTimes[FViewShakeNext], ShakeWho, FFightTarget, FFightWaitFor]);
+      end;
+    end;
+    if Abs(Turn) > 2 then
+      FViewLastTurn := Turn;
+  end;
+
 begin
   Result := True;
+  FViewClock := FViewClock + SecondsPassed;
+  if Length(FRoute) >= 2 then
+    MeasureViewTurn;
   if (Length(FRoute) < 2) or (FRouteMap <> MapName) then
   begin
     if FRouteMap <> MapName then
@@ -4384,6 +4555,27 @@ begin
     the route (le_enpro2's, le_hell's trigger_hurt of 1000) kills it again
     and again after every load }
   FGame.RouteInvulnerable := not FFight or FFightGod;
+  { on foot, fallen far below the route (a pit the route crosses on a
+    platform that isn't there, a hole in the floor): logged, then put ahead
+    past the gap onto a floor; checked before the fight, which can hold the
+    walk while the player falls to the bottom }
+  if FRouteWalkMode and (FRouteSeg < High(FRoute)) then
+  begin
+    SegLen := Max(0.001, PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]));
+    P := FRoute[FRouteSeg] + (FRoute[FRouteSeg + 1] - FRoute[FRouteSeg]) * (FRouteAlong / SegLen);
+    Q := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+    if (Q.Z < P.Z - 400) and (Q.Z < FWalkLastFloor.Z - 400) and not FGame.PlayerDead then
+    begin
+      Inc(FWalkFellCount);
+      WritelnLog('GameViewPlay', 'Walk: fell through the floor near %s (last on a floor at %s, now %.0f below): put ahead',
+        [P.ToString, FWalkLastFloor.ToString, P.Z - Q.Z]);
+      if Length(FWalkStuckSpots) < 2000 then
+        FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (fell through the floor)',
+          [FWalkLastFloor.X, FWalkLastFloor.Y, FWalkLastFloor.Z]);
+      WalkStuck(0, True);
+      Exit(False);
+    end;
+  end;
   if FFight and FightStep(SecondsPassed) then
     Exit(False);
   if FRouteHold > 0 then
@@ -4415,24 +4607,12 @@ begin
     Q := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
     { up to 100 above the feet: items on tables and shelves (the route
       visits the item's own point) }
-    if (Sqr(P.X - Q.X) + Sqr(P.Y - Q.Y) > Sqr(40)) or (P.Z - Q.Z > 100) or (Q.Z - P.Z > 72) then
+    { right under (or over) the point it goes on whatever the height: the
+      items and monsters the route visits up on shelves, ledges and in the
+      air (a third of the stuck places stood under them) }
+    D := Sqr(P.X - Q.X) + Sqr(P.Y - Q.Y);
+    if (D > Sqr(40)) or ((D > Sqr(24)) and ((P.Z - Q.Z > 100) or (Q.Z - P.Z > 72))) then
       Step := 0;
-    { fallen through the floor, out of the world: logged where it was last
-      on a floor, then back on the route }
-    if Q.Z < P.Z - 1024 then
-    begin
-      Inc(FWalkFellCount);
-      WritelnLog('GameViewPlay', 'Walk: fell through the floor near %s (last on a floor at %s), back on the route',
-        [P.ToString, FWalkLastFloor.ToString]);
-      if Length(FWalkStuckSpots) < 2000 then
-        FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (fell through the floor)',
-          [FWalkLastFloor.X, FWalkLastFloor.Y, FWalkLastFloor.Z]);
-      PlaceCamera(D3ToCge(P), CameraYaw);
-      { the fall's speed would take it down again in a frame }
-      WalkNavigation.CancelFalling;
-      FRouteLastEye := Camera.Translation;
-      Step := 0;
-    end else
     if FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 8, SegLen, Dir) then
       FWalkLastFloor := Q;
     if (FRouteWalked > FWalkProgressAt + 32) or (FRouteWalked < FWalkProgressAt) then
@@ -4442,6 +4622,9 @@ begin
       FWalkUsed := False;
       FWalkElevatorTries := 0;
       FWalkPutStreak := 0;
+      FWalkRerouted := False;
+      FWalkCrouch := False;
+      FWalkJumpAt := 0;
     end;
     if Step = 0 then
       WalkStuck(SecondsPassed);
@@ -4478,6 +4661,8 @@ begin
     if FFight and FHunt and HuntNext then
       Exit(False);
     WritelnLog('GameViewPlay', 'Route: done, %.0f units', [FRouteWalked]);
+    WritelnLog('GameViewPlay', 'Route: view turns: %d frames, %.2f degrees a frame, %d over 10 degrees, %d reversals of turns over 2 degrees',
+      [FViewFrames, FViewTurnSum / Max(1, FViewFrames), FViewJerks, FViewReversals]);
     if FFight then
       FightSummary
     else
@@ -4509,9 +4694,14 @@ begin
     Yaw := RadToDeg(ArcTan2(Dir.Y, Dir.X));
   P := RouteAroundHazards(P, Dir, Speed * Min(SecondsPassed, 0.1));
   if FRouteWalkMode then
-    WalkOnFoot(P, Yaw, Speed * Min(SecondsPassed, 0.1))
+    WalkOnFoot(P, Yaw, Speed * Min(SecondsPassed, 0.1), SecondsPassed)
   else
+  begin
+    OldDir := Camera.Direction;
     PlaceCamera(D3ToCge(P), Yaw);
+    Camera.SetWorldView(Camera.Translation, OldDir, Vector3(0, 1, 0));
+    TurnRouteView(Yaw, SecondsPassed, 'route');
+  end;
   FRouteLastEye := Camera.Translation;
   if FRouteSinceShot >= ShotEvery then
   begin
@@ -4522,7 +4712,63 @@ begin
   Result := False;
 end;
 
-procedure TViewPlay.WalkOnFoot(const Goal: TVector3; const Yaw, MaxStep: Single);
+procedure TViewPlay.TurnRouteView(const Yaw, SecondsPassed: Single; const Who: String);
+begin
+  if FViewClock < FViewHoldUntil then
+    TurnViewTo(FViewHoldPoint - Camera.Translation, SecondsPassed, 360, 'hold', 3)
+  else
+    TurnViewTo(YawToCgeDir(Yaw), SecondsPassed, 240, Who);
+end;
+
+function TViewPlay.TurnViewTo(const Dir: TVector3; const SecondsPassed: Single;
+  const DegreesPerSecond: Single; const Who: String; const DeadBand: Single): Single;
+var
+  Cur, Want: TVector3;
+  CurYaw, CurPitch, WantYaw, WantPitch, DYaw, DPitch, Err, Turn, T: Single;
+begin
+  Result := 0;
+  if Pos(Who, FViewBy) = 0 then
+    FViewBy := FViewBy + ' ' + Who;
+  if Dir.Length < 0.0001 then
+    Exit;
+  if GetEnvironmentVariable('CD3_SMOOTH_TURN') = '0' then
+  begin
+    Camera.SetWorldView(Camera.Translation, Dir.Normalize, Vector3(0, 1, 0));
+    Exit;
+  end;
+  Cur := CgeToD3(Camera.Direction);
+  Want := CgeToD3(Dir.Normalize);
+  CurYaw := RadToDeg(ArcTan2(Cur.Y, Cur.X));
+  CurPitch := RadToDeg(ArcTan2(Cur.Z, Sqrt(Sqr(Cur.X) + Sqr(Cur.Y))));
+  WantYaw := RadToDeg(ArcTan2(Want.Y, Want.X));
+  WantPitch := RadToDeg(ArcTan2(Want.Z, Sqrt(Sqr(Want.X) + Sqr(Want.Y))));
+  DYaw := WantYaw - CurYaw;
+  while DYaw > 180 do
+    DYaw := DYaw - 360;
+  while DYaw < -180 do
+    DYaw := DYaw + 360;
+  DPitch := WantPitch - CurPitch;
+  Err := Sqrt(Sqr(DYaw) + Sqr(DPitch));
+  Result := Err;
+  { close enough: no chasing small wobbles (a monster's center moving
+    with its anims, the strafe) }
+  if Err < Max(0.05, DeadBand) then
+    Exit;
+  { eases in (a fraction of what is left a frame), at most the rate: small
+    corrections are gentle, big turns don't take long }
+  T := Min(SecondsPassed, 0.1);
+  Turn := Min(DegreesPerSecond * T, Max(Err * (1 - Exp(-10 * T)), 30 * T));
+  if Turn >= Err then
+    Turn := Err;
+  CurYaw := DegToRad(CurYaw + DYaw * Turn / Err);
+  CurPitch := DegToRad(CurPitch + DPitch * Turn / Err);
+  Camera.SetWorldView(Camera.Translation,
+    D3ToCge(Vector3(Cos(CurPitch) * Cos(CurYaw), Cos(CurPitch) * Sin(CurYaw), Sin(CurPitch))),
+    Vector3(0, 1, 0));
+  Result := Err - Turn;
+end;
+
+procedure TViewPlay.WalkOnFoot(const Goal: TVector3; const Yaw, MaxStep, SecondsPassed: Single);
 var
   Feet, D, Move, From, Side: TVector3;
   Moved, Angle: Single;
@@ -4565,10 +4811,10 @@ begin
         Camera.Translation := From;
       end;
   end;
-  Camera.SetWorldView(Camera.Translation, YawToCgeDir(Yaw), Vector3(0, 1, 0));
+  TurnRouteView(Yaw, SecondsPassed, 'walk');
 end;
 
-procedure TViewPlay.WalkStuck(const SecondsPassed: Single);
+procedure TViewPlay.WalkStuck(const SecondsPassed: Single; const Fell: Boolean);
 const
   { after this long it uses what is near (a door, an elevator); after
     PutAheadAfter (longer after an elevator was called) it is put ahead }
@@ -4586,6 +4832,7 @@ var
   Seg: Integer;
   Near: TBox3D;
   N: TVector3;
+  Hop: TD3PointArray;
 
   { the route's point Dist units further on }
   function RouteAhead(const Dist: Single): TVector3;
@@ -4603,13 +4850,97 @@ var
     Result := FRoute[Seg] + (FRoute[Seg + 1] - FRoute[Seg]) * (Along / SegLen);
   end;
 
+  { the floor's height under a Doom 3 point (from just above it: from 48
+    above, a point floating under a ceiling found the roof's top), only
+    with the eye inside the map's areas there }
+  function FloorUnder(const At: TVector3; out FloorZ: Single): Boolean;
+  var
+    Dist: Single;
+    Normal: TVector3;
+    Start: Integer;
+  begin
+    { from just above the point; then from under it (the objectives and
+      items floating under a ceiling: from above, the ray started inside
+      the ceiling and found its underside), down to 224 below }
+    for Start := 0 to 1 do
+    begin
+      Result := FGame.WorldHit(D3ToCge(At) + Vector3(0, 8 - 32 * Start, 0), Vector3(0, -1, 0),
+        104 + 96 * Start, Dist, Normal);
+      if not Result then
+        Continue;
+      FloorZ := At.Z + 8 - 32 * Start - Dist;
+      { room for the player over it, the eye inside the map's areas (ray
+        casts ignore the faces' sides) }
+      Result := not FGame.WorldHit(D3ToCge(Vector3(At.X, At.Y, FloorZ + 1)), Vector3(0, 1, 0),
+        FGame.EyeHeight + 4, Dist, Normal) and
+        (Map.AreaAt(D3ToCge(Vector3(At.X, At.Y, FloorZ + FGame.EyeHeight))) >= 0);
+      if Result then
+        Exit;
+    end;
+  end;
+
 begin
   FWalkStuck := FWalkStuck + SecondsPassed;
-  if FWalkStuck < UseAfter then
-    Exit;
+  if Fell then
+    FWalkStuck := PutAheadAfter;
   Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
   P := RouteAhead(0);
-  if not FWalkUsed then
+  if not Fell then
+  begin
+    { a ledge up to the jump's height ahead: jump (every 1.5 s) }
+    if (FWalkStuck >= 0.5) and (FWalkStuck - FWalkJumpAt >= 1.5) and
+       (P.Z - Feet.Z > 16) and (P.Z - Feet.Z < 68) and
+       (Sqr(P.X - Feet.X) + Sqr(P.Y - Feet.Y) < Sqr(96)) then
+    begin
+      FWalkJumpAt := FWalkStuck;
+      { TCastleWalkNavigation.Jump is strict private: its key }
+      if (WalkNavigation.Input_Jump.Key1 <> keyNone) and
+         WalkNavigation.Press(InputKey(TVector2.Zero, WalkNavigation.Input_Jump.Key1, '', [])) then
+        WritelnLog('GameViewPlay', 'Walk: jumping %.0f up at %s', [P.Z - Feet.Z, Feet.ToString]);
+    end;
+    { blocked on the flat: a vent or a low pipe, crouch (the game stands up
+      again where there is room) }
+    if (FWalkStuck >= 1.5) and not FWalkCrouch and (Abs(P.Z - Feet.Z) < 16) and
+       not MainViewport.Items.WorldSegmentCollision(
+         Camera.Translation - Vector3(0, FGame.EyeHeight - 20, 0), D3ToCge(P) + Vector3(0, 20, 0)) then
+    begin
+      FWalkCrouch := True;
+      WritelnLog('GameViewPlay', 'Walk: crouching at %s', [Feet.ToString]);
+    end;
+    { off the line the route takes (pushed off by a corner, a monster, a
+      ledge): a new route from the feet along the AAS to the route's point
+      128 further, once a place }
+    if (FWalkStuck >= 2) and not FWalkRerouted and
+       ((PointsDistance(Feet, FWalkRerouteSpot) > 96) or (FWalkRerouteTries < 2)) then
+    begin
+      FWalkRerouted := True;
+      { at most twice a place: a detour that comes back here doesn't help }
+      if PointsDistance(Feet, FWalkRerouteSpot) > 96 then
+      begin
+        FWalkRerouteSpot := Feet;
+        FWalkRerouteTries := 0;
+      end;
+      Inc(FWalkRerouteTries);
+      Ahead := RouteAhead(128);
+      FGame.PlayerRoute(Feet, Ahead, Hop, D, I);
+      if Length(Hop) >= 3 then
+      begin
+        WritelnLog('GameViewPlay', 'Walk: around the corner at %s: %d points to %s',
+          [Feet.ToString, Length(Hop), Ahead.ToString]);
+        FRoute := Concat(Hop, Copy(FRoute, Seg + 1, MaxInt));
+        for I := 0 to High(FRouteMarks) do
+          FRouteMarks[I] := FRouteMarks[I] - Seg - 1 + Length(Hop);
+        FRouteSeg := 0;
+        FRouteAlong := 0;
+        FRouteLastEye := Camera.Translation;
+        Inc(FWalkReroutes);
+        Exit;
+      end;
+    end;
+  end;
+  if FWalkStuck < UseAfter then
+    Exit;
+  if not FWalkUsed and not Fell then
   begin
     FWalkUsed := True;
     { a door near the feet that touching doesn't open }
@@ -4674,7 +5005,9 @@ begin
   if FWalkStuck < PutAheadAfter then
     Exit;
   { it can't get on: logged, then put ahead past the spot }
-  if MainViewport.Items.WorldSegmentCollision(Camera.Translation,
+  if Fell then
+    Reason := 'fell'
+  else if MainViewport.Items.WorldSegmentCollision(Camera.Translation,
     D3ToCge(P) + Vector3(0, FGame.EyeHeight, 0)) then
     Reason := 'a wall between'
   else if P.Z - Feet.Z > 40 then
@@ -4688,33 +5021,44 @@ begin
     GoalName := FRouteMarkNames[FRouteNextMark]
   else if FHuntTarget <> '' then
     GoalName := FHuntTarget;
-  Inc(FWalkStuckCount);
-  WritelnLog('GameViewPlay', 'Walk: stuck at %s for %.0f s, the route''s point %s (%s, on the way to %s, %.0f units): put ahead',
-    [Feet.ToString, FWalkStuck, P.ToString, Reason, GoalName, FRouteWalked]);
-  if Length(FWalkStuckSpots) < 2000 then
-    FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (%s)', [Feet.X, Feet.Y, Feet.Z, Reason]);
+  if not Fell then
+  begin
+    Inc(FWalkStuckCount);
+    WritelnLog('GameViewPlay', 'Walk: stuck at %s for %.0f s, the route''s point %s (%s, on the way to %s, %.0f units): put ahead',
+      [Feet.ToString, FWalkStuck, P.ToString, Reason, GoalName, FRouteWalked]);
+    if Length(FWalkStuckSpots) < 2000 then
+      FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (%s)', [Feet.X, Feet.Y, Feet.Z, Reason]);
+  end;
   { stuck again right after: further each time (a gap in the route, where
     the AAS found no way, is one long straight line) }
   Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak, 6)));
   Inc(FWalkPutStreak);
   { a point with a floor under it (not one of the items up in the air the
-    route visits), up to 512 units further }
+    route visits, not over a pit), up to 512 units further (1024 after a
+    fall: the gap can be wide); the feet on the floor's surface }
   Extra := 0;
-  while (Extra < 512) and (not FGame.WorldHit(D3ToCge(Ahead) + Vector3(0, 8, 0), Vector3(0, -1, 0), 96, D, N) or
+  while (Extra < 512 * (1 + Ord(Fell))) and (not FloorUnder(Ahead, D) or
     FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
   begin
     Extra := Extra + 64;
     Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
   end;
+  if FloorUnder(Ahead, D) then
+    Ahead.Z := D + 1;
   FRouteSeg := Seg;
   FRouteAlong := Along;
   FRouteWalked := FRouteWalked + PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra;
+  if not FloorUnder(Ahead, D) then
+    WritelnLog('GameViewPlay', 'Walk: no floor found ahead, put at the route''s point %s', [Ahead.ToString]);
   PlaceCamera(D3ToCge(Ahead), CameraYaw);
   WalkNavigation.CancelFalling;
   FRouteLastEye := Camera.Translation;
   FWalkStuck := 0;
   FWalkUsed := False;
   FWalkElevatorTries := 0;
+  FWalkRerouted := False;
+  FWalkCrouch := False;
+  FWalkJumpAt := 0;
   FWalkProgressAt := FRouteWalked;
 end;
 
