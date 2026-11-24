@@ -125,6 +125,13 @@ type
       fight's last hazard stepped out of and projectile dodged }
     FRouteOffset, FRouteOffsetGoal: TVector3;
     FRouteHazardLogged, FFightHazardLogged: String;
+    { a hazard the walk goes through (no way around it, or stepping out of
+      it fought the walk: caverns1's barrel by the route, the player shook
+      in place for 10 s): no stepping out of it until FHazardPassUntil }
+    FHazardPassAt: TVector3;
+    FHazardPassUntil, FHazardStepTime, FHazardStepAt: Single;
+    { the side detour's progress along the route (none for 2 s: through) }
+    FDetourWalked, FDetourSince: Single;
     FFightDodged: TObject;
     FFightHasSave, FFightGod: Boolean;
     FFightRoute: TD3PointArray;
@@ -325,6 +332,7 @@ type
     function FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;
     { the route's point P (Doom 3 feet) moved aside around hazards }
     function RouteAroundHazards(const P, Dir: TVector3; const Step: Single): TVector3;
+    function HazardPassed(const Eye: TVector3): Boolean;
     { the hunt's next monster: FRoute to it; False when none is left }
     function HuntNext: Boolean;
     procedure LogMemory(const Title: String);
@@ -4341,8 +4349,30 @@ begin
       end;
     end;
     { in a hurt volume or by a barrel: out first, or walk on }
-    if FightHazard(Camera.Translation, 0, What) and not StepOutOfHazard then
-      Exit(False);
+    if FightHazard(Camera.Translation, 0, What) then
+    begin
+      if HazardPassed(Camera.Translation) then
+        { the walk goes through it }
+      else
+      begin
+        { stepping out of it for over a second within 4 s: the walk keeps
+          going back in (its way leads through it) }
+        if FViewClock - FHazardStepAt > 4 then
+          FHazardStepTime := 0;
+        FHazardStepAt := FViewClock;
+        FHazardStepTime := FHazardStepTime + SecondsPassed;
+        if FHazardStepTime > 1 then
+        begin
+          WritelnLog('GameViewPlay', 'Fight: stepping out of %s fights the walk at %s: walking through it',
+            [What, CgeToD3(Camera.Translation).ToString]);
+          FHazardPassAt := Camera.Translation;
+          FHazardPassUntil := FViewClock + 8;
+          FHazardStepTime := 0;
+        end else
+        if not StepOutOfHazard then
+          Exit(False);
+      end;
+    end;
   end;
 
   if FGame.FightTarget(Camera.Translation, 1200, FFightIgnore, Target, TargetName, FHuntTarget) and
@@ -5356,6 +5386,12 @@ begin
     FGame.HazardAt(Eye - Vector3(0, FGame.EyeHeight, 0), Margin, What);
 end;
 
+function TViewPlay.HazardPassed(const Eye: TVector3): Boolean;
+begin
+  { hazards near the place the walk goes through (a group of barrels) }
+  Result := (FViewClock < FHazardPassUntil) and (PointsDistance(Eye, FHazardPassAt) < 160);
+end;
+
 function TViewPlay.RouteAroundHazards(const P, Dir: TVector3; const Step: Single): TVector3;
 const
   { looks this far ahead along the route, tries this far to the side }
@@ -5372,6 +5408,9 @@ var
   function Hazard(const Feet: TVector3; const Margin: Single; out Name: String): Boolean;
   begin
     Result := FightHazard(D3ToCge(Feet) + Vector3(0, FGame.EyeHeight, 0), Margin, Name);
+    { the one the walk goes through doesn't count }
+    if Result and HazardPassed(D3ToCge(Feet) + Vector3(0, FGame.EyeHeight, 0)) then
+      Result := False;
   end;
 
 begin
@@ -5414,8 +5453,12 @@ begin
       if What <> FRouteHazardLogged then
         WritelnLog('GameViewPlay', 'Route: around %s at %s (%.0f to the side)', [What, P.ToString, Off.Length]);
     end else
-    if What <> FRouteHazardLogged then
-      WritelnLog('GameViewPlay', 'Route: through %s at %s (no way around)', [What, P.ToString]);
+    begin
+      if What <> FRouteHazardLogged then
+        WritelnLog('GameViewPlay', 'Route: through %s at %s (no way around)', [What, P.ToString]);
+      FHazardPassAt := D3ToCge(P) + Vector3(0, FGame.EyeHeight, 0);
+      FHazardPassUntil := FViewClock + 8;
+    end;
     FRouteHazardLogged := What;
   end else
   if not FRouteOffsetGoal.IsPerfectlyZero then
@@ -5423,6 +5466,22 @@ begin
     { back onto the route where that is safe }
     if not Hazard(P, 8, W) and not Hazard(P + Ahead * AheadDist, 8, W) then
       FRouteOffsetGoal := TVector3.Zero;
+  end;
+  { to the side, the route doesn't go on (its next point is among the
+    barrels, a wall at the side): through the hazards after all }
+  if FRouteOffsetGoal.IsPerfectlyZero or (FRouteWalked > FDetourWalked + 16) then
+  begin
+    FDetourWalked := FRouteWalked;
+    FDetourSince := FViewClock;
+  end else
+  if FViewClock - FDetourSince > 2 then
+  begin
+    WritelnLog('GameViewPlay', 'Route: no way past %s to the side at %s: through it', [FRouteHazardLogged, P.ToString]);
+    FHazardPassAt := D3ToCge(P) + Vector3(0, FGame.EyeHeight, 0);
+    FHazardPassUntil := FViewClock + 8;
+    FRouteOffsetGoal := TVector3.Zero;
+    FDetourWalked := FRouteWalked;
+    FDetourSince := FViewClock;
   end;
   { towards the goal at the walk's speed (a jump would look like a
     teleport) }
