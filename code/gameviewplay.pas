@@ -140,6 +140,10 @@ type
     FHuntTarget, FHuntDone, FHuntHidden, FHuntWoken: String;
     FHuntTries, FHuntRoutes: Integer;
     FHuntTime: Single;
+    { the hunt ends when it kills nothing for a while (delta2b: fists only
+      against an archvile's imps, it switched between them for an hour) }
+    FHuntLastKills: Integer;
+    FHuntKillTime: Single;
     FRouteGaps: Single;
     { console "route_walk 1": the route is walked on foot (collisions,
       gravity, doors opened by touch, elevators called) instead of in
@@ -2685,6 +2689,8 @@ begin
     FHuntTries := 0;
     FHuntRoutes := 0;
     FHuntTime := 0;
+    FHuntLastKills := -1;
+    FHuntKillTime := 0;
     FFightKills := 0;
     FFightDeaths := 0;
     FFightSaves := 0;
@@ -3946,7 +3952,9 @@ function TViewPlay.HuntNext: Boolean;
 const
   HuntTries = 3;
   HuntMaxSeconds = 1500;
+  HuntNoKillSeconds = 300;
 var
+  Stalled: Boolean;
   Mon, Best, Hidden: TD3Monster;
   Feet, P, Away: TVector3;
   D, BestD, Gap, HiddenD: Single;
@@ -3962,6 +3970,12 @@ var
 begin
   Result := False;
   Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+  if FFightKills <> FHuntLastKills then
+  begin
+    FHuntLastKills := FFightKills;
+    FHuntKillTime := FHuntTime;
+  end;
+  Stalled := FHuntTime - FHuntKillTime > HuntNoKillSeconds;
   repeat
     Best := nil;
     BestD := MaxSingle;
@@ -3980,7 +3994,7 @@ begin
       trigger never fired: a part of the map the route didn't go through,
       a closet a script opens); walking there fires it, or, once there,
       it is woken as its trigger would }
-    if (Best = nil) and (FHuntTime <= HuntMaxSeconds) then
+    if (Best = nil) and (FHuntTime <= HuntMaxSeconds) and not Stalled then
     begin
       Hidden := nil;
       HiddenD := MaxSingle;
@@ -4025,8 +4039,11 @@ begin
         Exit(True);
       end;
     end;
-    if (Best = nil) or (FHuntTime > HuntMaxSeconds) then
+    if (Best = nil) or (FHuntTime > HuntMaxSeconds) or Stalled then
     begin
+      if Stalled then
+        WritelnLog('GameViewPlay', 'Fight: hunt: no kill in %.0f s (%d routes): done',
+          [FHuntTime - FHuntKillTime, FHuntRoutes]);
       AliveList := '';
       for Mon in FGame.Monsters do
         if FGame.MonsterHuntable(Mon) then
@@ -5290,6 +5307,27 @@ begin
   begin
     Extra := Extra + 64;
     Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+  end;
+  { none: on along the route to the first point with a floor (delta4's
+    route is mostly gaps over a shaft: a point in the air dropped the player
+    to the bottom, the fall put it ahead again, three times to the level's
+    end); only past 4096 units the route's point as it is }
+  if not FloorUnder(Ahead, D) then
+  begin
+    D := Extra;
+    while (Extra < 4096) and (not FloorUnder(Ahead, CurZ) or
+      FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
+    begin
+      Extra := Extra + 64;
+      Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+    end;
+    if FloorUnder(Ahead, CurZ) then
+      WritelnLog('GameViewPlay', 'Walk: the first floor ahead is %.0f units on', [Extra - D])
+    else
+    begin
+      Extra := D;
+      Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+    end;
   end;
   if FloorUnder(Ahead, D) then
     Ahead.Z := D + 1;
