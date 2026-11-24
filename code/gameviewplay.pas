@@ -4988,7 +4988,7 @@ var
   Feet, P, Ahead: TVector3;
   Mover: TD3Mover;
   El: TD3Elevator;
-  I, BestFloor: Integer;
+  I, BestFloor, FeetFloor: Integer;
   Reason, GoalName: String;
   D, BestD, Along, SegLen, Extra: Single;
   Seg: Integer;
@@ -5140,7 +5140,7 @@ begin
     if FWalkStuck < RememberedPutAheadAfter then
       Exit;
   end else
-  if FWalkStuck < UseAfter then
+  if not Looping and (FWalkStuck < UseAfter) then
     Exit;
   if not FWalkUsed and not Fell and not Remembered then
   begin
@@ -5215,6 +5215,19 @@ begin
           end;
         end;
       end;
+      { its cab at another floor than the feet: called to the feet's floor
+        first (delta2a: the cab waited upstairs at the floor the route
+        went to, the walk called it there again and again from below) }
+      FeetFloor := -1;
+      BestD := MaxSingle;
+      for I := 0 to High(El.Floors) do
+        if Abs(El.Floors[I].Pos.Z - Feet.Z) < BestD then
+        begin
+          BestD := Abs(El.Floors[I].Pos.Z - Feet.Z);
+          FeetFloor := El.Floors[I].Floor;
+        end;
+      if (FeetFloor >= 0) and (FeetFloor <> El.CurrentFloor) and (BestFloor = El.CurrentFloor) then
+        BestFloor := FeetFloor;
       if (BestFloor >= 0) and (FWalkElevatorTries < 2) then
       begin
         Inc(FWalkElevatorTries);
