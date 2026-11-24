@@ -166,7 +166,10 @@ type
       saves): where it had to be put ahead, died and gave up }
     FMemMap: String;
     FMemStuck, FMemGiveUp, FMemDeath: TD3PointArray;
-    FMemGiveUpUsed: array of Boolean;
+    { a give-up place gives god mode again only once the walk is this far
+      on (FRouteWalked): a route that comes back to a pit died there once
+      a pass }
+    FMemGiveUpArm: array of Single;
     FMemStuckUsed, FMemGiveUpsUsed: Integer;
     FMemCheckAt: Single;
     FLastDeathAt: TVector3;
@@ -174,6 +177,12 @@ type
     FWalkRerouted, FWalkCrouch: Boolean;
     FWalkRerouteSpot: TVector3;
     FWalkRerouteTries: Integer;
+    { the walk's detours (where and when, FViewClock): three at one spot in
+      a few minutes is a loop (delta1: an elevator called to the floor it
+      was at, a detour away and back for an hour) }
+    FWalkDetours: TD3PointArray;
+    FWalkDetourTimes: array of Single;
+    FWalkLoops: Integer;
     FWalkJumpAt: Single;
     FWalkStuckSpots: String;
     FDvShift: TSFFloat;
@@ -2719,6 +2728,9 @@ begin
     FWalkDoorsOpened := 0;
     FWalkElevatorsCalled := 0;
     FWalkStuckSpots := '';
+    FWalkDetours := nil;
+    FWalkDetourTimes := nil;
+    FWalkLoops := 0;
     WritelnLog('GameViewPlay', 'Route walk on foot: %s', [BoolToStr(FRouteWalkMode, 'on', 'off')]);
     Console.Print('route_walk ' + BoolToStr(FRouteWalkMode, 'ON', 'OFF'));
   end else
@@ -3926,8 +3938,8 @@ end;
 
 procedure TViewPlay.WalkSummary;
 begin
-  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots (%d remembered from earlier runs), %d falls through the floor, %d doors opened for the walk, %d elevators called, %d detours, %d remembered give-up places%s',
-    [FWalkStuckCount, FMemStuckUsed, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkReroutes, FMemGiveUpsUsed, FWalkStuckSpots]);
+  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots (%d remembered from earlier runs), %d falls through the floor, %d doors opened for the walk, %d elevators called, %d detours, %d loops put ahead, %d remembered give-up places%s',
+    [FWalkStuckCount, FMemStuckUsed, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkReroutes, FWalkLoops, FMemGiveUpsUsed, FWalkStuckSpots]);
 end;
 
 function TViewPlay.HuntNext: Boolean;
@@ -4258,8 +4270,14 @@ begin
       FFightGod := True;
       FFightGodUntil := FFightDeathWalked + 400;
       WritelnLog('GameViewPlay', 'Fight: gave up at %s after %d deaths: god mode until the next save, %.0f units on',
-        [CgeToD3(Camera.Translation).ToString, FFightDeathsHere, FFightGodUntil - FRouteWalked]);
+        [FLastDeathAt.ToString, FFightDeathsHere, FFightGodUntil - FRouteWalked]);
       MemoryAdd('giveup', FLastDeathAt);
+      { this run comes back here too (routes and hunts pass a place again
+        and again: delta1's pit killed it 26 times) }
+      MemoryEnsure;
+      FMemGiveUp := Concat(FMemGiveUp, [FLastDeathAt]);
+      SetLength(FMemGiveUpArm, Length(FMemGiveUp));
+      FMemGiveUpArm[High(FMemGiveUpArm)] := FFightGodUntil + 600;
     end;
     FGame.God := FFightGod;
     Exit(True);
@@ -4272,17 +4290,17 @@ begin
     FMemCheckAt := FFightTime + 0.5;
     MemoryEnsure;
     Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
-    if (MemoryNear(FMemGiveUp, Feet, 300, MemI) > 0) and not FMemGiveUpUsed[MemI] then
+    if (MemoryNear(FMemGiveUp, Feet, 300, MemI) > 0) and (FRouteWalked >= FMemGiveUpArm[MemI]) then
     begin
-      { every give-up of earlier runs at this place is used up }
+      { every give-up at this place waits until the walk is well past it }
       for I := 0 to High(FMemGiveUp) do
         if PointsDistance(FMemGiveUp[I], FMemGiveUp[MemI]) < 300 then
-          FMemGiveUpUsed[I] := True;
+          FMemGiveUpArm[I] := FRouteWalked + 1500;
       Inc(FMemGiveUpsUsed);
       FFightGod := True;
       FGame.God := True;
       FFightGodUntil := FRouteWalked + 900;
-      WritelnLog('GameViewPlay', 'Fight: an earlier run gave up near %s (%d times), %.0f away: god mode for 900 units',
+      WritelnLog('GameViewPlay', 'Fight: a run gave up near %s (%d times), %.0f away: god mode for 900 units',
         [FMemGiveUp[MemI].ToString, MemoryNear(FMemGiveUp, FMemGiveUp[MemI], 300, I), PointsDistance(Feet, FMemGiveUp[MemI])]);
     end;
   end;
@@ -4768,6 +4786,7 @@ end;
 
 procedure TViewPlay.MemoryEnsure;
 var
+  I: Integer;
   L: TStringList;
   Line, Kind: String;
   Parts: TStringArray;
@@ -4780,7 +4799,7 @@ begin
   FMemStuck := nil;
   FMemGiveUp := nil;
   FMemDeath := nil;
-  FMemGiveUpUsed := nil;
+  FMemGiveUpArm := nil;
   FMemStuckUsed := 0;
   FMemGiveUpsUsed := 0;
   FileName := WalkMemoryFile(MapName);
@@ -4806,7 +4825,9 @@ begin
   finally
     FreeAndNil(L);
   end;
-  SetLength(FMemGiveUpUsed, Length(FMemGiveUp));
+  SetLength(FMemGiveUpArm, Length(FMemGiveUp));
+  for I := 0 to High(FMemGiveUpArm) do
+    FMemGiveUpArm[I] := 0;
   WritelnLog('GameViewPlay', 'Walk memory: %s: %d stuck spots, %d deaths, %d give-ups from earlier runs (%s)',
     [MapName, Length(FMemStuck), Length(FMemDeath), Length(FMemGiveUp), FileName]);
 end;
@@ -4974,7 +4995,10 @@ var
   Near: TBox3D;
   N: TVector3;
   Hop: TD3PointArray;
-  Remembered: Boolean;
+  Remembered, Looping: Boolean;
+  LoopCount: Integer;
+  Above: TVector3;
+  CurZ: Single;
 
   { the route's point Dist units further on }
   function RouteAhead(const Dist: Single): TVector3;
@@ -5031,6 +5055,26 @@ begin
     elevators, put ahead after 2.5 s }
   MemoryEnsure;
   Remembered := not Fell and (MemoryNear(FMemStuck, Feet, 64, I) > 0);
+  { the third detour at this spot in 4 minutes: going round in a loop }
+  Looping := False;
+  if not Fell and (FWalkStuck >= 2) and not FWalkRerouted then
+  begin
+    LoopCount := 0;
+    for I := 0 to High(FWalkDetours) do
+      if (FViewClock - FWalkDetourTimes[I] < 240) and (PointsDistance(FWalkDetours[I], Feet) < 128) then
+        Inc(LoopCount);
+    Looping := LoopCount >= 3;
+    if Looping then
+    begin
+      Inc(FWalkLoops);
+      WritelnLog('GameViewPlay', 'Walk: going round in a loop at %s (%d detours here in 4 minutes): put ahead',
+        [Feet.ToString, LoopCount]);
+      FWalkDetours := nil;
+      FWalkDetourTimes := nil;
+      FWalkPutStreak := Max(FWalkPutStreak, 3);
+      Remembered := True;
+    end;
+  end;
   if not Fell then
   begin
     { a ledge up to the jump's height ahead: jump (every 1.5 s) }
@@ -5056,7 +5100,7 @@ begin
     { off the line the route takes (pushed off by a corner, a monster, a
       ledge): a new route from the feet along the AAS to the route's point
       128 further, once a place }
-    if (FWalkStuck >= 2) and not FWalkRerouted and
+    if (FWalkStuck >= 2) and not FWalkRerouted and not Looping and
        ((PointsDistance(Feet, FWalkRerouteSpot) > 96) or (FWalkRerouteTries < 2)) then
     begin
       FWalkRerouted := True;
@@ -5080,11 +5124,18 @@ begin
         FRouteAlong := 0;
         FRouteLastEye := Camera.Translation;
         Inc(FWalkReroutes);
+        FWalkDetours := Concat(FWalkDetours, [Feet]);
+        FWalkDetourTimes := Concat(FWalkDetourTimes, [FViewClock]);
+        if Length(FWalkDetours) > 32 then
+        begin
+          Delete(FWalkDetours, 0, 1);
+          Delete(FWalkDetourTimes, 0, 1);
+        end;
         Exit;
       end;
     end;
   end;
-  if Remembered then
+  if Remembered and not Looping then
   begin
     if FWalkStuck < RememberedPutAheadAfter then
       Exit;
@@ -5126,7 +5177,16 @@ begin
         BestD := Min(BestD, Sqr(El.Floors[I].Pos.X - Feet.X) + Sqr(El.Floors[I].Pos.Y - Feet.Y));
       if BestD > Sqr(256) then
         Continue;
-      Ahead := RouteAhead(400);
+      { the height the route goes to: the point of the next 800 units
+        farthest up or down (at 400 it was still at the elevator's
+        bottom, and the elevator was called to the floor it was at) }
+      Ahead := RouteAhead(0);
+      for I := 1 to 25 do
+      begin
+        Above := RouteAhead(32 * I);
+        if Abs(Above.Z - Feet.Z) > Abs(Ahead.Z - Feet.Z) then
+          Ahead := Above;
+      end;
       BestFloor := -1;
       BestD := MaxSingle;
       for I := 0 to High(El.Floors) do
@@ -5136,6 +5196,23 @@ begin
         begin
           BestD := D;
           BestFloor := El.Floors[I].Floor;
+        end;
+      end;
+      { the floor it is at, with the route going far up or down: the
+        nearest floor that way }
+      if (BestFloor = El.CurrentFloor) and (Abs(Ahead.Z - Feet.Z) > 64) and
+         (El.FloorIndex(El.CurrentFloor) >= 0) then
+      begin
+        CurZ := El.Floors[El.FloorIndex(El.CurrentFloor)].Pos.Z;
+        BestD := MaxSingle;
+        for I := 0 to High(El.Floors) do
+        begin
+          D := (El.Floors[I].Pos.Z - CurZ) * Sign(Ahead.Z - Feet.Z);
+          if (D > 16) and (D < BestD) then
+          begin
+            BestD := D;
+            BestFloor := El.Floors[I].Floor;
+          end;
         end;
       end;
       if (BestFloor >= 0) and (FWalkElevatorTries < 2) then
