@@ -162,6 +162,14 @@ type
       swung between it and the route) }
     FViewHoldPoint: TVector3;
     FViewHoldUntil: Single;
+    { the walk's memory between runs (per map, a text file next to the
+      saves): where it had to be put ahead, died and gave up }
+    FMemMap: String;
+    FMemStuck, FMemGiveUp, FMemDeath: TD3PointArray;
+    FMemGiveUpUsed: array of Boolean;
+    FMemStuckUsed, FMemGiveUpsUsed: Integer;
+    FMemCheckAt: Single;
+    FLastDeathAt: TVector3;
     FWalkLastFloor: TVector3;
     FWalkRerouted, FWalkCrouch: Boolean;
     FWalkRerouteSpot: TVector3;
@@ -288,6 +296,12 @@ type
       const DegreesPerSecond: Single; const Who: String; const DeadBand: Single = 0): Single;
     { the walk's turn: along the route, or at a monster just out of sight }
     procedure TurnRouteView(const Yaw, SecondsPassed: Single; const Who: String);
+    { the walk's memory: loaded when the map changes, appended to at once
+      (a run that times out keeps what it learned) }
+    procedure MemoryEnsure;
+    procedure MemoryAdd(const Kind: String; const At: TVector3);
+    function MemoryNear(const Points: TD3PointArray; const At: TVector3;
+      const Radius: Single; out Index: Integer): Integer;
     { route_walk: no progress along the route for a while: a door or an
       elevator near the feet is used, later it is put ahead }
     procedure WalkStuck(const SecondsPassed: Single; const Fell: Boolean = False);
@@ -2675,6 +2689,7 @@ begin
     FFightIgnore := '';
     FFightTarget := '';
     FFightTime := 0;
+    FMemCheckAt := 0;
     { the first save at once }
     FFightSinceSave := 1000;
     Console.Print('fight ' + BoolToStr(FFight, 'ON', 'OFF'));
@@ -3911,8 +3926,8 @@ end;
 
 procedure TViewPlay.WalkSummary;
 begin
-  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots, %d falls through the floor, %d doors opened for the walk, %d elevators called, %d detours%s',
-    [FWalkStuckCount, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkReroutes, FWalkStuckSpots]);
+  WritelnLog('GameViewPlay', 'Walk: summary: %d stuck spots (%d remembered from earlier runs), %d falls through the floor, %d doors opened for the walk, %d elevators called, %d detours, %d remembered give-up places%s',
+    [FWalkStuckCount, FMemStuckUsed, FWalkFellCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkReroutes, FMemGiveUpsUsed, FWalkStuckSpots]);
 end;
 
 function TViewPlay.HuntNext: Boolean;
@@ -4066,6 +4081,19 @@ end;
 
 { One step of the fighting playthrough; True while the walk waits (a
   fight, a death). }
+function WalkMemoryFile(const Map: String): String;
+begin
+  Result := InclPathDelim(GetAppConfigDir(False)) + 'walkmemory' + PathDelim +
+    StringReplace(StringReplace(LowerCase(Map), '/', '_', [rfReplaceAll]), '', '_', [rfReplaceAll]) + '.txt';
+end;
+
+{ The walk's memory is used unless env CD3_WALK_MEMORY=0 (it is still
+  written then). }
+function WalkMemoryOn: Boolean;
+begin
+  Result := GetEnvironmentVariable('CD3_WALK_MEMORY') <> '0';
+end;
+
 { The fight's save: "fight", or env CD3_FIGHT_SAVE (two games fighting at
   once must not share a save). }
 function FightSaveName: String;
@@ -4109,8 +4137,9 @@ const
 var
   Target, Dir, Side, NewEye, Back, Away, Close: TVector3;
   TargetName, What: String;
-  Slot: Integer;
+  Slot, MemI, I: Integer;
   Fists: Boolean;
+  Feet: TVector3;
   Mon: TD3Monster;
   HuntAlive: Boolean;
   Proj: TObject;
@@ -4192,6 +4221,8 @@ begin
     Inc(FFightDeathsHere);
     WritelnLog('GameViewPlay', 'Fight: died at %s (death %d, %d since the save)',
       [CgeToD3(Camera.Translation).ToString, FFightDeaths, FFightDeathsHere]);
+    FLastDeathAt := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+    MemoryAdd('death', FLastDeathAt);
     FFightDeathWalked := Max(FFightDeathWalked, FRouteWalked);
     if not FFightHasSave then
     begin
@@ -4228,9 +4259,32 @@ begin
       FFightGodUntil := FFightDeathWalked + 400;
       WritelnLog('GameViewPlay', 'Fight: gave up at %s after %d deaths: god mode until the next save, %.0f units on',
         [CgeToD3(Camera.Translation).ToString, FFightDeathsHere, FFightGodUntil - FRouteWalked]);
+      MemoryAdd('giveup', FLastDeathAt);
     end;
     FGame.God := FFightGod;
     Exit(True);
+  end;
+
+  { an earlier run gave up near here (3 deaths): god mode from 300 units
+    before the place to 600 past it, without dying there again }
+  if WalkMemoryOn and not FFightGod and (FFightTime >= FMemCheckAt) then
+  begin
+    FMemCheckAt := FFightTime + 0.5;
+    MemoryEnsure;
+    Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+    if (MemoryNear(FMemGiveUp, Feet, 300, MemI) > 0) and not FMemGiveUpUsed[MemI] then
+    begin
+      { every give-up of earlier runs at this place is used up }
+      for I := 0 to High(FMemGiveUp) do
+        if PointsDistance(FMemGiveUp[I], FMemGiveUp[MemI]) < 300 then
+          FMemGiveUpUsed[I] := True;
+      Inc(FMemGiveUpsUsed);
+      FFightGod := True;
+      FGame.God := True;
+      FFightGodUntil := FRouteWalked + 900;
+      WritelnLog('GameViewPlay', 'Fight: an earlier run gave up near %s (%d times), %.0f away: god mode for 900 units',
+        [FMemGiveUp[MemI].ToString, MemoryNear(FMemGiveUp, FMemGiveUp[MemI], 300, I), PointsDistance(Feet, FMemGiveUp[MemI])]);
+    end;
   end;
 
   if FightTactics then
@@ -4712,6 +4766,92 @@ begin
   Result := False;
 end;
 
+procedure TViewPlay.MemoryEnsure;
+var
+  L: TStringList;
+  Line, Kind: String;
+  Parts: TStringArray;
+  V: TVector3;
+  FileName: String;
+begin
+  if SameText(FMemMap, MapName) then
+    Exit;
+  FMemMap := MapName;
+  FMemStuck := nil;
+  FMemGiveUp := nil;
+  FMemDeath := nil;
+  FMemGiveUpUsed := nil;
+  FMemStuckUsed := 0;
+  FMemGiveUpsUsed := 0;
+  FileName := WalkMemoryFile(MapName);
+  if not WalkMemoryOn or not FileExists(FileName) then
+    Exit;
+  L := TStringList.Create;
+  try
+    L.LoadFromFile(FileName);
+    for Line in L do
+    begin
+      Parts := Line.Split([#9, ' '], TStringSplitOptions.ExcludeEmpty);
+      if Length(Parts) < 4 then
+        Continue;
+      Kind := Parts[0];
+      V := Vector3(StrToFloatDefDot(Parts[1], 0), StrToFloatDefDot(Parts[2], 0), StrToFloatDefDot(Parts[3], 0));
+      if Kind = 'stuck' then
+        FMemStuck := Concat(FMemStuck, [V])
+      else if Kind = 'giveup' then
+        FMemGiveUp := Concat(FMemGiveUp, [V])
+      else if Kind = 'death' then
+        FMemDeath := Concat(FMemDeath, [V]);
+    end;
+  finally
+    FreeAndNil(L);
+  end;
+  SetLength(FMemGiveUpUsed, Length(FMemGiveUp));
+  WritelnLog('GameViewPlay', 'Walk memory: %s: %d stuck spots, %d deaths, %d give-ups from earlier runs (%s)',
+    [MapName, Length(FMemStuck), Length(FMemDeath), Length(FMemGiveUp), FileName]);
+end;
+
+procedure TViewPlay.MemoryAdd(const Kind: String; const At: TVector3);
+var
+  FileName: String;
+  F: TextFile;
+begin
+  FileName := WalkMemoryFile(MapName);
+  try
+    ForceDirectories(ExtractFileDir(FileName));
+    AssignFile(F, FileName);
+    if FileExists(FileName) then
+      Append(F)
+    else
+      Rewrite(F);
+    try
+      Writeln(F, Kind, #9, FloatToStrDot(Round(At.X)), ' ', FloatToStrDot(Round(At.Y)), ' ', FloatToStrDot(Round(At.Z)));
+    finally
+      CloseFile(F);
+    end;
+  except
+    on E: Exception do
+      WritelnWarning('GameViewPlay', 'Walk memory: cannot write "%s": %s', [FileName, E.Message]);
+  end;
+end;
+
+function TViewPlay.MemoryNear(const Points: TD3PointArray; const At: TVector3;
+  const Radius: Single; out Index: Integer): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  Index := -1;
+  for I := 0 to High(Points) do
+    if (Sqr(Points[I].X - At.X) + Sqr(Points[I].Y - At.Y) < Sqr(Radius)) and
+       (Abs(Points[I].Z - At.Z) < 96) then
+    begin
+      Inc(Result);
+      if Index < 0 then
+        Index := I;
+    end;
+end;
+
 procedure TViewPlay.TurnRouteView(const Yaw, SecondsPassed: Single; const Who: String);
 begin
   if FViewClock < FViewHoldUntil then
@@ -4820,6 +4960,7 @@ const
     PutAheadAfter (longer after an elevator was called) it is put ahead }
   UseAfter = 3;
   PutAheadAfter = 10;
+  RememberedPutAheadAfter = 2.5;
   ElevatorWait = 20;
   PutAheadBy = 96;
 var
@@ -4833,6 +4974,7 @@ var
   Near: TBox3D;
   N: TVector3;
   Hop: TD3PointArray;
+  Remembered: Boolean;
 
   { the route's point Dist units further on }
   function RouteAhead(const Dist: Single): TVector3;
@@ -4885,6 +5027,10 @@ begin
     FWalkStuck := PutAheadAfter;
   Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
   P := RouteAhead(0);
+  { an earlier run had to put it ahead here: no waiting for doors and
+    elevators, put ahead after 2.5 s }
+  MemoryEnsure;
+  Remembered := not Fell and (MemoryNear(FMemStuck, Feet, 64, I) > 0);
   if not Fell then
   begin
     { a ledge up to the jump's height ahead: jump (every 1.5 s) }
@@ -4938,9 +5084,14 @@ begin
       end;
     end;
   end;
+  if Remembered then
+  begin
+    if FWalkStuck < RememberedPutAheadAfter then
+      Exit;
+  end else
   if FWalkStuck < UseAfter then
     Exit;
-  if not FWalkUsed and not Fell then
+  if not FWalkUsed and not Fell and not Remembered then
   begin
     FWalkUsed := True;
     { a door near the feet that touching doesn't open }
@@ -5002,7 +5153,7 @@ begin
     end;
     Exit;
   end;
-  if FWalkStuck < PutAheadAfter then
+  if (FWalkStuck < PutAheadAfter) and not Remembered then
     Exit;
   { it can't get on: logged, then put ahead past the spot }
   if Fell then
@@ -5024,8 +5175,15 @@ begin
   if not Fell then
   begin
     Inc(FWalkStuckCount);
-    WritelnLog('GameViewPlay', 'Walk: stuck at %s for %.0f s, the route''s point %s (%s, on the way to %s, %.0f units): put ahead',
-      [Feet.ToString, FWalkStuck, P.ToString, Reason, GoalName, FRouteWalked]);
+    if Remembered then
+    begin
+      Inc(FMemStuckUsed);
+      WritelnLog('GameViewPlay', 'Walk: stuck at a remembered spot %s (%d times in earlier runs) for %.1f s, the route''s point %s (%s, on the way to %s, %.0f units): put ahead',
+        [Feet.ToString, MemoryNear(FMemStuck, Feet, 64, I), FWalkStuck, P.ToString, Reason, GoalName, FRouteWalked]);
+    end else
+      WritelnLog('GameViewPlay', 'Walk: stuck at %s for %.0f s, the route''s point %s (%s, on the way to %s, %.0f units): put ahead',
+        [Feet.ToString, FWalkStuck, P.ToString, Reason, GoalName, FRouteWalked]);
+    MemoryAdd('stuck', Feet);
     if Length(FWalkStuckSpots) < 2000 then
       FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (%s)', [Feet.X, Feet.Y, Feet.Z, Reason]);
   end;
