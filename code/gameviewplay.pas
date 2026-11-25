@@ -1572,6 +1572,7 @@ var
   HudScale: Single;
   Shown: Boolean;
   RecordStart: TTimerResult;
+  HudPath: String;
 begin
   if not FUseHudGui then
   begin
@@ -1582,10 +1583,15 @@ begin
   if (FHudGui = nil) and not FHudGuiTried then
   begin
     FHudGuiTried := True;
-    if D3Fs.FileExists('guis/hud.gui') then
+    { the player def's "hud" (a port key: the test level's
+      guis/test_hud.gui), else Doom 3's guis/hud.gui }
+    HudPath := 'guis/hud.gui';
+    if (FGame.PlayerDef <> nil) and (FGame.PlayerDef.Values['hud'] <> '') then
+      HudPath := FGame.PlayerDef.Values['hud'];
+    if D3Fs.FileExists(HudPath) then
     begin
       FHudGui := TD3HudGui.Create;
-      if not FHudGui.Load('guis/hud.gui') then
+      if not FHudGui.Load(HudPath) then
         FreeAndNil(FHudGui)
       else
       begin

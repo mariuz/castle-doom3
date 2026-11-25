@@ -169,6 +169,7 @@ jobs:
           grep -q "Tip: TIP: Press E to use panels and doors" test_output/playerinfo.log || { echo "::error::target_tip should show a tip"; exit 1; }
           grep -q "New objective: Find the keycard" test_output/playerinfo.log || { echo "::error::item_objective should give an objective"; exit 1; }
           grep -q "Radio chatter func_radiochatter_1" test_output/playerinfo.log || { echo "::error::func_radiochatter should play"; exit 1; }
+          grep -q 'HUD GUI "guis/test_hud.gui"' test_output/playerinfo.log || { echo "::error::the test level should show its HUD GUI (player_test's hud key)"; exit 1; }
           grep -q "PDA screen open" test_output/playerinfo.log || { echo "::error::the pda command should open the PDA screen"; exit 1; }
           grep -q "crate_2 shaderParm7 = 0" test_output/playerinfo.log || { echo "::error::target_setshaderparm should set the parm"; exit 1; }
           grep -q "Weapon weapon_test_grenade holds projectile_test_grenade" test_output/playerinfo.log || { echo "::error::createProjectile should hold the grenade"; exit 1; }
