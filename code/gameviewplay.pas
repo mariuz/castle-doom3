@@ -194,6 +194,11 @@ type
     FWalkDetours: TD3PointArray;
     FWalkDetourTimes: array of Single;
     FWalkLoops: Integer;
+    { where and when (FViewClock) the walk was put ahead: put ahead again
+      near one of them soon after, the route led back (alphalabs4: a pit
+      the route climbs out of, an hour of put aheads into it) }
+    FWalkPuts: TD3PointArray;
+    FWalkPutTimes: array of Single;
     FWalkJumpAt: Single;
     FWalkStuckSpots: String;
     FDvShift: TSFFloat;
@@ -2745,6 +2750,8 @@ begin
     FWalkDetours := nil;
     FWalkDetourTimes := nil;
     FWalkLoops := 0;
+    FWalkPuts := nil;
+    FWalkPutTimes := nil;
     WritelnLog('GameViewPlay', 'Route walk on foot: %s', [BoolToStr(FRouteWalkMode, 'on', 'off')]);
     Console.Print('route_walk ' + BoolToStr(FRouteWalkMode, 'ON', 'OFF'));
   end else
@@ -4553,7 +4560,10 @@ begin
   { not in a hurt volume (a save in a kill pit dies on every load: Mars
     City Underground looped there) and, walking, on a floor (not falling) }
   Result := not FGame.HazardAt(Camera.Translation - Vector3(0, FGame.EyeHeight, 0), 0, What) and
-    (not FRouteWalkMode or FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 24, D, N));
+    (not FRouteWalkMode or FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 24, D, N)) and
+    { inside the map's areas (cpuboss: a save on top of a wall, outside
+      them, fell 6000 units into the void on every load) }
+    (Map.AreaAt(Camera.Translation) >= 0);
 end;
 
 function TViewPlay.WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
@@ -5324,6 +5334,25 @@ begin
     if Length(FWalkStuckSpots) < 2000 then
       FWalkStuckSpots := FWalkStuckSpots + Format('; %.0f %.0f %.0f (%s)', [Feet.X, Feet.Y, Feet.Z, Reason]);
   end;
+  { put ahead near here before, in the last 15 minutes: the route came
+    back, so much further each time (4, 16, 64 times) }
+  LoopCount := 0;
+  for I := 0 to High(FWalkPuts) do
+    if (FViewClock - FWalkPutTimes[I] < 900) and (PointsDistance(FWalkPuts[I], Feet) < 256) then
+      Inc(LoopCount);
+  if (LoopCount > 0) and (FWalkPutStreak < 2 * LoopCount) then
+  begin
+    WritelnLog('GameViewPlay', 'Walk: put ahead near %s %d times in 15 minutes: %.0f units on',
+      [Feet.ToString, LoopCount, PutAheadBy * (1 shl Min(2 * LoopCount, 6)) * 1.0]);
+    FWalkPutStreak := 2 * LoopCount;
+  end;
+  FWalkPuts := Concat(FWalkPuts, [Feet]);
+  FWalkPutTimes := Concat(FWalkPutTimes, [FViewClock]);
+  if Length(FWalkPuts) > 64 then
+  begin
+    Delete(FWalkPuts, 0, 1);
+    Delete(FWalkPutTimes, 0, 1);
+  end;
   { stuck again right after: further each time (a gap in the route, where
     the AAS found no way, is one long straight line) }
   Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak, 6)));
@@ -5358,6 +5387,26 @@ begin
       Extra := D;
       Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
     end;
+  end;
+  { a hunted monster over no floor (delta2b: an imp's place in the air over
+    a shaft, the player put there fell to its bottom 57 times): back on the
+    last floor, the hunt gives it up }
+  if not FloorUnder(Ahead, D) and (FHuntTarget <> '') and (FRouteNextMark > High(FRouteMarkNames)) then
+  begin
+    WritelnLog('GameViewPlay', 'Walk: no floor on the way to the hunted %s: back to %s, given up',
+      [FHuntTarget, FWalkLastFloor.ToString]);
+    FHuntDone := FHuntDone + ',' + FHuntTarget;
+    if Fell then
+    begin
+      PlaceCamera(D3ToCge(FWalkLastFloor + Vector3(0, 0, 1)), CameraYaw);
+      WalkNavigation.CancelFalling;
+    end;
+    FRouteSeg := High(FRoute);
+    FRouteAlong := 0;
+    FRouteLastEye := Camera.Translation;
+    FWalkStuck := 0;
+    FWalkProgressAt := FRouteWalked;
+    Exit;
   end;
   if FloorUnder(Ahead, D) then
     Ahead.Z := D + 1;
