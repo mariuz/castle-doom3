@@ -5087,7 +5087,7 @@ var
   N: TVector3;
   Hop: TD3PointArray;
   Remembered, Looping, HuntFound: Boolean;
-  LoopCount: Integer;
+  LoopCount, UsedBefore: Integer;
   HuntAt: TVector3;
   Mon: TD3Monster;
   Above: TVector3;
@@ -5238,6 +5238,7 @@ begin
   if not FWalkUsed and not Fell and not Remembered then
   begin
     FWalkUsed := True;
+    UsedBefore := FWalkDoorsOpened + FWalkElevatorsCalled;
     { a door near the feet that touching doesn't open }
     Near := Box3DAroundPoint(Camera.Translation, 192);
     for Mover in FGame.Movers do
@@ -5333,6 +5334,16 @@ begin
         FWalkStuck := UseAfter - ElevatorWait + PutAheadAfter;
         FWalkUsed := (BestFloor = El.CurrentFloor) or (FWalkElevatorTries >= 2);
       end;
+    end;
+    { nothing to use, and the route goes straight up past any jump (a lift
+      a script or a call panel moves, a ledge, a pit's wall): no waiting
+      the whole PutAheadAfter (half the stuck spots, 10 s each) }
+    if (FWalkDoorsOpened + FWalkElevatorsCalled = UsedBefore) and (P.Z - Feet.Z > 100) and
+       (Sqr(P.X - Feet.X) + Sqr(P.Y - Feet.Y) < Sqr(64)) then
+    begin
+      WritelnLog('GameViewPlay', 'Walk: the route goes %.0f straight up at %s, nothing to use: put ahead in 1 s',
+        [P.Z - Feet.Z, Feet.ToString]);
+      FWalkStuck := PutAheadAfter - 1;
     end;
     Exit;
   end;
