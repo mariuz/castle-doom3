@@ -8650,7 +8650,7 @@ var
   Map: TDoom3Map;
   Game: TD3Game;
   Far: TVector3;
-  Saved: String;
+  Saved, Carried: String;
   I, J, Threads: Integer;
   SavedTime: Single;
   T: TD3MiscEntity;
@@ -8698,6 +8698,8 @@ begin
         Game.God := True;
         Game.Update(0.05, D3ToCge(Vector3(330, 0, 0)) + Vector3(0, PlayerEyeHeight, 0));
         Check(Game.Projectiles.Count > 0, 'a projectile flies before saving');
+        Game.Give('weapon', 'weapon_test_shotgun');
+        Carried := Game.PersistentInfo;
         Threads := Game.Script.ThreadCount;
         SavedTime := Game.Time;
         Saved := Game.SaveState('testmap');
@@ -8707,6 +8709,12 @@ begin
       end else
       begin
         Check(not Game.ItemOf(Game.FindEntity('item_armor_1')).PickedUp, 'a fresh game has the armor');
+        { what the level's end takes to the next map (Doom 3's persistent
+          info): the weapons and the armor }
+        Check(not Game.HasWeapon(2), 'a fresh game has no shotgun');
+        Game.RestorePersistentInfo(Carried);
+        Check(Game.HasWeapon(2), 'the shotgun carried to the next map');
+        Check(Game.Armor >= 35, 'the armor carried to the next map');
         Check(Game.RestoreState(Saved), 'restore the saved game');
         CheckEquals(61, Game.Health, 'restored health');
         Check(Game.Armor > 35, 'restored armor (the pickup''s and the given)');

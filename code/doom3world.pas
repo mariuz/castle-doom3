@@ -1943,6 +1943,11 @@ type
       the freshly spawned map it was saved in. }
     function SaveState(const AMapName: String): String;
     function RestoreState(const Text: String): Boolean;
+    { What the player takes to the next map (idPlayer::SavePersistantInfo,
+      RestorePersistantInfo): the weapons, their clips, the ammo and the
+      armor, as text lines; back onto a freshly spawned map. }
+    function PersistentInfo: String;
+    procedure RestorePersistentInfo(const Text: String);
     { The map of a saved game, '' if it isn't one. }
     class function SavedMapName(const Text: String): String;
     { "give all": full health and armor, every weapon, full ammo }

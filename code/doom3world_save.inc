@@ -1275,3 +1275,61 @@ begin
     L.Free;
   end;
 end;
+
+function TD3Game.PersistentInfo: String;
+var
+  L: TStringList;
+  I: Integer;
+  Pair: specialize TPair<String, Integer>;
+begin
+  L := TStringList.Create;
+  try
+    L.Add('armor'#9 + IntToStr(Armor));
+    for I := 0 to High(WeaponDefs) do
+      if (WeaponDefs[I] <> '') and HasWeapon(I) then
+        L.Add('weapon'#9 + WeaponDefs[I] + #9 + IntToStr(Clip[I]));
+    for Pair in FAmmo do
+      L.Add('ammo'#9 + Pair.Key + #9 + IntToStr(Pair.Value));
+    Result := L.Text;
+  finally
+    L.Free;
+  end;
+end;
+
+procedure TD3Game.RestorePersistentInfo(const Text: String);
+var
+  L: TStringList;
+  F: TStringArray;
+  I, J, Weapons: Integer;
+begin
+  L := TStringList.Create;
+  try
+    L.Text := Text;
+    Weapons := 0;
+    for I := 0 to L.Count - 1 do
+    begin
+      F := L[I].Split([#9]);
+      if Length(F) < 2 then
+        Continue;
+      case F[0] of
+        'armor': Armor := Max(Armor, StrToIntDef(F[1], 0));
+        'weapon':
+          for J := 0 to High(WeaponDefs) do
+            if SameText(WeaponDefs[J], F[1]) then
+            begin
+              if not HasWeapon(J) then
+                Inc(Weapons);
+              WeaponBits := WeaponBits or (Cardinal(1) shl J);
+              if Length(F) > 2 then
+                Clip[J] := Max(Clip[J], StrToIntDef(F[2], 0));
+            end;
+        'ammo':
+          if Length(F) > 2 then
+            SetAmmo(F[1], Max(AmmoCount(F[1]), StrToIntDef(F[2], 0)));
+      end;
+    end;
+    WritelnLog('Doom3World', 'Inventory from the last map: %d weapons more, armor %d', [Weapons, Armor]);
+  finally
+    L.Free;
+  end;
+end;
