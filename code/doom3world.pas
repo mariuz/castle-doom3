@@ -1887,6 +1887,12 @@ type
     function Give(const Stat, Value: String): Boolean;
     { an item's pickup (idItem::Pickup): True when the player took it }
     function PickupItem(const Item: TD3Item): Boolean;
+    { Picks up the weapons placed within Radius of Feet (Doom 3
+      coordinates) that aren't hidden or waiting for a trigger: the loadout
+      id put by the start of maps a player reaches with every weapon
+      (cpuboss: a closet 800 units from the start), for fight runs that
+      start a map alone. Returns how many. }
+    function PickUpStartKit(const Feet: TVector3; const Radius: Single): Integer;
     function AmmoCount(const AmmoClass: String): Integer;
     procedure SetAmmo(const AmmoClass: String; const Count: Integer);
     { max_<ammo class> of the player def (0: none can be carried) }
@@ -4202,6 +4208,24 @@ begin
   WritelnLog('Doom3World', 'Picked up %s (%s)', [E.Name, ItemName]);
   Message(ItemName);
   ActivateTargets(E);
+end;
+
+function TD3Game.PickUpStartKit(const Feet: TVector3; const Radius: Single): Integer;
+var
+  It: TD3Item;
+  E: TD3MapEntity;
+begin
+  Result := 0;
+  for It in FItems do
+  begin
+    E := It.Entity;
+    if It.PickedUp or not It.CanPickUp or E.BoolValue('hide') or
+       (Copy(LowerCase(E.ClassName_), 1, 7) <> 'weapon_') or
+       (PointsDistance(It.SpawnOrigin, Feet) > Radius) then
+      Continue;
+    if PickupItem(It) then
+      Inc(Result);
+  end;
 end;
 
 procedure TD3Game.UpdateItems;
@@ -6775,6 +6799,13 @@ begin
   FloorStart := NewPos + Vector3(0, 24, 0);
   if MapRayDown(FloorStart, 24 + 400, FloorDist) then
     NewPos.Y := FloorStart.Y - FloorDist;
+  { never from inside the map's areas to outside them: a gap in a floor's
+    collision dropped monsters onto a surface 385 below the map, where they
+    walked on under it (delta2b: seven imps, out of the player's reach;
+    Doom 3's monsters stay in the areas, its AAS and collision see to it) }
+  if (NewPos.Y < From.Y - 32) and (FMap.AreaAt(NewPos + Vector3(0, 32, 0)) < 0) and
+     (FMap.AreaAt(From + Vector3(0, 32, 0)) >= 0) then
+    NewPos := From;
   Result := NewPos;
 end;
 
