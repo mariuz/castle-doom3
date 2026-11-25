@@ -10,7 +10,8 @@ uses
   Classes, SysUtils,
   CastleVectors, CastleUIControls, CastleControls, CastleKeysMouse, CastleViewport,
   CastleCameras, CastleTransform, CastleScene, CastleSceneCore, X3DNodes, X3DFields, CastleTimeUtils, CastleGLImages,
-  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui, Doom3RenderDoc;
+  Doom3Level, Doom3World, Doom3Hud, Doom3Console, Doom3Efx, Doom3Particles, Doom3Pda, Doom3Gui, Doom3HudGui, Doom3RenderDoc,
+  Doom3GuiGL;
 
 type
   { d3xp's portal sky (idPlayerView::SingleView renders it before the
@@ -237,6 +238,14 @@ type
     { FHudImage's drawable (FHudImage owns it) }
     FHudDrawable: TDrawableImage;
     FHudImage: TCastleImageControl;
+    { the HUD GUI drawn on the GPU (g_hudGpu 1, the default): recorded as
+      quads (RecordGuiQuads), no software painting }
+    FHudGpu: TD3GuiGLControl;
+    FUseHudGpu: Boolean;
+    FHudRecords: Integer;
+    FHudRecordSeconds: Single;
+    FHudUpdates: Integer;
+    FHudUpdateSeconds: Single;
     FHudTimeMs: Double;
     FHudRedraw: Single;
     { "sample start <seconds>": the sampler stops by itself (a demo script
@@ -557,6 +566,7 @@ begin
   FEnvProbeScale := 0.5;
   FUsePdaGui := True;
   FUseHudGui := True;
+  FUseHudGpu := GetEnvironmentVariable('CD3_HUD_GPU') <> '0';
 end;
 
 destructor TViewPlay.Destroy;
@@ -1540,6 +1550,8 @@ begin
   FreeAndNil(FHudGui);
   if FHudImage <> nil then
     FreeAndNil(FHudImage);
+  if FHudGpu <> nil then
+    FreeAndNil(FHudGpu);
   FHudDrawable := nil;
   FHudGuiTried := False;
   Hud.GuiHud := False;
@@ -1552,10 +1564,14 @@ const
     time expressions) IdleRate }
   RedrawRate = 8;
   IdleRate = 4;
+  GpuRedrawRate = 30;
+  GpuIdleRate = 15;
   HudGuiMaxPixels = 1000000;
 var
   HudParent: TCastleUserInterface;
   HudScale: Single;
+  Shown: Boolean;
+  RecordStart: TTimerResult;
 begin
   if not FUseHudGui then
   begin
@@ -1591,6 +1607,15 @@ begin
           HudParent.InsertControl(HudParent.IndexOfControl(Hud), FHudImage)
         else
           InsertFront(FHudImage);
+        { the GPU's drawing at the same place }
+        FHudGpu := TD3GuiGLControl.Create(nil);
+        FHudGpu.Exists := False;
+        if HudParent <> nil then
+          HudParent.InsertControl(HudParent.IndexOfControl(Hud), FHudGpu)
+        else
+          InsertFront(FHudGpu);
+        FHudRecords := 0;
+        FHudRecordSeconds := 0;
         FHudTimeMs := 0;
         FHudRedraw := 0;
       end;
@@ -1600,10 +1625,39 @@ begin
     Exit;
   Hud.GuiHud := True;
   FHudTimeMs := FHudTimeMs + SecondsPassed * 1000;
+  RecordStart := Timer;
   FHudGui.Update(FGame, Round(FHudTimeMs), D3LangString(FGame.LocationAt(Camera.Translation)));
+  FHudUpdateSeconds := FHudUpdateSeconds + TimerSeconds(Timer, RecordStart);
+  Inc(FHudUpdates);
   { dead or in a cinematic: no HUD (idPlayer::DrawHUD) }
-  FHudImage.Exists := not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
+  Shown := not FGame.PlayerDead and not FInCinematic and not FPdaOpen;
   FHudRedraw := FHudRedraw + SecondsPassed;
+  if FUseHudGpu and TD3GuiGLControl.Supported then
+  begin
+    FHudImage.Exists := False;
+    FHudGpu.Exists := Shown;
+    { recording is only the windows' values (no pixels, ~1 ms): at a
+      change (at most GpuRedrawRate a second), else (time expressions:
+      flickers, scrolls) GpuIdleRate a second }
+    if Shown and ((FHudGpu.Quads.Count = 0) or (FHudGui.Gui.Dirty and (FHudRedraw >= 1 / GpuRedrawRate)) or
+       (FHudRedraw >= 1 / GpuIdleRate) or
+       (FHudGpu.Quads.Width <> Container.PixelsWidth) or (FHudGpu.Quads.Height <> Container.PixelsHeight)) then
+    begin
+      RecordStart := Timer;
+      RecordGuiQuads(FHudGui.Gui, Container.PixelsWidth, Container.PixelsHeight, FHudGpu.Quads);
+      FHudRecordSeconds := FHudRecordSeconds + TimerSeconds(Timer, RecordStart);
+      Inc(FHudRecords);
+      if FHudRecords = 50 then
+        WritelnLog('GameViewPlay', 'HUD GUI on the GPU: %d records, %.2f ms each, %d quads (%d x %d)',
+          [FHudRecords, FHudRecordSeconds / FHudRecords * 1000, FHudGpu.Quads.Count,
+           Container.PixelsWidth, Container.PixelsHeight]);
+      FHudRedraw := 0;
+    end;
+    Exit;
+  end;
+  if FHudGpu <> nil then
+    FHudGpu.Exists := False;
+  FHudImage.Exists := Shown;
   if FHudImage.Exists and ((FHudDrawable.Image = nil) or (FHudRedraw >= 1 / IdleRate) or
      (FHudGui.Gui.Dirty and (FHudRedraw >= 1 / RedrawRate))) then
   begin
@@ -3115,6 +3169,39 @@ begin
     if Args <> '' then
       UseMenuGui := StrToIntDef(Args, 0) <> 0;
     Console.Print('g_menuGui ' + Iff(UseMenuGui, '1', '0') + ' (guis/mainmenu.gui when the data has it, else our map list)');
+  end else
+  if Cmd = 'g_hudgpu' then
+  begin
+    { the HUD GUI drawn on the GPU (1) or by the software painter (0);
+      "bench": 200 records in a row, timed }
+    if SameText(Trim(Args), 'bench') then
+    begin
+      if (FHudGui <> nil) and (FHudGpu <> nil) then
+      begin
+        GuiStart := Timer;
+        for I := 1 to 200 do
+          RecordGuiQuads(FHudGui.Gui, Container.PixelsWidth, Container.PixelsHeight, FHudGpu.Quads);
+        WritelnLog('GameViewPlay', 'HUD GUI record bench: %.3f ms a record (%d quads)',
+          [TimerSeconds(Timer, GuiStart) / 200 * 1000, FHudGpu.Quads.Count]);
+        GuiStart := Timer;
+        for I := 1 to 20 do
+          RenderGuiTransparent(FHudGui.Gui, Container.PixelsWidth, Container.PixelsHeight, True).Free;
+        WritelnLog('GameViewPlay', 'HUD GUI software bench: %.3f ms a render (%d x %d)',
+          [TimerSeconds(Timer, GuiStart) / 20 * 1000, Container.PixelsWidth, Container.PixelsHeight]);
+      end;
+    end else
+    if Args <> '' then
+      FUseHudGpu := StrToIntDef(Args, 0) <> 0;
+    if FHudRecords > 0 then
+    begin
+      Console.Print(Format('g_hudGpu %s (%d records, %.2f ms each)',
+        [Iff(FUseHudGpu, '1', '0'), FHudRecords, FHudRecordSeconds / FHudRecords * 1000]));
+      WritelnLog('GameViewPlay', 'HUD GUI on the GPU: %d records, %.2f ms each, %d quads; the GUI''s update %.2f ms a frame',
+        [FHudRecords, FHudRecordSeconds / FHudRecords * 1000, FHudGpu.Quads.Count,
+         FHudUpdateSeconds / Max(1, FHudUpdates) * 1000]);
+    end else
+      Console.Print('g_hudGpu ' + Iff(FUseHudGpu, '1', '0'));
+    WritelnLog('GameViewPlay', 'HUD GUI drawn %s', [Iff(FUseHudGpu, 'on the GPU', 'by the software painter')]);
   end else
   if Cmd = 'g_hudgui' then
   begin
