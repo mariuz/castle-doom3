@@ -167,6 +167,9 @@ type
       elevator there, then is put ahead along the route (WalkOnFoot) }
     FRouteWalkMode: Boolean;
     FWalkStuck, FWalkProgressAt: Single;
+    { the seconds a put ahead waited for the fight (a monster at the
+      player): FightHoldMax at most each spot }
+    FWalkFightHold: Single;
     FWalkUsed: Boolean;
     FWalkStuckCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkPutStreak, FWalkElevatorTries, FWalkFellCount, FWalkReroutes: Integer;
     { the view's turns during a route (how smooth the bots look) }
@@ -265,6 +268,11 @@ type
     FCheckpoints: Boolean;
     { a saved game to restore once its map has spawned }
     FPendingRestore: String;
+    { the inventory the level's end takes to the next map (Doom 3's
+      persistent info); env CD3_CARRY_INVENTORY=<file> also writes it there
+      and starts the first map with it (the tour runs a process a map:
+      delta4's two hell knights of 1400 health each against the pistol) }
+    FCarryInfo: String;
     FPdaIndex: Integer;
     { after loading a map: the first frames (textures, shaders) are profiled }
     FProfileFrames: Integer;
@@ -449,7 +457,7 @@ uses
   Doom3Sampler, CastleInternalGLShadowVolumes, CastleGLShaders,
   CastleShapes, CastleBoxes,
   Doom3MapFile, Doom3Files, Doom3Decls, Doom3LightEffects, Doom3Md5, Doom3Images, GameViewMenu,
-  Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq;
+  Doom3EnvProbes, CastleColors, CastleRectangles, Doom3Roq, CastleFilesUtils, CastleUriUtils;
 
 {$ifdef MSWINDOWS}
 function D3GetThreadTimes(Thread: PtrUInt; out CreationTime, ExitTime, KernelTime, UserTime: Int64): LongBool;
@@ -1015,6 +1023,15 @@ begin
   FGame.Armor := 0;
   FGame.Spawn;
   PlaceCamera(Map.SpawnOrigin, Map.SpawnAngle);
+  { the first map of a tour's process: the inventory the last one ended
+    with }
+  if (FMapLoads = 1) and (FCarryInfo = '') and (FPendingRestore = '') and
+     (GetEnvironmentVariable('CD3_CARRY_INVENTORY') <> '') and
+     FileExists(GetEnvironmentVariable('CD3_CARRY_INVENTORY')) then
+    FCarryInfo := FileToString(FilenameToUriSafe(GetEnvironmentVariable('CD3_CARRY_INVENTORY')));
+  if (FCarryInfo <> '') and (FPendingRestore = '') then
+    FGame.RestorePersistentInfo(FCarryInfo);
+  FCarryInfo := '';
   if FPendingRestore <> '' then
   begin
     if not FGame.RestoreState(FPendingRestore) then
@@ -4878,6 +4895,7 @@ begin
       FWalkUsed := False;
       FWalkElevatorTries := 0;
       FWalkPutStreak := 0;
+      FWalkFightHold := 0;
       FWalkRerouted := False;
       FWalkCrouch := False;
       FWalkJumpAt := 0;
@@ -5168,7 +5186,11 @@ const
   RememberedPutAheadAfter = 2.5;
   ElevatorWait = 20;
   PutAheadBy = 96;
+  FightHoldMax = 60;
+  FightHoldDist = 700;
 var
+  HoldAt: TVector3;
+  HoldName: String;
   Feet, P, Ahead: TVector3;
   Mover: TD3Mover;
   El: TD3Elevator;
@@ -5442,6 +5464,20 @@ begin
   end;
   if (FWalkStuck < PutAheadAfter) and not Remembered then
     Exit;
+  { a monster at the player that it can see: no put ahead away from the
+    fight (delta4: put ahead through the door the script locked, the two
+    hell knights it must kill to be teleported on were left behind, the
+    walk went on to the level's end over a gap), up to FightHoldMax }
+  if not Fell and FFight and not FFightGod and (FWalkFightHold < FightHoldMax) and
+     FGame.FightTarget(Camera.Translation, FightHoldDist, FFightIgnore, HoldAt, HoldName) then
+  begin
+    if FWalkFightHold = 0 then
+      WritelnLog('GameViewPlay', 'Walk: stuck at %s while fighting %s: no put ahead for up to %.0f s',
+        [Feet.ToString, HoldName, FightHoldMax]);
+    FWalkFightHold := FWalkFightHold + SecondsPassed;
+    Exit;
+  end;
+  FWalkFightHold := 0;
   { it can't get on: logged, then put ahead past the spot }
   if Fell then
     Reason := 'fell'
@@ -5520,12 +5556,34 @@ begin
       Extra := Extra + 64;
       Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
     end;
+    { then the rest of the route, in bigger steps }
+    while (Extra < 65536) and (Seg < High(FRoute)) and (not FloorUnder(Ahead, CurZ) or
+      FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
+    begin
+      Extra := Extra + 128;
+      Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+    end;
     if FloorUnder(Ahead, CurZ) then
       WritelnLog('GameViewPlay', 'Walk: the first floor ahead is %.0f units on', [Extra - D])
     else
     begin
-      Extra := D;
-      Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+      { no floor anywhere on the rest of the route (delta4: the rest is
+        over a shaft, to a room only a teleport reaches; three falls of
+        1000 units put the player at the level's end, past the hell
+        knights): on the last floor, the route's end left to the map }
+      WritelnLog('GameViewPlay', 'Walk: no floor on the rest of the route from %s: back to the last floor %s, the route ends here',
+        [Feet.ToString, FWalkLastFloor.ToString]);
+      if Fell or (Feet.Z < FWalkLastFloor.Z - 72) then
+      begin
+        PlaceCamera(D3ToCge(FWalkLastFloor + Vector3(0, 0, 1)), CameraYaw);
+        WalkNavigation.CancelFalling;
+      end;
+      FRouteSeg := High(FRoute);
+      FRouteAlong := 0;
+      FRouteLastEye := Camera.Translation;
+      FWalkStuck := 0;
+      FWalkProgressAt := FRouteWalked;
+      Exit;
     end;
   end;
   { a hunted monster over no floor (delta2b: an imp's place in the air over
@@ -5956,6 +6014,16 @@ begin
     begin
       WritelnLog('GameViewPlay', 'Next map "%s"', [FPendingMap]);
       Hud.ShowMessage('', 0);
+      FCarryInfo := FGame.PersistentInfo;
+      if GetEnvironmentVariable('CD3_CARRY_INVENTORY') <> '' then
+        try
+          StringToFile(FilenameToUriSafe(GetEnvironmentVariable('CD3_CARRY_INVENTORY')), FCarryInfo);
+          WritelnLog('GameViewPlay', 'Inventory for the next map written to "%s"',
+            [GetEnvironmentVariable('CD3_CARRY_INVENTORY')]);
+        except
+          on E: Exception do
+            WritelnWarning('GameViewPlay', 'Cannot write the inventory: %s', [E.Message]);
+        end;
       LoadLevel(FPendingMap);
       FPendingMap := '';
       Exit;

@@ -52,7 +52,11 @@ param(
   [int] $ShotEvery = 1500,
   # -Visible: a normal window with sound; by default the game runs minimized
   # (screenshots render offscreen) and muted (--mute)
-  [switch] $Visible
+  [switch] $Visible,
+  # with -Fight each map starts with the weapons, ammo and armor the last one
+  # ended with (Doom 3 carries them; env CD3_CARRY_INVENTORY): -NoCarry starts
+  # every map with the player def's own
+  [switch] $NoCarry
 )
 
 $ErrorActionPreference = "Stop"
@@ -107,6 +111,11 @@ $Demo = $Steps -join ","
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $Summary = @()
+$CarryBefore = $env:CD3_CARRY_INVENTORY
+if ($Fight -and -not $NoCarry) {
+  $env:CD3_CARRY_INVENTORY = Join-Path (Resolve-Path $OutDir) "carry_inventory.txt"
+  Remove-Item $env:CD3_CARRY_INVENTORY -ErrorAction SilentlyContinue
+}
 foreach ($Map in $Maps) {
   $Name = $Map -replace '[/\\]', '_'
   $Arguments = "--autotest $Map `"$OutDir\$Name`" --demo `"$Demo`" -basepath `"$BasePath`""
@@ -177,6 +186,7 @@ if ($Route) {
     Write-Host "Scripted events: $($Check | Select-Object -Last 1) ($OutDir\events.md)"
   }
 }
+$env:CD3_CARRY_INVENTORY = $CarryBefore
 $Summary | Set-Content -Encoding utf8 (Join-Path $OutDir "summary.txt")
 # per-map performance against the baseline of its data set and kind
 # (tools/map_perf.py, docs/baselines/perf_<set>_<route|tour>.json): <OutDir>\perf.md
