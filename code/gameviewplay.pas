@@ -145,6 +145,10 @@ type
       shown (the nearest first) and kills it (HuntNext) }
     FHunt: Boolean;
     FHuntTarget, FHuntDone, FHuntHidden, FHuntWoken: String;
+    { every route of the hunt to a monster (",name," each): the tries count
+      over the whole hunt (delta2b: a pack of imps, a new one nearest every
+      route, tries reset at each switch, 276 routes in 11 minutes) }
+    FHuntTried: String;
     FHuntTries, FHuntRoutes: Integer;
     FHuntTime: Single;
     { the hunt ends when it kills nothing for a while (delta2b: fists only
@@ -2699,6 +2703,7 @@ begin
     FHuntDone := '';
     FHuntHidden := '';
     FHuntWoken := '';
+    FHuntTried := '';
     FHuntTries := 0;
     FHuntRoutes := 0;
     FHuntTime := 0;
@@ -3974,7 +3979,7 @@ var
   Feet, P, Away: TVector3;
   D, BestD, Gap, HiddenD: Single;
   Hop: TD3PointArray;
-  Areas: Integer;
+  Areas, I: Integer;
   MonName, AliveList: String;
 
   function Listed(const List, AName: String): Boolean;
@@ -4073,13 +4078,15 @@ begin
       Exit;
     end;
     MonName := Best.Model.Entity.Name;
-    if SameText(MonName, FHuntTarget) then
-      Inc(FHuntTries)
-    else
+    FHuntTarget := MonName;
+    FHuntTries := 0;
+    I := Pos(',' + LowerCase(MonName) + ',', FHuntTried);
+    while I > 0 do
     begin
-      FHuntTarget := MonName;
-      FHuntTries := 0;
+      Inc(FHuntTries);
+      I := Pos(',' + LowerCase(MonName) + ',', FHuntTried, I + 1);
     end;
+    FHuntTried := FHuntTried + ',' + LowerCase(MonName) + ',';
     if FHuntTries >= HuntTries then
     begin
       WritelnLog('GameViewPlay', 'Fight: hunt: gave up on %s at %s (health %d)',
@@ -5391,8 +5398,16 @@ begin
   { a hunted monster over no floor (delta2b: an imp's place in the air over
     a shaft, the player put there fell to its bottom 57 times): back on the
     last floor, the hunt gives it up }
-  if not FloorUnder(Ahead, D) and (FHuntTarget <> '') and (FRouteNextMark > High(FRouteMarkNames)) then
+  if not FloorUnder(Ahead, D) and (FHuntTarget <> '') and (FRouteNextMark > High(FRouteMarkNames)) and
+     (Length(FRoute) > 0) and
+     (not FGame.WorldHit(D3ToCge(FRoute[High(FRoute)]) + Vector3(0, 8, 0), Vector3(0, -1, 0), 600, D, N) or
+      { or outside the map's areas (cpuboss: an imp in the void beside the
+        boss's room, 11 falls) }
+      (Map.AreaAt(D3ToCge(FRoute[High(FRoute)]) + Vector3(0, 32, 0)) < 0)) then
   begin
+    { only when the monster's own place has no floor within 600 below: a
+      gap on the way (cpuboss: a shaft before the boss's room) is no reason
+      to give up Sabaoth and six more }
     WritelnLog('GameViewPlay', 'Walk: no floor on the way to the hunted %s: back to %s, given up',
       [FHuntTarget, FWalkLastFloor.ToString]);
     FHuntDone := FHuntDone + ',' + FHuntTarget;
