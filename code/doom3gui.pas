@@ -117,6 +117,10 @@ type
     { properties given as expressions (visible "gui::x", backcolor
       "$hilite"): name=expression, evaluated when drawn }
     Exprs: TStringList;
+    { the transitions running on this window (TD3Gui's list): property
+      reads look through them only when some are (a HUD record read the
+      whole list for every property of every window) }
+    TransitionCount: Integer;
     { definevec4 / definefloat / float / vec4: name=value }
     Vars: TStringList;
     { events (nil: none) }
@@ -326,6 +330,49 @@ function RenderGui(const Gui: TD3Gui; const State: TStrings; const Width, Height
 function RenderGuiTransparent(const Gui: TD3Gui; const Width: Integer = 0;
   const Height: Integer = 0; const Premultiplied: Boolean = False): TRGBAlphaImage;
 
+type
+  { How a recorded quad's texture is read: a color image as it is (nearest
+    pixels, like the painter's DrawImage), or a glyph page's coverage
+    (its alpha, or for opaque gray pages their brightness; filtered) in
+    the quad's color. }
+  TGuiQuadKind = (gqColor, gqCoverage);
+
+  { One textured quad of a GUI drawn on the GPU (RecordGuiQuads). }
+  TGuiQuad = record
+    { nil: a plain color (white) }
+    Image: TCastleImage;
+    Kind: TGuiQuadKind;
+    { blend add (rgb times the color added, no alpha) }
+    Additive: Boolean;
+    { the image changes between records (a video, a camera's view): its
+      texture is loaded again }
+    Volatile: Boolean;
+    { corners in pixels of the recorded size (y down): top-left, top-right,
+      bottom-right, bottom-left of the untransformed rectangle }
+    P: array [0..3] of TVector2;
+    { texture coordinates (v up, CGE images' rows) }
+    UV: array [0..3] of TVector2;
+    Color: TVector4;
+  end;
+
+  { The quads of a GUI, in drawing order (RecordGuiQuads). }
+  TGuiQuadList = class
+    Quads: array of TGuiQuad;
+    Count: Integer;
+    { the pixel size recorded at }
+    Width, Height: Integer;
+    { increased by every record (volatile images load again) }
+    Generation: Integer;
+    procedure Clear;
+    procedure Add(const Q: TGuiQuad);
+  end;
+
+{ Record a GUI as textured quads at Width x Height pixels (List is cleared
+  first), for drawing on the GPU (Doom3GuiGL): the same windows, clips and
+  rotate / shear transforms as RenderGuiTransparent, no pixels filled.
+  The cursor isn't recorded. }
+procedure RecordGuiQuads(const Gui: TD3Gui; const Width, Height: Integer; const List: TGuiQuadList);
+
 { The texture URL of a GUI drawn with some state, '' when the GUI file is
   missing. Rendered once per (path, state) and cached; static (no events). }
 function GuiImageUrl(const GuiPath: String; const State: TStrings): String;
@@ -464,6 +511,10 @@ begin
   Children := specialize TObjectList<TD3GuiWindow>.Create(True);
   Exprs := TStringList.Create;
   Vars := TStringList.Create;
+  { their names are stored lowercase and looked up lowercase: a plain
+    compare (AnsiCompareText per entry was much of a HUD record) }
+  Exprs.CaseSensitive := True;
+  Vars.CaseSensitive := True;
   Props := TStringList.Create;
   NamedEvents := specialize TObjectDictionary<String, TD3GuiScript>.Create([doOwnsValues]);
 end;
@@ -1448,6 +1499,7 @@ begin
         T.Window.SetProp(T.Prop, Format('%g', [V.X], DefaultFormatSettings))
       else
         T.Window.SetProp(T.Prop, Format('%g, %g, %g, %g', [V.X, V.Y, V.Z, V.W], DefaultFormatSettings));
+      Dec(T.Window.TransitionCount);
       FTransitions.Delete(I);
     end;
     Dirty := True;
@@ -2067,14 +2119,17 @@ end;
 
 function TD3Gui.PropVec4(const W: TD3GuiWindow; const Prop: String): TVector4;
 var
-  I: Integer;
+  Tr: ^TD3GuiTransition;
   E, V: String;
   Win: TD3GuiWindow;
   P: String;
 begin
-  for I := 0 to FTransitions.Count - 1 do
-    if (FTransitions[I].Window = W) and (FTransitions[I].Prop = Prop) then
-      Exit(FTransitions[I].Value(FTime));
+  { in place (FTransitions[I] copied the record and its string: most of a
+    HUD record's time) }
+  if W.TransitionCount > 0 then
+    for Tr in FTransitions.Ptr^ do
+      if (Tr^.Window = W) and (Tr^.Prop = Prop) then
+        Exit(Tr^.Value(FTime));
   case Prop of
     'rect': Result := Vector4(W.Rect.Left, W.Rect.Bottom, W.Rect.Width, W.Rect.Height);
     'backcolor': Result := W.BackColor;
@@ -2096,6 +2151,8 @@ begin
       Result := TVector4.Zero;
     end;
   end;
+  if W.Exprs.Count = 0 then
+    Exit;
   E := W.Exprs.Values[Prop];
   if E <> '' then
   begin
@@ -2239,7 +2296,10 @@ begin
               { a transition of the property ends }
               for I := FTransitions.Count - 1 downto 0 do
                 if (FTransitions[I].Window = Win) and (FTransitions[I].Prop = Prop) then
+                begin
+                  Dec(Win.TransitionCount);
                   FTransitions.Delete(I);
+                end;
               Win.SetProp(Prop, Value);
               Dirty := True;
             end;
@@ -2269,8 +2329,12 @@ begin
             T.Decel := D3StrToFloat(Unquote(C.Args[5]), 0);
           for I := FTransitions.Count - 1 downto 0 do
             if (FTransitions[I].Window = Win) and (FTransitions[I].Prop = Prop) then
+            begin
+              Dec(Win.TransitionCount);
               FTransitions.Delete(I);
+            end;
           FTransitions.Add(T);
+          Inc(T.Window.TransitionCount);
           Dirty := True;
         end;
       'resettime':
@@ -2756,6 +2820,22 @@ type
     { the pixels drawing may touch (idDeviceContext's clip rect: the
       windows' rects), end exclusive }
     ClipX0, ClipY0, ClipX1, ClipY1: Integer;
+    { recording (RecordGuiQuads): the primitives add quads here instead of
+      filling Image's pixels }
+    Quads: TGuiQuadList;
+    { while recording: the pixel transform of the rotate / shear windows
+      drawn (x' = XfA x + XfB y + XfC, y' = XfD x + XfE y + XfF) }
+    XfA, XfB, XfC, XfD, XfE, XfF: Single;
+    { while recording: the images drawn now change between records }
+    VolatileImages: Boolean;
+    { record a rectangle (pixels, may be flipped: the texture coordinates
+      follow its corners) clipped to the clip, transformed }
+    procedure RecordRect(X0, Y0, X1, Y1, U0, V0, U1, V1: Single; const Img: TCastleImage;
+      const Kind: TGuiQuadKind; const Color: TVector4; const Additive: Boolean);
+    { DrawTransformed while recording: the window drawn with the transform
+      composed into Xf (no scratch image) }
+    procedure RecordTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single;
+      const RX0, RY0, RX1, RY1: Integer; const Angle, ShearX, ShearY: Single; const V: TVector4);
     { blend 0..255 color bytes with alpha 0..255 }
     procedure BlendBytes(const X, Y: Integer; const R, G, B, A: Integer); inline;
     { the pixels a GUI rectangle covers (y down), end exclusive }
@@ -2785,6 +2865,126 @@ var
     images made again at each HUD redraw cost page faults. One may be
     larger than the image drawn. }
   GuiScratches: array of TRGBAlphaImage;
+
+procedure TGuiQuadList.Clear;
+begin
+  Count := 0;
+end;
+
+procedure TGuiQuadList.Add(const Q: TGuiQuad);
+begin
+  if Count >= Length(Quads) then
+    SetLength(Quads, Count * 2 + 256);
+  Quads[Count] := Q;
+  Inc(Count);
+end;
+
+procedure TGuiPainter.RecordRect(X0, Y0, X1, Y1, U0, V0, U1, V1: Single; const Img: TCastleImage;
+  const Kind: TGuiQuadKind; const Color: TVector4; const Additive: Boolean);
+var
+  Q: TGuiQuad;
+  T: Single;
+  K: Integer;
+  CX0, CY0, CX1, CY1, CU0, CV0, CU1, CV1: Single;
+begin
+  { a flipped rectangle: the same area, its texture coordinates swapped }
+  if X1 < X0 then
+  begin
+    T := X0; X0 := X1; X1 := T;
+    T := U0; U0 := U1; U1 := T;
+  end;
+  if Y1 < Y0 then
+  begin
+    T := Y0; Y0 := Y1; Y1 := T;
+    T := V0; V0 := V1; V1 := T;
+  end;
+  if (X1 <= X0) or (Y1 <= Y0) then
+    Exit;
+  { the clip, with the texture coordinates where it cuts }
+  CX0 := Max(X0, ClipX0);
+  CX1 := Min(X1, ClipX1);
+  CY0 := Max(Y0, ClipY0);
+  CY1 := Min(Y1, ClipY1);
+  if (CX1 <= CX0) or (CY1 <= CY0) then
+    Exit;
+  CU0 := U0 + (CX0 - X0) / (X1 - X0) * (U1 - U0);
+  CU1 := U0 + (CX1 - X0) / (X1 - X0) * (U1 - U0);
+  CV0 := V0 + (CY0 - Y0) / (Y1 - Y0) * (V1 - V0);
+  CV1 := V0 + (CY1 - Y0) / (Y1 - Y0) * (V1 - V0);
+  Q.Image := Img;
+  Q.Kind := Kind;
+  Q.Additive := Additive;
+  Q.Volatile := VolatileImages;
+  Q.Color := Color;
+  Q.P[0] := Vector2(CX0, CY0);
+  Q.P[1] := Vector2(CX1, CY0);
+  Q.P[2] := Vector2(CX1, CY1);
+  Q.P[3] := Vector2(CX0, CY1);
+  Q.UV[0] := Vector2(CU0, CV0);
+  Q.UV[1] := Vector2(CU1, CV0);
+  Q.UV[2] := Vector2(CU1, CV1);
+  Q.UV[3] := Vector2(CU0, CV1);
+  for K := 0 to 3 do
+    Q.P[K] := Vector2(XfA * Q.P[K].X + XfB * Q.P[K].Y + XfC, XfD * Q.P[K].X + XfE * Q.P[K].Y + XfF);
+  Quads.Add(Q);
+end;
+
+procedure TGuiPainter.RecordTransformed(const W: TD3GuiWindow; const ParentX, ParentY: Single;
+  const RX0, RY0, RX1, RY1: Integer; const Angle, ShearX, ShearY: Single; const V: TVector4);
+var
+  CX, CY, CosA, SinA, M00, M01, M10, M11: Single;
+  LA, LB, LC, LD, LE, LF: Single;
+  SA, SB, SC, SD, SE, SF: Single;
+  SaveX0, SaveY0, SaveX1, SaveY1: Integer;
+  OuterInTransform: TD3GuiWindow;
+begin
+  { the matrix of DrawTransformed (on GUI units around the rect's center),
+    as a pixel transform: the pixels aren't square }
+  CX := (ParentX + V.X + V.Z / 2) * ScaleX;
+  CY := (ParentY + V.Y + V.W / 2) * ScaleY;
+  CosA := Cos(DegToRad(Angle));
+  SinA := Sin(DegToRad(Angle));
+  M00 := CosA + ShearY * SinA;
+  M01 := -SinA + ShearY * CosA;
+  M10 := ShearX * CosA + SinA;
+  M11 := -ShearX * SinA + CosA;
+  if Abs(M00 * M11 - M01 * M10) < 1e-6 then
+    Exit;
+  LA := M00;
+  LB := M01 * ScaleX / ScaleY;
+  LC := CX - LA * CX - LB * CY;
+  LD := M10 * ScaleY / ScaleX;
+  LE := M11;
+  LF := CY - LD * CX - LE * CY;
+  { outer after local }
+  SA := XfA; SB := XfB; SC := XfC; SD := XfD; SE := XfE; SF := XfF;
+  XfA := SA * LA + SB * LD;
+  XfB := SA * LB + SB * LE;
+  XfC := SA * LC + SB * LF + SC;
+  XfD := SD * LA + SE * LD;
+  XfE := SD * LB + SE * LE;
+  XfF := SD * LC + SE * LF + SF;
+  SaveX0 := ClipX0;
+  SaveY0 := ClipY0;
+  SaveX1 := ClipX1;
+  SaveY1 := ClipY1;
+  ClipX0 := RX0;
+  ClipY0 := RY0;
+  ClipX1 := RX1;
+  ClipY1 := RY1;
+  OuterInTransform := InTransform;
+  InTransform := W;
+  try
+    DrawWindow(W, ParentX, ParentY);
+  finally
+    InTransform := OuterInTransform;
+    ClipX0 := SaveX0;
+    ClipY0 := SaveY0;
+    ClipX1 := SaveX1;
+    ClipY1 := SaveY1;
+    XfA := SA; XfB := SB; XfC := SC; XfD := SD; XfE := SE; XfF := SF;
+  end;
+end;
 
 procedure TGuiPainter.BlendBytes(const X, Y: Integer; const R, G, B, A: Integer);
 var
@@ -2866,6 +3066,13 @@ begin
   if C.W <= 0 then
     Exit;
   PixelBox(R, X0, Y0, X1, Y1);
+  if Quads <> nil then
+  begin
+    if (X1 > X0) and (Y1 > Y0) then
+      RecordRect(X0, Y0, X1, Y1, 0, 0, 1, 1, nil, gqColor,
+        Vector4(ColorByte(C.X) / 255, ColorByte(C.Y) / 255, ColorByte(C.Z) / 255, ColorByte(C.W) / 255), False);
+    Exit;
+  end;
   CR := ColorByte(C.X);
   CG := ColorByte(C.Y);
   CB := ColorByte(C.Z);
@@ -2935,6 +3142,14 @@ begin
     highlight layers) }
   if (not Additive and (TA = 0)) or (Additive and (TR = 0) and (TG = 0) and (TB = 0)) then
     Exit;
+  if Quads <> nil then
+  begin
+    { the painter's mapping: column X reads Trunc(F * width), F the pixel
+      center's fraction (1 - F flipped); the top row is the image's last }
+    RecordRect(X0, Y0, X1, Y1, Iff(FlipX, 1, 0), Iff(FlipY, 0, 1), Iff(FlipX, 0, 1), Iff(FlipY, 1, 0),
+      Rgba, gqColor, Vector4(TR / 255, TG / 255, TB / 255, TA / 255), Additive);
+    Exit;
+  end;
   CX0 := Max(ClipX0, X0);
   CX1 := Min(ClipX1, X1);
   CY0 := Max(ClipY0, Y0);
@@ -3112,6 +3327,12 @@ begin
   SrcH := (T2 - T) * Src.Height;
   if (SrcW <= 0) or (SrcH <= 0) then
     Exit;
+  if Quads <> nil then
+  begin
+    RecordRect(X0, Y0, X0 + DstW, Y0 + DstH, S, 1 - T, S2, 1 - T2, Src, gqCoverage,
+      Vector4(CR / 255, CG / 255, CB / 255, CA / 255), False);
+    Exit;
+  end;
   { the part's pixels (rows down), read once }
   PartX0 := Clamped(Floor(SrcX0), 0, Src.Width - 1);
   PartY0 := Clamped(Floor(SrcY0), 0, Src.Height - 1);
@@ -3339,6 +3560,12 @@ begin
           DstY0 := Round((Baseline + G.Y * Scale - Integer(Rect.Height) * Scale) * ScaleY);
           DstW := Max(1, Round(Rect.Width * Scale * ScaleX));
           DstH := Max(1, Round(Rect.Height * Scale * ScaleY));
+          if Quads <> nil then
+            RecordRect(DstX0, DstY0, DstX0 + DstW, DstY0 + DstH,
+              Rect.Left / Font.Image.Width, (Rect.Bottom + Rect.Height) / Font.Image.Height,
+              (Rect.Left + Rect.Width) / Font.Image.Width, Rect.Bottom / Font.Image.Height,
+              Font.Image, gqCoverage, Vector4(ForeR / 255, ForeG / 255, ForeB / 255, ForeA / 255), False)
+          else
           for GY := 0 to DstH - 1 do
             for GX := 0 to DstW - 1 do
             begin
@@ -3404,6 +3631,11 @@ begin
   RY1 := Min(ClipY1, Ceil((ParentY + V.Y + V.W + Margin) * ScaleY));
   if (RX1 <= RX0) or (RY1 <= RY0) then
     Exit;
+  if Quads <> nil then
+  begin
+    RecordTransformed(W, ParentX, ParentY, RX0, RY0, RX1, RY1, Angle, ShearX, ShearY, V);
+    Exit;
+  end;
   { the window and its children, untransformed, on a clear scratch image }
   Main := Image;
   if FScratchDepth >= Length(GuiScratches) then
@@ -3648,7 +3880,9 @@ begin
     if Video <> nil then
     begin
       Video.SeekTime(RoqTime(M.VideoMap), M.VideoLoop);
+      VolatileImages := True;
       DrawImage(R, Video.Image, Gui.PropVec4(W, 'matcolor'));
+      VolatileImages := False;
       Gui.HasVideo := True;
     end;
   end else
@@ -3662,7 +3896,11 @@ begin
     else
       Dyn := DynamicImage(M.DiffuseImage);
     if Dyn <> nil then
+    begin
+      VolatileImages := True;
       DrawImage(R, Dyn, Gui.PropVec4(W, 'matcolor'));
+      VolatileImages := False;
+    end;
     Gui.HasVideo := True;
   end else
   if M <> nil then
@@ -3903,6 +4141,38 @@ end;
 var
   { UnpremultiplyTable[A, C] = Min(255, C * 255 div A), for A in 1..254 }
   UnpremultiplyTable: array of array [Byte] of Byte;
+
+procedure RecordGuiQuads(const Gui: TD3Gui; const Width, Height: Integer; const List: TGuiQuadList);
+var
+  Painter: TGuiPainter;
+begin
+  List.Clear;
+  List.Width := Width;
+  List.Height := Height;
+  Inc(List.Generation);
+  if (Gui = nil) or (Gui.Desktop = nil) or (Width <= 0) or (Height <= 0) then
+    Exit;
+  Painter := TGuiPainter.Create;
+  try
+    Painter.Image := nil;
+    Painter.Quads := List;
+    Painter.XfA := 1;
+    Painter.XfE := 1;
+    Painter.ScaleX := Width / GuiWidth;
+    Painter.ScaleY := Height / GuiHeight;
+    Painter.Gui := Gui;
+    Painter.Font := Font_DefaultUi;
+    Painter.ClipX0 := 0;
+    Painter.ClipY0 := 0;
+    Painter.ClipX1 := Width;
+    Painter.ClipY1 := Height;
+    Gui.HasVideo := False;
+    Painter.DrawWindow(Gui.Desktop, 0, 0);
+  finally
+    Painter.Free;
+  end;
+  Gui.Dirty := False;
+end;
 
 function RenderGuiTransparent(const Gui: TD3Gui; const Width: Integer = 0;
   const Height: Integer = 0; const Premultiplied: Boolean = False): TRGBAlphaImage;

@@ -535,6 +535,7 @@ procedure TestGuiTransforms;
 var
   Gui: TD3Gui;
   Img: TRGBAlphaImage;
+  Quads: TGuiQuadList;
 
   function Red(const GX, GY: Single): Integer;
   begin
@@ -567,6 +568,19 @@ begin
       CheckEquals(0, Red(400, 240), 'not where it was');
     finally
       Img.Free;
+    end;
+    { the same recorded for the GPU (RecordGuiQuads): the bar's quad, its
+      top-right corner (420, 230) sheared to (420, 330) }
+    Quads := TGuiQuadList.Create;
+    try
+      RecordGuiQuads(Gui, 640, 480, Quads);
+      CheckEquals(2, Quads.Count, 'recorded: the desktop and the bar');
+      Check(Quads.Quads[1].Color.X = 1, 'recorded: the bar is red');
+      Check((Abs(Quads.Quads[1].P[1].X - 420) < 0.01) and (Abs(Quads.Quads[1].P[1].Y - 330) < 0.01),
+        Format('recorded: the sheared corner at 420 330 (%.2f %.2f)', [Quads.Quads[1].P[1].X, Quads.Quads[1].P[1].Y]));
+      Check(Abs(Quads.Quads[1].P[3].Y - 150) < 0.01, 'recorded: the bottom-left corner goes up 80');
+    finally
+      Quads.Free;
     end;
   finally
     Gui.Free;
