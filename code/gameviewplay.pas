@@ -2725,6 +2725,14 @@ begin
     FMemCheckAt := 0;
     { the first save at once }
     FFightSinceSave := 1000;
+    { the weapons by the start (a map started alone has only the player's
+      first ones: cpuboss's bot fought Sabaoth with its fists) }
+    if FFight then
+    begin
+      I := FGame.PickUpStartKit(CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight), 1200);
+      if I > 0 then
+        WritelnLog('GameViewPlay', 'Fight: %d weapons by the start picked up', [I]);
+    end;
     Console.Print('fight ' + BoolToStr(FFight, 'ON', 'OFF'));
     if FHunt then
       WritelnLog('GameViewPlay', 'Fight: %s, then the hunt for every monster left', [BoolToStr(FFight, 'on', 'off')])
