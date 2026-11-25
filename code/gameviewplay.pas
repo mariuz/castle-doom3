@@ -149,6 +149,10 @@ type
       over the whole hunt (delta2b: a pack of imps, a new one nearest every
       route, tries reset at each switch, 276 routes in 11 minutes) }
     FHuntTried: String;
+    { the fight target's health last frame: hurt, it isn't one that
+      doesn't die }
+    FFightTargetHealthOf: String;
+    FFightTargetHealth: Integer;
     FHuntTries, FHuntRoutes: Integer;
     FHuntTime: Single;
     { the hunt ends when it kills nothing for a while (delta2b: fists only
@@ -4419,7 +4423,16 @@ begin
       WritelnLog('GameViewPlay', 'Fight: the map had the weapons disabled here: enabled');
       FGame.WeaponsDisabled := False;
     end;
-    { time since something died (the target may change back and forth) }
+    { time since something died (the target may change back and forth) or
+      the target was hurt (a boss: Sabaoth's 1750 took longer than 25 s) }
+    for Mon in FGame.Monsters do
+      if SameText(Mon.Model.Entity.Name, TargetName) then
+      begin
+        if (FFightTargetHealthOf = TargetName) and (Mon.Health < FFightTargetHealth) then
+          FFightOnTarget := 0;
+        FFightTargetHealthOf := TargetName;
+        FFightTargetHealth := Mon.Health;
+      end;
     FFightOnTarget := FFightOnTarget + SecondsPassed;
     if FFightOnTarget > 25 then
     begin
@@ -5067,8 +5080,10 @@ var
   Near: TBox3D;
   N: TVector3;
   Hop: TD3PointArray;
-  Remembered, Looping: Boolean;
+  Remembered, Looping, HuntFound: Boolean;
   LoopCount: Integer;
+  HuntAt: TVector3;
+  Mon: TD3Monster;
   Above: TVector3;
   CurZ: Single;
 
@@ -5406,12 +5421,22 @@ begin
   { a hunted monster over no floor (delta2b: an imp's place in the air over
     a shaft, the player put there fell to its bottom 57 times): back on the
     last floor, the hunt gives it up }
-  if not FloorUnder(Ahead, D) and (FHuntTarget <> '') and (FRouteNextMark > High(FRouteMarkNames)) and
-     (Length(FRoute) > 0) and
-     (not FGame.WorldHit(D3ToCge(FRoute[High(FRoute)]) + Vector3(0, 8, 0), Vector3(0, -1, 0), 600, D, N) or
+  { the hunted monster's own place (not the route's end: a back off ends
+    160 away from it, where cpuboss gave up Sabaoth) }
+  HuntAt := TVector3.Zero;
+  HuntFound := False;
+  if FHuntTarget <> '' then
+    for Mon in FGame.Monsters do
+      if SameText(Mon.Model.Entity.Name, FHuntTarget) then
+      begin
+        HuntAt := Mon.Position;
+        HuntFound := True;
+      end;
+  if not FloorUnder(Ahead, D) and HuntFound and (FRouteNextMark > High(FRouteMarkNames)) and
+     (not FGame.WorldHit(HuntAt + Vector3(0, 8, 0), Vector3(0, -1, 0), 600, D, N) or
       { or outside the map's areas (cpuboss: an imp in the void beside the
         boss's room, 11 falls) }
-      (Map.AreaAt(D3ToCge(FRoute[High(FRoute)]) + Vector3(0, 32, 0)) < 0)) then
+      (Map.AreaAt(HuntAt + Vector3(0, 32, 0)) < 0)) then
   begin
     { only when the monster's own place has no floor within 600 below: a
       gap on the way (cpuboss: a shaft before the boss's room) is no reason
