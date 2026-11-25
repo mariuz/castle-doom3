@@ -2119,17 +2119,18 @@ end;
 
 function TD3Gui.PropVec4(const W: TD3GuiWindow; const Prop: String): TVector4;
 var
-  Tr: ^TD3GuiTransition;
+  I: Integer;
   E, V: String;
   Win: TD3GuiWindow;
   P: String;
 begin
-  { in place (FTransitions[I] copied the record and its string: most of a
-    HUD record's time) }
+  { only windows with a transition look (FTransitions[I] copies the record
+    and its string: that was most of a HUD record's time); not the list's
+    Ptr enumerator: an invalid cast with the CI's FPC }
   if W.TransitionCount > 0 then
-    for Tr in FTransitions.Ptr^ do
-      if (Tr^.Window = W) and (Tr^.Prop = Prop) then
-        Exit(Tr^.Value(FTime));
+    for I := 0 to FTransitions.Count - 1 do
+      if (FTransitions[I].Window = W) and (FTransitions[I].Prop = Prop) then
+        Exit(FTransitions[I].Value(FTime));
   case Prop of
     'rect': Result := Vector4(W.Rect.Left, W.Rect.Bottom, W.Rect.Width, W.Rect.Height);
     'backcolor': Result := W.BackColor;
