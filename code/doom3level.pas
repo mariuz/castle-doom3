@@ -24,7 +24,7 @@ interface
 uses
   SysUtils, Classes, Generics.Collections,
   CastleVectors, CastleTransform, CastleScene, CastleClassUtils, CastleBoxes, X3DNodes,
-  CastleCameras, CastleFrustum, Doom3Scene,
+  CastleCameras, CastleFrustum, CastleTriangles, Doom3Scene,
   Doom3Proc, Doom3MapFile, Doom3Md5, Doom3Collision, Doom3Portals, Doom3Decls, Doom3Expressions,
   Doom3Materials, Doom3Gui,
   Doom3LightEffects;
@@ -179,6 +179,7 @@ type
     FLightsInHiddenAreas: Boolean;
     { r_lightAreas: lights light only the scenes of their areas }
     FMaskLights: Boolean;
+    FHeightBroadphase: Boolean;
     { the last area the view was in (-1: none yet) }
     FLastViewArea: Integer;
     { the world's polygons blocking monsters (solid, monsterclip), off for
@@ -351,6 +352,17 @@ type
   protected
     procedure Loaded; override;
   public
+    { The height over the ground under APosition (the camera's gravity, every
+      frame): only the children whose boxes are under it, highest first,
+      down to the first ground found. CGE asked every colliding child for a
+      ray down through the whole map (Delta 3: 875 scenes, 5 ms a frame,
+      10% of the frame time). }
+    function LocalHeightCollision(const APosition, GravityUp: TVector3;
+      const TrianglesToIgnoreFunc: TTriangleIgnoreFunc;
+      out AboveHeight: Single; out AboveGround: PTriangle): Boolean; override;
+    { LocalHeightCollision's broadphase (env CD3_HEIGHT_BROADPHASE=0, console
+      r_heightBroadphase 0: CGE's own, every colliding child) }
+    property HeightBroadphase: Boolean read FHeightBroadphase write FHeightBroadphase;
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
     function PropertySections(const PropertyName: String): TPropertySections; override;
@@ -670,7 +682,7 @@ implementation
 uses
   Math, TypInfo,
   CastleComponentSerialize, CastleLog, CastleUtils, CastleStringUtils, CastleUriUtils,
-  CastleRenderOptions, CastleTimeUtils, CastleTriangles, CastleShapes, Doom3Roq,
+  CastleRenderOptions, CastleTimeUtils, CastleShapes, Doom3Roq,
   Doom3Files, Doom3Images, Doom3StaticModels;
 
 var
@@ -799,6 +811,7 @@ begin
   AnimTimeScale := 1;
   { env CD3_LIGHT_AREAS=0: lights reach every scene (to compare) }
   FMaskLights := GetEnvironmentVariable('CD3_LIGHT_AREAS') <> '0';
+  FHeightBroadphase := GetEnvironmentVariable('CD3_HEIGHT_BROADPHASE') <> '0';
   FSpawnModels := True;
   FUseCollisionModel := True;
   FPortalCulling := True;
@@ -4835,6 +4848,76 @@ begin
   B.Scene.ProcessEvents := SpriteCount <> Sprites;
   B.Scene.CastShadows := Closed;
   Result := True;
+end;
+
+type
+  { to call TCastleTransform's protected HeightCollision on the children }
+  TTransformHeightAccess = class(TCastleTransform)
+  end;
+
+function TDoom3Map.LocalHeightCollision(const APosition, GravityUp: TVector3;
+  const TrianglesToIgnoreFunc: TTriangleIgnoreFunc;
+  out AboveHeight: Single; out AboveGround: PTriangle): Boolean;
+var
+  I, J, N: Integer;
+  C: TCastleTransform;
+  Box: TBox3D;
+  Tops: array of Single;
+  Kids: array of TCastleTransform;
+  T: Single;
+  K: TCastleTransform;
+  NewAbove: Boolean;
+  NewHeight: Single;
+  NewGround: PTriangle;
+begin
+  if (not FHeightBroadphase) or not TVector3.PerfectlyEquals(GravityUp, Vector3(0, 1, 0)) then
+    Exit(inherited LocalHeightCollision(APosition, GravityUp, TrianglesToIgnoreFunc,
+      AboveHeight, AboveGround));
+  Result := False;
+  AboveHeight := MaxSingle;
+  AboveGround := nil;
+  if not CheckCollides then
+    Exit;
+  SetLength(Tops, Count);
+  SetLength(Kids, Count);
+  N := 0;
+  for I := 0 to Count - 1 do
+  begin
+    C := Items[I];
+    if not (C.Exists and C.Collides) then
+      Continue;
+    Box := C.BoundingBox;
+    if Box.IsEmpty or (Box.Min.Y > APosition.Y) or
+       (APosition.X < Box.Min.X - 1) or (APosition.X > Box.Max.X + 1) or
+       (APosition.Z < Box.Min.Z - 1) or (APosition.Z > Box.Max.Z + 1) then
+      Continue;
+    { highest top first (insertion) }
+    T := Min(Box.Max.Y, APosition.Y);
+    J := N;
+    while (J > 0) and (Tops[J - 1] < T) do
+    begin
+      Tops[J] := Tops[J - 1];
+      Kids[J] := Kids[J - 1];
+      Dec(J);
+    end;
+    Tops[J] := T;
+    Kids[J] := C;
+    Inc(N);
+  end;
+  for I := 0 to N - 1 do
+  begin
+    { everything left is lower than the ground found }
+    if Result and (APosition.Y - Tops[I] > AboveHeight) then
+      Break;
+    K := Kids[I];
+    NewAbove := TTransformHeightAccess(K).HeightCollision(APosition, GravityUp, TrianglesToIgnoreFunc, NewHeight, NewGround);
+    if NewHeight < AboveHeight then
+    begin
+      Result := NewAbove;
+      AboveHeight := NewHeight;
+      AboveGround := NewGround;
+    end;
+  end;
 end;
 
 function TDoom3Map.AreaAt(const P: TVector3): Integer;

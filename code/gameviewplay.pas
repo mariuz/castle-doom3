@@ -3616,6 +3616,12 @@ begin
     FGame.Broadphase := StrToIntDef(Trim(Args), Ord(not FGame.Broadphase)) <> 0;
     Console.Print('r_broadphase ' + IntToStr(Ord(FGame.Broadphase)));
   end else
+  if Cmd = 'r_heightbroadphase' then
+  begin
+    Map.HeightBroadphase := StrToIntDef(Trim(Args), Ord(not Map.HeightBroadphase)) <> 0;
+    Console.Print('r_heightBroadphase ' + BoolToStr(Map.HeightBroadphase, '1', '0'));
+    WritelnLog('GameViewPlay', 'Height broadphase %s', [BoolToStr(Map.HeightBroadphase, 'on', 'off')]);
+  end else
   if Cmd = 'colbench' then
   begin
     { the cost of a short segment collision at the eye: against the whole
