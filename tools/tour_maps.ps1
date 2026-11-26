@@ -55,8 +55,11 @@ param(
   [switch] $Visible,
   # with -Fight each map starts with the weapons, ammo and armor the last one
   # ended with (Doom 3 carries them; env CD3_CARRY_INVENTORY): -NoCarry starts
-  # every map with the player def's own
-  [switch] $NoCarry
+  # every map with the player def's own; each map's end is kept in
+  # <OutDir>\carry_<map>.txt, and -CarryFrom <file> starts the first map with
+  # one (a run again from a map partway through a chain)
+  [switch] $NoCarry,
+  [string] $CarryFrom = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,6 +118,7 @@ $CarryBefore = $env:CD3_CARRY_INVENTORY
 if ($Fight -and -not $NoCarry) {
   $env:CD3_CARRY_INVENTORY = Join-Path (Resolve-Path $OutDir) "carry_inventory.txt"
   Remove-Item $env:CD3_CARRY_INVENTORY -ErrorAction SilentlyContinue
+  if ($CarryFrom -ne "") { Copy-Item $CarryFrom $env:CD3_CARRY_INVENTORY }
 }
 foreach ($Map in $Maps) {
   $Name = $Map -replace '[/\\]', '_'
@@ -132,6 +136,9 @@ foreach ($Map in $Maps) {
     $Status = "exit $($Process.ExitCode)"
   }
   Copy-Item $Log (Join-Path $OutDir "$Name.log")
+  if ($Fight -and -not $NoCarry -and (Test-Path $env:CD3_CARRY_INVENTORY)) {
+    Copy-Item $env:CD3_CARRY_INVENTORY (Join-Path $OutDir "carry_$Name.txt")
+  }
   $Lines = Get-Content $Log
   $Load = ($Lines | Select-String 'Profile: Map "' | Select-Object -First 1)
   $Fps = @($Lines | Select-String 'Screenshot .*\((\d+\.\d) FPS' | ForEach-Object { [double]$_.Matches[0].Groups[1].Value })
