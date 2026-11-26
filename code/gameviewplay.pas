@@ -5472,7 +5472,7 @@ begin
      FGame.FightTarget(Camera.Translation, FightHoldDist, FFightIgnore, HoldAt, HoldName) then
   begin
     if FWalkFightHold = 0 then
-      WritelnLog('GameViewPlay', 'Walk: stuck at %s while fighting %s: no put ahead for up to %.0f s',
+      WritelnLog('GameViewPlay', 'Walk: stuck at %s while fighting %s: no put ahead for up to %d s',
         [Feet.ToString, HoldName, FightHoldMax]);
     FWalkFightHold := FWalkFightHold + SecondsPassed;
     Exit;
