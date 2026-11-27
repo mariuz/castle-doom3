@@ -1920,6 +1920,8 @@ type
       can still explode (within its splash radius plus Margin); What names
       it. }
     function HazardAt(const Feet: TVector3; const Margin: Single; out What: String): Boolean;
+    { a hurt volume there that kills soon (lava: 25 or more a hit) }
+    function DeadlyHazardAt(const Feet: TVector3; const Margin: Single; out What: String): Boolean;
     { A monster's projectile that will pass within MissDist of the eye Eye
       (CGE) in the next Within seconds: Away is the horizontal way out of
       its path (CGE, unit), Proj the projectile. }
