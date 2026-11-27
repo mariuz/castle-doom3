@@ -186,6 +186,12 @@ type
     { on foot, the route goes into a hurt volume that kills (lava) with no
       way around: put ahead past it, not into it (RouteAroundHazards) }
     FWalkDeadlyAhead: String;
+    { the last floor the feet stood on out of deadly hurt volumes (lava),
+      where the walk goes back to when the feet get into one anyway
+      (knockback, a load beside it); FWalkSafeFloorOk until a teleport }
+    FWalkSafeFloor, FWalkRescueAt: TVector3;
+    FWalkSafeFloorOk: Boolean;
+    FWalkRescues: Integer;
     FWalkUsed: Boolean;
     FWalkStuckCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkPutStreak, FWalkElevatorTries, FWalkFellCount, FWalkReroutes: Integer;
     { the view's turns during a route (how smooth the bots look) }
@@ -379,6 +385,12 @@ type
       below the feet: a step over a channel's edge falls into it
       (le_hell_post: a ridge between lava channels, too deep to climb out) }
     function DeadlyBelow(const Eye: TVector3; out What: String): Boolean;
+    { on foot: the feet in a deadly hurt volume (lava) all the same: back to
+      the last safe floor (three times at one place: put ahead) }
+    function WalkOutOfLava: Boolean;
+    { a deadly hurt volume under the eye or under one of 8 points Radius
+      around it }
+    function LavaNear(const Eye: TVector3; const Radius: Single): Boolean;
     function FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;
     { the route's point P (Doom 3 feet) moved aside around hazards }
     function RouteAroundHazards(const P, Dir: TVector3; const Step: Single): TVector3;
@@ -4747,7 +4759,28 @@ begin
     (not FRouteWalkMode or FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 24, D, N)) and
     { inside the map's areas (cpuboss: a save on top of a wall, outside
       them, fell 6000 units into the void on every load) }
-    (Map.AreaAt(Camera.Translation) >= 0);
+    (Map.AreaAt(Camera.Translation) >= 0) and
+    { nor at a ledge over lava (le_hell_post: a save at its edge, a big hit
+      after the load knocked the player in, and at 50 health or less the
+      first touch kills) }
+    not LavaNear(Camera.Translation, 96);
+end;
+
+function TViewPlay.LavaNear(const Eye: TVector3; const Radius: Single): Boolean;
+var
+  I: Integer;
+  What: String;
+  A: Single;
+begin
+  if DeadlyBelow(Eye, What) then
+    Exit(True);
+  for I := 0 to 7 do
+  begin
+    A := I * Pi / 4;
+    if DeadlyBelow(Eye + Vector3(Cos(A) * Radius, 0, Sin(A) * Radius), What) then
+      Exit(True);
+  end;
+  Result := False;
 end;
 
 function TViewPlay.WalkRoute(const SecondsPassed: Single; const Speed, ShotEvery: Single): Boolean;
@@ -4863,6 +4896,7 @@ begin
       [CgeToD3(Camera.Translation).ToString]);
     FRouteHold := 2;
     FRouteLastEye := Camera.Translation;
+    FWalkSafeFloorOk := False;
   end;
   { given up at a place (god mode): noGod damage too, or a kill volume on
     the route (le_enpro2's, le_hell's trigger_hurt of 1000) kills it again
@@ -4889,6 +4923,8 @@ begin
       Exit(False);
     end;
   end;
+  if FRouteWalkMode and WalkOutOfLava then
+    Exit(False);
   if FFight and FightStep(SecondsPassed) then
     Exit(False);
   if FRouteHold > 0 then
@@ -5275,7 +5311,7 @@ var
   M: Integer;
   Mon: TD3Monster;
   Above: TVector3;
-  CurZ: Single;
+  CurZ, FirstExtra: Single;
 
   { the route's point Dist units further on }
   function RouteAhead(const Dist: Single): TVector3;
@@ -5648,8 +5684,13 @@ begin
     route is mostly gaps over a shaft: a point in the air dropped the player
     to the bottom, the fall put it ahead again, three times to the level's
     end); only past 4096 units the route's point as it is }
-  if not FloorUnder(Ahead, D) then
+  if not SafeFloorUnder(Ahead, D) then
   begin
+    { the floors there are all in hazards (le_hell_post: lava a few units
+      over the floor beside the ridge the route runs on; the put ahead
+      stopped on it and died): on to a safe one, or back to the first
+      floor found }
+    FirstExtra := Extra;
     D := Extra;
     while (Extra < 4096) and (not SafeFloorUnder(Ahead, CurZ)) do
     begin
@@ -5662,8 +5703,14 @@ begin
       Extra := Extra + 128;
       Ahead := RouteAhead(Base + Extra);
     end;
-    if FloorUnder(Ahead, CurZ) then
+    if SafeFloorUnder(Ahead, CurZ) then
       WritelnLog('GameViewPlay', 'Walk: the first floor ahead is %.0f units on', [Extra - D])
+    else if FloorUnder(RouteAhead(Base + FirstExtra), CurZ) then
+    begin
+      Extra := FirstExtra;
+      Ahead := RouteAhead(Base + Extra);
+      WritelnLog('GameViewPlay', 'Walk: no floor ahead out of hazards: onto the one %.0f units on', [Extra]);
+    end
     else
     begin
       { no floor anywhere on the rest of the route (delta4: the rest is
@@ -5730,6 +5777,7 @@ begin
   FRouteWalked := FRouteWalked + Base + Extra;
   if not FloorUnder(Ahead, D) then
     WritelnLog('GameViewPlay', 'Walk: no floor found ahead, put at the route''s point %s', [Ahead.ToString]);
+  WritelnLog('GameViewPlay', 'Walk: put ahead onto %s', [Ahead.ToString]);
   PlaceCamera(D3ToCge(Ahead), CameraYaw);
   WalkNavigation.CancelFalling;
   FRouteLastEye := Camera.Translation;
@@ -5742,14 +5790,74 @@ begin
   FWalkProgressAt := FRouteWalked;
 end;
 
-function TViewPlay.DeadlyBelow(const Eye: TVector3; out What: String): Boolean;
+function TViewPlay.WalkOutOfLava: Boolean;
 var
-  Dist: Single;
+  Feet: TVector3;
+  What: String;
+  D: Single;
+  N: TVector3;
+begin
+  Result := False;
+  if FGame.PlayerDead or FGame.God or FGame.RouteInvulnerable then
+    Exit;
+  Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+  if not FGame.DeadlyHazardAt(D3ToCge(Feet), 0, What) then
+  begin
+    if FGame.WorldHit(Camera.Translation, Vector3(0, -1, 0), FGame.EyeHeight + 8, D, N) and
+       not FGame.DeadlyHazardAt(D3ToCge(Feet), 16, What) then
+    begin
+      FWalkSafeFloor := Feet;
+      FWalkSafeFloorOk := True;
+    end;
+    Exit;
+  end;
+  if not FWalkSafeFloorOk then
+  begin
+    WritelnLog('GameViewPlay', 'Walk: in %s at %s, no safe floor known: put ahead', [What, Feet.ToString]);
+    WalkStuck(0, True);
+    Exit(True);
+  end;
+  if PointsDistance(FWalkSafeFloor, FWalkRescueAt) < 256 then
+    Inc(FWalkRescues)
+  else
+    FWalkRescues := 1;
+  FWalkRescueAt := FWalkSafeFloor;
+  WritelnLog('GameViewPlay', 'Walk: in %s at %s: back to the last safe floor %s (%d times here)',
+    [What, Feet.ToString, FWalkSafeFloor.ToString, FWalkRescues]);
+  PlaceCamera(D3ToCge(FWalkSafeFloor + Vector3(0, 0, 1)), CameraYaw);
+  WalkNavigation.CancelFalling;
+  FRouteLastEye := Camera.Translation;
+  if FWalkRescues >= 3 then
+  begin
+    FWalkRescues := 0;
+    WalkStuck(0, True);
+  end;
+  Result := True;
+end;
+
+function TViewPlay.DeadlyBelow(const Eye: TVector3; out What: String): Boolean;
+const
+  { how far down a drop is followed when no floor is hit: lava has no
+    surface to stand on (le_hell_post: trigger_hurt_18 is 1568 deep, its
+    floor 1300 under the ledges; a ray of 160 below the feet hit nothing,
+    the step off the ledge counted as safe) }
+  DropMax = 600;
+var
+  Dist, Down: Single;
   N: TVector3;
 begin
   What := '';
-  Result := FGame.WorldHit(Eye, Vector3(0, -1, 0), FGame.EyeHeight + 160, Dist, N) and
-    FGame.DeadlyHazardAt(Eye - Vector3(0, Dist - 1, 0), 0, What);
+  if not FGame.WorldHit(Eye, Vector3(0, -1, 0), FGame.EyeHeight + DropMax, Dist, N) then
+    Dist := FGame.EyeHeight + DropMax;
+  { the floor hit (or the end of the drop), then up the drop every 64
+    units (the player's box is 74 high): the volume may end above a floor }
+  Down := Dist - 1;
+  repeat
+    if FGame.DeadlyHazardAt(Eye - Vector3(0, Down, 0), 0, What) then
+      Exit(True);
+    Down := Down - 64;
+  until Down < FGame.EyeHeight - 1;
+  Result := False;
 end;
 
 function TViewPlay.FightHazard(const Eye: TVector3; const Margin: Single; out What: String): Boolean;
