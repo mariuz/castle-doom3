@@ -100,6 +100,9 @@ type
       their names (logged when the walk gets there) }
     FRouteMarks: array of Integer;
     FRouteMarkNames: TStringArray;
+    { the marks that are items to pick up (BuildCoverageRoute): a put ahead
+      stops at the next one (WalkStuck) }
+    FRouteMarkItems: array of Boolean;
     FRouteNextMark: Integer;
     { where the walk put the eye last frame (a teleport moves it away), and
       the seconds left to stand where a teleport put the player }
@@ -170,6 +173,16 @@ type
     { the seconds a put ahead waited for the fight (a monster at the
       player): FightHoldMax at most each spot }
     FWalkFightHold: Single;
+    { the mover under the player's feet before the game's update (RideStart)
+      and the eye in its local space: RideEnd moves the player with it }
+    FRide: TCastleTransform;
+    FRideLocal, FRideEye: TVector3;
+    FRideLogged: Boolean;
+    { seconds the walk still waits after the mover under the feet moved
+      (le_hell_post: the boat over the lava, the route goes off its side) }
+    FRideHold: Single;
+    { how far the movers carried the player since the walk last went on }
+    FRideCarried: Single;
     FWalkUsed: Boolean;
     FWalkStuckCount, FWalkDoorsOpened, FWalkElevatorsCalled, FWalkPutStreak, FWalkElevatorTries, FWalkFellCount, FWalkReroutes: Integer;
     { the view's turns during a route (how smooth the bots look) }
@@ -415,6 +428,12 @@ type
     procedure UpdateCrouch(const SecondsPassed: Single);
     procedure CaptureScreenshot;
     function CameraYaw: Single;
+    { the player rides the mover it stands on (FRide) }
+    procedure RideStart;
+    { the walk goes on from the route's point nearest to where a ride
+      left the player (the route was planned from where it got on) }
+    procedure RouteAfterRide;
+    procedure RideEnd;
   public
     MapName: String;
     AutoTestPrefix: String;
@@ -2877,6 +2896,7 @@ begin
       (the nearest next) }
     FRouteMarks := nil;
     FRouteMarkNames := nil;
+    FRouteMarkItems := nil;
     FRouteNextMark := 0;
     if SameText(Args, 'all') then
     begin
@@ -4014,9 +4034,11 @@ var
   Hop: TD3PointArray;
   Best, D, Gap: Single;
   I, J, BestI, Areas: Integer;
-  Used: array of Boolean;
+  Used, Items: array of Boolean;
+  IsItem: Boolean;
 begin
   Spots := nil;
+  Items := nil;
   Names := TStringList.Create;
   try
     for T in FGame.Triggers do
@@ -4028,6 +4050,7 @@ begin
         if PointsDistance(P, Goal) < 64 then
           Continue;
         Spots := Concat(Spots, [P]);
+        Items := Concat(Items, [False]);
         Names.Add(T.Entity.Name);
       end;
     for E in Map.MapFile.Entities do
@@ -4037,6 +4060,7 @@ begin
          (Copy(S, 1, 14) = 'moveable_item_') then
       begin
         Spots := Concat(Spots, [E.Origin]);
+        Items := Concat(Items, [True]);
         Names.Add(E.Name);
       end;
     end;
@@ -4064,16 +4088,19 @@ begin
         Used[BestI] := True;
         P := Spots[BestI];
         S := Names[BestI];
+        IsItem := Items[BestI];
       end else
       begin
         P := Goal;
         S := GoalName;
+        IsItem := False;
       end;
       FGame.PlayerRoute(Cur, P, Hop, Gap, Areas);
       FRoute := Concat(FRoute, Copy(Hop, 1, MaxInt));
       FRouteGaps := FRouteGaps + Gap;
       FRouteMarks := Concat(FRouteMarks, [High(FRoute)]);
       FRouteMarkNames := Concat(FRouteMarkNames, [S]);
+      FRouteMarkItems := Concat(FRouteMarkItems, [IsItem]);
       Cur := P;
     end;
   finally
@@ -4178,6 +4205,7 @@ begin
         FRouteAlong := 0;
         FRouteMarks := nil;
         FRouteMarkNames := nil;
+        FRouteMarkItems := nil;
         FRouteNextMark := 0;
         FRouteLastEye := Camera.Translation;
         FHuntTarget := MonName;
@@ -4250,6 +4278,7 @@ begin
   FRouteAlong := 0;
   FRouteMarks := nil;
   FRouteMarkNames := nil;
+  FRouteMarkItems := nil;
   FRouteNextMark := 0;
   FRouteLastEye := Camera.Translation;
   Inc(FHuntRoutes);
@@ -4870,6 +4899,19 @@ begin
     FRouteLastEye := Camera.Translation;
     Exit(False);
   end;
+  { on foot, not off a mover while it carries the player: the walk goes on
+    where it stops }
+  if FRouteWalkMode and (FRideHold > 0) then
+  begin
+    FRideHold := FRideHold - SecondsPassed;
+    FWalkStuck := 0;
+    FRouteLastEye := Camera.Translation;
+    if (FRideHold <= 0) and (FRideCarried > 256) then
+      RouteAfterRide;
+    if FRideHold <= 0 then
+      FRideCarried := 0;
+    Exit(False);
+  end;
   { at most 1/10 s of walking per frame (slow frames, loads) }
   Step := Speed * Min(SecondsPassed, 0.1);
   if FRouteWalkMode then
@@ -5204,6 +5246,8 @@ var
   Remembered, Looping, HuntFound: Boolean;
   LoopCount, UsedBefore: Integer;
   HuntAt: TVector3;
+  Base, ItemDist: Single;
+  M: Integer;
   Mon: TD3Monster;
   Above: TVector3;
   CurZ: Single;
@@ -5531,7 +5575,27 @@ begin
   end;
   { stuck again right after: further each time (a gap in the route, where
     the AAS found no way, is one long straight line) }
-  Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak, 6)));
+  Base := PutAheadBy * (1 shl Min(FWalkPutStreak, 6));
+  { never past the next item the route still visits (phobos1: a put ahead
+    of 1536 units after two falls jumped over a PDA and the SkyTram
+    keycard, and the level's end came without them): at most onto it,
+    where the feet pick it up; stuck right at it (an item out of reach),
+    as far as before }
+  for M := FRouteNextMark to Min(High(FRouteMarks), High(FRouteMarkItems)) do
+    if FRouteMarkItems[M] then
+    begin
+      ItemDist := -FRouteAlong;
+      for I := FRouteSeg to Min(FRouteMarks[M], High(FRoute)) - 1 do
+        ItemDist := ItemDist + PointsDistance(FRoute[I], FRoute[I + 1]);
+      if (ItemDist > 64) and (ItemDist < Base) then
+      begin
+        WritelnLog('GameViewPlay', 'Walk: put ahead only %.0f units, onto %s (not %.0f)',
+          [ItemDist, FRouteMarkNames[M], Base]);
+        Base := ItemDist;
+      end;
+      Break;
+    end;
+  Ahead := RouteAhead(Base);
   Inc(FWalkPutStreak);
   { a point with a floor under it (not one of the items up in the air the
     route visits, not over a pit), up to 512 units further (1024 after a
@@ -5541,7 +5605,7 @@ begin
     FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
   begin
     Extra := Extra + 64;
-    Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+    Ahead := RouteAhead(Base + Extra);
   end;
   { none: on along the route to the first point with a floor (delta4's
     route is mostly gaps over a shaft: a point in the air dropped the player
@@ -5554,14 +5618,14 @@ begin
       FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
     begin
       Extra := Extra + 64;
-      Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+      Ahead := RouteAhead(Base + Extra);
     end;
     { then the rest of the route, in bigger steps }
     while (Extra < 65536) and (Seg < High(FRoute)) and (not FloorUnder(Ahead, CurZ) or
       FGame.HazardAt(D3ToCge(Ahead), 16, Reason)) do
     begin
       Extra := Extra + 128;
-      Ahead := RouteAhead(PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra);
+      Ahead := RouteAhead(Base + Extra);
     end;
     if FloorUnder(Ahead, CurZ) then
       WritelnLog('GameViewPlay', 'Walk: the first floor ahead is %.0f units on', [Extra - D])
@@ -5628,7 +5692,7 @@ begin
     Ahead.Z := D + 1;
   FRouteSeg := Seg;
   FRouteAlong := Along;
-  FRouteWalked := FRouteWalked + PutAheadBy * (1 shl Min(FWalkPutStreak - 1, 6)) + Extra;
+  FRouteWalked := FRouteWalked + Base + Extra;
   if not FloorUnder(Ahead, D) then
     WritelnLog('GameViewPlay', 'Walk: no floor found ahead, put at the route''s point %s', [Ahead.ToString]);
   PlaceCamera(D3ToCge(Ahead), CameraYaw);
@@ -5977,6 +6041,110 @@ begin
   Console.Print(Format('%.2f ms a frame', [FPerfFrame / FPerfFrames * 1000]));
 end;
 
+procedure TViewPlay.RideStart;
+const
+  { below the feet that still counts as standing on it }
+  RideReach = 24;
+var
+  Hit: TRayCollision;
+begin
+  FRide := nil;
+  if FInCinematic or FNoclip or FGame.PlayerDead or FGame.KnockbackAirborne or
+     (GetEnvironmentVariable('CD3_RIDE') = '0') then
+    Exit;
+  Hit := Map.World.WorldRay(Camera.Translation, Vector3(0, -1, 0));
+  try
+    if (Hit = nil) or (Hit.Count = 0) or (Hit.Distance > WalkNavigation.PreferredHeight + RideReach) then
+      Exit;
+    FRide := FGame.RideTransform(Hit[0].Item);
+  finally FreeAndNil(Hit) end;
+  if FRide <> nil then
+  begin
+    FRideEye := Camera.Translation;
+    FRideLocal := FRide.WorldToLocal(FRideEye);
+  end;
+end;
+
+procedure TViewPlay.RideEnd;
+const
+  { more in one frame is a teleport (of the mover or the player) }
+  RideMaxStep = 200;
+var
+  Delta: TVector3;
+begin
+  if (FRide = nil) or not FGame.IsRideTransform(FRide) then
+  begin
+    FRide := nil;
+    Exit;
+  end;
+  { the game moved the player itself (a teleport): it doesn't ride }
+  if not TVector3.Equals(Camera.Translation, FRideEye) then
+  begin
+    FRide := nil;
+    Exit;
+  end;
+  Delta := FRide.LocalToWorld(FRideLocal) - FRideEye;
+  if (Delta.IsZero(0.0001)) or (Delta.Length > RideMaxStep) then
+  begin
+    FRide := nil;
+    Exit;
+  end;
+  Camera.Translation := Camera.Translation + Delta;
+  FRideHold := 0.5;
+  FRideCarried := FRideCarried + Delta.Length;
+  if not FRideLogged then
+  begin
+    FRideLogged := True;
+    WritelnLog('GameViewPlay', 'Player rides a mover (%s) at %s', [FRide.Name, CgeToD3(FRideEye).ToString]);
+  end;
+  FRide := nil;
+end;
+
+procedure TViewPlay.RouteAfterRide;
+var
+  Feet: TVector3;
+  I, Best: Integer;
+  D, BestD: Single;
+  What: String;
+begin
+  Feet := CgeToD3(Camera.Translation) - Vector3(0, 0, FGame.EyeHeight);
+  Best := -1;
+  BestD := 0;
+  for I := FRouteSeg + 1 to High(FRoute) do
+  begin
+    D := PointsDistanceSqr(FRoute[I], Feet);
+    { not one in the lava the ride went over (le_hell_post: the route was
+      planned across it, and its nearest point was beside the boat) }
+    if ((Best < 0) or (D < BestD)) and not FGame.HazardAt(D3ToCge(FRoute[I]), 16, What) then
+    begin
+      Best := I;
+      BestD := D;
+      { the first one in the route's order that is near: a nearer one
+        later on is where the route comes back at its end }
+      if D < Sqr(512) then
+        Break;
+    end;
+  end;
+  { nearer than the point it was walking to }
+  if (Best < 0) or (BestD >= PointsDistanceSqr(FRoute[FRouteSeg], Feet)) then
+    Exit;
+  WritelnLog('GameViewPlay', 'Walk: carried %.0f units by a mover: the route goes on from %s, %.0f away (point %d of %d)',
+    [FRideCarried, FRoute[Best].ToString, Sqrt(BestD), Best, Length(FRoute)]);
+  while FRouteSeg < Best do
+  begin
+    FRouteWalked := FRouteWalked + PointsDistance(FRoute[FRouteSeg], FRoute[FRouteSeg + 1]) - FRouteAlong;
+    FRouteAlong := 0;
+    Inc(FRouteSeg);
+    while (FRouteNextMark <= High(FRouteMarks)) and (FRouteMarks[FRouteNextMark] <= FRouteSeg) do
+    begin
+      WritelnLog('GameViewPlay', 'Route: at %s (%d of %d, %.0f units, carried past)',
+        [FRouteMarkNames[FRouteNextMark], FRouteNextMark + 1, Length(FRouteMarks), FRouteWalked]);
+      Inc(FRouteNextMark);
+    end;
+  end;
+  FWalkProgressAt := FRouteWalked;
+end;
+
 procedure TViewPlay.Update(const SecondsPassed: Single; var HandleInput: Boolean);
 var
   Firing: Boolean;
@@ -6123,10 +6291,12 @@ begin
   { during cinematics the player stays where the camera was }
   PartTimer := Timer;
   FGame.SetFlashlightBeam(Flashlight.Exists and not FInCinematic, Camera.Direction);
+  RideStart;
   if FInCinematic then
     FGame.Update(SecondsPassed, FPlayerEye)
   else
     FGame.Update(SecondsPassed, Camera.Translation);
+  RideEnd;
   FPartGame := TimerSeconds(Timer, PartTimer);
   FPartGameParts := FGame.UpdateParts;
   UpdateCinematic;

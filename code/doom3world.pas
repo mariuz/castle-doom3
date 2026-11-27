@@ -2105,6 +2105,15 @@ type
     { Game time (seconds since Spawn). }
     property Time: Single read FTime;
     property Map: TDoom3Map read FMap;
+    { the mover the player rides when standing on Item (idPush carries what
+      stands on a pusher: le_hell_post's boat over the lava): Item or the
+      first of its parents that a script moves, a door / rotating / bobbing /
+      pendulum brush, or a bound entity; nil for the world, actors and
+      moveables }
+    function RideTransform(const Item: TCastleTransform): TCastleTransform;
+    { T (from RideTransform) is still a mover (only compares pointers: T
+      may be freed meanwhile) }
+    function IsRideTransform(const T: TCastleTransform): Boolean;
     property OnMessage: TD3MessageEvent read FOnMessage write FOnMessage;
   end;
 
@@ -13828,6 +13837,34 @@ begin
   ME := FMap.FindModelEntity(AName);
   if ME <> nil then
     Exit(ME.Holder);
+  Result := nil;
+end;
+
+function TD3Game.IsRideTransform(const T: TCastleTransform): Boolean;
+var
+  SM: TD3ScriptMover;
+  Mv: TD3Mover;
+begin
+  if T = nil then
+    Exit(False);
+  for SM in FScriptMovers.Values do
+    if SM.Transform = T then
+      Exit(True);
+  for Mv in FMovers do
+    if (Mv.Brush <> nil) and (Mv.Brush.Scene = T) then
+      Exit(True);
+  Result := FindBinding(T) <> nil;
+end;
+
+function TD3Game.RideTransform(const Item: TCastleTransform): TCastleTransform;
+begin
+  Result := Item;
+  while (Result <> nil) and (Result <> FMap) do
+  begin
+    if IsRideTransform(Result) then
+      Exit;
+    Result := Result.Parent;
+  end;
   Result := nil;
 end;
 
