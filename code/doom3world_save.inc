@@ -144,6 +144,25 @@ begin
   end;
 end;
 
+function TD3Game.DeadlyHazardAt(const Feet: TVector3; const Margin: Single; out What: String): Boolean;
+var
+  T: TD3Trigger;
+  PlayerBox: TBox3D;
+begin
+  What := '';
+  PlayerBox := Box3D(
+    Feet - Vector3(PlayerRadius + Margin, Margin, PlayerRadius + Margin),
+    Feet + Vector3(PlayerRadius + Margin, PlayerBodyHeight + Margin, PlayerRadius + Margin));
+  for T in FTriggers do
+    if (T.Kind = tkHurt) and not T.Disabled and not T.NoTouch and not T.WaitingForActivation and
+       (T.Damage >= 25) and T.Box.Collision(PlayerBox) then
+    begin
+      What := T.Entity.Name;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
 function TD3Game.HazardAt(const Feet: TVector3; const Margin: Single; out What: String): Boolean;
 var
   T: TD3Trigger;
